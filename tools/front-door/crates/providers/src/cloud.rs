@@ -33,6 +33,8 @@ pub struct CheckedCloudResult {
     pub result: CloudResult,
     pub requested_model: String,
     pub model: ModelObservation,
+    /// Whether the report names the executed tests and a log location.
+    pub evidence_complete: bool,
     pub passed: bool,
 }
 
@@ -63,12 +65,19 @@ impl CloudResult {
             Some(_) => ModelObservation::Differs,
             None => ModelObservation::Unknown,
         };
-        let passed =
-            self.exit_status == 0 && self.tests_failed.is_empty() && !self.tracked_files_changed;
+        let evidence_complete = !self.tests_run.is_empty()
+            && self.tests_run.iter().all(|test| !test.trim().is_empty())
+            && self.tests_failed.iter().all(|test| !test.trim().is_empty())
+            && !self.log_location.trim().is_empty();
+        let passed = evidence_complete
+            && self.exit_status == 0
+            && self.tests_failed.is_empty()
+            && !self.tracked_files_changed;
         Ok(CheckedCloudResult {
             result: self,
             requested_model: requested_model.to_owned(),
             model,
+            evidence_complete,
             passed,
         })
     }
@@ -112,6 +121,20 @@ mod tests {
     }
 
     #[test]
+    fn cloud_result_missing_test_or_log_evidence_cannot_pass() {
+        let mut result = report();
+        result.tests_run.clear();
+        let checked = result.clone().check(&"a".repeat(40), "requested").unwrap();
+        assert!(!checked.evidence_complete);
+        assert!(!checked.passed);
+        result.tests_run.push("test".into());
+        result.log_location = " ".into();
+        let checked = result.check(&"a".repeat(40), "requested").unwrap();
+        assert!(!checked.evidence_complete);
+        assert!(!checked.passed);
+    }
+
+    #[test]
     fn cloud_result_reports_failures_changes_and_model_observation() {
         let mut result = report();
         result.tracked_files_changed = true;
@@ -138,9 +161,11 @@ pub struct RemoteJob {
     pub provider: String,
     pub target: String,
     pub environment: String,
+    pub repository: String,
     pub remote_id: String,
     pub commit: String,
     pub requested_model: String,
+    pub requested_effort: Option<String>,
     pub state: RemoteState,
 }
 
@@ -153,10 +178,17 @@ pub enum RemoteState {
     CancellationUnconfirmed,
 }
 
+/// The task is supplied only at submission and is not stored in the job record.
+/// The caller must apply its normal credential scan before constructing it.
+pub struct CloudSubmission<'a> {
+    pub job: &'a RemoteJob,
+    pub task: &'a str,
+}
+
 /// A provider owns transport and authentication of its observations.
 pub trait CloudProvider {
     type Error;
-    fn submit(&mut self) -> Result<String, Self::Error>;
+    fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, Self::Error>;
     fn observe(&mut self, remote_id: &str) -> Result<RemoteState, Self::Error>;
     /// True means the provider confirmed the job stopped.
     fn cancel(&mut self, remote_id: &str) -> Result<bool, Self::Error>;
@@ -185,8 +217,11 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
     provider: &mut P,
     store: &mut S,
     mut job: RemoteJob,
+    task: &str,
 ) -> Result<RemoteJob, CloudJobError<P::Error, S::Error>> {
-    job.remote_id = provider.submit().map_err(CloudJobError::Provider)?;
+    job.remote_id = provider
+        .submit(CloudSubmission { job: &job, task })
+        .map_err(CloudJobError::Provider)?;
     job.state = RemoteState::Running;
     store
         .save(&job)
@@ -260,7 +295,13 @@ mod lifecycle_tests {
     }
     impl CloudProvider for FakeProvider {
         type Error = ();
-        fn submit(&mut self) -> Result<String, ()> {
+        fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, ()> {
+            assert_eq!(request.job.commit, "a".repeat(40));
+            assert_eq!(request.job.environment, "env");
+            assert_eq!(request.job.repository, "owner/repo");
+            assert_eq!(request.job.requested_model, "model");
+            assert_eq!(request.job.requested_effort.as_deref(), Some("low"));
+            assert_eq!(request.task, "run tests");
             self.submitted += 1;
             Ok("remote-1".into())
         }
@@ -294,9 +335,11 @@ mod lifecycle_tests {
             provider: "fake".into(),
             target: "target".into(),
             environment: "env".into(),
+            repository: "owner/repo".into(),
             remote_id: String::new(),
             commit: "a".repeat(40),
             requested_model: "model".into(),
+            requested_effort: Some("low".into()),
             state: RemoteState::Running,
         }
     }
@@ -322,7 +365,7 @@ mod lifecycle_tests {
             submitted: 0,
         };
         let mut store = FakeStore::default();
-        let submitted = submit(&mut provider, &mut store, job()).unwrap();
+        let submitted = submit(&mut provider, &mut store, job(), "run tests").unwrap();
         assert_eq!(store.saved.as_ref(), Some(&submitted));
         let mut reopened = store.saved.clone().unwrap();
         reconcile(&mut provider, &mut store, &mut reopened).unwrap();
@@ -344,7 +387,7 @@ mod lifecycle_tests {
             submitted: 0,
         };
         let mut store = FakeStore::default();
-        let mut job = submit(&mut provider, &mut store, job()).unwrap();
+        let mut job = submit(&mut provider, &mut store, job(), "run tests").unwrap();
         assert!(matches!(
             reconcile(&mut provider, &mut store, &mut job),
             Err(CloudJobError::Result(CloudResultError::CommitMismatch))
@@ -367,7 +410,7 @@ mod lifecycle_tests {
             saved: None,
             fail: true,
         };
-        let error = submit(&mut provider, &mut store, job()).unwrap_err();
+        let error = submit(&mut provider, &mut store, job(), "run tests").unwrap_err();
         assert!(
             matches!(error, CloudJobError::SaveAfterSubmit { job, .. } if job.remote_id == "remote-1")
         );

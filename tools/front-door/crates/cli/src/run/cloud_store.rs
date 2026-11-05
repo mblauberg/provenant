@@ -17,7 +17,9 @@ pub enum Error {
     File(#[from] FsError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error("cloud job record has an unsupported version, changed identity or conflicting terminal state")]
+    #[error(
+        "cloud job record has an unsupported version, changed identity or conflicting terminal state"
+    )]
     Identity,
 }
 
@@ -46,7 +48,7 @@ impl AttemptCloudStore {
             Err(error) => return Err(error.into()),
         };
         let record: Record = serde_json::from_slice(&bytes)?;
-        if record.schema_version != 1 {
+        if record.schema_version != 2 {
             return Err(Error::Identity);
         }
         validate_result(&record.job)?;
@@ -89,16 +91,20 @@ impl CloudJobStore for AttemptCloudStore {
                 &old.provider,
                 &old.target,
                 &old.environment,
+                &old.repository,
                 &old.remote_id,
                 &old.commit,
                 &old.requested_model,
+                &old.requested_effort,
             ) != (
                 &job.provider,
                 &job.target,
                 &job.environment,
+                &job.repository,
                 &job.remote_id,
                 &job.commit,
                 &job.requested_model,
+                &job.requested_effort,
             ) {
                 return Err(Error::Identity);
             }
@@ -109,7 +115,7 @@ impl CloudJobStore for AttemptCloudStore {
             PublishMode::NoReplace
         };
         let record = Record {
-            schema_version: 1,
+            schema_version: 2,
             job: job.clone(),
             extra: previous.map(|record| record.extra).unwrap_or_default(),
         };
@@ -134,9 +140,11 @@ mod tests {
             provider: "fake".into(),
             target: "test".into(),
             environment: "env".into(),
+            repository: "owner/repo".into(),
             remote_id: "remote-1".into(),
             commit: "a".repeat(40),
             requested_model: "model".into(),
+            requested_effort: Some("low".into()),
             state: RemoteState::Running,
         }
     }
@@ -186,7 +194,12 @@ mod tests {
         struct Fake;
         impl CloudProvider for Fake {
             type Error = ();
-            fn submit(&mut self) -> Result<String, ()> {
+            fn submit(
+                &mut self,
+                request: provenant_providers::cloud::CloudSubmission<'_>,
+            ) -> Result<String, ()> {
+                assert_eq!(request.task, "run tests");
+                assert_eq!(request.job.repository, "owner/repo");
                 Ok("remote-1".into())
             }
             fn observe(&mut self, id: &str) -> Result<RemoteState, ()> {
@@ -211,7 +224,8 @@ mod tests {
         let mut store = AttemptCloudStore::new(Directory::open_anchor(temp.path())?);
         let mut request = job();
         request.remote_id.clear();
-        let submitted = submit(&mut Fake, &mut store, request).map_err(|e| format!("{e:?}"))?;
+        let submitted =
+            submit(&mut Fake, &mut store, request, "run tests").map_err(|e| format!("{e:?}"))?;
         drop(store);
         let mut store = AttemptCloudStore::new(Directory::open_anchor(temp.path())?);
         let mut recovered = store.load()?.ok_or("missing job")?;
