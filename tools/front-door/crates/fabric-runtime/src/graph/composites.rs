@@ -727,10 +727,7 @@ fn coverage_shortfall(
 ) -> Option<String> {
     let members = exporting_members(spec, positions);
     let minimum = if spec.reduce_verdict {
-        spec.min_successful
-            .unwrap_or(members.len())
-            .max(1)
-            .min(members.len().max(1))
+        spec.min_successful.unwrap_or(members.len()).max(1)
     } else {
         spec.min_successful?.min(members.len())
     };

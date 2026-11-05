@@ -3287,6 +3287,12 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
         ),
         (vec![None, None], 0, None, false),
         (vec![Some("VERDICT: PASS"), None], 2, None, false),
+        (
+            vec![Some("VERDICT: PASS"), Some("VERDICT: PASS")],
+            3,
+            None,
+            false,
+        ),
     ] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version": 1, "graph_id": "reduced-review", "nodes": [
