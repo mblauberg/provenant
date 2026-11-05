@@ -226,8 +226,7 @@ fn answered_ask_publishes_marker_before_pending_checkpoint() {
     );
 }
 
-#[test]
-fn pending_index_reads_only_pending_checkpoints_after_rebuild() {
+fn checkpoint_scale_fixture() -> (tempfile::TempDir, StateRoot, ProjectId) {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
@@ -261,6 +260,12 @@ fn pending_index_reads_only_pending_checkpoints_after_rebuild() {
         let bytes = CanonicalV1::bytes(&stored).unwrap();
         std::fs::write(directory.join(format!("graph-{id}.json")), bytes.as_bytes()).unwrap();
     }
+    (temp, root, project)
+}
+
+#[test]
+fn pending_index_reads_only_pending_checkpoints_after_rebuild() {
+    let (_temp, root, project) = checkpoint_scale_fixture();
     let ids = FileJournal::pending_graph_ids(&root, project).unwrap();
     assert_eq!(ids.len(), 20);
     assert_eq!(
@@ -282,6 +287,52 @@ fn pending_index_reads_only_pending_checkpoints_after_rebuild() {
         super::journal::CHECKPOINT_READS.with(|reads| reads.get()),
         20
     );
+}
+
+#[test]
+#[ignore = "manual checkpoint read timing"]
+#[allow(clippy::print_stderr)]
+fn checkpoint_read_timing_at_scale() {
+    let (_temp, root, project) = checkpoint_scale_fixture();
+    // Build the markers before timing the steady-state pending path.
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project)
+            .unwrap()
+            .len(),
+        20
+    );
+
+    let clock = SystemClock::new();
+    let started = clock.mono_now();
+    let all = FileJournal::graph_ids(&root, project).unwrap();
+    assert_eq!(all.len(), 5020);
+    for id in &all {
+        assert!(
+            FileJournal::read_checkpoint_for_tick(&root, project, id)
+                .unwrap()
+                .is_some()
+        );
+    }
+    let all_elapsed = clock
+        .mono_now()
+        .as_micros()
+        .saturating_sub(started.as_micros());
+
+    let started = clock.mono_now();
+    let pending = FileJournal::pending_graph_ids(&root, project).unwrap();
+    assert_eq!(pending.len(), 20);
+    for id in &pending {
+        assert!(
+            FileJournal::read_checkpoint_for_tick(&root, project, id)
+                .unwrap()
+                .is_some()
+        );
+    }
+    let pending_elapsed = clock
+        .mono_now()
+        .as_micros()
+        .saturating_sub(started.as_micros());
+    eprintln!("checkpoint reads: all 5020: {all_elapsed} us; pending 20: {pending_elapsed} us");
 }
 
 #[test]
