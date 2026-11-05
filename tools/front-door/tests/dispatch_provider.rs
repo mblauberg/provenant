@@ -738,7 +738,7 @@ fn handoff_recovery_requires_a_settled_successor() -> Result {
     assert!(!handoff_recovered(&lanes));
     lanes["data"]["lanes"]
         .as_array_mut()
-        .unwrap()
+        .ok_or("fixture lanes must be an array")?
         .push(json!({"attempt_number":2,"state":"running","continuation":"policy_fallback"}));
     assert!(!handoff_recovered(&lanes));
     lanes["data"]["lanes"][1]["state"] = json!("uncommitted");
@@ -825,6 +825,7 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
     assert!(code(&output) == 1 || code(&output) == 0, "{output:?}");
     let run_id = launch["data"]["run_id"].as_str().ok_or("run ID")?;
     let mut last_rows = None;
+    let mut recovery_history = Vec::new();
     let lanes = provenant_test_support::wait_for(
         "quota-limited attempt and settled fallback",
         std::time::Duration::from_secs(120),
@@ -847,13 +848,14 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
                     .collect::<Vec<_>>()
             });
             if last_rows.as_ref() != Some(&rows) {
-                eprintln!("recovery at {:?}: {rows:?}", timeline.elapsed());
+                recovery_history.push((timeline.elapsed(), rows.clone()));
                 last_rows = Some(rows);
             }
             Ok(lanes)
         },
         |observation| observation.as_ref().is_ok_and(handoff_recovered),
-    )??;
+    )
+    .map_err(|error| format!("{error}; recovery history: {recovery_history:?}"))??;
     assert!(lanes["data"]["ignored_settled"].is_null(), "{lanes}");
     let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
