@@ -26,6 +26,7 @@ pub(super) fn main() -> TestResult {
         let holder = RunHolder {
             providers: &PinnedWriter,
             resources: &SystemResources,
+            clock: &SystemClock,
         };
         provenant_supervisor::supervise(
             &args[2..],
@@ -359,6 +360,12 @@ fn launches() -> TestResult {
         &call,
     )?;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
+    // A launched predecessor's guardian leaves a custody lock after release.
+    let custody = attempt.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    drop(custody);
     crate::artifacts::seal(
         &attempt,
         "writer-terminal.json",
@@ -375,6 +382,7 @@ fn launches() -> TestResult {
     publication.started_at = None;
     publication.provider_ms = None;
     store.publish_terminal(id, 1, &publication, &crate::tests::exit(), &call)?;
+    assert!(store.custody_released(&store.record(id, &call)?, &call)?);
     let queued = store.pending_attempts(input.run_id, &call)?;
     assert_eq!(queued.len(), 1);
     let successor = queued[0].attempt_id;
