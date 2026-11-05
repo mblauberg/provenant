@@ -985,6 +985,36 @@ pub(crate) fn advertised_remote_head(
     ])
 }
 
+/// Query one pushed branch, avoiding an unbounded remote ref listing.
+pub(crate) fn advertised_remote_branch(
+    executor: &dyn Executor,
+    repo: &ReadOnlyRepo,
+    runtime: &UtilityRuntime,
+    remote: &str,
+    branch: &crate::repo::GitRefName,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<ExecOutcome, UtilityError> {
+    if remote.is_empty()
+        || remote.len() > 128
+        || !remote
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b))
+        || remote.starts_with('-')
+        || remote.contains("..")
+    {
+        return Err(UtilityError::InvalidOperationValue);
+    }
+    let host = HostGit::new(executor, &repo.0, runtime, None, budget, cancel)?;
+    host.run(&[
+        "ls-remote".into(),
+        "--symref".into(),
+        "--".into(),
+        remote.into(),
+        branch.as_str().into(),
+    ])
+}
+
 /// Same closed reads and execution boundary, with no mutation capability.
 pub fn run_read_utility(
     executor: &dyn Executor,
