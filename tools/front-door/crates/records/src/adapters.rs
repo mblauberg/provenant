@@ -108,6 +108,8 @@ pub struct AdapterSpec {
     pub catalogue_models_only: bool,
     pub chair_switch: bool,
     pub user_sessions: bool,
+    /// Copy only session files when retaining private state.
+    pub copy_sessions_only: bool,
     pub quota_probe: QuotaProbeKind,
     pub quota_credits: bool,
     pub grouped_quota_pools: bool,
@@ -298,6 +300,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         catalogue_models_only: false,
         chair_switch: true,
         user_sessions: true,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
         quota_credits: true,
         grouped_quota_pools: false,
@@ -360,6 +363,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         catalogue_models_only: false,
         chair_switch: false,
         user_sessions: false,
+        copy_sessions_only: true,
         quota_probe: QuotaProbeKind::Command,
         quota_credits: true,
         grouped_quota_pools: false,
@@ -421,6 +425,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         catalogue_models_only: false,
         chair_switch: false,
         user_sessions: true,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
         quota_credits: false,
         grouped_quota_pools: false,
@@ -486,6 +491,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         catalogue_models_only: false,
         chair_switch: false,
         user_sessions: false,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::Command,
         quota_credits: false,
         grouped_quota_pools: true,
@@ -549,6 +555,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         catalogue_models_only: true,
         chair_switch: false,
         user_sessions: true,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::LocalLedger,
         quota_credits: true,
         grouped_quota_pools: false,
@@ -603,6 +610,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         catalogue_models_only: false,
         chair_switch: false,
         user_sessions: false,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
         quota_credits: false,
         grouped_quota_pools: false,
@@ -659,6 +667,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         catalogue_models_only: false,
         chair_switch: false,
         user_sessions: false,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
         quota_credits: false,
         grouped_quota_pools: false,
@@ -688,6 +697,18 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_copy_policy_preserves_adapter_behavior() {
+        for spec in ADAPTER_SPECS {
+            assert_eq!(
+                spec.copy_sessions_only,
+                spec.id == Harness::Codex,
+                "{}",
+                spec.name
+            );
+        }
+    }
 
     #[test]
     fn host_native_declares_a_fresh_named_writer_contract() {
