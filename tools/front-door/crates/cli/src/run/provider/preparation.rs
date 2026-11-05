@@ -2102,6 +2102,32 @@ mod user_skills_tests {
     }
 
     #[test]
+    fn user_skills_receipt_reports_each_skipped_reason() {
+        let mut staged = provenant_providers::StagedUserSkills::default();
+        staged.root = Some(PathBuf::from("/attempt/skills"));
+        for reason in ["credential_root", "cycle", "changed_during_copy"] {
+            staged.warnings.push(provenant_providers::SkillWarning {
+                path: PathBuf::from(reason),
+                reason,
+            });
+        }
+        let receipt = user_skills_exposure(
+            provenant_records::UserSkillsMode::Discover,
+            serde_json::Value::Null,
+            &staged,
+        );
+        assert_eq!(receipt["exposed"], true);
+        for (warning, reason) in receipt["warnings"].as_array().unwrap().iter().zip([
+            "credential_root",
+            "cycle",
+            "changed_during_copy",
+        ]) {
+            assert_eq!(warning["code"], "user_skill_skipped");
+            assert_eq!(warning["reason"], reason);
+        }
+    }
+
+    #[test]
     fn receipt_uses_prepared_skill_facts() {
         let staged = provenant_providers::StagedUserSkills::default();
         let origin = serde_json::json!({"key": "domains.lanes.user_skills", "origin": "compiled"});

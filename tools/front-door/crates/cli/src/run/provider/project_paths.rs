@@ -426,6 +426,207 @@ mod tests {
         assert!(!profile.spec.runtime_reads.contains(&grant(common.clone())));
         Ok(())
     }
+    #[test]
+    fn exec_roots_reject_files_and_overlapping_writes_in_both_modes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let primary = root.join("repo");
+        let home = root.join("home");
+        let common = primary.join(".git");
+        let tool = primary.join(".local-tools");
+        for dir in [&home, &common, &tool] {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(primary.join("file"), b"not a directory")?;
+        let grant = |path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: WorkScope::Project(ProjectId::from_bytes([2; 16])),
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+            permissions: PlanPermissions {
+                mode: AccessMode::ReadOnly,
+                read_only: None,
+                scratch: grant(root.join("scratch")),
+                private_state: None,
+                read_roots: vec![],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            },
+        })?;
+        let settings = crate::domains::ProjectLanesConfig {
+            exec_roots: vec![".local-tools".into(), "file".into()],
+            ..Default::default()
+        };
+        for writer in [false, true] {
+            let mut profile = ProviderProfile {
+                spec: ProviderProfileSpec {
+                    tool_writes: vec![grant(tool.clone())],
+                    ..Default::default()
+                },
+                observations: Default::default(),
+            };
+            let receipt = apply_to(
+                &mut Vec::new(),
+                &mut profile,
+                &plan,
+                Context {
+                    cwd: &primary,
+                    home: &home,
+                    state_root: &root,
+                    common_git: Some(&common),
+                    worktree_gitdir: None,
+                    writer,
+                    settings: Some(&settings),
+                    project: "example",
+                },
+            );
+            assert!(profile.spec.tool_exec_roots.is_empty());
+            assert_eq!(receipt["warnings"][0]["reason"], "writable_root");
+            assert_eq!(receipt["warnings"][1]["reason"], "not_directory");
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exec_roots_native_read_exec_and_deny_write_in_both_modes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::permissions::{
+            BackendContext, WorktreeWriteAuthority, system_backend,
+        };
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let primary = root.join("repo");
+        let home = root.join("home");
+        let common = primary.join(".git");
+        let tools = primary.join(".local-tools");
+        let scratch = root.join("scratch");
+        for path in [&home, &common, &tools, &scratch] {
+            std::fs::create_dir_all(path)?;
+        }
+        let script = tools.join("tool");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n")?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+        let executor = SystemExecutor::new(2)?;
+        let cancel = provenant_core::CancelToken::new();
+        if let Err(error) = system_backend(&BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            env: &[],
+        }) {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "native sandbox unavailable: {error}"
+            ))?;
+            return Ok(());
+        }
+        let grant = |path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let settings = crate::domains::ProjectLanesConfig {
+            exec_roots: vec![".local-tools".into()],
+            ..Default::default()
+        };
+        for writer in [false, true] {
+            let mode = if writer {
+                AccessMode::WorktreeWrite(Box::new(
+                    serde_json::from_value::<WorktreeWriteAuthority>(json!({
+                        "git_grants_digest": vec![7_u8; 32], "publishing": false,
+                        "common_git_dir": common, "cargo_cache": {"path": scratch.join("cache"), "scope": "subtree"}
+                    }))?,
+                ))
+            } else {
+                AccessMode::ReadOnly
+            };
+            let plan = ConfinedPlan::new(PlanRequest {
+                scope: WorkScope::Project(ProjectId::from_bytes([3; 16])),
+                codex: CodexPolicy::Clean,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+                permissions: PlanPermissions {
+                    mode,
+                    read_only: None,
+                    scratch: grant(scratch.clone()),
+                    private_state: None,
+                    read_roots: vec![],
+                    protected_roots: vec![],
+                    secret_roots: vec![],
+                    selected_authentication: None,
+                    include_continuation: false,
+                    write_roots: vec![],
+                    network: NetworkAccess::Provider,
+                    nested_confinement: false,
+                },
+            })?;
+            let mut profile = ProviderProfile {
+                spec: ProviderProfileSpec {
+                    allow_process_fork: true,
+                    tool_exec_roots: vec![grant("/bin".into()), grant("/usr/bin".into())],
+                    ..Default::default()
+                },
+                observations: Default::default(),
+            };
+            let receipt = apply_to(
+                &mut Vec::new(),
+                &mut profile,
+                &plan,
+                Context {
+                    cwd: &primary,
+                    home: &home,
+                    state_root: &root,
+                    common_git: Some(&common),
+                    worktree_gitdir: None,
+                    writer,
+                    settings: Some(&settings),
+                    project: "example",
+                },
+            );
+            assert_eq!(receipt["exec_roots"].as_array().ok_or("roots")?.len(), 1);
+            let sbpl = provenant_confinement::permissions::snapshot::render(
+                plan.permissions(),
+                &profile,
+                &home,
+            )?;
+            let argv = [
+                "/usr/bin/sandbox-exec".into(),
+                "-p".into(),
+                sbpl.into(),
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"test -r "$1" && "$1" && ! /usr/bin/touch "$2""#.into(),
+                "probe".into(),
+                script.as_os_str().to_owned(),
+                tools.join("write-probe").into_os_string(),
+            ];
+            let mut options = ExecOptions::new(&argv, &root, Duration::from_secs(10));
+            options.stderr = StreamPolicy::Capture { limit: 2048 };
+            let result = executor.execute(options)?;
+            assert_eq!(
+                result.termination,
+                Termination::Exit(0),
+                "{}",
+                String::from_utf8_lossy(&result.stderr.bytes)
+            );
+            assert!(!tools.join("write-probe").exists());
+        }
+        Ok(())
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn configured_shared_path_allows_lane_lock_contended_by_host() -> Result<(), String> {
