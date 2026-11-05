@@ -8,9 +8,29 @@ use serde::{Deserialize, Serialize};
 /// Latest command output retained by the guardian and adapter.
 pub const COMMAND_OUTPUT_TAIL_BYTES: usize = 65_536;
 
-// Define the wire identity and its facts together so a new adapter has one row.
+// Export the implementation bindings from the same rows as the adapter facts.
+// The callback is supplied by the composition crate, keeping mechanics there.
+// Pass the dollar token through to generate the callback macro on stable Rust.
+macro_rules! export_adapter_bindings {
+    ($d:tt; $name:ident; [$($out:tt)*];) => {
+        #[macro_export]
+        macro_rules! $name {
+            ($d callback:ident) => { $d callback! { $($out)* } };
+        }
+    };
+    ($d:tt; $name:ident; [$($out:tt)*]; [$(#[$cfg:meta])*] [$module:ident : $order:literal] $($tail:tt)*) => {
+        export_adapter_bindings!($d; $name; [$($out)* $(#[$cfg])* $module : $order,]; $($tail)*);
+    };
+    ($d:tt; $name:ident; [$($out:tt)*]; [$($cfg:tt)*] [] $($tail:tt)*) => {
+        export_adapter_bindings!($d; $name; [$($out)*]; $($tail)*);
+    };
+}
+
+// Define the wire identity, facts and implementation binding in one row.
+// A binding names its implementation module and dispatch order; equal orders
+// retain row order. Delegated entries need no implementation binding.
 macro_rules! adapter_specs {
-    ($( $(#[$cfg:meta])* $variant:ident [$($serde:meta),*] { $($fields:tt)* } ),* $(,)?) => {
+    ($d:tt; $( $(#[$cfg:meta])* $variant:ident [$($serde:meta),*] ($($module:ident : $order:literal)?) { $($fields:tt)* } ),* $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         #[non_exhaustive]
@@ -25,6 +45,7 @@ macro_rules! adapter_specs {
         pub static ADAPTER_SPECS: &[AdapterSpec] = &[
             $( $(#[$cfg])* AdapterSpec { id: Harness::$variant, $($fields)* }, )*
         ];
+        export_adapter_bindings!($d; adapter_implementation_bindings; []; $( [$(#[$cfg])*] [$($module : $order)?] )*);
     };
 }
 
@@ -328,8 +349,8 @@ impl AdapterSpec {
 const SKILL_INSTALL_ROOTS: &[&str] = &[".local/share/provenant/v1/releases"];
 
 // Keep the rows in Harness order. CLI installation also uses this order.
-adapter_specs! {
-    Claude [] {
+adapter_specs! { $;
+    Claude [] (claude: 1) {
         name: "claude",
         binary: "claude",
         skills: Some(SkillLocation {
@@ -403,7 +424,7 @@ adapter_specs! {
             write: true,
         },
     },
-    Codex [] {
+    Codex [] (codex: 0) {
         name: "codex",
         binary: "codex",
         skills: Some(SkillLocation {
@@ -481,7 +502,7 @@ adapter_specs! {
             write: true,
         },
     },
-    Cursor [] {
+    Cursor [] (cursor: 2) {
         name: "cursor",
         binary: "cursor-agent",
         skills: Some(SkillLocation {
@@ -558,7 +579,7 @@ adapter_specs! {
             write: true,
         },
     },
-    Agy [] {
+    Agy [] (agy: 3) {
         name: "agy",
         binary: "agy",
         skills: Some(SkillLocation {
@@ -639,7 +660,7 @@ adapter_specs! {
             write: true,
         },
     },
-    Opencode [] {
+    Opencode [] (opencode: 4) {
         name: "opencode",
         binary: "opencode",
         skills: Some(SkillLocation {
@@ -718,7 +739,7 @@ adapter_specs! {
             write: true,
         },
     },
-    Command [] {
+    Command [] (command: 5) {
         name: "command",
         binary: "",
         skills: None,
@@ -790,7 +811,7 @@ adapter_specs! {
     },
     // A named, optional host feature. Preparation delegates to its provider;
     // decoding, accounts and confinement remain owned by that provider.
-    HostNative [serde(rename = "host-native")] {
+    HostNative [serde(rename = "host-native")] () {
         name: "host-native",
         binary: "",
         skills: None,
@@ -861,7 +882,7 @@ adapter_specs! {
         },
     },
     #[cfg(feature = "registry-fixture")]
-    FixtureProvider [serde(rename = "fixture-provider")] {
+    FixtureProvider [serde(rename = "fixture-provider")] () {
         name: "fixture-provider",
         binary: "fixture-provider",
         skills: None,
@@ -936,6 +957,22 @@ adapter_specs! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    export_adapter_bindings!($; test_adapter_bindings; [];
+        [#[cfg(any())]] [disabled: 0]
+        [] [enabled: 1]
+        [] []
+    );
+
+    #[test]
+    fn implementation_bindings_retain_conditional_guards() {
+        macro_rules! names {
+            ($( $(#[$cfg:meta])* $module:ident : $order:literal,)*) => {
+                &[ $( $(#[$cfg])* (stringify!($module), $order), )* ]
+            };
+        }
+        assert_eq!(test_adapter_bindings!(names), &[("enabled", 1)]);
+    }
 
     #[test]
     fn account_and_session_policies_preserve_adapter_behavior() {
