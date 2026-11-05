@@ -793,6 +793,7 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
         &prompt,
         "fixture handoff recovery: finish the parser and renderer",
     )?;
+    let timeline = std::time::Instant::now();
     let output = rig.command(&[
         "run",
         "--model",
@@ -823,6 +824,7 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
     );
     assert!(code(&output) == 1 || code(&output) == 0, "{output:?}");
     let run_id = launch["data"]["run_id"].as_str().ok_or("run ID")?;
+    let mut last_rows = None;
     let lanes = provenant_test_support::wait_for(
         "quota-limited attempt and settled fallback",
         std::time::Duration::from_secs(120),
@@ -831,7 +833,24 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
             if code(&output) != 0 {
                 return Err(format!("lanes command failed: {output:?}").into());
             }
-            Ok(serde_json::from_slice(&output.stdout.bytes)?)
+            let lanes: Value = serde_json::from_slice(&output.stdout.bytes)?;
+            let rows = lanes["data"]["lanes"].as_array().map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        json!({
+                            "attempt_number": row["attempt_number"],
+                            "state": row["state"],
+                            "continuation": row["continuation"],
+                            "account": row["account"],
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            if last_rows.as_ref() != Some(&rows) {
+                eprintln!("recovery at {:?}: {rows:?}", timeline.elapsed());
+                last_rows = Some(rows);
+            }
+            Ok(lanes)
         },
         |observation| observation.as_ref().is_ok_and(handoff_recovered),
     )??;
