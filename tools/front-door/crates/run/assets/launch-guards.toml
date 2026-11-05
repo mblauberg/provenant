@@ -490,11 +490,6 @@ boundary = "authority"
 reason = "A Git executable containing a NUL cannot identify an executable to launch; native non-UTF-8 and shell-special bytes are preserved."
 
 [[guard]]
-site = "providers/src/lane.rs#LaneRuntime::environment"
-boundary = "unclassified"
-reason = "Private Git wrapper and runtime setup can reject paths or unavailable configuration."
-
-[[guard]]
 site = "providers/src/lane.rs#LaunchSpec::configure_build_slots"
 boundary = "warning"
 reason = "Unrepresentable optional build-slot shim configuration leaves the launch ungated and emits a warning."
