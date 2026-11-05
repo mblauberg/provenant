@@ -42,6 +42,8 @@ pub fn collect(
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
+    // A preview describes one inventory snapshot. Applied cleanup refreshes
+    // the inventory under custody before mutation.
     let entries = {
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
         read_worktrees(context, cancel)?
@@ -79,6 +81,7 @@ pub fn collect(
             if let Some(entry) = entries.iter().find(|entry| entry.path == lane.path) {
                 let result = prune_unknown_output(
                     context,
+                    &entries,
                     entry,
                     lane,
                     policy,
@@ -142,6 +145,7 @@ pub fn collect(
             }
             match collect_foreign(
                 context,
+                &entries,
                 entry,
                 lane,
                 &branch,
@@ -270,14 +274,15 @@ pub fn collect(
         if policy.dry_run {
             {
                 let precheck = || -> Result<(), WorktreeError> {
-                    // The census and the ignored-output walk run without the
-                    // repository lock; it covers only the registration reads.
+                    // The census and ignored-output walk run without the
+                    // repository lock; it covers the branch ref check.
                     let locked = lock_worktree(context, entry, cancel, true)?;
                     {
                         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
-                        let fresh = read_worktrees(context, cancel)?;
-                        tree_unchanged(&fresh, entry, lane.head)?;
-                        branch_unchanged(context, &fresh, &branch, &lane.path, lane.head, cancel)?;
+                        tree_unchanged(&entries, entry, lane.head)?;
+                        branch_unchanged(
+                            context, &entries, &branch, &lane.path, lane.head, cancel,
+                        )?;
                     }
                     // Applying needs a fresh Free census; a preview must not
                     // report a removal that applying would refuse.
@@ -339,6 +344,7 @@ pub fn collect(
 
 fn prune_unknown_output(
     context: &WorktreeContext<'_>,
+    preview_entries: &[GitWorktree],
     entry: &GitWorktree,
     lane: &WorktreeInfo,
     policy: &WorktreeGcPolicy<'_>,
@@ -351,7 +357,11 @@ fn prune_unknown_output(
     let locked = lock_worktree(context, entry, cancel, policy.dry_run)?;
     {
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
-        tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
+        if policy.dry_run {
+            tree_unchanged(preview_entries, entry, lane.head)?;
+        } else {
+            tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
+        }
     }
     if policy.dry_run {
         if let Some(detail) = census_refusal_detail(context, &lane.path) {
@@ -1041,6 +1051,7 @@ fn protect_nonignored(
 #[allow(clippy::too_many_arguments)]
 fn collect_foreign(
     context: &WorktreeContext<'_>,
+    preview_entries: &[GitWorktree],
     entry: &GitWorktree,
     lane: &WorktreeInfo,
     branch: &GitRefName,
@@ -1059,7 +1070,15 @@ fn collect_foreign(
         return Ok(None);
     }
     if policy.dry_run {
-        preview_foreign(context, entry, lane, branch, policy, cancel)?;
+        preview_foreign(
+            context,
+            preview_entries,
+            entry,
+            lane,
+            branch,
+            policy,
+            cancel,
+        )?;
     } else {
         // remove_tree_when verifies once, under writer custody.
         remove_and_finalise(
@@ -1084,9 +1103,11 @@ fn collect_foreign(
     Ok(Some(lane.clone()))
 }
 
-/// The dry-run proof: the same checks removal makes, without creating state.
+/// Preview against the command's inventory snapshot without creating state.
+/// Applied removal refreshes Git and custody facts before mutation.
 fn preview_foreign(
     context: &WorktreeContext<'_>,
+    entries: &[GitWorktree],
     entry: &GitWorktree,
     lane: &WorktreeInfo,
     branch: &GitRefName,
@@ -1115,7 +1136,7 @@ fn preview_foreign(
     };
     let recheck = || -> Result<(), WorktreeError> {
         verified.repo().revalidate()?;
-        tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
+        tree_unchanged(entries, entry, lane.head)?;
         if let Some(detail) = census_refusal_detail(context, &lane.path) {
             return Err(WorktreeError::IncompleteCensus { detail });
         }
@@ -1148,8 +1169,7 @@ fn preview_foreign(
         return Err(WorktreeError::Dirty(String::new()));
     }
     recheck()?;
-    let fresh = read_worktrees(context, cancel)?;
-    branch_unchanged(context, &fresh, branch, &lane.path, lane.head, cancel)?;
+    branch_unchanged(context, entries, branch, &lane.path, lane.head, cancel)?;
     drop(writer);
     Ok(())
 }

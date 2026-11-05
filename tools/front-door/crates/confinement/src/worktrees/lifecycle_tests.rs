@@ -62,9 +62,33 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
     for lane in &mut lanes {
         lane.writer = WriterState::Unknown;
     }
+    struct CountingGit<'a> {
+        inner: &'a dyn Executor,
+        listings: AtomicUsize,
+    }
+    impl Executor for CountingGit<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
+            {
+                self.listings.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.execute(options)
+        }
+    }
     let observer = Counting(AtomicUsize::new(0));
     let session = CensusSession::new(&observer, &test.clock);
+    let git = CountingGit {
+        inner: context.executor,
+        listings: AtomicUsize::new(0),
+    };
     context.workers = &session;
+    context.executor = &git;
     let report = collect(
         &context,
         &lanes,
@@ -81,6 +105,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
         &cancel(),
     )?;
     assert_eq!(observer.0.load(Ordering::SeqCst), 1);
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
     assert_eq!(report.idle_output.len(), 40, "{report:?}");
     assert!(
         report
