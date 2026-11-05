@@ -3360,6 +3360,90 @@ fn trace_store(
 }
 
 #[test]
+fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::cloud::{
+        self, CloudProvider, CloudResult, CloudSubmission, RemoteJob, RemoteState,
+    };
+    struct Fake;
+    impl CloudProvider for Fake {
+        type Error = ();
+        fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+            Ok(())
+        }
+        fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, ()> {
+            assert_eq!(request.job.commit, "a".repeat(40));
+            Ok("remote-id".into())
+        }
+        fn observe(&mut self, id: &str) -> Result<RemoteState, ()> {
+            assert_eq!(id, "remote-id");
+            Ok(RemoteState::Finished {
+                result: CloudResult {
+                    commit: "a".repeat(40),
+                    exit_status: 0,
+                    tests_run: vec!["targeted".into()],
+                    tests_failed: vec![],
+                    log_location: "log".into(),
+                    tracked_files_changed: false,
+                    observed_model: Some("small".into()),
+                },
+            })
+        }
+        fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+            Ok(false)
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|e| e.message)?;
+    let store = trace_store(&temp, &call)?;
+    let mut input = trace_run(
+        40,
+        AttemptId::from_bytes([1; 16]),
+        now(&clock).map_err(|e| e.message)?,
+    )?;
+    input.request.parent_attempt = None;
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let job = RemoteJob {
+        provider: "fake".into(),
+        target: "target".into(),
+        environment: "env".into(),
+        repository: "repository".into(),
+        remote_id: String::new(),
+        commit: "a".repeat(40),
+        requested_model: "small".into(),
+        requested_effort: None,
+        state: RemoteState::Submitting,
+    };
+    let submitted =
+        cloud_store::AttemptCloudStore::with_attempt(&store, id, true, &call, |cloud_store| {
+            cloud::submit(&mut Fake, cloud_store, job, "run tests")
+        })?
+        .map_err(|error| format!("{error:?}"))?;
+    drop(store);
+    let store = trace_store(&temp, &call)?;
+    cloud_store::AttemptCloudStore::with_attempt(
+        &store,
+        id,
+        false,
+        &call,
+        |cloud_store| -> Result<(), Box<dyn std::error::Error>> {
+            let mut recovered = cloud_store.load()?.ok_or("missing cloud job")?;
+            assert_eq!(recovered, submitted);
+            cloud::reconcile(&mut Fake, cloud_store, &mut recovered)
+                .map_err(|error| format!("{error:?}"))?;
+            assert!(matches!(
+                cloud_store.load()?.unwrap().state,
+                RemoteState::Finished { .. }
+            ));
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
 fn a_nested_lane_reads_the_host_ledger_when_it_opens_read_only()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
