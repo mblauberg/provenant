@@ -35,6 +35,7 @@ pub use panel::{ShapeSelector, review_selector};
 pub struct Layers {
     /// Host limits used by the runtime's composite structural check.
     pub graph_limits: provenant_fabric_runtime::config::GraphLimits,
+    built_nodes: std::cell::Cell<usize>,
     /// Routing review shapes. Each review stage selects its own shape from its
     /// final `review_shape` and `risk_tier` parameters.
     pub review: Option<ShapeSelector>,
@@ -1004,6 +1005,7 @@ pub fn expand_with(
                 .map(|expansion| expansion.document["nodes"].clone())
         });
     layers.used_shapes.borrow_mut().clear();
+    layers.built_nodes.set(0);
     layers.review_bases.borrow_mut().clear();
     layers.used_roles.borrow_mut().clear();
     layers.substitutions.borrow_mut().clear();
@@ -1169,7 +1171,6 @@ pub fn expand_with(
             .as_array()
             .ok_or("nodes must be an array")?,
         "",
-        0,
     )?;
     if let Some(reason) = layers.graph_limits.nodes_bound().refusal(count) {
         return Err(reason);
@@ -2280,8 +2281,8 @@ impl StageBuilder<'_> {
         nodes: &mut Vec<Value>,
         depth: usize,
     ) -> Result<Vec<String>, String> {
-        if depth >= DEPTH {
-            return Err(format!("preset composition depth exceeds {DEPTH}"));
+        if depth > self.layers.graph_limits.composite_expansion_safety_depth() {
+            return Err("composite expansion depth exceeds the limit".into());
         }
         let object = entry.as_object().ok_or("stage entries must be tables")?;
         if let Some(mode) = object.get("zero_minimum")
@@ -2737,6 +2738,12 @@ impl StageBuilder<'_> {
             if let Some(parameters) = self.parameters.as_object_mut() {
                 parameters.remove("item");
             }
+            let count = self.layers.built_nodes.get().saturating_add(1);
+            let maximum = self.layers.graph_limits.composite_expansion_safety_nodes();
+            if count > maximum {
+                return Err(format!("composite expansion exceeds {maximum} nodes"));
+            }
+            self.layers.built_nodes.set(count);
             nodes.push(node);
             if nodes.len() > 512 {
                 return Err("preset expands to more than 512 nodes".into());
@@ -2802,10 +2809,7 @@ fn composite(
     node
 }
 
-fn check_expansion(nodes: &[Value], prefix: &str, depth: usize) -> Result<usize, String> {
-    if depth > DEPTH {
-        return Err(format!("preset composition depth exceeds {DEPTH}"));
-    }
+fn check_expansion(nodes: &[Value], prefix: &str) -> Result<usize, String> {
     let mut count = 0usize;
     for node in nodes {
         let id = format!(
@@ -2821,7 +2825,7 @@ fn check_expansion(nodes: &[Value], prefix: &str, depth: usize) -> Result<usize,
             .and_then(|spec| spec.get("nodes"))
             .and_then(Value::as_array)
         {
-            count = count.saturating_add(check_expansion(children, &format!("{id}--"), depth + 1)?);
+            count = count.saturating_add(check_expansion(children, &format!("{id}--"))?);
         }
         if let Some(spec) = node.get("loop") {
             let children = spec
@@ -2833,8 +2837,7 @@ fn check_expansion(nodes: &[Value], prefix: &str, depth: usize) -> Result<usize,
                 .and_then(Value::as_u64)
                 .ok_or("loop.max_rounds must be positive")? as usize;
             count = count.saturating_add(
-                check_expansion(children, &format!("{id}--r{rounds}--"), depth + 1)?
-                    .saturating_mul(rounds),
+                check_expansion(children, &format!("{id}--r{rounds}--"))?.saturating_mul(rounds),
             );
         }
     }

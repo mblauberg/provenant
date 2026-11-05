@@ -301,8 +301,8 @@ pub(super) fn expansion_safety_limits(
     limits: &crate::config::GraphLimits,
 ) -> crate::config::GraphLimits {
     crate::config::GraphLimits {
-        nodes: limits.nodes.max(16_384),
-        expansion_depth: limits.expansion_depth.max(64),
+        nodes: limits.composite_expansion_safety_nodes(),
+        expansion_depth: limits.composite_expansion_safety_depth(),
         edges: usize::MAX,
         routes_per_node: u16::MAX as usize,
         node_prompt_bytes: usize::MAX,

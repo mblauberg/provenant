@@ -295,6 +295,17 @@ impl GraphBound<'_> {
 }
 
 impl GraphLimits {
+    /// Internal node bound used while expanding a graph before admission.
+    pub fn composite_expansion_safety_nodes(&self) -> usize {
+        self.nodes.max(16_384)
+    }
+
+    /// Internal expansion safety bound used before configured graph limits are
+    /// applied to the flattened graph.
+    pub fn composite_expansion_safety_depth(&self) -> usize {
+        self.expansion_depth.max(64)
+    }
+
     pub fn bound<'a>(&self, name: &'a str, maximum: usize) -> GraphBound<'a> {
         GraphBound {
             name,

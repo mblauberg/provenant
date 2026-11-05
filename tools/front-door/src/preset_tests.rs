@@ -2070,6 +2070,33 @@ fn expanded_composite_id_refusal_matches_admission() {
 }
 
 #[test]
+fn nested_composites_within_the_host_depth_bound_compile() {
+    let mut stage = "{ id='leaf', prompt='work' }".to_owned();
+    for index in 0..9 {
+        stage = format!("{{ id='g{index}', stages=[{stage}] }}");
+    }
+    let mut layers = Layers::empty();
+    layers
+        .insert("test", "nested-composites", &format!("stages=[{stage}]\n"))
+        .unwrap();
+    let expansion = expand(&layers, "nested-composites", "brief", &[]).unwrap();
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expansion.document).unwrap();
+    assert!(document.admit(&layers.graph_limits).is_ok());
+}
+
+#[test]
+fn preset_construction_stops_at_the_shared_expansion_safety_bound() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "wide-composites", "stages=[{id='a',count=32,stages=[{id='b',count=32,stages=[{id='c',count=32,prompt='work'}]}]}]\n").unwrap();
+    let error = expand(&layers, "wide-composites", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("composite expansion exceeds 16384 nodes"),
+        "{error}"
+    );
+}
+
+#[test]
 fn preset_explain_big_batch_shows_targeted_checks_policy_and_origin() {
     let layers = Layers::empty();
     let explained = layers.explain("big-batch").unwrap();
