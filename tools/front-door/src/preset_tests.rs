@@ -603,6 +603,15 @@ selected = {{ type = "string", default = "{selected}" }}
 }
 
 #[test]
+fn invalid_leaf_output_names_the_node_and_field() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "invalid-output", "stages=[{id='first',prompt='work'},{id='second',prompt='work',outputs=['not-an-output']}]").unwrap();
+    let error = expand(&layers, "invalid-output", "brief", &[]).unwrap_err();
+    assert!(error.contains("node second"), "{error}");
+    assert!(error.contains("outputs"), "{error}");
+}
+
+#[test]
 fn group_member_outputs_apply_to_static_and_deferred_members() {
     let mut layers = real_selector("/nonexistent");
     let review = include_str!("../assets/presets/review.toml").replace(

@@ -2248,9 +2248,14 @@ fn lower_leaf(
         && (!deps.is_empty() || (map.contains_key("dispositions") && !dependencies.is_empty()))
     {
         if !map.contains_key("inputs") {
+            let kinds: Vec<provenant_fabric_runtime::graph::OutputKind> =
+                serde_json::from_value(outputs.clone())
+                    .map_err(|error| format!("node {id}: outputs: {error}"))?;
+            let inputs = select_graph_inputs(&input_dependencies, &kinds);
             map.insert(
                 "inputs".into(),
-                selected_inputs(&input_dependencies, &outputs),
+                serde_json::to_value(inputs)
+                    .map_err(|error| format!("node {id}: inputs: {error}"))?,
             );
         }
         if map.contains_key("dispositions") {
