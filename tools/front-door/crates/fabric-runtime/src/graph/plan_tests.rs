@@ -1203,6 +1203,9 @@ fn continuation_budget_pauses_then_extends_without_duplicating_prior_work() {
     assert_eq!(run.checkpoint.expansions.len(), 1);
     assert_eq!(run.checkpoint.remaining.as_ref().unwrap().continuations, 0);
     assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    let reason = run.checkpoint.pause_reason.as_deref().unwrap();
+    assert!(reason.contains("limits.continuations=1"), "{reason}");
+    assert!(reason.contains("domains.fabric.graph.limits"), "{reason}");
     assert_eq!(owner.calls.len(), 2);
     assert_eq!(advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap().status, GraphStatus::Paused);
     owner.observations.extend(["VERDICT: PASS", "checked"].map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)));

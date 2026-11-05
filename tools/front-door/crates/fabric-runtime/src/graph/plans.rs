@@ -1763,17 +1763,14 @@ fn continuation(
     note: &str,
     limits: &crate::config::GraphLimits,
 ) -> Result<Expansion, String> {
-    if checkpoint
+    let requested = checkpoint
         .expansions
         .iter()
         .filter(|e| e.continuation)
         .count()
-        >= limits.continuations
-    {
-        return Err(format!(
-            "limits.continuations={} reached; extend the continuation budget",
-            limits.continuations
-        ));
+        .saturating_add(1);
+    if let Some(reason) = limits.continuations_bound().refusal(requested) {
+        return Err(format!("{reason}; extend the continuation budget"));
     }
     let mut child = document
         .nodes

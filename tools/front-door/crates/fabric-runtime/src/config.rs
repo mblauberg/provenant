@@ -342,6 +342,10 @@ impl GraphLimits {
         self.bound("nodes", self.nodes)
     }
 
+    pub fn continuations_bound(&self) -> GraphBound<'static> {
+        self.bound("continuations", self.continuations)
+    }
+
     pub fn edges_bound(&self) -> GraphBound<'static> {
         self.bound("edges", self.edges)
     }
