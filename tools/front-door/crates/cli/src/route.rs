@@ -1080,8 +1080,10 @@ fn resolve_pacing_accounts(
     }
     Ok(())
 }
+#[allow(clippy::too_many_arguments)]
 fn with_context<T>(
     roots: &Roots,
+    registry: &[provenant_providers::Registration],
     availability: &[AvailabilityRecord],
     access: &[AccessContext<'_>],
     host: &str,
@@ -1105,7 +1107,7 @@ fn with_context<T>(
         .as_bool()
         .ok_or(RoutingError::InvalidValue)?;
     let domains = resolved_config.domains;
-    let policies = provenant_providers::scheduling_policies(&domains.quota, REGISTRY);
+    let policies = provenant_providers::scheduling_policies(&domains.quota, registry);
     let mut config = domains.routing;
     config.allow_unknown_partial_headroom = allow_unknown;
     config.partial_headroom_source = Some(partial_headroom_source);
@@ -1203,7 +1205,7 @@ fn with_context<T>(
             policy_account_hint: None,
             catalogue: &catalogue,
             config: &config,
-            registry: REGISTRY,
+            registry,
             availability,
             quota: &quota,
             capacity_cooldowns: &capacity_cooldowns,
@@ -1247,6 +1249,7 @@ impl From<EdgeError> for DispatchError {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "fixture"))]
 pub(crate) fn resolve_dispatch(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
@@ -1261,6 +1264,7 @@ pub(crate) fn resolve_dispatch(
     resolve_dispatch_rejecting(
         request,
         roots,
+        REGISTRY,
         account,
         seed,
         availability,
@@ -1276,6 +1280,7 @@ pub(crate) fn resolve_dispatch(
 pub(crate) fn resolve_dispatch_rejecting(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
+    registry: &[provenant_providers::Registration],
     account: Option<&str>,
     seed: (&str, u64),
     availability: &[AvailabilityRecord],
@@ -1315,6 +1320,7 @@ pub(crate) fn resolve_dispatch_rejecting(
     let selected = resolve_dispatch_excluding(
         request,
         roots,
+        registry,
         account,
         seed,
         availability,
@@ -1342,6 +1348,7 @@ pub(crate) fn resolve_dispatch_rejecting(
         let relaxed = resolve_dispatch_excluding(
             request,
             roots,
+            registry,
             account,
             seed,
             availability,
@@ -1378,6 +1385,7 @@ pub(crate) fn resolve_dispatch_rejecting(
         let relaxed = resolve_dispatch_excluding(
             request,
             roots,
+            registry,
             account,
             seed,
             availability,
@@ -1434,6 +1442,7 @@ fn review_family_excluded(family: Option<&str>, families: &[String]) -> bool {
 fn resolve_dispatch_excluding(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
+    registry: &[provenant_providers::Registration],
     account: Option<&str>,
     seed: (&str, u64),
     availability: &[AvailabilityRecord],
@@ -1451,6 +1460,7 @@ fn resolve_dispatch_excluding(
     }
     with_context(
         roots,
+        registry,
         availability,
         access,
         host,
@@ -1667,6 +1677,7 @@ pub(crate) fn account_evidence(
     settings: &provenant_quota::Settings,
     mut records: Vec<provenant_quota::AccountRecord>,
     now: i64,
+    registry: &[provenant_providers::Registration],
 ) -> (
     Vec<provenant_quota::AccountRecord>,
     Vec<provenant_quota::QuotaPolicy>,
@@ -1674,13 +1685,14 @@ pub(crate) fn account_evidence(
     settings.apply_calibration(&mut records, now);
     (
         records,
-        provenant_providers::scheduling_policies(settings, REGISTRY),
+        provenant_providers::scheduling_policies(settings, registry),
     )
 }
 /// Recheck each selected fallback against the latest persisted refusals.
 pub(crate) fn check_dispatch_candidate(
     roots: &Roots,
     route: &provenant_records::ResolvedRoute,
+    registry: &[provenant_providers::Registration],
 ) -> Result<(), String> {
     let catalogue = Catalogue::bundled().map_err(|e| e.to_string())?;
     let model =
@@ -1697,7 +1709,7 @@ pub(crate) fn check_dispatch_candidate(
     let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
     let records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
-    let (records, policies) = account_evidence(&domains.quota, records, now);
+    let (records, policies) = account_evidence(&domains.quota, records, now, registry);
     provenant_quota::Admission {
         policies: &policies,
         now_unix_seconds: now,
@@ -1727,6 +1739,7 @@ fn list_data_and_accounts(
 > {
     with_context(
         roots,
+        REGISTRY,
         &[],
         &[],
         "local-preview",
@@ -2347,6 +2360,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
         Route::List(query) => Ok(Data::List(display_list_data(roots, query)?)),
         Route::Resolve(query) => with_context(
             roots,
+            REGISTRY,
             &[],
             &[],
             "local-preview",
@@ -2595,6 +2609,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
     };
     let blocked = with_context(
         roots,
+        REGISTRY,
         &[],
         &[],
         "local-preview",
@@ -4143,7 +4158,7 @@ mod route_tests {
                 exclude: vec![],
             };
             let resolved = resolve(&request.to_domain()?)?;
-            assert!(super::check_dispatch_candidate(&roots, &resolved).is_err());
+            assert!(super::check_dispatch_candidate(&roots, &resolved, super::REGISTRY).is_err());
             assert_eq!(
                 resolved.alternatives.as_slice()[0].model,
                 "opencode-go/deepseek-v4.1-flash"
@@ -4181,13 +4196,13 @@ mod route_tests {
         let mut candidate = selected.clone();
         candidate.model = "opencode-go/unlisted".into();
         assert!(
-            super::check_dispatch_candidate(&roots, &candidate)
+            super::check_dispatch_candidate(&roots, &candidate, super::REGISTRY)
                 .unwrap_err()
                 .contains("unknown")
         );
         candidate.model = "opencode-go/glm-5.3-flash".into();
         assert!(
-            super::check_dispatch_candidate(&roots, &candidate)
+            super::check_dispatch_candidate(&roots, &candidate, super::REGISTRY)
                 .unwrap_err()
                 .contains("$60")
         );
@@ -4391,7 +4406,7 @@ mod route_tests {
         };
         let drawn = resolve(None)?;
         let spent = drawn.account_key.clone().ok_or("account")?;
-        assert!(super::check_dispatch_candidate(&roots, &drawn).is_ok());
+        assert!(super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).is_ok());
         // The provider refused the drawn account: the next dispatch keeps the
         // model and takes the other account instead of failing.
         crate::quota::persist_provider_refusal(
@@ -4408,10 +4423,10 @@ mod route_tests {
             Some(now + 3_600),
         )?;
         // A refusal written after resolution still stops the launch.
-        let error = super::check_dispatch_candidate(&roots, &drawn).unwrap_err();
+        let error = super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).unwrap_err();
         assert!(error.contains("scoped provider refusal"), "{error}");
         let redrawn = resolve(None)?;
-        assert!(super::check_dispatch_candidate(&roots, &redrawn).is_ok());
+        assert!(super::check_dispatch_candidate(&roots, &redrawn, super::REGISTRY).is_ok());
         assert_eq!(redrawn.model, "gpt-6-luna");
         assert!(matches!(redrawn.readiness, RouteReadiness::Ready { .. }));
         assert_ne!(redrawn.account_key.as_deref(), Some(spent.as_str()));

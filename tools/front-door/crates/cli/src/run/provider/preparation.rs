@@ -444,6 +444,7 @@ pub(super) fn prepare_with_wait(
         };
         let mut launch = prepare_candidates(
             registry,
+            REGISTRY,
             &delegated,
             prompt_text,
             paths,
@@ -472,6 +473,7 @@ pub(super) fn prepare_with_wait(
     }
     prepare_candidates(
         registry,
+        REGISTRY,
         task,
         prompt_text,
         paths,
@@ -492,6 +494,7 @@ pub(super) fn login_check_can_clear(adapter: &str, mismatch: bool) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_candidates(
     registry: &Registry<'_>,
+    provider_registry: &[provenant_providers::Registration],
     task: &run::TaskRequest,
     prompt_text: &str,
     paths: &run::LaunchPaths,
@@ -638,9 +641,13 @@ pub(super) fn prepare_candidates(
     };
     request.intent = route_request(task)?.intent;
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
-    let eligible =
-        provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing, REGISTRY)
-            .map_err(|e| e.to_string())?;
+    let eligible = provenant_routing::probe_adapters(
+        &request,
+        &catalogue,
+        &config.domains.routing,
+        provider_registry,
+    )
+    .map_err(|e| e.to_string())?;
     // Exclude updates during preparation when the bounded wait succeeds.
     let clock = provenant_os::clock::SystemClock::new();
     use provenant_core::Clock;
@@ -869,7 +876,7 @@ pub(super) fn prepare_candidates(
     let mut access = Vec::new();
     let mut plan_errors = std::collections::BTreeMap::new();
     let mut reported_plan_errors = std::collections::BTreeSet::new();
-    for adapter in REGISTRY
+    for adapter in provider_registry
         .iter()
         .map(|entry| entry.adapter.id())
         .filter(|adapter| eligible(adapter))
@@ -978,6 +985,7 @@ pub(super) fn prepare_candidates(
         crate::route::resolve_dispatch_rejecting(
             &request,
             roots,
+            provider_registry,
             selected,
             (paths.operation_id.as_str(), paths.task_index),
             &availability,
@@ -988,18 +996,7 @@ pub(super) fn prepare_candidates(
             rejected,
         )
     };
-    let resolved = crate::route::resolve_dispatch(
-        &request,
-        roots,
-        selected,
-        (paths.operation_id.as_str(), paths.task_index),
-        &availability,
-        &access,
-        &host,
-        family_constraints,
-        &rules,
-    )
-    .map_err(|error| error.to_string())?;
+    let resolved = resolve(&[]).map_err(|error| error.to_string())?;
     let named_pool = resolved.pool_selection.is_some() && resume.is_none();
     if let Some(selection) = &resolved.pool_selection {
         for redraw in &selection.redraws {
@@ -1141,6 +1138,7 @@ pub(super) fn prepare_candidates(
             let fallback = nested_policy_fallback(task, &route, &model_policy)?;
             let mut prepared = prepare_candidates(
                 registry,
+                provider_registry,
                 &fallback,
                 prompt_text,
                 paths,
@@ -1160,7 +1158,7 @@ pub(super) fn prepare_candidates(
             );
             return Ok(prepared);
         }
-        let Some(registration) = REGISTRY
+        let Some(registration) = provider_registry
             .iter()
             .find(|registration| registration.adapter.id() == route.adapter)
         else {
@@ -1251,7 +1249,8 @@ pub(super) fn prepare_candidates(
             reasons.push(skip(&label, SkipKind::Unavailable, detail));
             continue;
         }
-        if let Err(error) = crate::route::check_dispatch_candidate(roots, &route) {
+        if let Err(error) = crate::route::check_dispatch_candidate(roots, &route, provider_registry)
+        {
             reasons.push(skip(&label, SkipKind::Unavailable, error));
             continue;
         }
@@ -1260,7 +1259,7 @@ pub(super) fn prepare_candidates(
             .find(|e| e.adapter == route.adapter && Some(&e.key) == route.account_key.as_ref());
         let account = match entry
             .filter(|entry| {
-                AdapterSpec::get(&entry.adapter).is_some_and(|spec| {
+                AdapterSpec::get(&entry.adapter).is_none_or(|spec| {
                     spec.registered_account && !spec.is_unregistered_local(&entry.key)
                 })
             })
@@ -1413,8 +1412,9 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
-        let adapter_spec = AdapterSpec::get(adapter.id()).ok_or("adapter is not registered")?;
-        let refreshed = if adapter_spec.launch_token_refresh && fixture_token.is_none() {
+        let adapter_spec = AdapterSpec::get(adapter.id());
+        let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh);
+        let refreshed = if refresh_token && fixture_token.is_none() {
             let account = account.as_ref().ok_or("Claude account is not registered")?;
             let login = provenant_providers::claude::Login {
                 executable: &executable,
@@ -1463,7 +1463,7 @@ pub(super) fn prepare_candidates(
         } else {
             None
         };
-        let token = if adapter_spec.launch_token_refresh {
+        let token = if refresh_token {
             fixture_token.or(refreshed.as_ref())
         } else {
             None
@@ -1629,8 +1629,10 @@ pub(super) fn prepare_candidates(
                 .and_then(|host| host.cargo_build_jobs.as_deref()),
             build_settings.jobs(),
         );
-        spec.configure_shell(scratch, adapter_spec)
-            .map_err(|error| error.to_string())?;
+        if let Some(adapter_spec) = adapter_spec {
+            spec.configure_shell(scratch, adapter_spec)
+                .map_err(|error| error.to_string())?;
+        }
         if let Some(gh) = publishing_gh.as_ref() {
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
@@ -1643,7 +1645,7 @@ pub(super) fn prepare_candidates(
             }
         }
         if git_context.is_some()
-            && let Some(argument) = adapter_spec.context_directory_arg
+            && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)
         {
             // Scratch is already granted by the outer profile. Claude's file
             // tools also need it in their working directories to read context.
@@ -1653,7 +1655,7 @@ pub(super) fn prepare_candidates(
         spec.complete_tool_requirements(&plan, &home, &cwd);
         let transcript_account = account
             .as_ref()
-            .filter(|_| adapter_spec.transcript_account_root)
+            .filter(|_| adapter_spec.is_some_and(|spec| spec.transcript_account_root))
             .map(|account| account.directory());
         let mut setup_roots = vec![scratch, private_state, roots.state.as_path()];
         // Only directory creation uses these additional provider state roots;
@@ -1663,7 +1665,7 @@ pub(super) fn prepare_candidates(
             .iter()
             .find(|(key, _)| key == "XDG_DATA_HOME")
             .map(|(_, value)| Path::new(value));
-        match adapter_spec.setup_root {
+        match adapter_spec.map_or(provenant_records::SetupRoot::None, |spec| spec.setup_root) {
             provenant_records::SetupRoot::XdgDataHome => {
                 if let Some(data) = xdg_data_home {
                     let existing = data

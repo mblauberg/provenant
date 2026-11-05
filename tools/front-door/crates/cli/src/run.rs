@@ -353,6 +353,7 @@ impl run::Providers for Registry<'_> {
                         &config.domains.quota,
                         quota,
                         now.unix_seconds(),
+                        REGISTRY,
                     );
                     let catalogue = provenant_routing::Catalogue::bundled()
                         .map_err(|error| error.to_string())?;

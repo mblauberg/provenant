@@ -1333,6 +1333,212 @@ fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
 }
 
 #[test]
+fn registry_only_provider_prepares_its_selected_account() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_core::{AttemptId, CancelToken, Digest, OperationId, RunId, TaskId};
+    use provenant_os::exec::SystemExecutor;
+    use provenant_providers::{
+        Adapter, Continuation, ExitObservation, LaunchSpec, PrepareInput, ProviderError,
+        ProviderEvent, ProviderOutcome, RouteProvenance, StreamState, VerifiedLineage,
+    };
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    struct Fixture;
+    impl Adapter for Fixture {
+        fn id(&self) -> &'static str {
+            "fixture-provider"
+        }
+        fn account(
+            &self,
+            _: &StreamState,
+        ) -> Result<provenant_providers::AccountDetection, ProviderError> {
+            Ok(provenant_providers::AccountDetection::Unknown)
+        }
+        fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError> {
+            let account = input.account.ok_or(ProviderError::UnknownIdentity)?;
+            account.validate_route(input.route)?;
+            let mut command_route = input.route.clone();
+            command_route.adapter = "command".into();
+            command_route.model.clear();
+            command_route.account_key = None;
+            let argv = vec![input.executable.to_string_lossy().into_owned()];
+            let command = provenant_providers::command::Invocation {
+                argv: &argv,
+                program: input.executable,
+                runtimes: &[],
+            };
+            provenant_providers::command::Command.prepare(PrepareInput {
+                route: &command_route,
+                account: None,
+                command: Some(command),
+                ..input
+            })
+        }
+        fn stream(
+            &self,
+            continuation: Option<&Continuation>,
+        ) -> Result<StreamState, ProviderError> {
+            provenant_providers::command::Command.stream(continuation)
+        }
+        fn observe(
+            &self,
+            state: &mut StreamState,
+            bytes: &[u8],
+        ) -> Result<Vec<ProviderEvent>, ProviderError> {
+            provenant_providers::command::Command.observe(state, bytes)
+        }
+        fn finish(
+            &self,
+            state: StreamState,
+            exit: ExitObservation,
+        ) -> Result<ProviderOutcome, ProviderError> {
+            provenant_providers::command::Command.finish(state, exit)
+        }
+        fn continuation(
+            &self,
+            outcome: &ProviderOutcome,
+            route: &provenant_records::ResolvedRoute,
+            digest: &str,
+        ) -> Result<Continuation, ProviderError> {
+            provenant_providers::command::Command.continuation(outcome, route, digest)
+        }
+        fn validate_provenance(
+            &self,
+            provenance: &RouteProvenance<'_>,
+        ) -> Result<VerifiedLineage, ProviderError> {
+            provenant_providers::command::Command.validate_provenance(provenance)
+        }
+    }
+    static ADAPTER: Fixture = Fixture;
+    let providers = [provenant_providers::Registration {
+        adapter: &ADAPTER,
+        ..provenant_providers::command::REGISTRATION
+    }];
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let assets = base.join("release");
+    let git_home = base.join("git-home");
+    for path in [&home, &state, &project, &assets, &git_home] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let account_dir = home.join("fixture-account");
+    std::fs::create_dir(&account_dir)?;
+    std::fs::write(
+        state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.accounts.entries.work]\nadapter='fixture-provider'\nlabel='work'\nkey='work'\ndirectory={:?}\n",
+            account_dir.to_str().ok_or("account path")?
+        ),
+    )?;
+    let executor = SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let cancel = CancelToken::new();
+    let repo = utility.open_repo(
+        &executor,
+        &project,
+        provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
+        &cancel,
+    )?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let executable = assets.join("fixture-provider");
+    std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture 1.0\\n'\n")?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+    let run_id = RunId::from_bytes([2; 16]);
+    let attempt_id = AttemptId::from_bytes([1; 16]);
+    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let paths = run::LaunchPaths {
+        attempt_id,
+        operation_id: OperationId::parse("registry-fixture")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id,
+        deadline_unix_ms: u64::MAX,
+        scratch: attempt.join("scratch"),
+        provider_state: attempt.join("provider-state"),
+        temporary: attempt.join("tmp"),
+        temporary_alias: None,
+    };
+    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+    }
+    let prompt = "fixture prompt";
+    let task = run::TaskRequest {
+        context: None,
+        extra: Default::default(),
+        build_heavy: false,
+        title: None,
+        base: None,
+        head: None,
+        source_head: None,
+        base_ref: None,
+        task_id: TaskId::from_bytes([3; 16]),
+        profile: Default::default(),
+        prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
+        route: run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "fixture-provider".into(),
+            model: "fixture-provider/test".into(),
+            effort: None,
+        },
+        account: Some("work".into()),
+        fallback: vec![],
+        authority_digest: Digest::from_bytes([4; 32]),
+        writer: None,
+        deliver: None,
+        provider_timeout_seconds: 20,
+        delivery_id: None,
+        access: Default::default(),
+    };
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        assets: Some(&assets),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: Some(binding.project_id()),
+        host: None,
+        cancel: Some(&cancel),
+    };
+    let prepared = super::preparation::prepare_candidates(
+        &registry,
+        &providers,
+        &task,
+        prompt,
+        &paths,
+        None,
+        &|name| {
+            if name == "fixture-provider" {
+                Ok(executable.clone())
+            } else {
+                Err("unavailable".into())
+            }
+        },
+        None,
+        false,
+        None,
+    )?;
+    assert_eq!(prepared.route.provider.as_deref(), Some("fixture-provider"));
+    assert_eq!(prepared.route.account_key.as_deref(), Some("work"));
+    assert!(!prepared.argv.is_empty());
+    Ok(())
+}
+
+#[test]
 fn opencode_stale_auth_prepares_with_an_unverified_warning()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId};
