@@ -265,6 +265,8 @@ pub struct GraphLimits {
     pub nodes: usize,
     pub edges: usize,
     pub routes_per_node: usize,
+    /// Maximum substitutions after settled failures per review member.
+    pub review_substitutions: usize,
     pub node_prompt_bytes: usize,
     pub graph_prompt_bytes: usize,
     pub expansion_depth: usize,
@@ -308,6 +310,7 @@ impl Default for GraphLimits {
                     nodes: number("nodes"),
                     edges: number("edges"),
                     routes_per_node: number("routes_per_node"),
+                    review_substitutions: number("review_substitutions"),
                     node_prompt_bytes: number("node_prompt_bytes"),
                     graph_prompt_bytes: number("graph_prompt_bytes"),
                     expansion_depth: number("expansion_depth"),
@@ -1211,6 +1214,9 @@ mod tests {
         assert_eq!(config.graph.limits.expansion_depth, 64);
         assert_eq!(config.graph.limits.nodes, 512);
         assert_eq!(config.graph.limits.continuations, 2);
+        assert_eq!(config.graph.limits.review_substitutions, 1);
+        config.graph.limits.review_substitutions = 0;
+        assert!(config.validate().is_empty());
         config.graph.limits.continuations = 0;
         assert!(config.validate().is_empty());
         assert_eq!(config.graph.limits.graph_prompt_bytes, 4 * 1024 * 1024);

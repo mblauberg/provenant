@@ -54,6 +54,26 @@ pub fn decide(
         }
     }
 }
+
+/// A stack must be published through the forge so it can retarget its upper
+/// members. The decision is made before the pending marker is written.
+pub fn decide_candidate(
+    forge: &mut dyn Forge,
+    target: &str,
+    requested: Publication,
+    method: MergeMethod,
+    candidate: &Candidate,
+) -> Result<PublishDecision, LandingError> {
+    for step in &candidate.steps {
+        if forge.pull_request(step.pr.number)?.stack.is_some() {
+            return Ok(PublishDecision {
+                mode: PublishMode::RestOrdered,
+                reason: "stack members require asynchronous forge publication".into(),
+            });
+        }
+    }
+    decide(forge, target, requested, method)
+}
 /// Return PRs whose pinned head or approval changed immediately before publication.
 pub fn revalidate(
     forge: &mut dyn Forge,
@@ -74,6 +94,35 @@ pub fn revalidate(
         }
     }
     Ok(excluded)
+}
+
+/// Only request the lowest unmerged stack member: an async request for an
+/// upper member would also merge its downstack members without their gates.
+pub fn merge_member(
+    forge: &mut dyn Forge,
+    number: u64,
+    head: &str,
+    method: MergeMethod,
+) -> Result<String, LandingError> {
+    if let Some(stack) = forge.pull_request(number)?.stack {
+        let members = forge.stack_members(stack.number)?;
+        let position = members
+            .iter()
+            .position(|member| member.number == number)
+            .ok_or(LandingError::PublicationUnknown)?;
+        if let Some(lower) = members[..position]
+            .iter()
+            .find(|member| member.state != super::ports::PullRequestState::Merged)
+        {
+            return Err(LandingError::Refused(format!(
+                "pull request #{number} has unmerged lower pull request #{}",
+                lower.number
+            )));
+        }
+        forge.merge_stack(number, head, method)
+    } else {
+        forge.merge(number, head, method)
+    }
 }
 /// Advance the target from the candidate base with an expected-old-value push.
 pub fn fast_forward(
@@ -109,6 +158,7 @@ pub fn rest_ordered(
     candidate: &Candidate,
     method: MergeMethod,
     landed: &mut Vec<String>,
+    before_dispatch: &mut dyn FnMut(u64) -> Result<(), LandingError>,
 ) -> Result<PublishResult, LandingError> {
     let mut expected = candidate.base.clone();
     for step in &candidate.steps {
@@ -134,7 +184,8 @@ pub fn rest_ordered(
         {
             return Err(LandingError::PullRequestChanged(step.pr.number));
         }
-        expected = forge.merge(step.pr.number, &step.pr.head, method)?;
+        before_dispatch(step.pr.number)?;
+        expected = merge_member(forge, step.pr.number, &step.pr.head, method)?;
         landed.push(expected.clone());
     }
     // The final landed commit is durable evidence for the later tree comparison.
@@ -189,6 +240,7 @@ mod tests {
                     author: "author".into(),
                     state: PullRequestState::Open,
                     merged_commit: None,
+                    stack: None,
                 },
             );
             forge.approvals_at_head.insert(
@@ -199,6 +251,62 @@ mod tests {
                 }],
             );
         }
+    }
+    #[test]
+    fn stack_publication_uses_async_only_for_the_lowest_member() -> Result<(), LandingError> {
+        use crate::pr::landing::ports::{PullRequestState, StackMember, StackMembership};
+        let mut forge = FakeForge {
+            direct_push: true,
+            ..Default::default()
+        };
+        prepare(&mut forge);
+        for (number, position) in [(1, 1), (2, 2)] {
+            forge.pull_requests.get_mut(&number).unwrap().stack = Some(StackMembership {
+                number: 42,
+                size: 2,
+                position,
+                base_branch: "main".into(),
+            });
+        }
+        forge.pull_requests.get_mut(&2).unwrap().base_branch = "lower".into();
+        forge.stacks.insert(
+            42,
+            vec![
+                StackMember {
+                    number: 1,
+                    state: PullRequestState::Open,
+                },
+                StackMember {
+                    number: 2,
+                    state: PullRequestState::Open,
+                },
+            ],
+        );
+        assert_eq!(
+            decide_candidate(
+                &mut forge,
+                "main",
+                Publication::Auto,
+                MergeMethod::Merge,
+                &candidate()
+            )?
+            .mode,
+            PublishMode::RestOrdered
+        );
+        let error = merge_member(&mut forge, 2, "head-2", MergeMethod::Merge).unwrap_err();
+        assert!(error.to_string().contains("#1"));
+        assert!(forge.merge_attempts.is_empty());
+        assert_eq!(
+            merge_member(&mut forge, 1, "head-1", MergeMethod::Squash)?,
+            "landed-1"
+        );
+        assert_eq!(forge.stack_merge_attempts, vec![1]);
+        assert_eq!(forge.merges[0].2, MergeMethod::Squash);
+        assert_eq!(forge.pull_requests[&2].base_branch, "main");
+        forge.heads.insert(2, "moved".into());
+        assert!(merge_member(&mut forge, 2, "head-2", MergeMethod::Merge).is_err());
+        assert_eq!(forge.merges.len(), 1);
+        Ok(())
     }
     #[test]
     fn publication_decisions_respect_permission_and_explicit_mode() -> Result<(), LandingError> {
@@ -325,7 +433,8 @@ mod tests {
                 "main",
                 &candidate(),
                 MergeMethod::Merge,
-                &mut Vec::new()
+                &mut Vec::new(),
+                &mut |_| Ok(())
             ),
             Err(LandingError::PullRequestChanged(2))
         ));
@@ -364,7 +473,8 @@ mod tests {
                 "main",
                 &candidate(),
                 MergeMethod::Merge,
-                &mut Vec::new()
+                &mut Vec::new(),
+                &mut |_| Ok(())
             ),
             Err(LandingError::TargetMoved)
         ));
@@ -388,6 +498,7 @@ mod tests {
             &candidate(),
             MergeMethod::Squash,
             &mut Vec::new(),
+            &mut |_| Ok(()),
         )?;
         assert_eq!(
             forge.merges,

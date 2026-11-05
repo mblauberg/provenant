@@ -654,6 +654,11 @@ impl Registry<'_> {
         for event in &events {
             match event {
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
+                ProviderEvent::MessageStart => {
+                    if !decoded.result.is_empty() && !decoded.result.ends_with('\n') {
+                        decoded.result.push('\n');
+                    }
+                }
                 ProviderEvent::EarlyStop { reason } => {
                     decoded
                         .partial_signals

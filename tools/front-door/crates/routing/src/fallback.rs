@@ -21,7 +21,17 @@ impl FallbackOutcome {
             Reason::Exhausted | Reason::FreeTierRefused | Reason::ProviderRefused => {
                 Self::UsageLimited
             }
-            Reason::MissingExecutable => Self::AdapterUnavailable,
+            // The route cannot run here now and nothing has started, so a later
+            // route may. One account with stale evidence must not strand the rest.
+            Reason::MissingExecutable
+            | Reason::Disabled
+            | Reason::UnknownAvailability
+            | Reason::StaleAvailability
+            | Reason::UnknownAccount
+            | Reason::UnknownPartialHeadroom
+            | Reason::ConfinementUnavailable
+            | Reason::UnsupportedEffort
+            | Reason::UnverifiedModel => Self::AdapterUnavailable,
             _ => Self::Other,
         }
     }
@@ -97,6 +107,25 @@ mod tests {
                 &provenant_records::RouteExclusionReason::AccountMismatch,
             ),
             FallbackOutcome::AuthRequired
+        );
+        for reason in [
+            provenant_records::RouteExclusionReason::UnknownAvailability,
+            provenant_records::RouteExclusionReason::StaleAvailability,
+        ] {
+            let outcome = FallbackOutcome::from_exclusion(&reason);
+            assert!(
+                FallbackPolicy { outcome, ..base }.allows_switch(),
+                "{reason:?}"
+            );
+        }
+        assert!(
+            !FallbackPolicy {
+                outcome: FallbackOutcome::from_exclusion(
+                    &provenant_records::RouteExclusionReason::DisclosureDenied,
+                ),
+                ..base
+            }
+            .allows_switch()
         );
         for outcome in [
             FallbackOutcome::AuthRequired,
