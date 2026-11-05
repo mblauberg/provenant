@@ -232,6 +232,7 @@ fn journal_accepts_v2_and_rejects_v1_review_fields() {
     let mut record: StoredCheckpoint = serde_json::from_value(stored()).unwrap();
     record.execution.document.review_base = Some("base".into());
     record.execution.document.schema_version = 2;
+    record.execution.review_base = Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap());
     record.digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",
         2,
@@ -241,6 +242,18 @@ fn journal_accepts_v2_and_rejects_v1_review_fields() {
     .to_string();
     let bytes = serde_json::to_vec(&record).unwrap();
     assert!(decode_checkpoint(&bytes, "g-test").is_ok());
+    record.execution.review_base = None;
+    record.digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&record.checkpoint, &record.execution),
+    )
+    .unwrap()
+    .to_string();
+    assert!(matches!(
+        decode_checkpoint(&serde_json::to_vec(&record).unwrap(), "g-test"),
+        Err(JournalError::BadEnvelope)
+    ));
     record.execution.document.schema_version = 1;
     let bytes = serde_json::to_vec(&record).unwrap();
     assert!(matches!(

@@ -351,7 +351,9 @@ worktree, or the graph execution directory when it has none, and saved on the
 node before its first attempt. Replay uses that OID and refuses an existing
 attempt if its required binding is missing. Status includes the saved pin.
 Rebinding an existing journal retains its original execution
-directory and its persisted execution fields. Checkpoint and envelope versions remain 1. A review specification
+directory and its persisted execution fields. A nonempty document review-base
+reference without its saved execution pin is rejected on bind or journal read;
+it is never resolved again from the current checkout. Checkpoint and envelope versions remain 1. A review specification
 requires a read-only plan node with a source and no ordinary plan specification.
 Older hosts reject version 2 and require an upgrade.
 
