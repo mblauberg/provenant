@@ -1263,6 +1263,7 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
         assert!(comparison.is_match(pattern), "{pattern}");
     }
     assert!(!comparison.is_match("default_value = Harness::Claude.spec().name"));
+    assert!(!comparison.is_match("true => Some(Harness::Codex),\nfalse => None"));
     Ok(())
 }
 
