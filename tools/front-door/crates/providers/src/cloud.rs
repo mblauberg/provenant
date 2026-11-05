@@ -319,17 +319,22 @@ pub fn cancel<P: CloudProvider, S: CloudJobStore>(
     if job.state == RemoteState::Submitting {
         return Err(CloudJobError::SubmissionUnknown);
     }
+    // Persist the ambiguous outcome before contacting the provider. A crash or
+    // lost response cannot otherwise distinguish an unattempted cancellation
+    // from one that reached the remote service.
+    let mut updated = job.clone();
+    updated.state = RemoteState::CancellationUnconfirmed;
+    store.save(&updated).map_err(CloudJobError::Store)?;
+    *job = updated;
     let confirmed = provider
         .cancel(&job.remote_id)
         .map_err(CloudJobError::Provider)?;
-    let mut updated = job.clone();
-    updated.state = if confirmed {
-        RemoteState::Cancelled
-    } else {
-        RemoteState::CancellationUnconfirmed
-    };
-    store.save(&updated).map_err(CloudJobError::Store)?;
-    *job = updated;
+    if confirmed {
+        let mut updated = job.clone();
+        updated.state = RemoteState::Cancelled;
+        store.save(&updated).map_err(CloudJobError::Store)?;
+        *job = updated;
+    }
     Ok(())
 }
 
@@ -456,6 +461,66 @@ mod lifecycle_tests {
         provider.confirmed = true;
         cancel(&mut provider, &mut store, &mut job).unwrap();
         assert_eq!(job.state, RemoteState::Cancelled);
+    }
+    #[test]
+    fn cloud_cancel_lost_response_retains_unconfirmed_state() {
+        struct LostCancellation;
+        impl CloudProvider for LostCancellation {
+            type Error = ();
+            fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+                Ok(())
+            }
+            fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
+                Ok("remote-1".into())
+            }
+            fn observe(&mut self, _: &str) -> Result<RemoteState, ()> {
+                Ok(RemoteState::Running)
+            }
+            fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+                Err(())
+            }
+        }
+        let mut store = FakeStore::default();
+        let mut job = submit(&mut LostCancellation, &mut store, job(), "run tests").unwrap();
+        assert!(matches!(
+            cancel(&mut LostCancellation, &mut store, &mut job),
+            Err(CloudJobError::Provider(()))
+        ));
+        assert_eq!(job.state, RemoteState::CancellationUnconfirmed);
+        assert_eq!(
+            store.saved.unwrap().state,
+            RemoteState::CancellationUnconfirmed
+        );
+    }
+    #[test]
+    fn cloud_cancel_does_not_contact_provider_without_durable_intent() {
+        struct CountingCancel(usize);
+        impl CloudProvider for CountingCancel {
+            type Error = ();
+            fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+                Ok(())
+            }
+            fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
+                Ok("remote-1".into())
+            }
+            fn observe(&mut self, _: &str) -> Result<RemoteState, ()> {
+                Ok(RemoteState::Running)
+            }
+            fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+                self.0 += 1;
+                Ok(true)
+            }
+        }
+        let mut provider = CountingCancel(0);
+        let mut store = FakeStore::default();
+        let mut job = submit(&mut provider, &mut store, job(), "run tests").unwrap();
+        store.fail = true;
+        assert!(matches!(
+            cancel(&mut provider, &mut store, &mut job),
+            Err(CloudJobError::Store(()))
+        ));
+        assert_eq!(provider.0, 0);
+        assert_eq!(job.state, RemoteState::Running);
     }
     #[test]
     fn cloud_environment_failure_names_target_and_never_submits() {
