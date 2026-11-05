@@ -147,7 +147,9 @@ impl Factory {
     fn for_graph_directory(&self, directory: &Path) -> Result<Self, FacadeError> {
         let context = Context::open(self.context.roots.clone(), &self.home, directory)
             .map_err(|_| FacadeError::StateCorrupt)?;
-        if context.identity.project != self.context.identity.project || context.in_lane {
+        if context.identity.project != self.context.identity.project
+            || context.in_lane != self.context.in_lane
+        {
             return Err(FacadeError::StateCorrupt);
         }
         let mut host_launch = self.host_launch.clone();
