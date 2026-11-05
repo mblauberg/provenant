@@ -2443,6 +2443,15 @@ fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
         refused["reason"],
         "host-native absent is not configured in domains.fabric.host_native"
     );
+    let launched = lanes
+        .iter()
+        .find(|lane| lane["state"] == "succeeded")
+        .ok_or("fallback lane did not succeed")?;
+    assert_eq!(launched["applied_route"]["provider"], "claude");
+    assert_eq!(
+        launched["applied_route"]["model"],
+        "claude/claude-sonnet-5-5"
+    );
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
     Ok(())
