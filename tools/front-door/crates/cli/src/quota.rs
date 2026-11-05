@@ -883,10 +883,7 @@ fn detections(
 ) -> Vec<Detection> {
     registry
         .iter()
-        .filter(|r| {
-            provenant_records::AdapterSpec::get(r.adapter.id())
-                .is_some_and(|spec| spec.quota_probe != provenant_records::QuotaProbeKind::None)
-        })
+        .filter(|r| r.quota_source.is_some())
         .map(|r| {
             let status = r.adapter.stream(None).and_then(|s| r.adapter.account(&s));
             Detection {
@@ -4257,17 +4254,24 @@ mod tests {
         assert_eq!(headline, "Quota: 3/3 current readings\n");
     }
 
-    struct AuthRequiredAdapter;
-    impl provenant_providers::Adapter for AuthRequiredAdapter {
+    struct FixtureAdapter {
+        id: &'static str,
+        auth_required: bool,
+    }
+    impl provenant_providers::Adapter for FixtureAdapter {
         fn id(&self) -> &'static str {
-            "claude"
+            self.id
         }
         fn account(
             &self,
             _: &provenant_providers::StreamState,
         ) -> Result<provenant_providers::AccountDetection, provenant_providers::ProviderError>
         {
-            Ok(provenant_providers::AccountDetection::AuthRequired)
+            Ok(if self.auth_required {
+                provenant_providers::AccountDetection::AuthRequired
+            } else {
+                provenant_providers::AccountDetection::Unknown
+            })
         }
         fn prepare(
             &self,
@@ -4316,7 +4320,10 @@ mod tests {
         }
     }
 
-    static AUTH_REQUIRED_ADAPTER: AuthRequiredAdapter = AuthRequiredAdapter;
+    static AUTH_REQUIRED_ADAPTER: FixtureAdapter = FixtureAdapter {
+        id: "claude",
+        auth_required: true,
+    };
 
     #[test]
     fn auth_required_adapter_with_registered_account_shows_stale_cached_reading() {
@@ -4330,7 +4337,7 @@ mod tests {
         };
         let registration = provenant_providers::Registration {
             adapter: &AUTH_REQUIRED_ADAPTER,
-            quota_source: None,
+            quota_source: provenant_providers::claude::REGISTRATION.quota_source,
             stdout_decoder: None,
             stderr_decoder: None,
             display_name: "Claude",
@@ -4346,5 +4353,114 @@ mod tests {
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].status, QuotaStatus::AuthRequired);
         assert_eq!(detected[0].accounts, Some(configured.clone()));
+    }
+
+    #[test]
+    fn registry_only_quota_source_is_probed_and_reported() -> Result<(), Box<dyn std::error::Error>>
+    {
+        struct Source;
+        impl QuotaSource for Source {
+            fn adapter_id(&self) -> &'static str {
+                "fixture-provider"
+            }
+            fn probe(
+                &self,
+                account: &AccountScope,
+                input: &QuotaProbeInput,
+            ) -> Result<QuotaProbePlan, QuotaError> {
+                Ok(QuotaProbePlan {
+                    kind: QuotaEffectKind::Command,
+                    account: account.clone(),
+                    input: input.clone(),
+                })
+            }
+            fn decode(
+                &self,
+                plan: &QuotaProbePlan,
+                _: &ProbeCapture,
+            ) -> Result<QuotaSnapshot, QuotaError> {
+                Ok(QuotaSnapshot {
+                    schema_version: 1,
+                    account: plan.account.clone(),
+                    revision: 0,
+                    status: QuotaStatus::Available,
+                    observed_unix_seconds: plan.input.now_unix_seconds,
+                    source_ref: "fixture".into(),
+                    authority_ref: None,
+                    windows: vec![],
+                    details: None,
+                })
+            }
+        }
+        struct Effects(std::cell::Cell<u32>);
+        impl QuotaEffects for Effects {
+            fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
+                Ok(vec![AccountScope {
+                    adapter: "fixture-provider".into(),
+                    account_key: "work".into(),
+                    label: "work".into(),
+                }])
+            }
+            fn capture(
+                &self,
+                _: &QuotaProbePlan,
+                _: Option<&AccountRecord>,
+            ) -> Result<ProbeCapture, ProbeFailure> {
+                self.0.set(self.0.get() + 1);
+                Ok(ProbeCapture {
+                    stdout: vec![],
+                    stderr: vec![],
+                    exit_code: Some(0),
+                    overflowed: false,
+                })
+            }
+        }
+        static ADAPTER: FixtureAdapter = FixtureAdapter {
+            id: "fixture-provider",
+            auth_required: false,
+        };
+        static SOURCE: Source = Source;
+        let registry = [provenant_providers::Registration {
+            adapter: &ADAPTER,
+            quota_source: Some(&SOURCE),
+            stdout_decoder: None,
+            stderr_decoder: None,
+            display_name: "Fixture",
+            quota: QuotaPolicy {
+                adapter: "fixture-provider",
+                timer_seconds: 300,
+                panel_seconds: 120,
+                probe_seconds: 10,
+                low_power: true,
+                solo: false,
+            },
+        }];
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let effects = Effects(std::cell::Cell::new(0));
+        let report = execute(
+            &Quota::Tick {
+                adapter: Filter {
+                    adapter: Some("fixture-provider".into()),
+                },
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &roots,
+            &registry,
+            &effects,
+        )?;
+        assert_eq!(effects.0.get(), 1);
+        let row = report
+            .accounts
+            .iter()
+            .find(|row| row.account.adapter == "fixture-provider")
+            .ok_or("fixture quota row")?;
+        assert_eq!(row.status, QuotaStatus::Available);
+        assert!(row.snapshot.is_some());
+        Ok(())
     }
 }
