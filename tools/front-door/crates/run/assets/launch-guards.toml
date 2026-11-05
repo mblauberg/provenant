@@ -1,0 +1,57 @@
+# Inventory in progress: do not treat this as an exhaustive policy catalogue.
+# `unclassified` identifies a refusal that still needs a boundary decision or
+# a configurable default. Paths name the implementation, not a stable API.
+schema_version = 1
+complete = false
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#verify_worktree_authority"
+boundary = "lane_git"
+reason = "Verified worktree, selected ref and Git grants must match."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#verify_git_control_links"
+boundary = "lane_git"
+reason = "A second link to a Git control file could permit writes through another name."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#refuses_lane_root"
+boundary = "credentials"
+reason = "A lane root must not expose credential stores."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_plan_grant_limit"
+boundary = "configurable_default"
+setting = "domains.run.grant_limit"
+reason = "Bounds plan grant counts."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#render_with_limit"
+boundary = "configurable_default"
+setting = "domains.run.profile_limit_bytes"
+reason = "Bounds rendered sandbox profile size."
+
+[[guard]]
+site = "providers/src/contract.rs#Prompt::check_argv"
+boundary = "unclassified"
+reason = "The fixed argv prompt limit can refuse preparation; inspect file-backed prompt alternatives."
+
+[[guard]]
+site = "providers/src/contract.rs#Continuation::validate"
+boundary = "authority"
+reason = "A continuation must match its recorded route and grant identity."
+
+[[guard]]
+site = "run/src/launch.rs#child_access_within_impl"
+boundary = "authority"
+reason = "A child cannot exceed its parent access or select another graph source."
+
+[[guard]]
+site = "run/src/launch.rs#applied_write_grants"
+boundary = "unclassified"
+reason = "Invalid paths or a fixed wire-size limit refuse launch while recording applied grants."
+
+[[guard]]
+site = "run/src/launch.rs#start_queued"
+boundary = "unclassified"
+reason = "Stored prompt, priority, policy, provider preparation and handoff can refuse; enumerate their originating guards."
