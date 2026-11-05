@@ -484,6 +484,8 @@ fn saved_refusal_is_visible_in_status_and_lanes() -> Result {
                 &provenant_core::RelativePath::parse("writer")?,
             )?),
             refused_at: clock.wall_now()?,
+            worktree_branch: None,
+            request: None,
             chair: None,
         }),
     };
@@ -624,6 +626,8 @@ fn refusal_only_store_never_says_there_are_no_lanes() -> Result {
                     &provenant_core::RelativePath::parse("writer")?,
                 )?),
                 refused_at: clock.wall_now()?,
+                worktree_branch: None,
+                request: None,
                 chair: None,
             }),
         },

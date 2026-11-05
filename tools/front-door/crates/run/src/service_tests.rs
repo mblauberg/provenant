@@ -379,8 +379,14 @@ fn dispatch_replays_a_refusal_only_for_the_same_canonical_request() -> TestResul
         .next("inspect the worktree");
     let mut original = submission("review this code");
     original.operation_id = operation_id.clone();
-    let saved =
-        service.record_dispatch_refusal(original, temp.path(), diagnostic.clone(), None, &call)?;
+    let saved = service.record_dispatch_refusal(
+        original,
+        temp.path(),
+        diagnostic.clone(),
+        None,
+        None,
+        &call,
+    )?;
     assert!(matches!(
         store.run(saved.run_id, &call),
         Err(RunError::NotFound)
@@ -413,6 +419,7 @@ fn dispatch_refusal_write_failure_does_not_create_a_run() -> TestResult {
         input,
         temp.path(),
         provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE").next("inspect the worktree"),
+        None,
         None,
         &call,
     );

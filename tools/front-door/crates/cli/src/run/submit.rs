@@ -525,16 +525,17 @@ pub fn submit_with_host(
     submit_with_host_and_wait(session, edge, submission, call, host, None)
 }
 
-fn prepare_submission(
+pub(super) fn prepare_submission(
     edge: &Edge<'_>,
     submission: Submission,
+    check_disk: bool,
 ) -> Result<run::DispatchRequest, Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
     // Nested proposals are checked by the host before provider preparation.
     // A confined parent cannot open a sibling worktree to sample its volume.
-    if parent_attempt.is_none() {
+    if check_disk && parent_attempt.is_none() {
         for task in &submission.tasks {
             if let Some(path) = &task.worktree {
                 let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
@@ -633,7 +634,7 @@ pub(super) fn submit_with_host_and_wait(
     host: Option<&run::HostLaunchContext>,
     provider_lease_wait: Option<u64>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
-    let input = prepare_submission(edge, submission)?;
+    let input = prepare_submission(edge, submission, true)?;
     let parent_attempt = input.parent_attempt;
     let record = run::Service::new(&session.store).dispatch(input, edge.cwd, call)?;
     if parent_attempt.is_none() {

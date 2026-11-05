@@ -1418,6 +1418,7 @@ pub(super) fn dispatch_inner(
 
     // Preflight is complete: create or claim the owned tree, then admit.
     let mut pinned_base = None;
+    let mut admission_refusal = None;
     let worktree = if owned.is_some() || command.access.worktree.is_some() {
         let wait_deadline = match command.wait {
             Some(seconds) => {
@@ -1607,6 +1608,34 @@ pub(super) fn dispatch_inner(
                     pinned_base = base;
                     break Some(value);
                 }
+                Err(WorktreeAdmissionError::Own(worktree::OwnWorktreeError::Dirty {
+                    error,
+                    path,
+                    base,
+                    identifier,
+                })) => {
+                    let diagnostic =
+                        error.diagnostic(provenant_records::diagnostic::Destination::Remote {
+                            repository: Some(edge.cwd),
+                            home: Some(edge.home),
+                        });
+                    let fail: Fail = error.into();
+                    let relative = provenant_core::RelativePath::parse(PathBuf::from(identifier))
+                        .map_err(|_| run::RunError::Validation("worktree identifier"))?;
+                    let identifier = provenant_records::PathWire::from_relative(&relative)
+                        .map_err(|_| run::RunError::Validation("worktree identifier"))?;
+                    command.access.worktree = Some(path.clone());
+                    lane_access =
+                        self::lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
+                    pinned_base = Some(base);
+                    let branch = owned
+                        .as_ref()
+                        .expect("owned worktree refusal")
+                        .branch
+                        .clone();
+                    admission_refusal = Some((fail, diagnostic, identifier, branch.clone()));
+                    break Some(json!({"path": path, "branch": branch, "owned": true}));
+                }
                 Err(err) => {
                     if !err.is_transient() || wait_deadline.is_none() {
                         return Err(err.into());
@@ -1726,20 +1755,27 @@ pub(super) fn dispatch_inner(
         })
         .collect();
     brief_warnings.extend(capability_warnings);
-    let (record, started) = submit_with_host_and_wait(
-        &session,
-        edge,
-        Submission {
-            chair,
-            operation_id: command.operation_id,
-            tasks,
-            concurrency,
-            knobs: command.knobs,
-        },
-        &call,
-        None,
-        command.wait,
-    )?;
+    let submission = Submission {
+        chair,
+        operation_id: command.operation_id,
+        tasks,
+        concurrency,
+        knobs: command.knobs,
+    };
+    if let Some((fail, diagnostic, identifier, branch)) = admission_refusal {
+        let input = submit::prepare_submission(edge, submission, false)?;
+        run::Service::new(&session.store).record_dispatch_refusal(
+            input,
+            edge.cwd,
+            diagnostic,
+            Some(identifier),
+            Some(branch),
+            &call,
+        )?;
+        return Err(fail);
+    }
+    let (record, started) =
+        submit_with_host_and_wait(&session, edge, submission, &call, None, command.wait)?;
     let mut cloud_jobs = Vec::new();
     if let Some(placement) = cloud.as_ref() {
         let attempts = session.store.pending_attempts(record.run_id, &call)?;
@@ -2067,7 +2103,18 @@ pub(super) fn replay_owned_dispatch(
     let Some(operation) = session.store.operation(&command.operation_id, call)? else {
         return Ok(None);
     };
-    let canonical = session.store.request(operation.run_id, call)?;
+    let canonical = if let Some(refusal) = &operation.refusal {
+        let request = refusal
+            .request
+            .clone()
+            .ok_or(run::RunError::Validation("refusal request unavailable"))?;
+        if request.digest().map_err(run::RunError::from)? != operation.request_digest {
+            return Err(run::RunError::Validation("refusal request identity").into());
+        }
+        request
+    } else {
+        session.store.request(operation.run_id, call)?
+    };
     let task = canonical
         .tasks
         .first()
@@ -2121,6 +2168,12 @@ pub(super) fn replay_owned_dispatch(
         || command.task_id.is_some_and(|id| id != task.task_id)
     {
         return Err(run::RunError::OperationConflict.into());
+    }
+    if let Some(refusal) = operation.refusal {
+        if refusal.worktree_branch.as_deref() != Some(branch) {
+            return Err(run::RunError::OperationConflict.into());
+        }
+        return Err(run::RunError::RecordedRefusal(Box::new(refusal.diagnostic)).into());
     }
     let mut settlement = None;
     let owned = if writer.worktree.exists() {

@@ -3219,6 +3219,7 @@ fn refused_operation(context: &ExecutionContext) -> OperationRecord {
                 .unwrap(),
             ),
             refused_at: WallTime::from_micros(100).unwrap(),
+            worktree_branch: None,
             request: None,
             chair: None,
         }),

@@ -32,6 +32,13 @@ pub(super) enum OwnWorktreeError {
         "--worktree-branch cannot reuse an adopted or foreign owner; its ownership, label and base are unchanged"
     )]
     ForeignOwner,
+    #[error("{error}")]
+    Dirty {
+        error: run::RunError,
+        path: PathBuf,
+        base: provenant_core::GitOid,
+        identifier: std::ffi::OsString,
+    },
     #[error(transparent)]
     Other(run::RunError),
 }
@@ -42,6 +49,7 @@ impl From<OwnWorktreeError> for Fail {
             OwnWorktreeError::ForeignOwner => {
                 Fail::new(Status::Refused, ErrorKind::Refused, error.to_string())
             }
+            OwnWorktreeError::Dirty { error, .. } => error.into(),
             OwnWorktreeError::Other(error) => error.into(),
         }
     }
@@ -75,6 +83,7 @@ pub(super) fn own_worktree(
         created_at,
     } = owned;
     let mut owner_refused = false;
+    let mut dirty_tree = None;
     provenant_confinement::worktrees::with_context(
         edge.roots,
         edge.home,
@@ -237,7 +246,7 @@ pub(super) fn own_worktree(
             if created.as_ref().is_some_and(|(path, _)| path == &info.path) {
                 worktrees::save_owner(&verified, &owner)?;
             } else {
-                worktrees::save_lane_owner_when_free(
+                if let Err(error) = worktrees::save_lane_owner_when_free(
                     context,
                     &verified,
                     &owner,
@@ -245,7 +254,20 @@ pub(super) fn own_worktree(
                     expected_prior.as_ref(),
                     terminal_prior,
                     cancel,
-                )?;
+                ) {
+                    if matches!(error, worktrees::WorktreeError::Dirty(_))
+                        && let Ok(base) = provenant_core::GitOid::parse(&owner.base)
+                    {
+                        let identifier = verified
+                            .repo()
+                            .private_git_dir()
+                            .file_name()
+                            .ok_or(worktrees::WorktreeError::InvalidOutput)?
+                            .to_owned();
+                        dirty_tree = Some((info.path.clone(), base, identifier));
+                    }
+                    return Err(error);
+                }
             }
             let base = provenant_core::GitOid::parse(&owner.base)
                 .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
@@ -255,6 +277,13 @@ pub(super) fn own_worktree(
     .map_err(|error| {
         if owner_refused {
             OwnWorktreeError::ForeignOwner
+        } else if let Some((path, base, identifier)) = dirty_tree {
+            OwnWorktreeError::Dirty {
+                error: run::RunError::from(error),
+                path,
+                base,
+                identifier,
+            }
         } else {
             OwnWorktreeError::Other(run::RunError::from(error))
         }

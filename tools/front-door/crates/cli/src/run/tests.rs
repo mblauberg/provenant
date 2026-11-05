@@ -7508,12 +7508,54 @@ fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
                 err_msg.contains("dirty"),
                 "expected dirty refusal, got: {err_msg}"
             );
-            // Clean up dirty file
-            std::fs::remove_file(fixture.tree.join("uncommitted.txt"))?;
-
-            // 2. Foreign owner fails closed immediately without retry
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let operation = session
+                .store
+                .operation(&"dirty-tree".parse()?, &call)?
+                .ok_or("dirty refusal not recorded")?;
+            let refusal = operation.refusal.as_ref().ok_or("refusal projection")?;
+            assert_eq!(refusal.diagnostic.code, "WRITER_SCOPE");
+            assert!(refusal.diagnostic.next.is_some());
+            assert_eq!(refusal.worktree_branch.as_deref(), Some("writer"));
+            assert!(refusal.request.is_some());
+            assert_eq!(
+                refusal
+                    .worktree
+                    .as_ref()
+                    .ok_or("worktree")?
+                    .to_relative_path()?
+                    .as_path()
+                    .to_str(),
+                Some("writer")
+            );
+            // Clean up dirty file
+            std::fs::remove_file(fixture.tree.join("uncommitted.txt"))?;
+            let replay = dispatch_with_workers(command("dirty-tree")?, edge, &Free);
+            assert_eq!(
+                replay.result.error.as_ref().ok_or("replayed refusal")?.code,
+                "WRITER_SCOPE"
+            );
+            assert_eq!(
+                session.store.operation(&"dirty-tree".parse()?, &call)?,
+                Some(operation)
+            );
+            std::fs::write(&prompt, "changed prompt")?;
+            let conflict = dispatch_with_workers(command("dirty-tree")?, edge, &Free);
+            assert_eq!(
+                conflict
+                    .result
+                    .error
+                    .as_ref()
+                    .ok_or("operation conflict")?
+                    .code,
+                "OPERATION_CONFLICT"
+            );
+            std::fs::write(&prompt, "reply OK")?;
+
+            // 2. Foreign owner fails closed immediately without retry
             worktrees::with_context(
                 edge.roots,
                 edge.home,

@@ -90,6 +90,7 @@ impl<'a> Service<'a> {
         cwd: &Path,
         diagnostic: provenant_records::diagnostic::Diagnostic,
         worktree: Option<provenant_records::PathWire>,
+        worktree_branch: Option<String>,
         call: &Request<'_>,
     ) -> Result<OperationRecord> {
         let (prepared, _) = self.prepare_dispatch(input, cwd, call)?;
@@ -110,6 +111,7 @@ impl<'a> Service<'a> {
                     extra: Default::default(),
                     diagnostic,
                     worktree,
+                    worktree_branch,
                     refused_at: prepared.created_at,
                     request: Some(prepared.request),
                     chair,

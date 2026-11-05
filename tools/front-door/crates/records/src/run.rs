@@ -645,6 +645,9 @@ pub struct OperationRefusal {
     pub diagnostic: crate::diagnostic::Diagnostic,
     /// Registered worktree identifier, when the request names a worktree.
     pub worktree: Option<PathWire>,
+    /// Branch selected by a managed-worktree dispatch, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
     pub refused_at: WallTime,
     /// Sealed request identity, when admission reached request preparation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1256,6 +1259,7 @@ mod tests {
                 .next("inspect the worktree"),
             worktree: Some(PathWire::from_relative(&relative).unwrap()),
             refused_at: WallTime::from_micros(1).unwrap(),
+            worktree_branch: None,
             request: None,
             chair: None,
         };
@@ -1292,6 +1296,7 @@ mod tests {
                     .unwrap(),
                 ),
                 refused_at: WallTime::from_micros(1).unwrap(),
+                worktree_branch: None,
                 request: None,
                 chair: None,
             }),
