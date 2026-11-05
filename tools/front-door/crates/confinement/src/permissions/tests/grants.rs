@@ -254,16 +254,16 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             .filter(|line| line.starts_with("(allow signal"))
             .collect();
         assert_eq!(signals, ["(allow signal (target same-sandbox))"]);
-        assert!(rendered.contains("(deny sysctl-read (sysctl-name-prefix \"kern.procargs\") (sysctl-name-prefix \"kern.proc.\"))"));
-        assert!(
-            rendered.contains("(deny process-info*)\n(allow process-info* (target same-sandbox))")
-        );
+        assert!(rendered.contains("(deny sysctl-read (sysctl-name-prefix \"kern.procargs\"))"));
+        assert!(!rendered.contains("(sysctl-name-prefix \"kern.proc.\")"));
+        assert!(rendered.contains("(allow process-info*)"));
+        assert!(!rendered.contains("(deny process-info*)"));
         assert_eq!(
             rendered
                 .lines()
                 .filter(|line| line.starts_with("(allow process-info"))
                 .collect::<Vec<_>>(),
-            ["(allow process-info* (target same-sandbox))"]
+            ["(allow process-info*)"]
         );
         assert_eq!(
             rendered.contains("(allow file-read* (subpath \"/dev/fd\"))"),
