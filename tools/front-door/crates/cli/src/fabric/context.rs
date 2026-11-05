@@ -422,6 +422,8 @@ impl Context {
             }
         };
         let exchanged = if matches!(request.action, PeerAction::Submit { .. }) {
+            provenant_fabric_runtime::hosts::encode_peer_request(&request)
+                .map_err(|error| peer_failure(&peer.destination, &error))?;
             let probe = PeerRequest::new(
                 host,
                 self.identity.host,
@@ -433,7 +435,26 @@ impl Context {
             );
             submit_after_probe(
                 &peer.destination,
-                || exchange(&probe),
+                || {
+                    let remaining =
+                        Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
+                    let remaining = within.map_or(remaining, |limit| {
+                        let elapsed = Duration::from_micros(
+                            clock
+                                .mono_now()
+                                .as_micros()
+                                .saturating_sub(started.as_micros()),
+                        );
+                        remaining.min(limit.saturating_sub(elapsed))
+                    });
+                    transport.exchange_within(
+                        peer,
+                        &probe,
+                        budget,
+                        cancel,
+                        (remaining / 4).min(Duration::from_millis(250)),
+                    )
+                },
                 || exchange(&request),
             )?
         } else {
@@ -470,49 +491,63 @@ fn submit_after_probe(
     probe: impl FnOnce() -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerError>,
     submit: impl FnOnce() -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerError>,
 ) -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerFailure> {
-    let response = probe().map_err(|error| {
-        if matches!(
-            error,
-            PeerError::ProtocolMismatch { .. } | PeerError::Version
-        ) {
-            PeerFailure::new(
-                FacadeError::PeerVersion,
-                format!("{peer}: upgrade the peer with `provenant upgrade`"),
-            )
-        } else {
-            peer_failure(peer, &error)
-        }
-    })?;
-    check_submit_health(peer, response.result)?;
+    if let Ok(response) = probe() {
+        check_submit_health(peer, response.result)?;
+    }
     submit().map_err(|error| peer_failure(peer, &error))
 }
 
-/// Submission support was introduced with the health capability advertisement.
+const MIN_SUBMIT_RELEASE: (u64, u64, u64) = (1, 6, 5);
+
+/// Refuse only capabilities the peer explicitly reports as incompatible.
 fn check_submit_health(peer: &str, result: PeerResult) -> Result<(), PeerFailure> {
     let PeerResult::Health { data, .. } = result else {
-        return Err(PeerFailure::new(
-            FacadeError::HomeUnavailable,
-            format!("{peer}: invalid health response"),
-        ));
+        return Ok(());
     };
     let version = data.release.as_deref().and_then(|v| {
-        let core = v.split_once('+').map_or(v, |(core, _)| core);
-        let (core, prerelease) = core
-            .split_once('-')
-            .map_or((core, false), |(core, _)| (core, true));
-        let mut parts = core.split('.').map(str::parse::<u64>);
-        let version = (
-            parts.next()?.ok()?,
-            parts.next()?.ok()?,
-            parts.next()?.ok()?,
-        );
-        (parts.next().is_none() && !(prerelease && version == (1, 6, 5))).then_some(version)
+        let valid_identifiers = |suffix: &str, prerelease: bool| {
+            suffix.split('.').all(|part| {
+                !part.is_empty()
+                    && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && !(prerelease
+                        && part.len() > 1
+                        && part.starts_with('0')
+                        && part.bytes().all(|b| b.is_ascii_digit()))
+            })
+        };
+        let core = if let Some((core, build)) = v.split_once('+') {
+            if !valid_identifiers(build, false) {
+                return None;
+            }
+            core
+        } else {
+            v
+        };
+        let core = if let Some((core, prerelease)) = core.split_once('-') {
+            if !valid_identifiers(prerelease, true) {
+                return None;
+            }
+            core
+        } else {
+            core
+        };
+        let mut parts = core.split('.').map(|part| {
+            if part.len() > 1 && part.starts_with('0') {
+                return None;
+            }
+            if !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            part.parse::<u64>().ok()
+        });
+        let version = (parts.next()??, parts.next()??, parts.next()??);
+        parts.next().is_none().then_some(version)
     });
-    if version.is_none_or(|version| version < (1, 6, 5)) || data.run_capabilities.is_none() {
+    if version.is_some_and(|version| version < MIN_SUBMIT_RELEASE) {
         return Err(PeerFailure::new(
             FacadeError::PeerVersion,
             format!(
-                "{peer}: peer release {} cannot report submission support; run `provenant upgrade` on the peer",
+                "{peer}: peer release {} is too old for submission; run `provenant upgrade` on the peer",
                 provenant_fabric_runtime::hosts::plain_text(
                     data.release.as_deref().unwrap_or("unknown"),
                     80
@@ -520,9 +555,9 @@ fn check_submit_health(peer: &str, result: PeerResult) -> Result<(), PeerFailure
             ),
         ));
     }
-    if !data
+    if data
         .run_capabilities
-        .is_some_and(|capabilities| capabilities.submit)
+        .is_some_and(|capabilities| !capabilities.submit)
     {
         return Err(PeerFailure::new(
             FacadeError::DispatchRefused {
@@ -680,9 +715,13 @@ mod tests {
         let project =
             CrossHostProjectKey::from_home(Path::new("/home/a"), Path::new("/home/a/repo"))?;
         for (release, submit, code) in [
-            ("1.6.4", true, Some("peer_version")),
-            ("1.6.5", false, Some("dispatch_refused")),
-            ("1.6.5", true, None),
+            (Some("1.6.4"), Some(true), Some("peer_version")),
+            (Some("1.6.5"), Some(false), Some("dispatch_refused")),
+            (Some("1.6.5"), Some(true), None),
+            (Some("1.6.5-rc.1"), Some(true), None),
+            (None, None, None),
+            (Some("unparseable"), None, None),
+            (Some("1.6.4-"), None, None),
         ] {
             let calls = Cell::new(0);
             let stub = || {
@@ -699,9 +738,9 @@ mod tests {
                             extra: Default::default(),
                             host,
                             available: true,
-                            execution: Some(submit),
-                            release: Some(release.into()),
-                            run_capabilities: Some(RunCapabilities {
+                            execution: submit,
+                            release: release.map(str::to_owned),
+                            run_capabilities: submit.map(|submit| RunCapabilities {
                                 submit,
                                 list: true,
                                 status: true,

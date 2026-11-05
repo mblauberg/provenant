@@ -4011,6 +4011,74 @@ fn peer_terminal_missing_output_is_not_found() -> Result {
 }
 
 #[test]
+fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
+    let mut rig = TestRig::new()?;
+    let peer = loopback_peer(&mut rig)?;
+    let ssh = rig.root.join("ssh");
+    let real = rig.root.join("ssh-real");
+    std::fs::rename(&ssh, &real)?;
+    let lost = rig.root.join("lost-submit");
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in\n  *'\"action\":\"health\"'*) exit 1;;\n  *'\"action\":\"submit\"'*) if [ -f '{}' ]; then printf '%s\\n' \"$request\" | '{}' >/dev/null; rm '{}'; exit 1; fi;;\nesac\nprintf '%s\\n' \"$request\" | '{}'\n",
+            lost.display(),
+            real.display(),
+            lost.display(),
+            real.display()
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "fixture")?;
+    let prompt = prompt.to_str().ok_or("prompt")?;
+    let dispatch = |operation| {
+        json_command(
+            &rig,
+            &[
+                "dispatch",
+                "--host",
+                "workshop",
+                "--mode",
+                "read-only",
+                "--model",
+                "codex/gpt-6-luna",
+                "--operation-id",
+                operation,
+                "--prompt-file",
+                prompt,
+                "--json",
+            ],
+        )
+    };
+    let (status, success) = dispatch("probe-failure-success")?;
+    assert_eq!(status, 0, "{success}");
+    assert_eq!(success["data"]["host"], peer.to_string());
+    let runs = rig.root.join("peer-state/runs");
+    let existing: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    std::fs::write(&lost, "")?;
+    let (status, unknown) = dispatch("probe-failure-retry")?;
+    assert_ne!(status, 0, "{unknown}");
+    assert_eq!(unknown["error"]["code"], "LAUNCH_UNKNOWN", "{unknown}");
+    let after_loss: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    let created: Vec<_> = after_loss.difference(&existing).collect();
+    assert_eq!(created.len(), 1);
+    let (status, recovered) = dispatch("probe-failure-retry")?;
+    assert_eq!(status, 0, "{recovered}");
+    assert_eq!(recovered["data"]["host"], peer.to_string());
+    assert_eq!(recovered["data"]["operation_id"], "probe-failure-retry");
+    assert_eq!(recovered["data"]["run_id"].as_str(), created[0].to_str());
+    let (status, replay) = dispatch("probe-failure-retry")?;
+    assert_eq!(status, 0, "{replay}");
+    assert_eq!(replay["data"]["run_id"], recovered["data"]["run_id"]);
+    Ok(())
+}
+
+#[test]
 fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
     let mut rig = TestRig::new()?;
     loopback_peer(&mut rig)?;

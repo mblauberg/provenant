@@ -904,6 +904,16 @@ pub struct SshTransport<'a> {
     pub executable: std::path::PathBuf,
     pub seconds: u64,
 }
+/// Encode and validate the request before any peer contact.
+pub fn encode_peer_request(request: &PeerRequest) -> Result<Vec<u8>, PeerError> {
+    let mut input = serde_json::to_vec(request).map_err(|_| PeerError::Frame)?;
+    if input.len() >= MAX_FRAME {
+        return Err(PeerError::RequestTooLarge);
+    }
+    input.push(b'\n');
+    Ok(input)
+}
+
 impl SshTransport<'_> {
     pub fn exchange_with_cap(
         &self,
@@ -958,11 +968,7 @@ impl SshTransport<'_> {
         {
             return Err(PeerError::Project);
         }
-        let mut input = serde_json::to_vec(request).map_err(|_| PeerError::Frame)?;
-        if input.len() >= MAX_FRAME {
-            return Err(PeerError::RequestTooLarge);
-        }
-        input.push(b'\n');
+        let input = encode_peer_request(request)?;
         let mut timeout =
             Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros())
                 .min(Duration::from_secs(self.seconds))
