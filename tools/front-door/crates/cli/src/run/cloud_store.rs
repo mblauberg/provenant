@@ -17,7 +17,7 @@ pub enum Error {
     File(#[from] FsError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error("cloud job record has an unsupported version or changed identity")]
+    #[error("cloud job record has an unsupported version, changed identity or conflicting terminal state")]
     Identity,
 }
 
@@ -76,6 +76,15 @@ impl CloudJobStore for AttemptCloudStore {
         let previous = self.record()?;
         if let Some(record) = &previous {
             let old = &record.job;
+            // Once terminal evidence is durable, a stale observer must not
+            // replace it with a later sample or a different terminal result.
+            if matches!(
+                old.state,
+                RemoteState::Finished { .. } | RemoteState::Cancelled
+            ) && old.state != job.state
+            {
+                return Err(Error::Identity);
+            }
             if (
                 &old.provider,
                 &old.target,
@@ -161,6 +170,12 @@ mod tests {
         assert!(matches!(reopened.save(&wrong_result), Err(Error::Identity)));
         original.state = RemoteState::CancellationUnconfirmed;
         reopened.save(&original)?;
+        assert_eq!(reopened.load()?, Some(original.clone()));
+        original.state = RemoteState::Cancelled;
+        reopened.save(&original)?;
+        let mut stale = original.clone();
+        stale.state = RemoteState::Running;
+        assert!(matches!(reopened.save(&stale), Err(Error::Identity)));
         assert_eq!(reopened.load()?, Some(original));
         Ok(())
     }
