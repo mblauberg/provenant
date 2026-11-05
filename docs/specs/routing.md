@@ -514,3 +514,10 @@ configuration.
 - Rotating pools, a selection store and inferred class or size routing.
 - Native-seat inference, host avoidance and account pins on routes.
 - Concurrent writer batches or a recursive swarm manager.
+
+A route intent with image input prefers ready pool members whose adapter
+advertises image support. The normal weights and zero-weight order apply within
+that subset. If no ready member advertises support, selection is unchanged;
+the preference never refuses an explicit model or creates authority.
+
+A dispatch can require an adapter-owned skill location with `--require-skill-location`, the manifest task field `require_skill_location`, or the same field on a graph node. Preset runs apply the CLI requirement to their task nodes, including deferred review lenses. Pool selection and launch check that requirement against the adapter registry; the default is false. This capability does not grant access to a skill tree.

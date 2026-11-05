@@ -3522,7 +3522,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 executables: [("codex".into(), executable.clone())].into(),
                 executable_search_path: Vec::new(),
                 git: selected_git.clone(),
-                codex_home: None,
+                default_account_directories: Default::default(),
                 cargo_build_jobs: None,
                 fixture_state_write: true,
             }),

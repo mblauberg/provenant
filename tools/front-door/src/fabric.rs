@@ -2255,6 +2255,7 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(fail_error)?;
             submitted.push(Submitted {
+                require_skill_location: task.require_skill_location,
                 settlement_retry_limit,
                 context: task.context,
                 build_heavy: task.build_heavy,
@@ -4522,6 +4523,9 @@ impl BoundGraphOwner<'_> {
             if !node.read_roots.is_empty() {
                 map.insert("read_roots".into(), serde_json::json!(node.read_roots));
             }
+            if node.require_skill_location {
+                map.insert("require_skill_location".into(), serde_json::json!(true));
+            }
             map.insert(
                 "source".into(),
                 serde_json::json!({"type":"commit","commit":subject}),
@@ -5344,6 +5348,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let mut accepted_knobs = None;
             let mut accepted_route = None;
             let mut accepted_retry_limit = None;
+            let mut accepted_skill_location = None;
             let context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
                     Ok(request) => {
@@ -5352,6 +5357,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             accepted_knobs = Some(task.profile.overrides.clone());
                             accepted_route = Some(task.route.clone());
                             accepted_retry_limit = Some(task.profile.settlement_retry_limit);
+                            accepted_skill_location = Some(task.profile.require_skill_location);
                         }
                         task.context.clone()
                     }
@@ -5554,6 +5560,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 extra: Default::default(),
                 operation_id,
                 tasks: vec![SubmittedTask {
+                    require_skill_location: accepted_skill_location
+                        .unwrap_or(node.require_skill_location),
                     context,
                     extra: Default::default(),
                     build_heavy: false,

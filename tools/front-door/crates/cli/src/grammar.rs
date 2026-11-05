@@ -412,6 +412,21 @@ mod viewer_tests {
     use super::*;
 
     #[test]
+    fn dispatch_accepts_skill_location_requirement() {
+        let invocation = RawInvocation::try_parse_from([
+            "provenant",
+            "run",
+            "--require-skill-location",
+            "--prompt-stdin",
+        ])
+        .unwrap();
+        let Command::Run(dispatch) = invocation.command else {
+            panic!("expected run")
+        };
+        assert!(dispatch.require_skill_location);
+    }
+
+    #[test]
     fn viewer_revision_flags_reject_zero() {
         for args in [
             vec![
@@ -672,6 +687,9 @@ pub struct Dispatch {
     /// Changed or declared path supplied to automatic preset selection (repeatable)
     #[arg(long = "path")]
     pub selection_paths: Vec<String>,
+    /// Require the selected adapter to provide a skill location
+    #[arg(long)]
+    pub require_skill_location: bool,
     /// Use the build-heavy scheduling priority
     #[arg(long)]
     pub build_heavy: bool,

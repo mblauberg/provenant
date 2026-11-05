@@ -1613,6 +1613,97 @@ fn availability() -> AvailabilityRecord {
         expires_unix_seconds: 120,
     }
 }
+
+#[test]
+fn resolves_an_available_provider_supplied_only_by_the_registry()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::{
+        AccountDetection, Adapter, Continuation, ExitObservation, LaunchSpec, PrepareInput,
+        ProviderError, ProviderEvent, ProviderOutcome, RouteProvenance, StreamState,
+        VerifiedLineage,
+    };
+    struct Fixture;
+    impl Adapter for Fixture {
+        fn id(&self) -> &'static str {
+            "fixture-provider"
+        }
+        fn account(&self, _: &StreamState) -> Result<AccountDetection, ProviderError> {
+            Ok(AccountDetection::Unknown)
+        }
+        fn prepare(&self, _: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+        fn stream(&self, _: Option<&Continuation>) -> Result<StreamState, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+        fn observe(
+            &self,
+            _: &mut StreamState,
+            _: &[u8],
+        ) -> Result<Vec<ProviderEvent>, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+        fn finish(
+            &self,
+            _: StreamState,
+            _: ExitObservation,
+        ) -> Result<ProviderOutcome, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+        fn continuation(
+            &self,
+            _: &ProviderOutcome,
+            _: &provenant_records::ResolvedRoute,
+            _: &str,
+        ) -> Result<Continuation, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+        fn validate_provenance(
+            &self,
+            _: &RouteProvenance<'_>,
+        ) -> Result<VerifiedLineage, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+    }
+    static ADAPTER: Fixture = Fixture;
+    let registry = [provenant_providers::Registration {
+        adapter: &ADAPTER,
+        quota_source: None,
+        ..provenant_providers::codex::REGISTRATION
+    }];
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [AvailabilityRecord {
+        adapter: "fixture-provider".into(),
+        executable: "/fixture/provider".into(),
+        ..availability()
+    }];
+    let access = [AccessContext {
+        adapter: "fixture-provider",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let context = RoutingContext {
+        registry: &registry,
+        availability: &records,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let resolved = resolve(&request("fixture-provider/test")?, &context)?;
+    assert_eq!(
+        probe_adapters(
+            &request("fixture-provider/test")?,
+            &catalogue,
+            &config,
+            &registry
+        )?,
+        ["fixture-provider"]
+    );
+    assert_eq!(resolved.adapter, "fixture-provider");
+    assert_eq!(resolved.account_key.as_deref(), Some("opaque-account"));
+    assert!(matches!(resolved.readiness, RouteReadiness::Ready { .. }));
+    Ok(())
+}
 #[test]
 fn availability_gates_disclosure_and_rejects_duplicates() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -2757,8 +2848,7 @@ fn probe_adapters_include_only_requested_routes_pools_and_fallbacks()
     let mut config = RoutingConfig::default();
     let mut query = request("codex/fixture")?;
     let names = |query: &RouteRequest, config: &RoutingConfig| {
-        probe_adapters(query, &catalogue, config)
-            .map(|specs| specs.into_iter().map(|spec| spec.name).collect::<Vec<_>>())
+        probe_adapters(query, &catalogue, config, REGISTRY)
     };
     assert_eq!(names(&query, &config)?, ["codex"]);
     query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("agy/fixture")?])?);
@@ -2810,7 +2900,7 @@ fn probe_adapters_include_only_requested_routes_pools_and_fallbacks()
     assert_eq!(names(&query, &config)?, ["opencode"]);
     query.choice = RouteChoice::NamedRoute(RouteName::parse("absent")?);
     assert!(matches!(
-        probe_adapters(&query, &catalogue, &config),
+        probe_adapters(&query, &catalogue, &config, REGISTRY),
         Err(RoutingError::UnknownRoute)
     ));
     query = request("unknown/fixture")?;
@@ -3504,6 +3594,66 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         }
     };
     let calibrated = apply(&raw);
+    // Selection and launch admission must interpret the same fresh scoped
+    // observation and opt-in identically, including calibration expiry.
+    let mut expired_for_table = duplicate(&calibrated);
+    expired_for_table
+        .snapshot
+        .details
+        .as_mut()
+        .unwrap()
+        .calibration_expires_unix_seconds = Some(100);
+    let mut exhausted_for_table = duplicate(&raw);
+    exhausted_for_table.snapshot.windows[0].used_basis_points = 10_000;
+    let policy = [provenant_quota::QuotaPolicy {
+        adapter: "opencode",
+        timer_seconds: 300,
+        panel_seconds: 120,
+        probe_seconds: 14,
+        low_power: true,
+        solo: false,
+    }];
+    for (name, observation, opt_in, expected) in [
+        ("partial default", duplicate(&raw), false, false),
+        ("partial opted in", duplicate(&raw), true, true),
+        ("exhausted opted in", exhausted_for_table, true, false),
+        ("calibrated", duplicate(&calibrated), false, true),
+        ("calibration expired", expired_for_table, false, false),
+    ] {
+        let mut row_config = config.clone();
+        row_config.allow_unknown_partial_headroom = opt_in;
+        let observations = [observation];
+        let mut ctx = context(&catalogue, &row_config, now()?);
+        ctx.availability = &availability;
+        ctx.access = &access;
+        ctx.quota = &observations;
+        let selected = resolve(&explicit, &ctx)?;
+        let ready = matches!(selected.readiness, RouteReadiness::Ready { .. });
+        let mut admitted_route = selected.clone();
+        // Check the independent admission policy with a fresh readiness grant,
+        // so an earlier selection refusal cannot mask a headroom disagreement.
+        admitted_route.readiness = RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 120,
+        };
+        let mut record = AccountRecord::empty(observations[0].snapshot.account.clone());
+        record.revision = observations[0].snapshot.revision;
+        record.snapshot = Some(observations[0].snapshot.clone());
+        let records = [record];
+        let admission = provenant_quota::Admission {
+            policies: &policy,
+            now_unix_seconds: 100,
+            records: &records,
+            pools: &[],
+        }
+        .check_with_partial_headroom(&admitted_route, opt_in);
+        assert_eq!(
+            (ready, admission.is_ok()),
+            (expected, expected),
+            "{name}: {admission:?}"
+        );
+    }
     for (key, five_hour, seven_day, expected) in [
         ("go", None, None, "five_hour, seven_day"),
         (
@@ -5397,6 +5547,7 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         ],
     );
     let narrow = AdapterSpec {
+        skills: None,
         launch: LaunchCapabilities {
             write: false,
             network: &[NetworkAccess::Provider],
@@ -5430,15 +5581,24 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
     ctx.availability = &availability;
     ctx.access = &access;
     ctx.launch_specs = Some(&lookup);
-    for (writes, network, expected) in [
-        (false, NetworkAccess::Provider, "cursor"),
-        (true, NetworkAccess::Provider, "codex"),
-        (false, NetworkAccess::Open, "codex"),
+    for (writes, network, skill_location, expected) in [
+        (false, NetworkAccess::Provider, false, "cursor"),
+        (true, NetworkAccess::Provider, false, "codex"),
+        (false, NetworkAccess::Open, false, "codex"),
+        (false, NetworkAccess::Provider, true, "codex"),
     ] {
         let mut query = request("cursor/gpt-5.3-codex-low")?;
         query.choice = RouteChoice::NamedRoute(RouteName::parse("fixture-capabilities")?);
         query.intent.writes = writes;
         query.intent.network = Some(network);
+        query.intent.skill_location = skill_location;
+        assert_eq!(
+            query
+                .intent
+                .check_launch(&narrow, "gpt-5.3-codex-low", None)
+                .is_ok(),
+            expected == "cursor"
+        );
         let selected = resolve(&query, &ctx)?;
         assert_eq!(
             selected.adapter, expected,
@@ -5464,6 +5624,91 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
             ),
             expected == "codex"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn image_input_preference_keeps_pool_weights_and_falls_back()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::AdapterSpec;
+    let catalogue = Catalogue::bundled()?;
+    for (cursor_image, codex_image, cursor_weight, codex_weight, preferred) in [
+        (true, false, 1, 50, Some("cursor")),
+        (false, true, 50, 0, Some("codex")),
+        (false, false, 1, 0, Some("cursor")),
+        (true, true, 1, 1, None),
+    ] {
+        let mut config = RoutingConfig::default();
+        config.pools.insert(
+            "image-fixture".into(),
+            vec![
+                RoutePoolMember {
+                    model: ModelId::parse("cursor/gpt-5.3-codex-low")?,
+                    weight: cursor_weight,
+                    effort: None,
+                    efforts: vec![],
+                    free: false,
+                },
+                RoutePoolMember {
+                    model: ModelId::parse("codex/gpt-6-luna")?,
+                    weight: codex_weight,
+                    effort: None,
+                    efforts: vec![],
+                    free: false,
+                },
+            ],
+        );
+        let lookup = |adapter: &str| {
+            let mut spec = *AdapterSpec::get(adapter)?;
+            spec.launch.image_input = match adapter {
+                "cursor" => cursor_image,
+                "codex" => codex_image,
+                _ => false,
+            };
+            Some(spec)
+        };
+        let mut cursor = availability();
+        cursor.adapter = "cursor".into();
+        let available = [cursor, availability()];
+        let access = [
+            AccessContext {
+                adapter: "cursor",
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            },
+            AccessContext {
+                adapter: "codex",
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            },
+        ];
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.availability = &available;
+        ctx.access = &access;
+        ctx.launch_specs = Some(&lookup);
+        let mut query = request("cursor/gpt-5.3-codex-low")?;
+        query.choice = RouteChoice::NamedRoute(RouteName::parse("image-fixture")?);
+        query.intent.image_input = true;
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..32 {
+            let result = resolve_with_seed(&query, &ctx, "image", seed)?;
+            if let Some(expected) = preferred {
+                assert_eq!(result.adapter, expected);
+            }
+            if cursor_image == codex_image {
+                let mut without_image = query.clone();
+                without_image.intent.image_input = false;
+                assert_eq!(
+                    result.adapter,
+                    resolve_with_seed(&without_image, &ctx, "image", seed)?.adapter
+                );
+            }
+            seen.insert(result.adapter);
+        }
+        if preferred.is_none() {
+            assert_eq!(seen.len(), 2);
+        }
     }
     Ok(())
 }

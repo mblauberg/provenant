@@ -53,6 +53,30 @@ pub enum LoginObservation {
     ExecutableOnly,
 }
 
+/// Additional host root required by the adapter's setup directory creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupRoot {
+    None,
+    Home,
+    XdgDataHome,
+}
+
+/// How a model-less named entry is prepared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedEntry {
+    None,
+    Command,
+    DelegatedAgent,
+}
+
+/// Evidence used to identify the model after a provider finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelObservation {
+    Stream,
+    Rollout,
+    SessionDatabase,
+}
+
 /// Location of a provider's user skill tree relative to the host home or an
 /// absolute environment override. The fallback is relative to the home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,11 +95,22 @@ pub struct AdapterSpec {
     /// Home-relative installation roots that can supply linked skills.
     /// They describe discovery provenance, not an eligibility allowlist.
     pub skill_install_roots: &'static [&'static str],
+    /// Environment override and home-relative default for an implicitly discovered account.
+    pub default_account_directory: Option<(&'static str, &'static str)>,
     pub registered_account: bool,
     /// A registered account's directory is the client's configuration
     /// directory, which account settings sync keeps in step. False where it is
     /// something else: agy's is the account's keychain home.
     pub account_config_dir: bool,
+    /// Fixed home-relative prefix for registered account directories, if required.
+    pub account_directory_prefix: Option<&'static str>,
+    /// Registered account configuration supports shared settings overlays.
+    pub shared_account_settings: bool,
+    /// Registered accounts use an isolated login keychain rooted in their home.
+    pub isolated_login_keychain: bool,
+    /// Setup may mirror a transcript into the registered account directory.
+    pub transcript_account_root: bool,
+    pub setup_root: SetupRoot,
     pub local_login: bool,
     pub login_reprobe: LoginReprobe,
     pub login_observation: LoginObservation,
@@ -107,7 +142,25 @@ pub struct AdapterSpec {
     pub namespaced_models: bool,
     pub catalogue_models_only: bool,
     pub chair_switch: bool,
+    /// Supports launching a transferred interactive session.
+    pub session_handoff: bool,
+    /// Refresh an account token through the authorised credential broker at launch.
+    pub launch_token_refresh: bool,
+    /// Remove a duplicated complete answer from the provider stream.
+    pub deduplicate_result: bool,
+    /// Diagnose absent usage from structured result events.
+    pub result_event_usage: bool,
+    /// Use the requested route as the observed route when a command exits.
+    pub exit_route: bool,
+    /// Classify exit-time stderr for quota refusals.
+    pub stderr_quota: bool,
+    /// Source of model identity after a run.
+    pub model_observation: ModelObservation,
+    /// Preparation mechanism for a model-less named entry.
+    pub named_entry: NamedEntry,
     pub user_sessions: bool,
+    /// Copy only session files when retaining private state.
+    pub copy_sessions_only: bool,
     pub quota_probe: QuotaProbeKind,
     pub quota_credits: bool,
     pub grouped_quota_pools: bool,
@@ -160,6 +213,7 @@ pub struct LaunchRequest<'a> {
     pub resume: bool,
     pub network: Option<NetworkAccess>,
     pub write: bool,
+    pub skill_location: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +223,7 @@ pub enum LaunchField {
     Resume,
     Network,
     Write,
+    SkillLocation,
 }
 impl LaunchField {
     pub fn name(self) -> &'static str {
@@ -178,6 +233,7 @@ impl LaunchField {
             Self::Resume => "resume",
             Self::Network => "network",
             Self::Write => "write",
+            Self::SkillLocation => "skill location",
         }
     }
     /// A fixed refusal for callers that cannot carry the adapter name.
@@ -188,6 +244,7 @@ impl LaunchField {
             Self::Resume => "resume is not supported by the route's adapter",
             Self::Network => "network mode is not supported by the route's adapter",
             Self::Write => "worktree-write is not supported by the route's adapter",
+            Self::SkillLocation => "skill location is not supported by the route's adapter",
         }
     }
 }
@@ -228,6 +285,8 @@ impl AdapterSpec {
             Some(LaunchField::Network)
         } else if request.write && !caps.write {
             Some(LaunchField::Write)
+        } else if request.skill_location && self.skills.is_none() {
+            Some(LaunchField::SkillLocation)
         } else {
             None
         };
@@ -274,8 +333,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             suffix: "skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
+        default_account_directory: None,
         registered_account: true,
         account_config_dir: true,
+        account_directory_prefix: Some(".claude-"),
+        shared_account_settings: true,
+        isolated_login_keychain: false,
+        transcript_account_root: true,
+        setup_root: SetupRoot::None,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::AccountAvailability,
@@ -297,7 +362,16 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: true,
+        session_handoff: true,
+        launch_token_refresh: true,
+        deduplicate_result: false,
+        result_event_usage: true,
+        exit_route: false,
+        stderr_quota: false,
+        model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::None,
         user_sessions: true,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
         quota_credits: true,
         grouped_quota_pools: false,
@@ -332,8 +406,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             suffix: "skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
+        default_account_directory: Some(("CODEX_HOME", ".codex")),
         registered_account: true,
         account_config_dir: true,
+        account_directory_prefix: None,
+        shared_account_settings: false,
+        isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::None,
         local_login: false,
         login_reprobe: LoginReprobe::Codex,
         login_observation: LoginObservation::Reprobe,
@@ -359,7 +439,16 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: false,
+        session_handoff: false,
+        launch_token_refresh: false,
+        deduplicate_result: false,
+        result_event_usage: false,
+        exit_route: false,
+        stderr_quota: false,
+        model_observation: ModelObservation::Rollout,
+        named_entry: NamedEntry::None,
         user_sessions: false,
+        copy_sessions_only: true,
         quota_probe: QuotaProbeKind::Command,
         quota_credits: true,
         grouped_quota_pools: false,
@@ -394,8 +483,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             suffix: "skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
+        default_account_directory: None,
         registered_account: false,
         account_config_dir: false,
+        account_directory_prefix: None,
+        shared_account_settings: false,
+        isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::Home,
         local_login: true,
         login_reprobe: LoginReprobe::Cursor,
         login_observation: LoginObservation::Reprobe,
@@ -420,7 +515,16 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: false,
+        session_handoff: false,
+        launch_token_refresh: false,
+        deduplicate_result: false,
+        result_event_usage: false,
+        exit_route: false,
+        stderr_quota: false,
+        model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::None,
         user_sessions: true,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
         quota_credits: false,
         grouped_quota_pools: false,
@@ -455,8 +559,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             suffix: "skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
+        default_account_directory: None,
         registered_account: true,
         account_config_dir: false,
+        account_directory_prefix: None,
+        shared_account_settings: false,
+        isolated_login_keychain: true,
+        transcript_account_root: false,
+        setup_root: SetupRoot::None,
         local_login: true,
         login_reprobe: LoginReprobe::AccountIdentity,
         login_observation: LoginObservation::Reprobe,
@@ -485,7 +595,16 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: false,
+        session_handoff: false,
+        launch_token_refresh: false,
+        deduplicate_result: true,
+        result_event_usage: false,
+        exit_route: false,
+        stderr_quota: false,
+        model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::None,
         user_sessions: false,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::Command,
         quota_credits: false,
         grouped_quota_pools: true,
@@ -520,8 +639,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             suffix: "opencode/skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
+        default_account_directory: None,
         registered_account: false,
         account_config_dir: false,
+        account_directory_prefix: None,
+        shared_account_settings: false,
+        isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::XdgDataHome,
         local_login: true,
         login_reprobe: LoginReprobe::ExecutableOnly,
         login_observation: LoginObservation::ExecutableOnly,
@@ -548,7 +673,16 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         namespaced_models: true,
         catalogue_models_only: true,
         chair_switch: false,
+        session_handoff: false,
+        launch_token_refresh: false,
+        deduplicate_result: false,
+        result_event_usage: false,
+        exit_route: false,
+        stderr_quota: true,
+        model_observation: ModelObservation::SessionDatabase,
+        named_entry: NamedEntry::None,
         user_sessions: true,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::LocalLedger,
         quota_credits: true,
         grouped_quota_pools: false,
@@ -579,8 +713,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         binary: "",
         skills: None,
         skill_install_roots: &[],
+        default_account_directory: None,
         registered_account: false,
         account_config_dir: false,
+        account_directory_prefix: None,
+        shared_account_settings: false,
+        isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::None,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
@@ -602,7 +742,16 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: false,
+        session_handoff: false,
+        launch_token_refresh: false,
+        deduplicate_result: false,
+        result_event_usage: false,
+        exit_route: true,
+        stderr_quota: false,
+        model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::Command,
         user_sessions: false,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
         quota_credits: false,
         grouped_quota_pools: false,
@@ -635,8 +784,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         binary: "",
         skills: None,
         skill_install_roots: &[],
+        default_account_directory: None,
         registered_account: false,
         account_config_dir: false,
+        account_directory_prefix: None,
+        shared_account_settings: false,
+        isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::None,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
@@ -658,7 +813,16 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: false,
+        session_handoff: false,
+        launch_token_refresh: false,
+        deduplicate_result: false,
+        result_event_usage: false,
+        exit_route: false,
+        stderr_quota: false,
+        model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::DelegatedAgent,
         user_sessions: false,
+        copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
         quota_credits: false,
         grouped_quota_pools: false,
@@ -688,6 +852,52 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_and_session_policies_preserve_adapter_behavior() {
+        for spec in ADAPTER_SPECS {
+            assert_eq!(
+                spec.transcript_account_root,
+                spec.id == Harness::Claude,
+                "{}",
+                spec.name
+            );
+            assert_eq!(
+                spec.setup_root,
+                match spec.id {
+                    Harness::Cursor => SetupRoot::Home,
+                    Harness::Opencode => SetupRoot::XdgDataHome,
+                    _ => SetupRoot::None,
+                },
+                "{}",
+                spec.name
+            );
+            assert_eq!(
+                spec.isolated_login_keychain,
+                spec.id == Harness::Agy,
+                "{}",
+                spec.name
+            );
+            assert_eq!(
+                spec.shared_account_settings,
+                spec.id == Harness::Claude,
+                "{}",
+                spec.name
+            );
+            assert_eq!(
+                spec.account_directory_prefix,
+                (spec.id == Harness::Claude).then_some(".claude-"),
+                "{}",
+                spec.name
+            );
+            assert_eq!(
+                spec.copy_sessions_only,
+                spec.id == Harness::Codex,
+                "{}",
+                spec.name
+            );
+        }
+    }
 
     #[test]
     fn host_native_declares_a_fresh_named_writer_contract() {
@@ -859,6 +1069,7 @@ mod launch_tests {
                 resume: true,
                 network: Some(NetworkAccess::Open),
                 write: true,
+                ..Default::default()
             };
             assert_eq!(
                 spec.check_launch(&request).err().map(|e| e.field),

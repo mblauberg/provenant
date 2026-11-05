@@ -10,6 +10,19 @@ use provenant_supervisor::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn account_directories(
+    specs: &[provenant_records::AdapterSpec],
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> std::collections::BTreeMap<String, PathBuf> {
+    specs
+        .iter()
+        .filter_map(|spec| {
+            let (environment, _) = spec.default_account_directory?;
+            lookup(environment).map(|path| (spec.name.to_owned(), PathBuf::from(path)))
+        })
+        .collect()
+}
+
 /// Inputs that re-resolve the submitting edge's state root in the guardian,
 /// whose environment is cleared.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +42,9 @@ pub struct HostLaunchContext {
     #[serde(default)]
     pub executable_search_path: Vec<PathBuf>,
     pub git: PathBuf,
-    pub codex_home: Option<PathBuf>,
+    /// Trusted environment overrides for adapter default account directories.
+    #[serde(default)]
+    pub default_account_directories: std::collections::BTreeMap<String, PathBuf>,
     #[serde(default)]
     pub cargo_build_jobs: Option<String>,
     /// Synthetic fake-provider evidence; absent from installed builds.
@@ -38,6 +53,11 @@ pub struct HostLaunchContext {
     pub fixture_state_write: bool,
 }
 impl HostLaunchContext {
+    pub fn default_account_directories() -> std::collections::BTreeMap<String, PathBuf> {
+        account_directories(provenant_records::ADAPTER_SPECS, |name| {
+            std::env::var_os(name)
+        })
+    }
     /// The inputs a host derives for itself when no guardian handed it any:
     /// the caller's trusted roots and git, with search path and tool homes
     /// from this process's environment and no pinned executables.
@@ -58,7 +78,7 @@ impl HostLaunchContext {
                 })
                 .unwrap_or_default(),
             git,
-            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            default_account_directories: Self::default_account_directories(),
             cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
@@ -1982,6 +2002,18 @@ mod host_clock_tests {
     use super::*;
 
     #[test]
+    fn account_directory_overrides_follow_registry_entries() {
+        let mut fixture = provenant_records::ADAPTER_SPECS[0];
+        fixture.name = "fixture";
+        fixture.default_account_directory = Some(("FIXTURE_HOME", ".fixture"));
+        let actual = account_directories(&[fixture], |key| {
+            (key == "FIXTURE_HOME").then(|| "/fixture/home".into())
+        });
+        assert_eq!(actual.get("fixture"), Some(&PathBuf::from("/fixture/home")));
+        assert!(account_directories(&[fixture], |_| None).is_empty());
+    }
+
+    #[test]
     fn a_published_reason_fits_terminal_evidence_on_a_character_boundary() {
         let long = "é".repeat(REASON_LIMIT);
         let bounded = bounded_reason(long.clone());
@@ -2133,7 +2165,7 @@ mod disk_admission_tests {
                 executables: Default::default(),
                 executable_search_path: Vec::new(),
                 git: "/usr/bin/git".into(),
-                codex_home: None,
+                default_account_directories: Default::default(),
                 cargo_build_jobs: None,
                 #[cfg(feature = "fixture")]
                 fixture_state_write: false,

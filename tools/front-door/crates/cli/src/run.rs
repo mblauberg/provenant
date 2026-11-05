@@ -357,6 +357,7 @@ impl run::Providers for Registry<'_> {
                         &config.domains.quota,
                         quota,
                         now.unix_seconds(),
+                        REGISTRY,
                     );
                     let catalogue = provenant_routing::Catalogue::bundled()
                         .map_err(|error| error.to_string())?;
@@ -523,8 +524,11 @@ impl Registry<'_> {
         provider_state: &Path,
         host_settlement: bool,
     ) -> Result<run::Decoded, String> {
-        let is_claude =
-            route.provider.as_deref() == Some(provenant_records::Harness::Claude.spec().name);
+        let result_event_usage = route
+            .provider
+            .as_deref()
+            .and_then(provenant_records::AdapterSpec::get)
+            .is_some_and(|spec| spec.result_event_usage);
         let failed = |reason: &str| run::Decoded {
             outcome: run::Outcome::Failed,
             result: String::new(),
@@ -532,7 +536,7 @@ impl Registry<'_> {
             observed_route: None,
             // `source` names why usage is absent; records stay readable by older builds.
             usage: run::UsageRecord {
-                source: is_claude.then(|| "absent: no result event".into()),
+                source: result_event_usage.then(|| "absent: no result event".into()),
                 ..run::UsageRecord::default()
             },
             session: None,
@@ -546,6 +550,9 @@ impl Registry<'_> {
         else {
             return Ok(failed("route names no registered adapter"));
         };
+        let model_observation = provenant_records::AdapterSpec::get(adapter.id())
+            .map(|spec| spec.model_observation)
+            .unwrap_or(provenant_records::ModelObservation::Stream);
         let Ok(mut state) = adapter.stream(None) else {
             return Ok(failed("provider stream is unavailable"));
         };
@@ -565,31 +572,33 @@ impl Registry<'_> {
         events.extend(outcome.final_events().iter().cloned());
         // Exit-time stderr quota text is evidence only for a run the adapter
         // did not accept. Live structured refusals trigger cleanup separately.
-        if adapter.id() == provenant_records::Harness::Opencode.spec().name
+        if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.stderr_quota)
             && !matches!(outcome.status(), OutcomeStatus::Success)
             && let Some(event) = provenant_providers::opencode::stderr_quota(stderr)
         {
             events.push(event);
         }
-        let rollout = (adapter.id() == "codex").then(|| {
-            outcome
-                .session()
-                .ok_or(provenant_providers::ProviderError::UnknownIdentity)
-                .and_then(|thread| provider::observe_codex_rollout(provider_state, thread))
-        });
+        let rollout =
+            (model_observation == provenant_records::ModelObservation::Rollout).then(|| {
+                outcome
+                    .session()
+                    .ok_or(provenant_providers::ProviderError::UnknownIdentity)
+                    .and_then(|thread| provider::observe_codex_rollout(provider_state, thread))
+            });
         // The typed reason survives into the terminal record for diagnosis.
         let mut rollout_error = rollout
             .as_ref()
             .and_then(|observed| observed.as_ref().err())
             .map(|error| format!("Codex rollout identity: {error}"));
         // OpenCode's stream names no model; its session record does.
-        let opencode_model = (adapter.id() == provenant_records::Harness::Opencode.spec().name)
+        let opencode_model = (model_observation
+            == provenant_records::ModelObservation::SessionDatabase)
             .then(|| {
                 let data = std::env::var_os("XDG_DATA_HOME")
                     .map(std::path::PathBuf::from)
                     .filter(|path| path.is_absolute())
                     .or_else(|| self.home.map(|home| home.join(".local/share")))
-                    .map(|data| data.join(provenant_records::Harness::Opencode.spec().name))
+                    .map(|data| data.join(adapter.id()))
                     .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
                 let session = outcome
                     .session()
@@ -605,10 +614,10 @@ impl Registry<'_> {
             None => None,
         };
         let rollout = rollout.and_then(Result::ok);
-        let observed_model = if adapter.id() == "codex" {
+        let observed_model = if model_observation == provenant_records::ModelObservation::Rollout {
             // Missing or invalid rollout evidence cannot fall back to another source.
             rollout.as_ref().map(|turn| turn.model.as_str())
-        } else if adapter.id() == provenant_records::Harness::Opencode.spec().name {
+        } else if model_observation == provenant_records::ModelObservation::SessionDatabase {
             opencode_model.as_deref()
         } else {
             outcome.model()
@@ -681,8 +690,10 @@ impl Registry<'_> {
                 _ => {}
             }
         }
-        if adapter.id() == provenant_records::Harness::Agy.spec().name {
-            // Agy can repeat the whole answer across its streamed response and
+        if provenant_records::AdapterSpec::get(adapter.id())
+            .is_some_and(|spec| spec.deduplicate_result)
+        {
+            // The provider can repeat the whole answer across its streamed response and
             // result, or within the result itself. Leave distinct text intact.
             let answer = decoded.result.trim();
             let mut middle = answer.len() / 2;
@@ -696,7 +707,7 @@ impl Registry<'_> {
                 decoded.result = first.to_owned();
             }
         }
-        if adapter.id() == "command" {
+        if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.exit_route) {
             decoded.observed_route = Some(run::RouteRecord {
                 source: Some("command_exit".into()),
                 ..route.clone()
@@ -707,9 +718,7 @@ impl Registry<'_> {
                     .insert_str(0, "[output truncated; retained tail]\n");
             }
         }
-        if (is_claude || adapter.id() == provenant_records::Harness::Claude.spec().name)
-            && !has_usage
-        {
+        if result_event_usage && !has_usage {
             let has_result = stdout.split(|&b| b == b'\n').any(|line| {
                 serde_json::from_slice::<serde_json::Value>(line)
                     .is_ok_and(|event| event["type"] == "result")
@@ -994,6 +1003,8 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         intent: provenant_routing::RouteIntent {
             writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
             network: Some(task.access.network(task.writer.is_some())),
+            image_input: false,
+            skill_location: task.profile.require_skill_location,
             workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
                 provenant_routing::Workload::Review
             } else {
