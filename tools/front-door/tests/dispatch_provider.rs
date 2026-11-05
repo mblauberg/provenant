@@ -2549,6 +2549,19 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         .ok_or("unsupported named entry was accepted")?;
     assert_eq!(error.to_string(), "cursor has no named model-less entries");
     assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
+    unsupported.route = provenant_run::RequestedRoute::Adapter {
+        extra: Default::default(),
+        provider: "command".into(),
+        name: "fixture".into(),
+    };
+    let error = provenant_run::Providers::prepare(&registry, &unsupported, "fixture", &paths, None)
+        .err()
+        .ok_or("unconfigured command was accepted")?;
+    assert_eq!(
+        error.to_string(),
+        "command fixture is not configured in domains.fabric.commands"
+    );
+    assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
     writeln!(
         OpenOptions::new()
             .append(true)
