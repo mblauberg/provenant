@@ -5227,6 +5227,47 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     });
                 }
             }
+            if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && matches!(
+                    replay.delivery,
+                    Some(provenant_records::run::DeliveryMode::Integrate(_))
+                )
+                && let (Some(base), Some(commit)) = (
+                    self.integration_base.and_then(|bases| bases.integration),
+                    node.source_commit,
+                )
+            {
+                let head = commit
+                    .parse()
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                let descends = provenant_confinement::worktrees::with_context(
+                    &self.factory.context.roots,
+                    &self.factory.home,
+                    &self.factory.cwd,
+                    &self.factory.clock,
+                    self.cancel,
+                    |context| {
+                        provenant_confinement::worktrees::is_ancestor(
+                            context,
+                            base,
+                            head,
+                            self.cancel,
+                        )
+                    },
+                )
+                .map_err(|error| graph_writer_initialisation_error(commit, error))?;
+                if !descends {
+                    return Err(FacadeError::DispatchRefused {
+                        fact: None,
+                        disk: None,
+                        reason: format!(
+                            "node {}: lane source {head} does not descend from integration base {base}",
+                            key.node_id
+                        ),
+                    });
+                }
+            }
             if !accepted && let (Some(path), Some(commit)) = (worktree, node.source_commit) {
                 let head = commit
                     .parse()

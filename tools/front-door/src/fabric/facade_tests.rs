@@ -706,6 +706,47 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
+    fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::integrating_graph_writer_refuses_a_source_outside_the_pinned_base")? { return Ok(()); }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::repository()?;
+        let git = |args: &[&str]| crate::worktree_tests::git(&rig, args);
+        let base = git(&["rev-parse", "HEAD"])?;
+        let tree = git(&["rev-parse", "HEAD^{tree}"])?;
+        let unrelated = git(&["commit-tree", &tree, "-m", "unrelated"])?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BoundGraphOwner { factory: &factory,
+            integration_base: Some(BoundGraphBases { integration: Some(base.parse()?), review: None }),
+            integration_branch: Some("batch".into()), network: None, exclude: Vec::new(),
+            budget, cancel: &cancel, prices: None, tick: false };
+        let actor = owner.actor();
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"batch", "node_id":"lane-outside", "route_index":0}))?;
+        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
+        let delivery = provenant_records::run::DeliveryMode::Integrate("batch".into());
+        let error = owner.observe_or_start(&key, graph::NodeInput {
+            settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
+            read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
+            source_commit: Some(&unrelated), review_base: None, title: "lane", prompt: "write",
+            required_verdict: None, deadline_seconds: None, inputs_dir: None,
+        }, &route, graph::AccessMode::WorktreeWrite, None, graph::Replay {
+            delivery: Some(&delivery), branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+        }).err().ok_or("unrelated lane was accepted")?;
+        assert!(error.to_string().contains("lane-outside"));
+        assert!(error.to_string().contains(&base));
+        let binary = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
+        assert!(binary.store(&cancel)?.operation(&graph_operation("graph-attempt-operation", &key)?, &binary.call(&cancel))?.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn graph_replay_preserves_legacy_context_without_a_checkpoint_reference()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(

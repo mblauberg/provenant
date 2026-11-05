@@ -3177,6 +3177,7 @@ fn bind_default_subject_to_worktree(
         )
     })?;
     let mut resolved = false;
+    let mut multiple_subjects = false;
     visit_nodes(
         expansion.document["nodes"]
             .as_array_mut()
@@ -3185,13 +3186,37 @@ fn bind_default_subject_to_worktree(
             if node.pointer("/source/type").and_then(Value::as_str) == Some("commit")
                 && node.pointer("/source/commit").and_then(Value::as_str) == Some("HEAD")
             {
-                node["source"]["commit"] = json!(oid);
+                // Each writer can belong to a different lane. Its default
+                // source is its own worktree HEAD, not the first writer's.
+                let lane = (node["access"] == "worktree_write")
+                    .then(|| node.get("worktree").and_then(Value::as_str))
+                    .flatten()
+                    .filter(|path| !path.is_empty() && !path.contains("${"));
+                let source = if let Some(lane) = lane {
+                    let path = Path::new(lane);
+                    let path = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        directory.join(path)
+                    };
+                    provenant_run::resolve_git_base(&git, &path, "HEAD").map_err(|error| {
+                        format!(
+                            "cannot resolve default subject for node {} in {}: {error}",
+                            node["id"].as_str().unwrap_or("unknown"),
+                            path.display()
+                        )
+                    })?
+                } else {
+                    oid.clone()
+                };
+                multiple_subjects |= source != oid;
+                node["source"]["commit"] = json!(source);
                 resolved = true;
             }
             Ok(())
         },
     )?;
-    if resolved {
+    if resolved && !multiple_subjects {
         expansion.document["provenance"]["resolved_subject"] = json!({
             "reference": "HEAD",
             "worktree": worktree,
@@ -3228,7 +3253,27 @@ fn warn_differing_source_and_worktree(
     };
 
     let mut warnings = Vec::new();
-    fn check_node(node: &Value, worktree_head: &str, warnings: &mut Vec<String>) {
+    fn check_node(
+        node: &Value,
+        worktree_head: &str,
+        directory: &Path,
+        git: &Path,
+        warnings: &mut Vec<String>,
+    ) {
+        let lane_head = (node["access"] == "worktree_write")
+            .then(|| node.get("worktree").and_then(Value::as_str))
+            .flatten()
+            .filter(|path| !path.is_empty() && !path.contains("${"))
+            .and_then(|path| {
+                let path = Path::new(path);
+                let path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    directory.join(path)
+                };
+                provenant_run::resolve_git_base(git, &path, "HEAD").ok()
+            });
+        let worktree_head = lane_head.as_deref().unwrap_or(worktree_head);
         if node.pointer("/source/type").and_then(Value::as_str) == Some("commit")
             && let Some(commit) = node.pointer("/source/commit").and_then(Value::as_str)
             && commit != worktree_head
@@ -3246,13 +3291,13 @@ fn warn_differing_source_and_worktree(
                 .and_then(Value::as_array)
             {
                 for child in nested {
-                    check_node(child, worktree_head, warnings);
+                    check_node(child, worktree_head, directory, git, warnings);
                 }
             }
         }
     }
     for node in nodes {
-        check_node(node, &worktree_head, &mut warnings);
+        check_node(node, &worktree_head, directory, &git, &mut warnings);
     }
     for warning in warnings {
         if !expansion.warnings.contains(&warning) {

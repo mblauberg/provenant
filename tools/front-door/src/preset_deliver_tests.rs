@@ -920,6 +920,19 @@ fn big_batch_lanes_deliver_then_the_council_gates_the_principal_and_repairer() {
     fn pin(value: &mut Value) {
         match value {
             Value::Object(map) => {
+                if map.get("access") == Some(&json!("worktree_write")) {
+                    let lane = match map.get("worktree").and_then(Value::as_str) {
+                        Some("/repo/a") => Some("a".repeat(40)),
+                        Some("/repo/b") => Some("b".repeat(40)),
+                        _ => None,
+                    };
+                    if let Some(lane) = lane
+                        && let Some(source) = map.get_mut("source").and_then(Value::as_object_mut)
+                        && source.get("commit") == Some(&json!("HEAD"))
+                    {
+                        source.insert("commit".into(), json!(lane));
+                    }
+                }
                 if map.get("type") == Some(&json!("commit"))
                     && map.get("commit") == Some(&json!("HEAD"))
                 {
@@ -964,6 +977,15 @@ fn big_batch_lanes_deliver_then_the_council_gates_the_principal_and_repairer() {
         .filter(|id| id.starts_with("lanes") && id.ends_with("--implement"))
         .collect();
     assert_eq!(lane_writers.len(), 2, "{:?}", host.launched);
+    for (lane, head) in [("lane-a", "a".repeat(40)), ("lane-b", "b".repeat(40))] {
+        assert!(
+            host.sources.iter().any(|(id, source)| id.contains(lane)
+                && id.ends_with("--implement")
+                && source.as_deref() == Some(head.as_str())),
+            "{:?}",
+            host.sources
+        );
+    }
     for writer in &lane_writers {
         let (_, mode, fast_forward) = delivery(writer);
         assert_eq!(
