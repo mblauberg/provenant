@@ -409,9 +409,9 @@ pub(super) enum LaunchPromptError {
     )]
     TooLarge,
     #[error(
-        "invalid input: nested argv launch prompt including the preamble exceeds 64 KiB; route the child to a stdin adapter (claude, codex or opencode), or shorten the prompt"
+        "invalid input: nested argv launch prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes, {origin}); route the child to a stdin adapter or shorten the prompt"
     )]
-    NestedArgvTooLarge,
+    NestedArgvTooLarge { limit: usize, origin: &'static str },
     #[error("{0}")]
     Other(String),
 }
@@ -430,6 +430,8 @@ pub(super) fn check_launch_prompt(
     text: &str,
     paths: &run::LaunchPaths,
     adapter: Option<&str>,
+    argv_limit: usize,
+    argv_origin: &'static str,
 ) -> Result<(), LaunchPromptError> {
     if text.len() as u64 > super::PROMPT_LIMIT {
         return Err(LaunchPromptError::TooLarge);
@@ -438,9 +440,15 @@ pub(super) fn check_launch_prompt(
         && adapter
             .and_then(AdapterSpec::get)
             .is_some_and(|spec| spec.argv_prompt)
-        && Prompt::new(text.to_owned()).check_argv().is_err()
+        && Prompt::new(text.to_owned())
+            .with_argv_limit(argv_limit)
+            .check_argv()
+            .is_err()
     {
-        return Err(LaunchPromptError::NestedArgvTooLarge);
+        return Err(LaunchPromptError::NestedArgvTooLarge {
+            limit: argv_limit,
+            origin: argv_origin,
+        });
     }
     Ok(())
 }
@@ -450,9 +458,11 @@ pub(super) fn launch_prompt(
     paths: &run::LaunchPaths,
     state_root: &Path,
     adapter: &str,
+    argv_limit: usize,
+    argv_origin: &'static str,
 ) -> Result<Prompt, LaunchPromptError> {
-    check_launch_prompt(text, paths, Some(adapter))?;
-    let prompt = Prompt::new(text.to_owned());
+    check_launch_prompt(text, paths, Some(adapter), argv_limit, argv_origin)?;
+    let prompt = Prompt::new(text.to_owned()).with_argv_limit(argv_limit);
     if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt)
         || prompt.check_argv().is_ok()
     {
@@ -495,7 +505,7 @@ pub(super) fn launch_prompt(
         Err(error) if error.is_exists() && matches(name)? => {}
         Err(error) => return Err(error.to_string().into()),
     }
-    let prompt = Prompt::from_file(attempt.join(name));
+    let prompt = Prompt::from_file(attempt.join(name)).with_argv_limit(argv_limit);
     prompt.check_argv().map_err(|error| error.to_string())?;
     Ok(prompt)
 }

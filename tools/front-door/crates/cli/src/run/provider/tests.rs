@@ -949,12 +949,12 @@ fn launch_prompt_preserves_small_text_and_refuses_more_than_one_mib()
     for entry in REGISTRY {
         let adapter = entry.adapter.id();
         for text in ["small prompt".to_owned(), "a".repeat(65_536)] {
-            let prompt = launch_prompt(&text, &paths, &attempt, adapter)?;
+            let prompt = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")?;
             assert_eq!(prompt.text(), text);
             assert!(prompt.file().is_none());
         }
         let text = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
-        let error = launch_prompt(&text, &paths, &attempt, adapter)
+        let error = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")
             .err()
             .ok_or("oversized launch accepted")?;
         assert!(
@@ -977,7 +977,7 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
         paths.lane_depth = depth;
         for adapter in ["claude", "codex", "opencode"] {
             for text in [&text, &"a".repeat(1024 * 1024)] {
-                let prompt = launch_prompt(text, &paths, &attempt, adapter)?;
+                let prompt = launch_prompt(text, &paths, &attempt, adapter, 65_536, "test")?;
                 assert_eq!(prompt.text(), text);
                 assert!(prompt.file().is_none());
             }
@@ -997,18 +997,18 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
         let mut paths = prompt_paths(&attempt)?;
         let text = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
         paths.lane_depth = 2;
-        let error = launch_prompt(&text, &paths, &attempt, adapter)
+        let error = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")
             .err()
             .ok_or("nested argv spill accepted")?;
         assert!(
-            matches!(error, LaunchPromptError::NestedArgvTooLarge),
+            matches!(error, LaunchPromptError::NestedArgvTooLarge { .. }),
             "{error}"
         );
         assert!(!attempt.join("prompt.md").exists());
 
         paths.lane_depth = 1;
         for _ in 0..2 {
-            let prompt = launch_prompt(&text, &paths, &attempt, adapter)?;
+            let prompt = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")?;
             assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
             assert!(prompt.text().len() < 1024);
             assert_eq!(std::fs::read_to_string(attempt.join("prompt.md"))?, text);
@@ -1021,12 +1021,29 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
             );
         }
         std::fs::write(attempt.join("prompt.md"), "conflicting prompt")?;
-        assert!(launch_prompt(&text, &paths, &attempt, adapter).is_err());
+        assert!(launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test").is_err());
         assert_eq!(
             std::fs::read_to_string(attempt.join("prompt.md"))?,
             "conflicting prompt"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let attempt = canonical(temp.path())?;
+    let mut paths = prompt_paths(&attempt)?;
+    paths.lane_depth = 2;
+    let text = "a".repeat(65_537);
+    assert!(matches!(
+        launch_prompt(&text, &paths, &attempt, "cursor", 65_536, "test"),
+        Err(LaunchPromptError::NestedArgvTooLarge { limit: 65_536, .. })
+    ));
+    let prompt = launch_prompt(&text, &paths, &attempt, "cursor", 131_072, "test")?;
+    assert_eq!(prompt.text(), text);
+    assert!(prompt.file().is_none());
     Ok(())
 }
 
@@ -1037,7 +1054,17 @@ fn launch_prompt_refuses_symlinked_attempt_ancestors() -> Result<(), Box<dyn std
     std::fs::create_dir_all(state.join("actual/attempt"))?;
     std::os::unix::fs::symlink(state.join("actual"), state.join("runs"))?;
     let paths = prompt_paths(&state.join("runs/attempt"))?;
-    assert!(launch_prompt(&"a".repeat(65_537), &paths, &state, "cursor").is_err());
+    assert!(
+        launch_prompt(
+            &"a".repeat(65_537),
+            &paths,
+            &state,
+            "cursor",
+            65_536,
+            "test"
+        )
+        .is_err()
+    );
     assert!(!state.join("actual/attempt/prompt.md").exists());
     Ok(())
 }
@@ -1113,11 +1140,61 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
             assert!(
                 matches!(
                     error,
-                    PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge)
+                    PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge { .. })
                 ),
                 "{error}"
             );
             assert!(!attempt.join("prompt.md").exists());
+            if adapter == "cursor" {
+                let home = attempt.join("fixture-home");
+                let checkout = attempt.join("fixture-checkout");
+                let state = attempt.join("fixture-state");
+                for path in [&home, &checkout, &state] {
+                    std::fs::create_dir_all(path)?;
+                }
+                std::fs::write(
+                    state.join("config.toml"),
+                    "schema_version = 1\n[domains.run]\nargv_prompt_limit_bytes = 262144\n",
+                )?;
+                let mut inputs = provenant_core::RootInputs::new(home, checkout);
+                inputs.state_dir = Some(state.clone());
+                let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+                let configured = Registry {
+                    roots: Some(&roots),
+                    ..Registry::default()
+                };
+                let error = prepare_with(
+                    &configured,
+                    &requested,
+                    &full,
+                    &nested,
+                    None,
+                    |_| unreachable!("missing home must precede executable probing"),
+                    None,
+                )
+                .err()
+                .ok_or("missing home accepted")?;
+                assert!(
+                    error.to_string().contains("home directory is unavailable"),
+                    "{error}"
+                );
+                std::fs::write(
+                    state.join("config.toml"),
+                    "schema_version = 1\n[domains.run]\nargv_prompt_limit_bytes = 65536\n",
+                )?;
+                let error = prepare_with(
+                    &configured,
+                    &requested,
+                    &full,
+                    &nested,
+                    None,
+                    |_| unreachable!("nested threshold must precede probing"),
+                    None,
+                )
+                .err()
+                .ok_or("nested threshold accepted")?;
+                assert!(error.to_string().contains("host configuration"), "{error}");
+            }
         }
     }
     Ok(())
@@ -2408,7 +2485,7 @@ printf 'agy 1.0.0\n'
     std::fs::write(
         state.join("config.toml"),
         format!(
-            "schema_version = 1\n[domains.accounts.entries.unrelated]\nadapter = 'claude'\nlabel = 'other'\nkey = 'fixture-other'\ndirectory = '{}'\n",
+            "schema_version = 1\n[domains.run]\nargv_prompt_limit_bytes = 60000\n[domains.accounts.entries.unrelated]\nadapter = 'claude'\nlabel = 'other'\nkey = 'fixture-other'\ndirectory = '{}'\n",
             home.join(".claude-other").display()
         ),
     )?;
@@ -2424,6 +2501,15 @@ printf 'agy 1.0.0\n'
         },
         None,
     )?;
+    assert_eq!(launch.route.extra["argv_prompt_limit"]["value"], 60_000);
+    assert_eq!(
+        launch.route.extra["argv_prompt_limit"]["key"],
+        "domains.run.argv_prompt_limit_bytes"
+    );
+    assert_eq!(
+        launch.route.extra["argv_prompt_limit"]["origin"]["kind"],
+        "user"
+    );
     assert!(
         launch
             .environment

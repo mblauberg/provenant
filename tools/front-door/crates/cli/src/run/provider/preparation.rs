@@ -507,12 +507,52 @@ pub(super) fn prepare_candidates(
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(registry, task, paths, resume, locate, provider, name);
     }
-    check_launch_prompt(prompt_text, paths, None)?;
+    let default_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
+    check_launch_prompt(prompt_text, paths, None, default_limit, "compiled default")?;
+    let loaded_config = registry
+        .roots
+        .map(|roots| provenant_config::read_with_domains(roots, &crate::domains::SECTIONS));
+    const ARGV_LIMIT_KEY: &str = "domains.run.argv_prompt_limit_bytes";
+    let (argv_limit, argv_origin, argv_origin_record) = match &loaded_config {
+        Some(Ok(config)) => {
+            let origin = config.origins.get(ARGV_LIMIT_KEY);
+            let label = if matches!(origin, Some(provenant_config::Origin::User { .. })) {
+                "host configuration"
+            } else {
+                "compiled default"
+            };
+            (
+                config.domains.run.argv_prompt_limit_bytes,
+                label,
+                origin.map_or_else(
+                    || serde_json::json!({"kind": "compiled"}),
+                    |value| serde_json::json!(value),
+                ),
+            )
+        }
+        Some(Err(error)) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: {ARGV_LIMIT_KEY} unavailable ({error}); using compiled default"
+            );
+            (
+                default_limit,
+                "compiled default",
+                serde_json::json!({"kind": "compiled"}),
+            )
+        }
+        None => (
+            default_limit,
+            "compiled default",
+            serde_json::json!({"kind": "compiled"}),
+        ),
+    };
     if task.fallback.is_empty()
         && let run::RequestedRoute::Model { model, .. } = &task.route
         && let Some((adapter, _)) = model.split_once('/')
     {
-        check_launch_prompt(prompt_text, paths, Some(adapter))?;
+        check_launch_prompt(prompt_text, paths, Some(adapter), argv_limit, argv_origin)?;
     }
     // Only fixture builds may stand a supplied token in for host authority.
     #[cfg(not(feature = "fixture"))]
@@ -626,8 +666,9 @@ pub(super) fn prepare_candidates(
     let executor =
         provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
             .map_err(|e| e.to_string())?;
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?;
+    let config = loaded_config
+        .ok_or("routing context is unavailable")?
+        .map_err(|error| error.to_string())?;
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
     let mut request = match resume {
@@ -1362,7 +1403,14 @@ pub(super) fn prepare_candidates(
                 &private_state.join("handoff.json")
             )
         );
-        let prompt = match launch_prompt(&text, paths, state_root, adapter.id()) {
+        let prompt = match launch_prompt(
+            &text,
+            paths,
+            state_root,
+            adapter.id(),
+            argv_limit,
+            argv_origin,
+        ) {
             Ok(prompt) => prompt,
             Err(error) => {
                 reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
@@ -1769,6 +1817,12 @@ pub(super) fn prepare_candidates(
             account_source(resume.is_some(), task.account.is_some()).into(),
         );
         provider.extra.insert("project_paths".into(), project_paths);
+        provider.extra.insert(
+            "argv_prompt_limit".into(),
+            serde_json::json!({
+                "value": argv_limit, "key": ARGV_LIMIT_KEY, "origin": argv_origin_record.clone(),
+            }),
+        );
         if let Some(event) = &dependency_event {
             provider
                 .extra

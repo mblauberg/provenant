@@ -1900,6 +1900,12 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
 #[test]
 fn argv_prompt_limit_counts_utf8_bytes() {
     assert!(Prompt::new("a".repeat(65_536)).check_argv().is_ok());
+    assert!(
+        Prompt::new("a".repeat(65_537))
+            .with_argv_limit(131_072)
+            .check_argv()
+            .is_ok()
+    );
     assert!(matches!(
         Prompt::new("é".repeat(32_769)).check_argv(),
         Err(ProviderError::PromptTooLarge)

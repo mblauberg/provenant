@@ -33,8 +33,14 @@ reason = "Bounds rendered sandbox profile size."
 
 [[guard]]
 site = "providers/src/contract.rs#Prompt::check_argv"
-boundary = "unclassified"
-reason = "The fixed argv prompt limit can refuse preparation; inspect file-backed prompt alternatives."
+boundary = "configurable_default"
+setting = "domains.run.argv_prompt_limit_bytes"
+reason = "The argv prompt byte threshold defaults to 65536 and can be overridden; top-level launches spill above it."
+
+[[guard]]
+site = "cli/src/run/provider/observation.rs#check_launch_prompt"
+boundary = "authority"
+reason = "Nested argv prompts above the threshold cannot spill to a parent-writable file without allowing the parent to alter the child task."
 
 [[guard]]
 site = "providers/src/contract.rs#Continuation::validate"
@@ -90,9 +96,19 @@ boundary = "warning"
 reason = "An unobservable disk floor or available space warns and allows dispatch; measured low space retains the configurable floor."
 
 [[guard]]
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "authority"
+reason = "The stored prompt must match its recorded length and digest before a host launches the task."
+
+[[guard]]
+site = "run/src/artifacts.rs#RunStore::artifact_bytes"
+boundary = "unclassified"
+reason = "The fixed prompt artifact byte limit can refuse before the digest check and needs a configurable default or a safe warning fallback."
+
+[[guard]]
 site = "run/src/launch.rs#start_inner"
 boundary = "unclassified"
-reason = "Stored prompt, policy, provider preparation and handoff can refuse; enumerate their originating guards."
+reason = "Remaining policy, provider preparation and handoff refusals need caller-specific classification."
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"

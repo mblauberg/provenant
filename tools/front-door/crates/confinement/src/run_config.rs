@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 const MAX_WRITER_WRITES: usize = 16;
+/// Default maximum prompt text passed as a single argument.
+pub const DEFAULT_ARGV_PROMPT_LIMIT_BYTES: usize = 65_536;
 /// Paths every implementation legitimately changes: release-note fragments,
 /// specs, lock files and the tracker's input file. None is a control file.
 pub const DEFAULT_REVIEW_EXEMPT: [&str; 4] = [
@@ -22,6 +24,7 @@ push_conflict_markers = true
 brief_read_root_warnings = true
 profile_limit_bytes = 524288
 grant_limit = 128
+argv_prompt_limit_bytes = 65536
 
 [projects]
 "#;
@@ -65,6 +68,9 @@ pub struct RunConfig {
     /// authentication and native controls retain minimum caps of 16 and 64.
     #[serde(default = "default_grant_limit")]
     pub grant_limit: usize,
+    /// Prompt bytes passed directly to argv before the file-backed fallback.
+    #[serde(default = "default_argv_prompt_limit_bytes")]
+    pub argv_prompt_limit_bytes: usize,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
@@ -73,6 +79,9 @@ fn default_profile_limit_bytes() -> usize {
 }
 fn default_grant_limit() -> usize {
     128
+}
+fn default_argv_prompt_limit_bytes() -> usize {
+    DEFAULT_ARGV_PROMPT_LIMIT_BYTES
 }
 fn default_true() -> bool {
     true
@@ -112,6 +121,7 @@ impl Default for RunConfig {
             admission_seconds: None,
             profile_limit_bytes: default_profile_limit_bytes(),
             grant_limit: default_grant_limit(),
+            argv_prompt_limit_bytes: default_argv_prompt_limit_bytes(),
             projects: BTreeMap::new(),
         }
     }
@@ -239,6 +249,7 @@ impl DomainConfig for RunConfig {
         for (field, value) in [
             ("profile_limit_bytes", self.profile_limit_bytes),
             ("grant_limit", self.grant_limit),
+            ("argv_prompt_limit_bytes", self.argv_prompt_limit_bytes),
         ] {
             if value == 0 {
                 errors.push(SectionError {
@@ -291,6 +302,7 @@ fn project_key(key: &str) -> bool {
 pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("profile_limit_bytes", "int"),
     FieldMetadata::new("grant_limit", "int"),
+    FieldMetadata::new("argv_prompt_limit_bytes", "int"),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("brief_read_root_warnings", "bool"),
     FieldMetadata::new("warn_brief_read_roots", "bool"),
@@ -324,10 +336,16 @@ mod tests {
     fn launch_resource_defaults_can_be_raised() -> Result<(), Box<dyn std::error::Error>> {
         let defaults: RunConfig = toml_edit::de::from_str("")?;
         assert_eq!(defaults.grant_limit, 128);
+        assert_eq!(
+            defaults.argv_prompt_limit_bytes,
+            DEFAULT_ARGV_PROMPT_LIMIT_BYTES
+        );
         assert_eq!(defaults.profile_limit_bytes, 512 * 1024);
-        let raised: RunConfig =
-            toml_edit::de::from_str("grant_limit = 2048\nprofile_limit_bytes = 2097152\n")?;
+        let raised: RunConfig = toml_edit::de::from_str(
+            "grant_limit = 2048\nprofile_limit_bytes = 2097152\nargv_prompt_limit_bytes = 131072\n",
+        )?;
         assert!(raised.validate().is_empty());
+        assert_eq!(raised.argv_prompt_limit_bytes, 131_072);
         assert_eq!(
             (raised.grant_limit, raised.profile_limit_bytes),
             (2048, 2097152)
@@ -335,12 +353,20 @@ mod tests {
         let state = tempfile::tempdir()?;
         std::fs::write(
             state.path().join("config.toml"),
-            "schema_version=1\n[domains.run]\ngrant_limit=2048\nprofile_limit_bytes=2097152\n",
+            "schema_version=1\n[domains.run]\ngrant_limit=2048\nprofile_limit_bytes=2097152\nargv_prompt_limit_bytes=131072\n",
         )?;
         let loaded = RunConfig::read(state.path())?;
+        assert_eq!(loaded.argv_prompt_limit_bytes, 131_072);
         assert_eq!(
             (loaded.grant_limit, loaded.profile_limit_bytes),
             (2048, 2097152)
+        );
+        let invalid_argv: RunConfig = toml_edit::de::from_str("argv_prompt_limit_bytes = 0")?;
+        assert!(
+            invalid_argv
+                .validate()
+                .iter()
+                .any(|error| error.field == "argv_prompt_limit_bytes")
         );
         let invalid: RunConfig = toml_edit::de::from_str("grant_limit = 0")?;
         assert!(

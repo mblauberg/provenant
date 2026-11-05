@@ -627,10 +627,16 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
   "host_run_settings": {
     "path": "domains.run",
     "settings": {
+      "argv_prompt_limit_bytes": {
+        "allowed": "1 or more bytes",
+        "default": "65536",
+        "effect": "Maximum prompt bytes passed directly to argv adapters. Larger top-level prompts spill to an attempt-owned file; nested attempts refuse rather than use a parent-writable spill. The overall 1 MiB prompt bound and operating-system argument limits still apply.",
+        "type": "int"
+      },
       "grant_limit": {
         "allowed": "1 or more",
         "default": "128",
-        "effect": "Maximum total plan roots and maximum entries in each provider grant family. Increase for lanes needing more roots.",
+        "effect": "Maximum total plan roots and entries in each provider profile family; authentication and native-control families retain minimum caps of 16 and 64. Increase for lanes needing more roots.",
         "type": "int"
       },
       "profile_limit_bytes": {
