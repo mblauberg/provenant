@@ -2391,6 +2391,7 @@ pub(crate) mod peer_tests {
             Ok(serde_json::from_value(serde_json::json!({
                 "id":"review", "kind":"plan", "access":"read_only", "prompt":"review",
                 "depends_on":["subject"], "read_roots":["/repo/lane"],
+                "require_skill_location":true,
                 "inputs":[{"node":"subject","outputs":["result"]}],
                 "review":{"shape":null,"risk_tier":risk,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":lenses,"min_successful":1,"max_nodes":13},
                 "lens_templates": templates,
@@ -2409,6 +2410,7 @@ pub(crate) mod peer_tests {
         assert_eq!(lens.routes.as_ref().map(Vec::len), Some(2));
         assert_eq!(lens.depends_on, ["subject"]);
         assert_eq!(lens.read_roots, ["/repo/lane"]);
+        assert!(lens.require_skill_location);
         assert!(matches!(&lens.source, Some(graph::SourceBinding::Commit { commit }) if *commit == head));
         let floored = bound.resolve_review(&deferred(Some("crucial"), serde_json::json!([]))?, &head)?;
         let record = floored.review.as_ref().ok_or("review resolution missing")?;

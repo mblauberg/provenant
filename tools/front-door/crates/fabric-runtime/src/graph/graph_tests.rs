@@ -2988,7 +2988,7 @@ fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"parallel-composite","nodes":[
             {"id":"start","access":"read_only","prompt":"start","route":{"alias":"senior"}},
-            {"id":"parallel","kind":"composite","access":"read_only","depends_on":["start"],
+            {"id":"parallel","kind":"composite","access":"read_only","require_skill_location":true,"depends_on":["start"],
             "inputs":[{"node":"start","outputs":["result"]}],
             "composite":{"nodes":[
                 {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
@@ -3010,6 +3010,7 @@ fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
     assert!(run.checkpoint.successful());
     assert!(owner.prompts[1].contains("initial evidence"));
     assert!(owner.prompts[2].contains("initial evidence"));
+    assert_eq!(owner.skill_requirements, [false, true, true]);
     let result = run
         .checkpoint
         .nodes

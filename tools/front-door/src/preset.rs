@@ -2720,7 +2720,7 @@ fn visit_nodes(
 ) -> Result<(), String> {
     for node in nodes {
         visitor(node)?;
-        for path in ["/composite/nodes", "/loop/body"] {
+        for path in ["/composite/nodes", "/loop/body", "/plan/fallback/nodes"] {
             if let Some(children) = node.pointer_mut(path).and_then(Value::as_array_mut) {
                 visit_nodes(children, visitor)?;
             }
@@ -2922,6 +2922,9 @@ pub(crate) fn bind_run_context(
         confine_pattern_roots(node, policy)?;
         let container = node.get("composite").is_some() || node.get("loop").is_some();
         if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {
+            if request.require_skill_location {
+                node["require_skill_location"] = json!(true);
+            }
             let writer = node["access"] == "worktree_write";
             // A deferred review measures in the bound worktree unless it names one.
             if let Some(worktree) = &request.access.worktree

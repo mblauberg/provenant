@@ -4365,6 +4365,9 @@ impl BoundGraphOwner<'_> {
             if !node.read_roots.is_empty() {
                 map.insert("read_roots".into(), serde_json::json!(node.read_roots));
             }
+            if node.require_skill_location {
+                map.insert("require_skill_location".into(), serde_json::json!(true));
+            }
             map.insert(
                 "source".into(),
                 serde_json::json!({"type":"commit","commit":subject}),

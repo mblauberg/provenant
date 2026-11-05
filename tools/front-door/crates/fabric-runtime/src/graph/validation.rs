@@ -1157,10 +1157,11 @@ fn fallback_settled(
         .outputs
         .as_ref()
         .is_some_and(|outputs| outputs.plan.is_some())
-        && plans::fallback_expansion(&node.id, spec, document).is_ok_and(|derived| {
-            checkpoint
-                .expansions
-                .iter()
-                .any(|expansion| expansion.source == node.id && *expansion == derived)
-        })
+        && plans::fallback_expansion(&node.id, spec, document, node.require_skill_location)
+            .is_ok_and(|derived| {
+                checkpoint
+                    .expansions
+                    .iter()
+                    .any(|expansion| expansion.source == node.id && *expansion == derived)
+            })
 }

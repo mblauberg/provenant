@@ -1409,6 +1409,71 @@ fn pin_fixture_sources(value: &mut serde_json::Value) {
 }
 
 #[test]
+fn preset_run_binds_skill_requirement_to_task_nodes() {
+    let args = [
+        "run",
+        "--preset",
+        "single",
+        "--prompt-file",
+        "brief.md",
+        "--require-skill-location",
+    ];
+    let provenant_cli::ParseOutcome::Invocation(invocation) =
+        provenant_cli::parse(args.into_iter().map(Into::into))
+    else {
+        panic!("run arguments")
+    };
+    let provenant_cli::Command::Run(request) = invocation.command else {
+        panic!("run command")
+    };
+    let mut expanded = expand(&Layers::empty(), "single", "brief", &[]).unwrap();
+    expanded.document["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"group", "access":"read_only", "composite":{"nodes":[
+                {"id":"child", "access":"read_only", "prompt":"work"},
+                {"id":"gate", "kind":"gate", "access":"read_only", "prompt":""}
+            ]}
+        }));
+    expanded.document["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"planner", "kind":"plan", "access":"read_only", "prompt":"plan",
+            "plan":{"fallback":{"nodes":[{"id":"fallback", "access":"read_only", "prompt":"work"}]}}
+        }));
+    let directory = tempfile::tempdir().unwrap();
+    let roots = ReadRoots::new(vec![directory.path().into()], &[]);
+    super::preset::bind_run_context(
+        &mut expanded,
+        &request,
+        directory.path(),
+        &roots,
+        "fixture",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        expanded.document["nodes"][0]["require_skill_location"],
+        true
+    );
+    assert_eq!(
+        expanded.document["nodes"][1]["composite"]["nodes"][0]["require_skill_location"],
+        true
+    );
+    assert!(
+        expanded.document["nodes"][1]["composite"]["nodes"][1]
+            .get("require_skill_location")
+            .is_none()
+    );
+    assert_eq!(
+        expanded.document["nodes"][2]["plan"]["fallback"]["nodes"][0]["require_skill_location"],
+        true
+    );
+}
+
+#[test]
 fn read_only_worktree_bindings_lower_to_read_roots() {
     let expanded = expand(
         &Layers::empty(),
