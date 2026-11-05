@@ -4185,6 +4185,7 @@ fn persisted_attempt_with(
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,

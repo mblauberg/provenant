@@ -3382,6 +3382,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         lane_depth: 0,
         parent_attempt: None,
         tasks: vec![run::DispatchTask {
+            cloud: None,
             context: None,
             build_heavy: false,
             title: None,
@@ -3606,6 +3607,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         chair: chair.clone(),
         operation_id: OperationId::parse("context-ref-replay").unwrap(),
         tasks: vec![Submitted {
+            cloud: None,
             require_skill_location: true,
             settlement_retry_limit: None,
             context: None,
@@ -3746,6 +3748,7 @@ pub(super) fn trace_run(
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![run::TaskRequest {
+                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,
@@ -3801,6 +3804,172 @@ fn trace_store(
         read_prompts: true,
     };
     Ok(run::RunStore::open(&context, call)?)
+}
+
+#[test]
+fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::cloud::{
+        CloudProvider, CloudResult, CloudSubmission, RemoteJob, RemoteState,
+    };
+    struct Fake {
+        running: bool,
+    }
+    impl CloudProvider for Fake {
+        type Error = ();
+        fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+            Ok(())
+        }
+        fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, ()> {
+            assert_eq!(request.job.commit, "a".repeat(40));
+            Ok("remote-id".into())
+        }
+        fn observe(&mut self, job: &RemoteJob) -> Result<RemoteState, ()> {
+            assert_eq!(job.remote_id, "remote-id");
+            assert_eq!(job.repository, "repository");
+            assert_eq!(job.commit, "a".repeat(40));
+            if self.running {
+                return Ok(RemoteState::Running);
+            }
+            Ok(RemoteState::Finished {
+                result: CloudResult {
+                    job_id: job.job_id.clone(),
+                    nonce: job.nonce.clone(),
+                    commit: "a".repeat(40),
+                    exit_status: 0,
+                    tests_run: vec!["targeted".into()],
+                    tests_failed: vec![],
+                    log_location: "log".into(),
+                    tracked_files_changed: false,
+                    observed_model: Some("small".into()),
+                },
+            })
+        }
+        fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
+            Ok(false)
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|e| e.message)?;
+    let store = trace_store(&temp, &call)?;
+    let mut input = trace_run(
+        40,
+        AttemptId::from_bytes([1; 16]),
+        now(&clock).map_err(|e| e.message)?,
+    )?;
+    input.request.parent_attempt = None;
+    input.request.tasks[0].head = Some("a".repeat(40));
+    input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
+        target: "target".into(),
+        provider: "fake".into(),
+        environment: "env".into(),
+        repository: "repository".into(),
+        branch: "main".into(),
+        model: "small".into(),
+        effort: None,
+        deadline_seconds: 3600,
+    });
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let target = crate::domains::CloudTarget {
+        provider: "fake".into(),
+        environment: "env".into(),
+        model: "small".into(),
+        effort: None,
+        repository: "repository".into(),
+        branch: "main".into(),
+        deadline_seconds: 3600,
+    };
+    let job = cloud_owner::prepare_job(id, "target", &target, &"a".repeat(40), &clock)?;
+    assert_eq!(job.job_id, id.to_string());
+    assert_eq!(job.nonce.len(), 32);
+    assert_ne!(
+        job.nonce,
+        cloud_owner::prepare_job(id, "target", &target, &"a".repeat(40), &clock)?.nonce
+    );
+    let mut wrong_commit = job.clone();
+    wrong_commit.commit = "b".repeat(40);
+    assert!(
+        cloud_owner::submit(
+            &mut Fake { running: true },
+            &store,
+            id,
+            wrong_commit,
+            "run tests",
+            &call
+        )
+        .is_err()
+    );
+    let submitted = cloud_owner::submit(
+        &mut Fake { running: true },
+        &store,
+        id,
+        job,
+        "run tests",
+        &call,
+    )?;
+    drop(store);
+    let store = trace_store(&temp, &call)?;
+    let cancelled = cloud_owner::cancel(&mut Fake { running: true }, &store, id, &call)?;
+    assert_eq!(cancelled.remote_id, submitted.remote_id);
+    assert_eq!(cancelled.state, RemoteState::CancellationUnconfirmed);
+    drop(store);
+    let store = trace_store(&temp, &call)?;
+    let running = cloud_owner::reconcile(&mut Fake { running: true }, &store, id, &call)?;
+    assert_eq!(running.state, RemoteState::CancellationUnconfirmed);
+    // A crash can happen after the remote result is saved but before its run
+    // event is recorded; reconciliation repairs that publication.
+    cloud_store::AttemptCloudStore::with_attempt(
+        &store,
+        id,
+        false,
+        &call,
+        |cloud_store| -> Result<(), String> {
+            let mut job = cloud_store
+                .load()
+                .map_err(|error| error.to_string())?
+                .ok_or("missing cloud job")?;
+            provenant_providers::cloud::reconcile(
+                &mut Fake { running: false },
+                cloud_store,
+                &mut job,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            Ok(())
+        },
+    )??;
+    assert!(!cloud_owner::finished_run(&store, input.run_id, &call)?);
+    let finished = cloud_owner::reconcile(&mut Fake { running: false }, &store, id, &call)?;
+    assert!(matches!(finished.state, RemoteState::Finished { .. }));
+    assert!(cloud_owner::finished_run(&store, input.run_id, &call)?);
+    let event = store.last_event_sequence(id, &call)?;
+    let _ = cloud_owner::reconcile(&mut Fake { running: false }, &store, id, &call)?;
+    assert_eq!(store.last_event_sequence(id, &call)?, event);
+    let mut lanes = vec![store.record(id, &call)?];
+    cloud_owner::hydrate(&store, &mut lanes, &call)?;
+    assert_eq!(status::lane_display_state(&lanes[0]), "cloud_passed");
+    assert!(condition_met(&lanes, Condition::All));
+    let mut data = json!({});
+    let mut human = String::new();
+    status::attach_cloud_jobs(&store, &lanes, &mut data, &mut human, &call)
+        .map_err(|error| error.message)?;
+    assert_eq!(data["cloud_jobs"][0]["state"]["state"], "finished");
+    assert_eq!(data["cloud_jobs"][0]["passed"], true);
+    assert!(human.contains("advisory pass"));
+    let mut setup_failed = finished;
+    setup_failed.state = RemoteState::SetupFailed {
+        detail: "environment setup failed".into(),
+    };
+    let diagnostic = cloud_owner::view(&setup_failed);
+    assert_eq!(diagnostic["target"], "target");
+    assert_eq!(diagnostic["environment"], "env");
+    assert!(
+        diagnostic["remedy"]
+            .as_str()
+            .is_some_and(|text| text.contains("repair"))
+    );
+    Ok(())
 }
 
 #[test]

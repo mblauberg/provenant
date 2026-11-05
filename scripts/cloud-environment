@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Describe a repository's likely cloud environment requirements."""
+
+import argparse
+from pathlib import Path
+import shlex
+import subprocess
+
+
+def describe(repo: Path) -> str:
+    lines = [
+        "Create a provider environment for this repository and select its source.",
+        "Keep credentials out of setup scripts, prompts and result artifacts.",
+    ]
+    manifests = []
+    toolchains = []
+    if (repo / "Cargo.toml").is_file():
+        manifests.append("Cargo.toml")
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "-z", "--", "Cargo.toml", "**/Cargo.toml",
+             "rust-toolchain", "rust-toolchain.toml", "**/rust-toolchain", "**/rust-toolchain.toml"],
+            check=True, capture_output=True, text=True,
+        )
+        for path in filter(None, tracked.stdout.split("\0")):
+            if Path(path).name == "Cargo.toml" and path not in manifests:
+                manifests.append(path)
+            elif Path(path).name in ("rust-toolchain", "rust-toolchain.toml"):
+                toolchains.append(path)
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    if manifests:
+        lines.append("Rust: install the repository's Rust toolchain and Cargo.")
+        lines.append("Cargo manifests: " + ", ".join(manifests))
+        for name in ("rust-toolchain", "rust-toolchain.toml"):
+            if (repo / name).is_file() and name not in toolchains:
+                toolchains.append(name)
+        if toolchains:
+            lines.append("Use the pinned Rust toolchains: " + ", ".join(toolchains))
+        lines.append("For nextest tiers: install cargo-nextest (cargo install cargo-nextest --locked).")
+        # Build from each outermost manifest directory so rustup also discovers
+        # the toolchain pinned beside a nested workspace.
+        roots = []
+        for path in sorted((Path(name).parent for name in manifests), key=lambda p: len(p.parts)):
+            if not any(root == path or root in path.parents for root in roots):
+                roots.append(path)
+        lines.append("Optional cache warm-up (check the provider's setup time limit):")
+        for root in roots:
+            lines.append(f"  (cd {shlex.quote(str(root))} && cargo build --locked)")
+    else:
+        lines.append("Install the toolchain and test runner required by the selected tier.")
+    lines.append("Add repository-specific native dependencies and cache setup as needed.")
+    return "\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("repository", nargs="?", type=Path, default=Path.cwd())
+    args = parser.parse_args()
+    if not args.repository.is_dir():
+        parser.error("repository must be an existing directory")
+    print(describe(args.repository))
+
+
+if __name__ == "__main__":
+    main()

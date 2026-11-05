@@ -278,7 +278,9 @@ impl TestRig {
     ) -> Result<ExecOutcome> {
         let mut argv = vec![program.as_os_str().to_owned()];
         argv.extend_from_slice(args);
-        let mut options = ExecOptions::new(&argv, &self.project, Duration::from_secs(10));
+        // Only a backstop for a hung child: commands carry their own `--wait`
+        // budgets, and nextest bounds the whole test.
+        let mut options = ExecOptions::new(&argv, &self.project, Duration::from_secs(60));
         options.env = Some(&self.env);
         options.stdin = stdin;
         options.stdout = StreamPolicy::Capture {

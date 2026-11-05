@@ -3607,6 +3607,9 @@ pub(crate) fn bind_run_context(
         confine_pattern_roots(node, policy)?;
         let container = node.get("composite").is_some() || node.get("loop").is_some();
         if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {
+            if request.require_skill_location {
+                node["require_skill_location"] = json!(true);
+            }
             let writer = node["access"] == "worktree_write";
             if writer || node.get("capabilities").is_some() {
                 let invalid_capabilities = node

@@ -29,6 +29,8 @@ use std::{
 mod assess;
 mod cancel;
 mod children;
+pub mod cloud_owner;
+pub mod cloud_store;
 mod dispatch;
 mod output;
 mod provider;
