@@ -18,6 +18,11 @@ pub struct CompositeSpec {
     pub exports: Vec<GraphInput>,
 }
 
+impl CompositeSpec {
+    /// Default selection for each member of a generated group.
+    pub const DEFAULT_MEMBER_OUTPUTS: [OutputKind; 2] = [OutputKind::Result, OutputKind::Findings];
+}
+
 /// Expand only at the execution boundary. The submitted document remains nested.
 pub(super) fn expand(
     document: &GraphDocument,

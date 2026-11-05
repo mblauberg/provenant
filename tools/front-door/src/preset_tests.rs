@@ -541,6 +541,13 @@ kind = "synthesise"
     assert_eq!(scouts[0]["prompt"], "Scope 1: map");
     assert_eq!(scouts[1]["prompt"], "Scope 2: map");
     assert_eq!(scouts[2]["kind"], "composite");
+    let exports = nodes[0]["composite"]["exports"].as_array().unwrap();
+    assert_eq!(exports.len(), scouts.as_array().unwrap().len());
+    for (export, member) in exports.iter().zip(scouts.as_array().unwrap()) {
+        assert_eq!(export["node"], member["id"]);
+        assert_eq!(export["outputs"], json!(["result", "findings"]));
+        assert!(export.get("required_outputs").is_none());
+    }
     assert_eq!(nodes[1]["depends_on"], json!(["scouts"]));
     assert_eq!(
         nodes[1]["inputs"],
@@ -673,8 +680,8 @@ fn group_member_outputs_apply_to_static_and_deferred_members() {
         .unwrap()
         .document;
     assert_eq!(
-        static_graph["nodes"][0]["composite"]["exports"][0]["outputs"],
-        json!(["result"])
+        static_graph["nodes"][0]["composite"]["exports"],
+        json!([{ "node": "one", "outputs": ["result"] }])
     );
     layers
         .insert(

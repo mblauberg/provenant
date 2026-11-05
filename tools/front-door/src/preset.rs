@@ -1,4 +1,5 @@
 use crate::preset_roles::{RoleLibrary, prompt_file_reference};
+use provenant_fabric_runtime::graph::CompositeSpec;
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -1636,6 +1637,22 @@ fn selected_inputs(deps: &[String], outputs: &Value) -> Value {
     )
 }
 
+/// Construct graph selectors from typed output kinds. Serialization happens at
+/// the legacy stage-builder boundary until the builder itself holds nodes.
+fn select_graph_inputs(
+    deps: &[String],
+    outputs: &[provenant_fabric_runtime::graph::OutputKind],
+) -> Vec<provenant_fabric_runtime::graph::GraphInput> {
+    deps.iter()
+        .map(|node| provenant_fabric_runtime::graph::GraphInput {
+            extra: Default::default(),
+            node: node.clone(),
+            outputs: outputs.to_vec(),
+            required_outputs: Vec::new(),
+        })
+        .collect()
+}
+
 fn parse_member_outputs(
     value: Value,
 ) -> Result<Vec<provenant_fabric_runtime::graph::OutputKind>, String> {
@@ -3211,8 +3228,15 @@ impl StageBuilder<'_> {
                         interpolate(&exports, &self.parameters, self.prompt, index as usize)
                     })
                     .transpose()?
-                    .or_else(|| config.get("exports").cloned())
-                    .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
+                    .or_else(|| config.get("exports").cloned());
+                let exports = match exports {
+                    Some(exports) => exports,
+                    None => serde_json::to_value(select_graph_inputs(
+                        &ends,
+                        &CompositeSpec::DEFAULT_MEMBER_OUTPUTS,
+                    ))
+                    .map_err(|error| format!("stage {id}: exports: {error}"))?,
+                };
                 (
                     composite(&id, children, exports, deps, &outputs, None),
                     true,
@@ -3257,14 +3281,18 @@ impl StageBuilder<'_> {
                                 .map_err(|error| format!("stage {id}: {error}"))
                         })
                         .transpose()?
-                        .map_or_else(|| json!(["result", "findings"]), |outputs| json!(outputs));
-                    let mut exports = object
+                        .unwrap_or_else(|| CompositeSpec::DEFAULT_MEMBER_OUTPUTS.to_vec());
+                    let exports = object
                         .remove("exports")
                         .map(|exports| {
                             interpolate(&exports, &self.parameters, self.prompt, index as usize)
                         })
-                        .transpose()?
-                        .unwrap_or_else(|| selected_inputs(&ends, &member_outputs));
+                        .transpose()?;
+                    let mut exports = match exports {
+                        Some(exports) => exports,
+                        None => serde_json::to_value(select_graph_inputs(&ends, &member_outputs))
+                            .map_err(|error| format!("stage {id}: exports: {error}"))?,
+                    };
                     if let Some(requested) = object.remove("export_first") {
                         let requested =
                             interpolate(&requested, &self.parameters, self.prompt, index as usize)?;
@@ -3328,8 +3356,15 @@ impl StageBuilder<'_> {
                     .map(|exports| {
                         interpolate(&exports, &self.parameters, self.prompt, index as usize)
                     })
-                    .transpose()?
-                    .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
+                    .transpose()?;
+                let exports = match exports {
+                    Some(exports) => exports,
+                    None => serde_json::to_value(select_graph_inputs(
+                        &ends,
+                        &CompositeSpec::DEFAULT_MEMBER_OUTPUTS,
+                    ))
+                    .map_err(|error| format!("stage {id}: exports: {error}"))?,
+                };
                 (
                     composite(&id, children, exports, deps, &outputs, None),
                     true,

@@ -187,6 +187,14 @@ pub struct ReviewSpec {
     pub max_nodes: usize,
 }
 
+impl ReviewSpec {
+    pub fn member_outputs(&self) -> &[OutputKind] {
+        self.member_outputs
+            .as_deref()
+            .unwrap_or(&CompositeSpec::DEFAULT_MEMBER_OUTPUTS)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewLens {
     pub name: String,
