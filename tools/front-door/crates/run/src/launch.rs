@@ -453,6 +453,7 @@ enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
     Busy,
+    SetupLockTimeout(u64),
     /// The guardian may have received the launch.
     Uncertain(String),
 }
@@ -483,6 +484,7 @@ pub enum RefusalKind {
     InvalidWriteGrantPath,
     WriteGrantsLimit,
     Handoff,
+    SetupLockTimeout { seconds: u64 },
 }
 
 /// Check a canonical root against state, allowing installed releases for reads.
@@ -1715,12 +1717,18 @@ impl RunStore {
                 ) {
                     Ok(()) => Started::Launched(id),
                     // Nothing reached a guardian: the attempt ends here.
-                    Err(error @ (HandOff::Local(_) | HandOff::Busy)) => {
+                    Err(
+                        error @ (HandOff::Local(_) | HandOff::Busy | HandOff::SetupLockTimeout(_)),
+                    ) => {
                         let (reason, kind) = match error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
                             HandOff::Local(error) => (
                                 format!("launch preparation failed: {error}"),
                                 RefusalKind::Handoff,
+                            ),
+                            HandOff::SetupLockTimeout(seconds) => (
+                                RunError::SetupLockTimeout { seconds }.to_string(),
+                                RefusalKind::SetupLockTimeout { seconds },
                             ),
                             _ => unreachable!(),
                         };

@@ -152,7 +152,12 @@ impl RunStore {
                     lease
                         .withdraw_unlaunched()
                         .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                    return Err(local("Git setup", &error));
+                    return Err(match error {
+                        RunError::SetupLockTimeout { seconds } => {
+                            HandOff::SetupLockTimeout(seconds)
+                        }
+                        error => local("Git setup", &error),
+                    });
                 }
             };
             let writer_attempt = directory()?;
