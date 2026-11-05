@@ -3168,7 +3168,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         chair: chair.clone(),
         operation_id: OperationId::parse("context-ref-replay").unwrap(),
         tasks: vec![Submitted {
-            require_skill_location: false,
+            require_skill_location: true,
             settlement_retry_limit: None,
             context: None,
             build_heavy: false,
@@ -3197,6 +3197,11 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     };
     let (first, _) =
         submit(&session, &edge, submission("context-base"), &call).map_err(|f| f.message)?;
+    assert!(
+        session.store.request(first.run_id, &call)?.tasks[0]
+            .profile
+            .require_skill_location
+    );
     with_chair_index(&roots, &call, |index, index_call| {
         let binding = index
             .read(session.context.project_id, first.run_id, index_call)?
