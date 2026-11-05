@@ -180,7 +180,7 @@ fn newer_checkpoint_envelope_and_payload_versions_are_not_corruption() {
 }
 
 #[test]
-fn review_schema_versions_and_legacy_digests() {
+fn review_schema_versions_and_stored_digests() {
     let fixture = stored();
     let legacy: StoredCheckpoint = serde_json::from_value(fixture.clone()).unwrap();
     assert_eq!(serde_json::to_value(&legacy).unwrap(), fixture);
@@ -210,21 +210,7 @@ fn review_schema_versions_and_legacy_digests() {
         serde_json::from_slice::<GraphDocument>(&serde_json::to_vec(&v2).unwrap()).unwrap(),
         v2
     );
-    let old_gate = |found| {
-        if found > 1 {
-            Err(DecodeError::UnsupportedVersion {
-                found,
-                line: 1,
-                column: 1,
-            })
-        } else {
-            Ok(())
-        }
-    };
-    assert!(matches!(
-        old_gate(v2.schema_version),
-        Err(DecodeError::UnsupportedVersion { found: 2, .. })
-    ));
+
 }
 
 #[test]

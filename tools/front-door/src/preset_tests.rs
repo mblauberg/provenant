@@ -4720,7 +4720,7 @@ mod planner_front_end {
             ("scope-then-run", scoped, & ["plan", "synthesis", "scope", "ready", "run"][..], Some("ready")),
         ] {
             let expansion = run(&layers(PlanMode::On, None), name, "brief", params.clone());
-            assert_eq!(ids(&expansion), expected, "{name}");
+            assert_eq!(ids(&expansion).iter().map(String::as_str).collect::<Vec<_>>(), expected.to_vec(), "{name}");
             let nodes = expansion.document["nodes"].as_array().unwrap();
             let planner = nodes.iter().find(|node| node["id"] == "plan").unwrap();
             assert_eq!(route(planner)["alias"], "principal", "{name}");
