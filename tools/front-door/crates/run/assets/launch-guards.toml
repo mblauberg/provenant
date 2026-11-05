@@ -354,8 +354,13 @@ reason = "The adapter, registered account and continuation must match the select
 
 [[guard]]
 site = "providers/src/launch.rs#admit"
-boundary = "unclassified"
-reason = "Non-absolute executable, home or working-directory inputs are refused and require a safe fallback or boundary classification."
+boundary = "credentials"
+reason = "The host home must be absolute so credential exclusions are evaluated against the selected host identity."
+
+[[guard]]
+site = "providers/src/launch.rs#admit"
+boundary = "authority"
+reason = "Executable and working-directory paths must be absolute to bind the launch to the selected executable and granted working directory."
 
 [[guard]]
 site = "providers/src/launch.rs#tool_search_path"
