@@ -58,6 +58,7 @@ struct FakeOwner {
     integration_heads: VecDeque<String>,
     source_commits: Vec<Option<String>>,
     equal_range: bool,
+    no_review_base: bool,
     read_roots: Vec<Vec<String>>,
     distinct_from: Vec<Vec<String>>,
     family_peers: Vec<Vec<String>>,
@@ -209,8 +210,17 @@ impl AttemptOwner for FakeOwner {
         Ok(Some("https://example.invalid/pr/1".into()))
     }
 
-    fn equal_review_range(&mut self, _: &str) -> Result<bool, Self::Error> {
-        Ok(self.equal_range)
+    fn review_range(&mut self, _: &str, _: bool) -> Result<ReviewRange, Self::Error> {
+        Ok(if self.equal_range {
+            ReviewRange::Resolved {
+                base: "1".repeat(40),
+                head: "1".repeat(40),
+            }
+        } else if self.no_review_base {
+            ReviewRange::NoBase
+        } else {
+            ReviewRange::Unknown
+        })
     }
 
     fn observe_or_start(
@@ -8343,40 +8353,113 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
 fn equal_review_range_warns_on_review_nodes() {
     let mut review = node("review", route("review"));
     review.role = Some("lens.correctness-spec".into());
+    let mut synthesis = node("synthesis", route("review"));
+    synthesis.role = Some("review.synthesis".into());
+    synthesis.depends_on = vec!["review".into()];
     let mut other = node("other", route("other"));
     other.role = Some("scout".into());
+    other.depends_on = vec!["synthesis".into()];
+    let mut gate = gate_node(GateCondition::Verdict {
+        extra: Default::default(),
+        expected: "VERDICT: PASS".into(),
+        threshold: VerdictThreshold::All,
+    });
+    gate.depends_on = vec!["synthesis".into()];
+    gate.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "synthesis".into(),
+        outputs: vec![OutputKind::Verdict],
+    }];
+    let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
     let mut owner = FakeOwner {
         equal_range: true,
         observations: [
-            terminal_from(
-                "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
-                "host/one",
-            ),
-            terminal_from(
-                "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
-                "host/two",
-            ),
+            terminal_from(pass, "host/one"),
+            terminal_from(pass, "host/two"),
+            terminal_from(pass, "host/three"),
         ]
         .into(),
         ..Default::default()
     };
     let run = advance(
-        &graph(vec![review, other]),
+        &graph(vec![review, synthesis, other, gate]),
         &mut owner,
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    assert_eq!(
-        run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings,
-        ["equal_base_and_head: review range is empty"]
-    );
+    for progress in &run.checkpoint.nodes[..2] {
+        let outputs = progress.outputs.as_ref().unwrap();
+        assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: INCONCLUSIVE"));
+        assert!(
+            outputs
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(&format!(
+                    "base {}, head {}",
+                    "1".repeat(40),
+                    "1".repeat(40)
+                )))
+        );
+    }
     assert!(
-        run.checkpoint.nodes[1]
+        run.checkpoint.nodes[2]
             .outputs
             .as_ref()
             .unwrap()
             .warnings
             .is_empty()
+    );
+    assert!(!run.checkpoint.nodes[3].gate.as_ref().unwrap().passed);
+
+    let mut review = node("review", route("review"));
+    review.role = Some("lens.correctness-spec".into());
+    let mut owner = FakeOwner {
+        no_review_base: true,
+        observations: [terminal_from(pass, "host/one")].into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![review]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let outputs = run.checkpoint.nodes[0].outputs.as_ref().unwrap();
+    assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: PASS"));
+    assert!(
+        outputs
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no base was resolved"))
+    );
+    assert!(
+        !outputs
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("equal_base_and_head"))
+    );
+
+    let mut review = node("review", route("review"));
+    review.role = Some("lens.correctness-spec".into());
+    let malformed =
+        findings_text(r#"{"id":"F1","severity":1,"file":1,"summary":1,"status":1,"line":-1}"#);
+    let mut owner = FakeOwner {
+        equal_range: true,
+        observations: [terminal_from(&malformed, "host/one")].into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![review]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let outputs = run.checkpoint.nodes[0].outputs.as_ref().unwrap();
+    assert!(
+        outputs
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("equal_base_and_head"))
     );
 }
 

@@ -4277,10 +4277,12 @@ impl BoundGraphOwner<'_> {
         let subject = provenant_core::GitOid::parse(subject).map_err(|error| {
             ReviewResolveError::Failed(format!("invalid pinned review subject: {error}"))
         })?;
-        let base = self
+        let resolved_base = self
             .integration_base
-            .and_then(|bases| bases.review.or(bases.integration))
-            .unwrap_or(subject);
+            .and_then(|bases| bases.review.or(bases.integration));
+        // The checkpoint's review resolution requires a commit, but the
+        // fallback must not pretend an unresolved base describes an empty diff.
+        let base = resolved_base.unwrap_or(subject);
         let directory = spec.worktree.as_deref().map_or_else(
             || self.factory.cwd.clone(),
             |path| self.factory.cwd.join(path),
@@ -4290,12 +4292,19 @@ impl BoundGraphOwner<'_> {
                 .map_err(|error| {
                     ReviewResolveError::Failed(format!("read review configuration: {error}"))
                 })?;
-        let measured = routing.review.size.measure(
-            spec.kind.as_deref(),
-            &base.to_string(),
-            &subject.to_string(),
-            &mut |args| self.review_git(&directory, args),
-        );
+        let measured = if resolved_base.is_some() {
+            routing.review.size.measure(
+                spec.kind.as_deref(),
+                &base.to_string(),
+                &subject.to_string(),
+                &mut |args| self.review_git(&directory, args),
+            )
+        } else {
+            provenant_routing::Measured {
+                size: None,
+                warning: Some("no review base was resolved; size unknown".into()),
+            }
+        };
         Ok(ReviewMeasure {
             routing,
             directory,
@@ -4601,10 +4610,15 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.prior_models(attempts)
     }
 
-    fn equal_review_range(&mut self, reference: &str) -> Result<bool, Self::Error> {
+    fn review_range(
+        &mut self,
+        reference: &str,
+        explicit_base: bool,
+    ) -> Result<provenant_fabric_runtime::graph::ReviewRange, Self::Error> {
+        use provenant_fabric_runtime::graph::ReviewRange;
         let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
         if host != self.factory.context.identity.host.to_string() {
-            return Ok(false);
+            return Ok(ReviewRange::Unknown);
         }
         let owner = BinaryRunOwner {
             factory: self.factory,
@@ -4626,11 +4640,20 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(FacadeError::StateCorrupt)?;
-        Ok(task
-            .base
-            .as_ref()
-            .zip(task.head.as_ref())
-            .is_some_and(|(base, head)| base == head))
+        if !explicit_base
+            && self
+                .integration_base
+                .is_none_or(|bases| bases.review.is_none() && bases.integration.is_none())
+        {
+            return Ok(ReviewRange::NoBase);
+        }
+        Ok(match task.base.as_ref().zip(task.head.as_ref()) {
+            Some((base, head)) => ReviewRange::Resolved {
+                base: base.clone(),
+                head: head.clone(),
+            },
+            None => ReviewRange::Unknown,
+        })
     }
     fn respect_ci_wake(&self) -> bool {
         self.tick

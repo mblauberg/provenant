@@ -662,7 +662,12 @@ pub(crate) mod peer_tests {
             let reference = match observation {
                 graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("missing attempt reference")?,
             };
-            assert_eq!(graph_owner.equal_review_range(&reference)?, expected_base == &head);
+            let range = graph_owner.review_range(&reference, review_base.is_some())?;
+            if review_base.is_none() {
+                assert_eq!(range, graph::ReviewRange::NoBase);
+            } else {
+                assert_eq!(range, graph::ReviewRange::Resolved { base: expected_base.clone(), head: head.clone() });
+            }
         }
         Ok(())
     }

@@ -870,4 +870,7 @@ preset's `base`. When `base` is empty, the review uses the graph's pinned
 integration base if available, otherwise the source commit itself, preserving
 launches in repositories without `origin/HEAD`. Set `base` to the intended
 comparison commit for a nonempty range. An `equal_base_and_head` node warning
-means that comparison has no commit range to review.
+names both commits when that comparison has no commit range to review. The host
+sets the review verdict to inconclusive, even if the agent reported a pass. When
+no base was resolved, the host reports that separately; the source fallback does
+not identify an empty review range.
