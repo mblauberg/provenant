@@ -149,19 +149,6 @@ fn stderr_of(child: &mut Child) -> Result<String> {
     Ok(text)
 }
 
-#[allow(clippy::print_stderr)] // Preserve the final readiness observation on failure.
-fn until(timeout: Duration, condition: impl FnMut() -> bool) -> bool {
-    match provenant_test_support::wait_for("build slot condition", timeout, condition, |ready| {
-        *ready
-    }) {
-        Ok(_) => true,
-        Err(error) => {
-            eprintln!("{error}");
-            false
-        }
-    }
-}
-
 fn finish(child: &mut Child, timeout: Duration) -> Result<bool> {
     Ok(until_exit(child, timeout)?.success())
 }
@@ -198,11 +185,16 @@ fn more_builds_than_slots_compile_serially() -> Result {
         .map(|_| rig.held_build(1))
         .collect::<Result<Vec<_>>>()?;
     for started in 1..=4 {
-        assert!(until(Duration::from_secs(30), || {
-            rig.log().is_ok_and(|log| {
-                log.iter().filter(|line| line.starts_with("start ")).count() >= started
-            })
-        }));
+        assert!(provenant_test_support::wait_for(
+            "build slot readiness",
+            Duration::from_secs(30),
+            || {
+                rig.log().is_ok_and(|log| {
+                    log.iter().filter(|line| line.starts_with("start ")).count() >= started
+                })
+            },
+            |ready| *ready
+        )?);
         rig.release()?;
     }
     for child in &mut children {
@@ -230,11 +222,16 @@ fn two_slots_allow_two_builds_at_once_and_no_more() -> Result {
         .map(|_| rig.held_build(2))
         .collect::<Result<Vec<_>>>()?;
     for started in 2..=4 {
-        assert!(until(Duration::from_secs(30), || {
-            rig.log().is_ok_and(|log| {
-                log.iter().filter(|line| line.starts_with("start ")).count() >= started
-            })
-        }));
+        assert!(provenant_test_support::wait_for(
+            "build slot readiness",
+            Duration::from_secs(30),
+            || {
+                rig.log().is_ok_and(|log| {
+                    log.iter().filter(|line| line.starts_with("start ")).count() >= started
+                })
+            },
+            |ready| *ready
+        )?);
         rig.release()?;
     }
     rig.release()?;
@@ -257,21 +254,39 @@ fn waiting_commands_keep_separate_markers() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
-    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    assert!(provenant_test_support::wait_for(
+        "holder started",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
     let mut first = rig.held_build(1)?;
     let mut second = rig.held_build(1)?;
-    assert!(until(Duration::from_secs(20), || rig.markers().len() == 2));
+    provenant_test_support::wait_for(
+        "two waiting markers",
+        Duration::from_secs(20),
+        || rig.markers(),
+        |markers| markers.len() == 2,
+    )?;
     holder.kill()?;
     holder.wait()?;
     // The first to finish removes only its own marker.
-    assert!(until(Duration::from_secs(30), || {
-        rig.started("start") && rig.markers().len() == 1
-    }));
+    assert!(provenant_test_support::wait_for(
+        "build slot readiness",
+        Duration::from_secs(30),
+        || { rig.started("start") && rig.markers().len() == 1 },
+        |ready| *ready
+    )?);
     rig.release()?;
-    assert!(until(Duration::from_secs(30), || {
-        rig.log()
-            .is_ok_and(|log| log.iter().filter(|line| line.starts_with("start ")).count() == 2)
-    }));
+    assert!(provenant_test_support::wait_for(
+        "build slot readiness",
+        Duration::from_secs(30),
+        || {
+            rig.log()
+                .is_ok_and(|log| log.iter().filter(|line| line.starts_with("start ")).count() == 2)
+        },
+        |ready| *ready
+    )?);
     rig.release()?;
     assert!(finish(&mut first, Duration::from_secs(30))?);
     assert!(finish(&mut second, Duration::from_secs(30))?);
@@ -284,25 +299,45 @@ fn a_killed_build_releases_its_slot_and_the_wait_is_reported() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
-    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    assert!(provenant_test_support::wait_for(
+        "holder started",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
     let mut waiter = rig.shim(1, &["build"])?;
     let slots = BuildSlots::open(&rig.state)?;
-    assert!(until(Duration::from_secs(20), || slots.held(1) == 1));
-    assert!(until(Duration::from_secs(20), || {
-        rig.markers()
-            .iter()
-            .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("slot ")))
-    }));
+    provenant_test_support::wait_for(
+        "slot held",
+        Duration::from_secs(20),
+        || slots.held(1),
+        |held| *held == 1,
+    )?;
+    assert!(provenant_test_support::wait_for(
+        "build slot readiness",
+        Duration::from_secs(20),
+        || {
+            rig.markers()
+                .iter()
+                .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("slot ")))
+        },
+        |ready| *ready
+    )?);
     assert!(
         !rig.started("start"),
         "the second build waits while the first holds the slot"
     );
     // The host reads this to show the lane as waiting in `lanes` and `status`.
-    assert!(until(Duration::from_secs(20), || {
-        rig.markers()
-            .iter()
-            .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("slot ")))
-    }));
+    assert!(provenant_test_support::wait_for(
+        "build slot readiness",
+        Duration::from_secs(20),
+        || {
+            rig.markers()
+                .iter()
+                .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("slot ")))
+        },
+        |ready| *ready
+    )?);
     // SIGKILL leaves no chance to release anything: the kernel does.
     holder.kill()?;
     holder.wait()?;
@@ -349,7 +384,12 @@ fn a_wait_gives_up_after_the_configured_time_naming_the_slots() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
-    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    assert!(provenant_test_support::wait_for(
+        "holder started",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
     let begun = Instant::now();
     let mut waiter = rig.command(1, 1, &["build"]).spawn()?;
     assert!(
@@ -407,7 +447,12 @@ fn a_spoofed_marker_does_not_skip_the_gate_unless_it_names_a_live_ancestor() -> 
     let rig = Rig::new()?;
     rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
-    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    assert!(provenant_test_support::wait_for(
+        "holder started",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
     let holder_pid = holder.id().to_string();
     // The holder is live but not an ancestor of these shims; nor is init, a
     // pid that does not exist, or text.
@@ -439,7 +484,12 @@ fn a_marker_naming_a_live_ancestor_that_is_not_a_shim_does_not_skip_the_gate() -
     let rig = Rig::new()?;
     rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
-    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    assert!(provenant_test_support::wait_for(
+        "holder started",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
     let result = rig.log.with_extension("result");
     // The shell stays the shim's parent: the shim is not its last command.
     let script = format!(
@@ -465,7 +515,12 @@ fn a_marker_naming_a_live_ancestor_that_is_not_a_shim_does_not_skip_the_gate() -
         "{pid}:{}",
         fact.identity.native_start
     )?;
-    assert!(until(Duration::from_secs(30), || result.exists()));
+    assert!(provenant_test_support::wait_for(
+        "shell result written",
+        Duration::from_secs(30),
+        || result.exists(),
+        |ready| *ready
+    )?);
     assert!(
         fs::read_to_string(&result)?.contains("exit 1"),
         "the build waited for the held slot and gave up"
@@ -482,7 +537,12 @@ fn the_cargo_lock_wait_and_the_slot_wait_share_one_deadline() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
-    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    assert!(provenant_test_support::wait_for(
+        "holder started",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
     let profile = rig.state.join("target/debug");
     fs::create_dir_all(&profile)?;
     let lock = fs::File::create(profile.join(".cargo-lock"))?;
@@ -495,13 +555,22 @@ fn the_cargo_lock_wait_and_the_slot_wait_share_one_deadline() -> Result {
     // Wait for the lock marker before consuming part of the shared deadline.
     // The slot never frees, so resetting its full budget would exceed the
     // one-budget bound after the Cargo lock is released.
-    assert!(until(Duration::from_secs(20), || {
-        rig.markers()
-            .iter()
-            .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("lock ")))
-    }));
-    assert!(until(Duration::from_secs(20), || began.elapsed()
-        >= Duration::from_secs(2)));
+    assert!(provenant_test_support::wait_for(
+        "build slot readiness",
+        Duration::from_secs(20),
+        || {
+            rig.markers()
+                .iter()
+                .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("lock ")))
+        },
+        |ready| *ready
+    )?);
+    assert!(provenant_test_support::wait_for(
+        "build slot readiness",
+        Duration::from_secs(20),
+        || began.elapsed() >= Duration::from_secs(2),
+        |ready| *ready
+    )?);
     drop(lock);
     assert!(!finish(&mut waiter, Duration::from_secs(30))?);
     let total = began.elapsed();
@@ -521,7 +590,12 @@ fn a_terminated_shim_passes_the_signal_to_its_build() -> Result {
         let rig = Rig::new()?;
         rig.provision(1)?;
         let mut shim = rig.shim(1, &["check"])?;
-        assert!(until(Duration::from_secs(20), || rig.started("hung")));
+        assert!(provenant_test_support::wait_for(
+            "build slot readiness",
+            Duration::from_secs(20),
+            || rig.started("hung"),
+            |ready| *ready
+        )?);
         let pid = rig
             .log()?
             .iter()
@@ -534,7 +608,12 @@ fn a_terminated_shim_passes_the_signal_to_its_build() -> Result {
         let status = until_exit(&mut shim, Duration::from_secs(20))?;
         assert!(!status.success(), "{signal}: the build was interrupted");
         assert!(
-            until(Duration::from_secs(10), || !alive(&pid)),
+            provenant_test_support::wait_for(
+                "build slot readiness",
+                Duration::from_secs(10),
+                || !alive(&pid),
+                |ready| *ready
+            )?,
             "{signal}: the build kept running after the shim was signalled"
         );
     }
@@ -546,7 +625,12 @@ fn commands_that_do_not_compile_and_nested_cargo_never_queue() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
-    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    assert!(provenant_test_support::wait_for(
+        "holder started",
+        Duration::from_secs(20),
+        || rig.started("hung"),
+        |ready| *ready
+    )?);
     // Not a compiling subcommand: runs at once although the only slot is held.
     let mut format = rig.shim(1, &["fmt"])?;
     assert!(finish(&mut format, Duration::from_secs(10))?);
