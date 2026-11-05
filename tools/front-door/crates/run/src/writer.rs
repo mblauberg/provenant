@@ -1169,13 +1169,13 @@ mod cargo_setup_tests {
                 let common = Directory::open_anchor(&path).unwrap();
                 let _lock = queued_setup_lock(
                     &common,
-                    10,
+                    30,
                     &CancelToken::new(),
                     &provenant_os::clock::SystemClock::new(),
                 )
                 .unwrap();
                 send.send(index).unwrap();
-                std::thread::sleep(Duration::from_millis(25));
+                std::thread::sleep(Duration::from_millis(125));
             }));
             let until = std::time::Instant::now() + Duration::from_secs(5);
             loop {
@@ -1196,10 +1196,14 @@ mod cargo_setup_tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
+        let released = std::time::Instant::now();
         drop(initial);
         let order: Vec<_> = (0..10)
-            .map(|_| receive.recv_timeout(Duration::from_secs(10)).unwrap())
+            .map(|_| receive.recv_timeout(Duration::from_secs(30)).unwrap())
             .collect();
+        // One second is a scaled old bound: the last waiter remains queued
+        // beyond it rather than losing its place or being rejected.
+        assert!(released.elapsed() >= Duration::from_secs(1));
         for thread in threads {
             thread.join().unwrap();
         }
@@ -1238,15 +1242,40 @@ mod cargo_setup_tests {
         }
         let directory = Directory::open_anchor(temp.path())?;
         let held = directory.try_lock_existing(name, LockMode::Exclusive);
+        let path = temp.path().to_owned();
+        let waiter = std::thread::spawn(move || {
+            let directory = Directory::open_anchor(&path).map_err(|error| error.to_string())?;
+            queued_setup_lock(
+                &directory,
+                30,
+                &CancelToken::new(),
+                &provenant_os::clock::SystemClock::new(),
+            )
+            .map(drop)
+            .map_err(|error| error.to_string())
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let queued = loop {
+            let count = std::fs::read_dir(temp.path().join("provenant-lane-setup-queue"))
+                .map(|entries| {
+                    entries
+                        .filter_map(std::result::Result::ok)
+                        .any(|entry| entry.file_name().to_string_lossy().starts_with("ticket-"))
+                })
+                .unwrap_or(false);
+            if count {
+                break true;
+            }
+            if waiter.is_finished() || std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
         child.kill()?;
         child.wait()?;
+        assert!(queued, "waiter did not enter the queue");
         assert!(matches!(held, Err(FsError::LockTimeout { .. })));
-        let _recovered = queued_setup_lock(
-            &directory,
-            5,
-            &CancelToken::new(),
-            &provenant_os::clock::SystemClock::new(),
-        )?;
+        waiter.join().map_err(|_| "waiter panicked")??;
         Ok(())
     }
 
