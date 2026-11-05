@@ -1838,7 +1838,7 @@ impl Decoded {
     }
 }
 fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallError> {
-    let receipt: InstallReceipt =
+    let mut receipt: InstallReceipt =
         provenant_records::decode_v1(bytes, Limits::CONFIG).map_err(InstallError::ReceiptDecode)?;
     let state_root = targets.roots.state.as_path();
     normal_absolute(&receipt.bin_dir.to_path_buf()?)?;
