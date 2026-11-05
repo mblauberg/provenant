@@ -540,6 +540,20 @@ impl RunError {
                         ));
                     }
                 }
+                // Census evidence can name processes and host paths. The local
+                // operator needs it to understand the uncertainty, but it is
+                // not an approved fact for remote peers.
+                if let WorktreeError::CensusUnknown { path, detail } = error
+                    && matches!(
+                        destination,
+                        provenant_records::diagnostic::Destination::Local
+                    )
+                {
+                    let scope = safe_path(path, destination)
+                        .unwrap_or_else(|| "the requested worktree".into());
+                    diagnostic = diagnostic
+                        .detail(format!("writer occupancy is unknown for {scope}: {detail}"));
+                }
                 if let WorktreeError::BranchCollision { existing } = error {
                     diagnostic = diagnostic
                         .detail(format!("branch name collides with existing ref {existing}"));
@@ -815,5 +829,26 @@ mod diagnostic_projection_tests {
                 .unwrap()
                 .contains("/checkout")
         );
+    }
+
+    #[test]
+    fn unknown_census_diagnostic_names_local_scope_and_evidence() {
+        let error = RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::CensusUnknown {
+                path: PathBuf::from("/checkout/tree"),
+                detail: "process 123: cwd unreadable at /private/other".into(),
+            },
+        );
+        let local = error.diagnostic(Destination::Local);
+        let detail = local.detail.unwrap();
+        assert!(detail.contains("/checkout/tree"));
+        assert!(detail.contains("process 123: cwd unreadable at /private/other"));
+        let remote = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        let rendered = serde_json::to_string(&remote).unwrap();
+        assert!(!rendered.contains("/private/other"));
+        assert!(!rendered.contains("/checkout/tree"));
     }
 }
