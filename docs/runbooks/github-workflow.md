@@ -645,3 +645,10 @@ Afterwards:
    automatic merged-head cleanup needs no separate per-branch authority. Forced
    deletion, and deletion of an unmerged branch on either side, remains an
    explicit user gate.
+
+### Event intake (in progress)
+
+The event admission component records authenticated delivery hints and can
+coalesce pending hints. It is not yet connected to an HTTP receiver or a
+GitHub reconciliation worker. Continue using the existing `gh`-based commands;
+there is no event-intake configuration or operational service yet.

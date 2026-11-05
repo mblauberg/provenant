@@ -11,6 +11,7 @@ mod compose_tests;
 mod console;
 mod disk;
 mod disk_guard;
+pub mod event_intake;
 mod experiment;
 mod fabric;
 mod tick;
