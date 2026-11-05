@@ -1093,7 +1093,10 @@ pub fn expand_with(
     )
     .to_string();
     let id = format!("preset-{}", &digest[7..39]);
-    check_expansion(&nodes, "", 0)?;
+    let count = check_expansion(&nodes, "", 0)?;
+    if let Some(reason) = layers.graph_limits.nodes_bound().refusal(count) {
+        return Err(reason);
+    }
     let bases = layers.review_bases.take();
     if bases.len() > 1 {
         return Err(format!(
@@ -2827,9 +2830,6 @@ fn check_expansion(nodes: &[Value], prefix: &str, depth: usize) -> Result<usize,
                 check_expansion(children, &format!("{id}--r{rounds}--"), depth + 1)?
                     .saturating_mul(rounds),
             );
-        }
-        if count > 512 {
-            return Err("preset expands to more than 512 nodes".into());
         }
     }
     Ok(count)

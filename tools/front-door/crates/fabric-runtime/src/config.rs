@@ -275,6 +275,38 @@ pub struct GraphLimits {
     )]
     pub concurrency: Option<usize>,
 }
+
+/// One named host graph limit, including its configuration owner.
+pub struct GraphBound<'a> {
+    pub name: &'a str,
+    pub maximum: usize,
+    pub owner: &'static str,
+}
+
+impl GraphBound<'_> {
+    pub fn refusal(&self, actual: usize) -> Option<String> {
+        (actual > self.maximum).then(|| {
+            format!(
+                "limits.{}={} reached ({}); set by {}",
+                self.name, self.maximum, actual, self.owner
+            )
+        })
+    }
+}
+
+impl GraphLimits {
+    pub fn bound<'a>(&self, name: &'a str, maximum: usize) -> GraphBound<'a> {
+        GraphBound {
+            name,
+            maximum,
+            owner: "domains.fabric.graph.limits",
+        }
+    }
+
+    pub fn nodes_bound(&self) -> GraphBound<'static> {
+        self.bound("nodes", self.nodes)
+    }
+}
 fn serialise_concurrency<S: serde::Serializer>(
     value: &Option<usize>,
     serializer: S,

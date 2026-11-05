@@ -58,6 +58,9 @@ source `parameter`, an `equals_any` list, a `value` and an `otherwise` value.
 Interpolation uses the matching value when the destination parameter is absent;
 an explicitly supplied parameter takes precedence.
 
+Preset expansion checks the configured host graph node limit before launch;
+the refusal names the limit and its configuration owner.
+
 Typed parameters without defaults are required. Missing-value errors name the
 parameter; `--set` and parameter files satisfy it and retain type validation.
 Injected `read_roots` is optional for a nested preset that does not declare it;

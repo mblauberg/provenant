@@ -1144,6 +1144,19 @@ stages = [
             format!("schema_version = 1\n[domains.fabric.graph.limits]\n{key} = 1\n"),
         )?;
         let explained = run(true)?;
+        if key == "nodes" {
+            assert!(!explained.status.success(), "{key}");
+            let explained: serde_json::Value = serde_json::from_slice(&explained.stdout)?;
+            let reason = explained["error"]["message"]
+                .as_str()
+                .ok_or("missing compile refusal reason")?;
+            assert!(reason.contains("limits.nodes=1"), "{reason}");
+            let submitted = run(false)?;
+            assert!(!submitted.status.success(), "{key}");
+            let submitted: serde_json::Value = serde_json::from_slice(&submitted.stdout)?;
+            assert_eq!(submitted["error"]["message"], reason);
+            continue;
+        }
         assert!(
             explained.status.success(),
             "{key}: {}",

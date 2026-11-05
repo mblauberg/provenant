@@ -1717,7 +1717,7 @@ fn preset_limits_and_composition_wiring() {
     assert!(
         expand(&large, "outer", "brief", &[])
             .unwrap_err()
-            .contains("512 nodes")
+            .contains("limits.nodes=512")
     );
     let mut deep = Layers::empty();
     for i in 0..9 {
@@ -2031,6 +2031,21 @@ fn composite_exports_are_checked_when_a_preset_is_compiled() {
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document).unwrap();
     assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+}
+
+#[test]
+fn preset_node_limit_uses_the_host_admission_bound() {
+    let mut layers = Layers::empty();
+    layers.graph_limits.nodes = 1;
+    let error = expand(&layers, "chain", "brief", &[]).unwrap_err();
+    let document = expand(&Layers::empty(), "chain", "brief", &[])
+        .unwrap()
+        .document;
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document).unwrap();
+    assert_eq!(error, document.admit(&layers.graph_limits).unwrap_err());
+    assert!(error.contains("limits.nodes=1"), "{error}");
+    assert!(error.contains("domains.fabric.graph.limits"), "{error}");
 }
 
 #[test]
