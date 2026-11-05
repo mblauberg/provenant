@@ -1023,6 +1023,26 @@ fn apply_node_failure(progress: &mut NodeProgress, code: &str, reason: String) {
     progress.advance_error = Some(reason);
 }
 
+/// Record the result of a settled gate without observing external state.
+fn apply_gate_result(progress: &mut NodeProgress, reason: Option<String>, on_fail: Option<String>) {
+    let passed = reason.is_none();
+    progress.state = if passed {
+        NodeState::Succeeded
+    } else {
+        NodeState::Failed
+    };
+    progress.gate = Some(GateResult {
+        extra: Default::default(),
+        passed,
+        reason: reason.map(|reason| bounded(&reason, OUTPUT_FIELD_BYTES)),
+        on_fail,
+    });
+    progress.outputs = Some(ci::outputs(passed, progress.ci.as_ref()));
+    if let Some(ci) = progress.ci.as_mut() {
+        ci.wake_at = None;
+    }
+}
+
 /// Apply a successful terminal attempt observation without I/O.
 fn apply_attempt_success(progress: &mut NodeProgress) {
     progress.state = NodeState::Succeeded;
@@ -1709,25 +1729,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 } else {
                     gate_failure(condition, node, &checkpoint, &positions, &effective_budget)
                 };
-                let progress = &mut checkpoint.nodes[node_index];
-                progress.state = if reason.is_none() {
-                    NodeState::Succeeded
-                } else {
-                    NodeState::Failed
-                };
-                progress.gate = Some(GateResult {
-                    extra: Default::default(),
-                    passed: reason.is_none(),
-                    reason: reason.map(|reason| bounded(&reason, OUTPUT_FIELD_BYTES)),
-                    on_fail: node.on_fail.clone(),
-                });
-                progress.outputs = Some(ci::outputs(
-                    progress.state == NodeState::Succeeded,
-                    progress.ci.as_ref(),
-                ));
-                if let Some(ci) = progress.ci.as_mut() {
-                    ci.wake_at = None;
-                }
+                apply_gate_result(
+                    &mut checkpoint.nodes[node_index],
+                    reason,
+                    node.on_fail.clone(),
+                );
                 asks::refresh_wake(&mut checkpoint);
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 continue;

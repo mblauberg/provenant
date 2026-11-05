@@ -9818,3 +9818,24 @@ fn node_failure_transition_preserves_attempt_history() {
     assert_eq!(progress.advance_error.as_deref(), Some("account is pinned"));
     assert_eq!(progress.attempts, attempts);
 }
+
+#[test]
+fn gate_transition_records_result_without_owner_or_journal() {
+    let mut progress: NodeProgress = serde_json::from_value(serde_json::json!({
+        "id":"gate", "state":"running", "worktree":null, "attempts":[],
+        "ci":{"state":"pending", "summary":"checks pending", "wake_at":"2026-11-06T00:00:00.000000Z"}
+    }))
+    .unwrap();
+    apply_gate_result(
+        &mut progress,
+        Some("checks failed".into()),
+        Some("repair".into()),
+    );
+    assert_eq!(progress.state, NodeState::Failed);
+    let gate = progress.gate.as_ref().unwrap();
+    assert!(!gate.passed);
+    assert_eq!(gate.reason.as_deref(), Some("checks failed"));
+    assert_eq!(gate.on_fail.as_deref(), Some("repair"));
+    assert!(progress.ci.as_ref().unwrap().wake_at.is_none());
+    assert!(progress.outputs.is_some());
+}
