@@ -41,18 +41,19 @@ pub fn collect(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, cancel, false)
+    collect_impl(context, lanes, policy, cancel, false, None)
 }
 
 /// Collect against [`list_for_gc`], checking candidate cleanliness under
 /// writer exclusion before using it to authorise cleanup.
 pub fn collect_lazy(
     context: &WorktreeContext<'_>,
+    facts: &RepoFacts,
     lanes: &[WorktreeInfo],
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, cancel, true)
+    collect_impl(context, lanes, policy, cancel, true, Some(facts))
 }
 
 fn collect_impl(
@@ -61,13 +62,23 @@ fn collect_impl(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
     lazy_cleanliness: bool,
+    facts: Option<&RepoFacts>,
 ) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
     // A preview describes one inventory snapshot. Applied cleanup refreshes
     // the inventory under custody before mutation.
     let entries = {
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
-        read_worktrees(context, cancel)?
+        context.repo.revalidate()?;
+        let snapshot = facts.and_then(|facts| facts.take_inventory(context));
+        if policy.dry_run {
+            match snapshot {
+                Some(entries) => entries,
+                None => read_worktrees(context, cancel)?,
+            }
+        } else {
+            read_worktrees(context, cancel)?
+        }
     };
     // Preview all candidates against one census snapshot. Applying still
     // refreshes under custody immediately before each mutation.

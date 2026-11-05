@@ -120,16 +120,17 @@ pub fn list_streaming(
     cancel: &CancelToken,
     report: impl FnMut(usize, Option<&WorktreeInfo>),
 ) -> Result<Vec<WorktreeObservation>, WorktreeError> {
-    list_impl(context, cancel, report, true)
+    list_impl(context, cancel, report, true, None)
 }
 
 /// Inventory for GC. Cleanliness is checked only for candidates after the
 /// policy and custody checks, rather than running Git in every checkout.
 pub fn list_for_gc(
     context: &WorktreeContext<'_>,
+    facts: &RepoFacts,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    Ok(list_impl(context, cancel, |_, _| {}, false)?
+    Ok(list_impl(context, cancel, |_, _| {}, false, Some(facts))?
         .into_iter()
         .map(|observation| observation.info)
         .collect())
@@ -140,12 +141,16 @@ fn list_impl(
     cancel: &CancelToken,
     mut report: impl FnMut(usize, Option<&WorktreeInfo>),
     eager_git: bool,
+    facts: Option<&RepoFacts>,
 ) -> Result<Vec<WorktreeObservation>, WorktreeError> {
     validate_binding(context)?;
     let entries = {
         let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
         context.repo.revalidate()?;
-        read_worktrees(context, cancel)?
+        match facts {
+            Some(facts) => facts.capture_inventory(context, cancel)?,
+            None => read_worktrees(context, cancel)?,
+        }
     };
     // A stale Git registration must not hide the remaining worktrees from GC.
     let candidates: Vec<_> = entries

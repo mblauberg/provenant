@@ -1,6 +1,62 @@
 //! Git worktree inventory parsing and Git invocations.
 use super::*;
 
+/// Command-scoped repository observations. A GC preview consumes its inventory
+/// snapshot; mutation paths always perform a fresh read while holding custody.
+#[derive(Default)]
+pub struct RepoFacts {
+    inventories: std::sync::Mutex<BTreeMap<PathBuf, InventorySnapshot>>,
+}
+
+struct InventorySnapshot {
+    device: u64,
+    inode: u64,
+    entries: Vec<GitWorktree>,
+}
+
+impl RepoFacts {
+    pub(super) fn capture_inventory(
+        &self,
+        context: &WorktreeContext<'_>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<GitWorktree>, WorktreeError> {
+        let _ = self.take_inventory(context);
+        let entries = read_worktrees(context, cancel)?;
+        self.remember_inventory(context, &entries);
+        Ok(entries)
+    }
+
+    fn remember_inventory(&self, context: &WorktreeContext<'_>, entries: &[GitWorktree]) {
+        let path = context.repo.common_git_dir();
+        let mut inventories = self
+            .inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        inventories.remove(path);
+        if let Ok(metadata) = std::fs::metadata(path) {
+            inventories.insert(
+                path.to_path_buf(),
+                InventorySnapshot {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                    entries: entries.to_vec(),
+                },
+            );
+        }
+    }
+
+    pub(super) fn take_inventory(&self, context: &WorktreeContext<'_>) -> Option<Vec<GitWorktree>> {
+        let snapshot = self
+            .inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(context.repo.common_git_dir())?;
+        let metadata = std::fs::metadata(context.repo.common_git_dir()).ok()?;
+        (snapshot.device == metadata.dev() && snapshot.inode == metadata.ino())
+            .then_some(snapshot.entries)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitWorktree {
     pub(crate) path: PathBuf,

@@ -674,6 +674,7 @@ fn gc_project(
     home: &Path,
     project: &Path,
     workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
     read_only: bool,
 ) -> Result<GcProject, Error> {
     with_context_mode(
@@ -699,7 +700,7 @@ fn gc_project(
                         .join("worktrees")
                         .join(context.binding.project_id().to_string()),
                 )?,
-                lanes: worktrees::list_for_gc(context, cancel)?,
+                lanes: worktrees::list_for_gc(context, facts, cancel)?,
             })
         },
     )
@@ -984,6 +985,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     } else {
         Some(collection_lock(&roots)?)
     };
+    let facts = worktrees::RepoFacts::default();
     let mut projects = Vec::new();
     let mut project_ids = Vec::new();
     let mut unobserved_projects = Vec::new();
@@ -1015,7 +1017,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             } else {
                 common
             };
-            match gc_project(&roots, &home, path, workers, command.dry_run) {
+            match gc_project(&roots, &home, path, workers, &facts, command.dry_run) {
                 Ok(project) => {
                     project_ids.push(project.binding.project_id());
                     projects.push(project);
@@ -1050,7 +1052,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             });
         }
         let primary = gc_primary_checkout(&repo, &executor, &runtime, &CancelToken::new())?;
-        let selected = gc_project(&roots, &home, primary, workers, command.dry_run)?;
+        let selected = gc_project(&roots, &home, primary, workers, &facts, command.dry_run)?;
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
@@ -1142,6 +1144,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     .map_err(|_| Error::Budget)?;
                 let mut report = worktrees::collect_lazy(
                     context,
+                    &facts,
                     &project.lanes,
                     &worktrees::WorktreeGcPolicy {
                         upstream: upstream.map(|(_, oid)| oid),

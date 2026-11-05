@@ -212,7 +212,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    for index in 0..40 {
+    for index in 0..100 {
         let path = fixture.root.join(format!("foreign-{index}"));
         fixture.run(&["worktree", "add", "--detach", path.to_str().ok_or("path")?])?;
     }
@@ -221,9 +221,11 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         calls: AtomicUsize::new(0),
     };
     context.executor = &git;
-    let lanes = list_for_gc(&context, &cancel())?;
+    let facts = RepoFacts::default();
+    let lanes = list_for_gc(&context, &facts, &cancel())?;
     let report = collect_lazy(
         &context,
+        &facts,
         &lanes,
         &WorktreeGcPolicy {
             upstream: None,
@@ -238,9 +240,27 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         &cancel(),
     )?;
     assert!(report.worktrees.removed.is_empty());
-    // One inventory read in list and one in collect, independent of the
-    // number of out-of-scope worktrees. No per-tree Git probes are needed.
-    assert_eq!(git.calls.load(Ordering::SeqCst), 2);
+    // A single command-scoped inventory serves both phases of a preview.
+    assert_eq!(git.calls.load(Ordering::SeqCst), 1);
+    let lanes = list_for_gc(&context, &facts, &cancel())?;
+    collect_lazy(
+        &context,
+        &facts,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| false,
+            no_live_lanes: &|_| false,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    // Applying discards the cached snapshot and reads again under custody.
+    assert_eq!(git.calls.load(Ordering::SeqCst), 3);
     Ok(())
 }
 
@@ -258,9 +278,11 @@ fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Err
         &cancel(),
     )?;
     fs::write(lane.path.join("untracked"), "keep")?;
-    let lanes = list_for_gc(&context, &cancel())?;
+    let facts = RepoFacts::default();
+    let lanes = list_for_gc(&context, &facts, &cancel())?;
     let report = collect_lazy(
         &context,
+        &facts,
         &lanes,
         &WorktreeGcPolicy {
             upstream: None,
@@ -320,9 +342,11 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
         rejected: AtomicUsize::new(0),
     };
     context.executor = &git;
-    let lanes = list_for_gc(&context, &cancel())?;
+    let facts = RepoFacts::default();
+    let lanes = list_for_gc(&context, &facts, &cancel())?;
     let report = collect_lazy(
         &context,
+        &facts,
         &lanes,
         &WorktreeGcPolicy {
             upstream: None,
@@ -366,9 +390,11 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
     let poison = add_poisoned_gitlink(&fixture, &lane.path, "sub", &marker)?;
     assert_raw_git_runs_poison_filter(&fixture, &poison)?;
     poison.arm()?;
-    let lanes = list_for_gc(&context, &cancel())?;
+    let facts = RepoFacts::default();
+    let lanes = list_for_gc(&context, &facts, &cancel())?;
     let report = collect_lazy(
         &context,
+        &facts,
         &lanes,
         &WorktreeGcPolicy {
             upstream: None,

@@ -16,6 +16,13 @@ relative to `tools/front-door/`.
 
 ## Custody
 
+### Repository facts in GC previews
+
+A GC command shares its worktree inventory between discovery and preview for
+each repository. The snapshot is tied to the common Git directory identity and
+is consumed once. Applied cleanup discards the snapshot and reads Git again
+under the repository lock before authorising mutations.
+
 ### Worktree census sessions
 
 Each command owns a census session. Within an unchanged observation epoch,
