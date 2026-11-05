@@ -215,6 +215,10 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
         facts.resolve_revision(&context, GitRevision::new("facts-ref~1")?, &cancel())?,
         initial
     );
+    assert_eq!(
+        facts.symbolic_revision(&context, GitRevision::new("facts-ref")?, &cancel())?,
+        Some("refs/heads/facts-ref".into())
+    );
     let inventory_limit = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
     assert!(RepoFacts::with_limits(inventory_limit, 0).is_err());
     assert!(RepoFacts::with_limits(0, provenant_os::git::REPO_FACT_SCALAR_LIMIT).is_err());
@@ -227,6 +231,12 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
     ));
     assert!(matches!(
         limited.resolve_revision(&context, GitRevision::new("facts-ref")?, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert!(matches!(
+        limited.symbolic_revision(&context, GitRevision::new("facts-ref")?, &cancel()),
         Err(WorktreeError::Utility(UtilityError::Truncated {
             stream: "stdout"
         }))

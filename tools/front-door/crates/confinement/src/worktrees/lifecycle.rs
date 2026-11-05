@@ -396,11 +396,16 @@ pub fn create(
     } else if let Some(base) = request.base.as_deref() {
         pin_revision(context, &facts, base, cancel)?
     } else {
-        let outcome = run_git(context, context.repo, GitRead::RevParseHead, cancel)?;
-        if exit_code(&outcome)? != 0 {
-            return Err(WorktreeError::InvalidOutput);
-        }
-        parse_oid(trim_ascii(&outcome.stdout.bytes))?
+        let head = GitRevision::new("HEAD").map_err(|_| WorktreeError::InvalidRequest)?;
+        facts
+            .resolve_revision(context, head, cancel)
+            .map_err(|error| {
+                if matches!(error, WorktreeError::NotFound) {
+                    WorktreeError::InvalidOutput
+                } else {
+                    error
+                }
+            })?
     };
     let worktree_root = match context
         .repo
@@ -632,18 +637,8 @@ pub(super) fn pin_revision(
     // root against the remote's advertisement and apply any operators to that.
     let (root, suffix) = provenant_core::split_revision_root(revision);
     let parsed = GitRevision::new(root).map_err(|_| WorktreeError::InvalidRequest)?;
-    let symbolic = run_git(
-        context,
-        context.repo,
-        GitRead::SymbolicRevision { revision: parsed },
-        cancel,
-    )?;
-    let symbolic_name = if exit_code(&symbolic)? == 0 {
-        std::str::from_utf8(trim_ascii(&symbolic.stdout.bytes))
-            .map_err(|_| WorktreeError::InvalidOutput)?
-    } else {
-        ""
-    };
+    let symbolic = facts.symbolic_revision(context, parsed, cancel)?;
+    let symbolic_name = symbolic.as_deref().unwrap_or("");
     let tracking = symbolic_name.starts_with("refs/remotes/");
     let remote_head = (tracking && !root.contains('/') && GitRefName::branch(root).is_ok())
         .then(|| format!("{root}/HEAD"));
