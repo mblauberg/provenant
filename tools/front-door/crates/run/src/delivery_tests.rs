@@ -2996,6 +2996,22 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         store.delivered(id, &call)?.map(|(_, delivered)| delivered),
         Some(receipt.clone())
     );
+    let mut blocked = receipt.clone();
+    blocked.state = failed_state(&RunError::PullRequestReconciliation {
+        reason: "pull request was closed without merging",
+        number: Some(7),
+    });
+    publish_pickup(&attempt, &fixture.request, &blocked)?;
+    assert_eq!(
+        store.delivered(id, &call)?.map(|(_, value)| value),
+        Some(blocked)
+    );
+    // The immutable success seal remains replayable after a later blocked pickup.
+    assert_eq!(deliver()?, receipt);
+    assert_eq!(
+        store.delivered(id, &call)?.map(|(_, value)| value),
+        Some(receipt.clone())
+    );
     assert_eq!(deliver()?, receipt);
     attempt.unlink(std::ffi::OsStr::new("delivery-pickup.json"))?;
     assert_eq!(deliver()?, receipt);
