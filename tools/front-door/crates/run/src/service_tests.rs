@@ -373,34 +373,18 @@ fn dispatch_replays_a_refusal_only_for_the_same_canonical_request() -> TestResul
     let context = context(temp.path())?;
     let store = RunStore::open(&context, &call)?;
     let service = Service::new(&store);
-    let accepted = service.dispatch(submission("review this code"), temp.path(), &call)?;
-    let request = store.request(accepted.run_id, &call)?;
     let operation_id = OperationId::parse("refused-dispatch")?;
     let diagnostic = provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
         .detail("writer scope refused")
         .next("inspect the worktree");
-    store.record_refusal(
-        &OperationRecord {
-            extra: Default::default(),
-            schema_version: 1,
-            project_id: context.project_id,
-            actor_id: context.actor_id,
-            operation_id: operation_id.clone(),
-            kind: OperationKind::Dispatch,
-            request_digest: request.digest()?,
-            run_id: provenant_core::RunId::from_bytes([44; 16]),
-            state: OperationState::Terminal,
-            refusal: Some(OperationRefusal {
-                extra: Default::default(),
-                diagnostic: diagnostic.clone(),
-                worktree: None,
-                refused_at: call.clock.wall_now()?,
-                request: Some(request),
-                chair: None,
-            }),
-        },
-        &call,
-    )?;
+    let mut original = submission("review this code");
+    original.operation_id = operation_id.clone();
+    let saved =
+        service.record_dispatch_refusal(original, temp.path(), diagnostic.clone(), None, &call)?;
+    assert!(matches!(
+        store.run(saved.run_id, &call),
+        Err(RunError::NotFound)
+    ));
     let mut replay = submission("review this code");
     replay.operation_id = operation_id.clone();
     assert!(matches!(
@@ -413,6 +397,28 @@ fn dispatch_replays_a_refusal_only_for_the_same_canonical_request() -> TestResul
         service.dispatch(different, temp.path(), &call),
         Err(RunError::OperationConflict)
     ));
+    Ok(())
+}
+
+#[test]
+fn dispatch_refusal_write_failure_does_not_create_a_run() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    store.db.execute_batch("CREATE TRIGGER fail_refusal BEFORE INSERT ON operations BEGIN SELECT RAISE(ABORT, 'injected refusal write failure'); END;")?;
+    let input = submission("review this code");
+    let operation = input.operation_id.clone();
+    let result = Service::new(&store).record_dispatch_refusal(
+        input,
+        temp.path(),
+        provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE").next("inspect the worktree"),
+        None,
+        &call,
+    );
+    assert!(matches!(result, Err(RunError::Sqlite(_))));
+    assert!(store.operation(&operation, &call)?.is_none());
+    assert!(store.refused_operations(None, &call)?.is_empty());
     Ok(())
 }
 

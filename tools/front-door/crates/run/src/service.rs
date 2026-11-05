@@ -7,6 +7,8 @@ use std::path::Path;
 pub struct Service<'a> {
     store: &'a RunStore,
 }
+type ContributionBranches =
+    std::collections::BTreeMap<provenant_core::TaskId, (String, &'static str)>;
 impl Service<'_> {
     /// Whether the lane access grants any write authority.
     pub fn has_writes(writer: bool, write_roots: &[std::path::PathBuf]) -> bool {
@@ -61,6 +63,68 @@ impl<'a> Service<'a> {
         cwd: &std::path::Path,
         call: &Request<'_>,
     ) -> Result<RunRecord> {
+        let (prepared, contribution_branches) = self.prepare_dispatch(input, cwd, call)?;
+        let record = self.store.create(&prepared, call)?;
+        if !contribution_branches.is_empty() {
+            let captured = (|| {
+                let db = Contributions::open(self.store.writer_registry(), call)?;
+                // Read the accepted run, including on operation replay. Newly
+                // generated candidate IDs are not authoritative after create.
+                for attempt in self.store.contribution_attempts(record.run_id, call)? {
+                    if let Some((branch, role)) = contribution_branches.get(&attempt.task_id) {
+                        db.capture(&attempt, branch, role, call)?;
+                    }
+                }
+                Ok(())
+            })();
+            self.store.contribution_diagnostic(record.run_id, captured);
+        }
+        Ok(record)
+    }
+
+    /// Record an admission refusal using the same sealed identity as dispatch.
+    /// Preparing the request does not create a run or release writer custody.
+    pub fn record_dispatch_refusal(
+        &self,
+        input: DispatchRequest,
+        cwd: &Path,
+        diagnostic: provenant_records::diagnostic::Diagnostic,
+        worktree: Option<provenant_records::PathWire>,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
+        let (prepared, _) = self.prepare_dispatch(input, cwd, call)?;
+        let digest = prepared.request.digest()?;
+        let chair = prepared.request.chair.clone();
+        self.store.record_refusal(
+            &OperationRecord {
+                extra: Default::default(),
+                schema_version: 1,
+                project_id: self.store.context.project_id,
+                actor_id: self.store.context.actor_id,
+                operation_id: prepared.operation_id,
+                kind: OperationKind::Dispatch,
+                request_digest: digest,
+                run_id: prepared.run_id,
+                state: OperationState::Terminal,
+                refusal: Some(OperationRefusal {
+                    extra: Default::default(),
+                    diagnostic,
+                    worktree,
+                    refused_at: prepared.created_at,
+                    request: Some(prepared.request),
+                    chair,
+                }),
+            },
+            call,
+        )
+    }
+
+    fn prepare_dispatch(
+        &self,
+        input: DispatchRequest,
+        cwd: &std::path::Path,
+        call: &Request<'_>,
+    ) -> Result<(PreparedRun, ContributionBranches)> {
         // Reuse the originally resolved boundary before consulting Git. Retrying
         // the same operation must work even after its caller-supplied ref vanishes.
         let operation = self.store.operation(&input.operation_id, call)?;
@@ -339,22 +403,7 @@ impl<'a> Service<'a> {
                 attempt.attempt_id = id;
             }
         }
-        let record = self.store.create(&prepared, call)?;
-        if !contribution_branches.is_empty() {
-            let captured = (|| {
-                let db = Contributions::open(self.store.writer_registry(), call)?;
-                // Read the accepted run, including on operation replay. Newly
-                // generated candidate IDs are not authoritative after create.
-                for attempt in self.store.contribution_attempts(record.run_id, call)? {
-                    if let Some((branch, role)) = contribution_branches.get(&attempt.task_id) {
-                        db.capture(&attempt, branch, role, call)?;
-                    }
-                }
-                Ok(())
-            })();
-            self.store.contribution_diagnostic(record.run_id, captured);
-        }
-        Ok(record)
+        Ok((prepared, contribution_branches))
     }
     /// Canonical model IDs carry the provider prefix in every stored request.
     pub fn route(route: RequestedRoute) -> Result<RequestedRoute> {
