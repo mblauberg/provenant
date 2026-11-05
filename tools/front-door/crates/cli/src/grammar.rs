@@ -1384,6 +1384,9 @@ pub enum ClaudeHook {
     /// Handle the chair session-start hook
     #[command(name = crate::hooks::CHAIR_START)]
     ChairStart,
+    /// Ingest native usage when the chair turn ends
+    #[command(name = crate::hooks::CHAIR_STOP)]
+    ChairStop,
     /// Check a tool call before it runs
     #[command(name = crate::hooks::PRE_TOOL_USE)]
     PreToolUse,

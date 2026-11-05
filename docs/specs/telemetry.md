@@ -169,8 +169,8 @@ claimed twice is visited once. Every other `~/.claude*` directory with a
 `projects` child, including the default `~/.claude`, is stored under
 `unattributed` and never dropped. A session recorded by the chair's
 SessionStart hook is a `chair`, a file under a session's `subagents` directory
-is a `subagent`, and every other session is a `lane`. The chair's SessionStart
-hook also runs the last day of ingest, best effort, so the interactive session
+is a `subagent`, and every other session is a `lane`. The chair's SessionStart and Stop
+hooks also run the last day of ingest, best effort, so the interactive session
 is captured without a manual command. That run stops at a three-second wall
 deadline, inside the hook's five-second timeout, and writes the rows it has
 read. A `telemetry ingest` run has no deadline, and its report sets
@@ -188,7 +188,8 @@ its cap, ingest stops adding rows and the report says the store is full.
   `::an_expired_deadline_reads_nothing_and_keeps_the_store`;
   `::one_message_in_two_session_files_counts_twice`;
   `tests/telemetry_ingest.rs::ingest_is_idempotent_and_attributes_by_directory`;
-  `::chair_session_start_ingests_the_session_as_chair`
+  `::chair_session_start_ingests_the_session_as_chair`;
+  `::chair_stop_ingests_new_usage`
 - Owner: `crates/telemetry/src/ingest.rs`, `src/usage.rs`, `src/hooks.rs`
 
 ## Mileage and effective rates

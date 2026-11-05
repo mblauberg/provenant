@@ -151,7 +151,7 @@ pub fn ingest_native(
 /// timeout with room for the chair's own work.
 const HOOK_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Best-effort ingest after the chair's SessionStart hook records its session.
+/// Best-effort ingest at chair session start and turn end.
 /// The hook has a five-second host timeout, so only the last day is read, the
 /// read stops at a three-second wall deadline, and the rows read so far are
 /// still written. Every failure is ignored: a slow transcript must never stop

@@ -105,6 +105,55 @@ fn chair_session_start_ingests_the_session_as_chair() -> Result {
     Ok(())
 }
 
+#[test]
+fn chair_stop_ingests_new_usage() -> Result {
+    let rig = TestRig::new()?;
+    let config = rig.root.join("claude");
+    register_account(&rig, "claude", "current", "current", &config)?;
+    write_session(&config, "chair-session", "m1", 45)?;
+    let input = serde_json::to_vec(&json!({
+        "hook_event_name":"Stop", "session_id":"chair-session", "cwd":rig.project
+    }))?;
+    let invoke = || {
+        rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "--state-dir",
+                rig.state.to_str().ok_or("state")?,
+                "hook",
+                "claude",
+                "chair-stop",
+            ],
+            Some(&input),
+        )
+    };
+    assert_eq!(code(&invoke()?), 0);
+    use std::io::Write;
+    let transcript = config.join("projects/-fixture/chair-session.jsonl");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(transcript)?
+        .write_all(message("m2", 60).as_bytes())?;
+    let subagents = config.join("projects/-fixture/chair-session/subagents");
+    fs::create_dir_all(&subagents)?;
+    fs::write(subagents.join("agent-a.jsonl"), message("m3", 20))?;
+    assert_eq!(code(&invoke()?), 0);
+    let rows: Vec<Value> = fs::read_to_string(rig.state.join("ingest.jsonl"))?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter()
+            .any(|row| row["message"] == "m2" && row["output"] == 60)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row["message"] == "m3" && row["source"] == "subagent")
+    );
+    Ok(())
+}
+
 fn rig() -> Result<TestRig> {
     let rig = TestRig::new()?;
     std::fs::create_dir_all(rig.project.join("config"))?;
