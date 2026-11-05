@@ -8374,6 +8374,18 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
     };
     let mut document = graph(vec![write, review]);
     document.schema_version = 2;
+    // Every attempt in a deferred panel must review the resolved subject.
+    let mut wrong_subject = addition.clone();
+    wrong_subject
+        .nodes
+        .iter_mut()
+        .find(|node| node.composite.is_none())
+        .unwrap()
+        .source = Some(SourceBinding::Commit {
+        commit: "4".repeat(40),
+    });
+    assert!(plans::validate_review_addition(&document, &wrong_subject).is_err());
+
     let mut changed_reduction = addition.clone();
     changed_reduction
         .nodes
