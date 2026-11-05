@@ -227,9 +227,17 @@ fn run_inner(
                             report.head_moves.insert(number, class);
                         }
                     }
-                    Err(error) => report.warnings.push(format!(
-                        "pull request #{number}: shadow head-move target unavailable: {error}"
-                    )),
+                    Err(error) => {
+                        let class = super::head_move::HeadMove::C {
+                            reviewed_head: review.head,
+                            reviewed_base: review.base,
+                            reason: format!("target unavailable: {error}"),
+                        };
+                        report.warnings.push(format!(
+                            "pull request #{number}: shadow head-move classification {class:?}"
+                        ));
+                        report.head_moves.insert(number, class);
+                    }
                 }
             }
             Err(error) => report.warnings.push(format!(
@@ -958,14 +966,18 @@ mod tests {
         };
         for refuse in [false, true] {
             let mut outcomes = Vec::new();
-            for class in [None, Some("A"), Some("B"), Some("C")] {
+            for class in [None, Some("exact"), Some("A"), Some("B"), Some("C")] {
                 let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
                 let head = forge.pull_requests[&1].head.clone();
                 if let Some(class) = class {
                     forge.latest_reviews.insert(
                         1,
                         ReviewedHead {
-                            head: "reviewed".into(),
+                            head: if class == "exact" {
+                                head.clone()
+                            } else {
+                                "reviewed".into()
+                            },
                             base: Some("old-base".into()),
                             valid: class != "C",
                         },
@@ -1012,7 +1024,7 @@ mod tests {
                 outcomes.push(report.outcomes.clone());
                 let observed = report.head_moves.get(&1);
                 assert!(match class {
-                    None => observed.is_none(),
+                    None | Some("exact") => observed.is_none(),
                     Some("A") => matches!(observed, Some(HeadMove::A { .. })),
                     Some("B") => matches!(observed, Some(HeadMove::B { .. })),
                     Some("C") => matches!(observed, Some(HeadMove::C { .. })),
@@ -1031,6 +1043,48 @@ mod tests {
                     Outcome::Landed
                 }
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_shadow_target_reports_class_c_without_changing_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::head_move::{HeadMove, ReviewedHead};
+        for classified in [false, true] {
+            let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+            forge.approvals_at_head.clear();
+            repo.fail_fetch = Some(std::rc::Rc::new(std::cell::Cell::new(true)));
+            if classified {
+                forge.latest_reviews.insert(
+                    1,
+                    ReviewedHead {
+                        head: "reviewed".into(),
+                        base: None,
+                        valid: true,
+                    },
+                );
+            }
+            let state = tempfile::tempdir()?;
+            let report = exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1],
+                false,
+                state.path(),
+            )?;
+            assert_eq!(report.outcomes[&1], Outcome::Excluded);
+            if classified {
+                assert!(matches!(
+                    report.head_moves.get(&1),
+                    Some(HeadMove::C { .. })
+                ));
+            } else {
+                assert!(report.head_moves.is_empty());
+            }
         }
         Ok(())
     }

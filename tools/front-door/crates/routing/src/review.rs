@@ -945,7 +945,27 @@ fn path_specificity(pattern: &str) -> (usize, std::cmp::Reverse<usize>) {
     (pattern.len() - wildcards, std::cmp::Reverse(wildcards))
 }
 // * and ? stay within one path component; ** also matches slashes.
-fn path_matches(pattern: &str, path: &str) -> bool {
+/// Shared path exclusions for a small review delta. Callers may add project
+/// exclusions; a match is evidence that the path needs a full review.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct ReviewPathExclusions {
+    pub patterns: Vec<String>,
+}
+
+impl ReviewPathExclusions {
+    pub fn bundled() -> Option<Self> {
+        toml_edit::de::from_str(include_str!("../assets/review-path-exclusions.toml")).ok()
+    }
+
+    pub fn excludes(&self, path: &str) -> bool {
+        self.patterns
+            .iter()
+            .any(|pattern| path_matches(pattern, path))
+    }
+}
+
+/// Match a repository-relative path against a review policy glob.
+pub fn path_matches(pattern: &str, path: &str) -> bool {
     fn go(
         p: &[u8],
         s: &[u8],

@@ -1566,7 +1566,7 @@ const INSTRUCTION_DOCS: [&[u8]; 4] = [b"AGENTS.md", b"HARNESS.md", b"CLAUDE.md",
 
 /// Instruction documents at any depth and the `.agents/` tree: a directory or
 /// bare-name exemption never covers them, only an exact path listing does.
-pub(crate) fn is_instruction_path(path: &[u8]) -> bool {
+pub fn is_instruction_path(path: &[u8]) -> bool {
     under_agents_bytes(path) || is_known_control(Path::new(OsStr::from_bytes(path)))
 }
 

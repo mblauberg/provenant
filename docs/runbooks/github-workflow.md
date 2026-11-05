@@ -575,7 +575,12 @@ replace review on the exact head. Find it in the report warnings and the
 `head_moves` field of the JSON report, candidate receipt and run summary under
 the project state directory’s `landing/receipts/`. An approval-time base not
 recorded when the review was made remains unknown, and incomplete delta
-statistics classify as C.
+statistics classify as C. For class B, line changes accumulate over each
+single-parent commit. Bundled review path exclusions and instruction controls
+require class C; add project-specific exclusions with
+`git config --add provenant.reviewProtected 'pattern'`. Patterns match paths
+relative to the repository root; `*` matches within a component and `**`
+across components. These extra patterns do not remove the bundled exclusions.
 
 ### Rust build cache
 
