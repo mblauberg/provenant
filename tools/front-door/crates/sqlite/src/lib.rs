@@ -612,7 +612,7 @@ mod tests {
                     |row| row.get(0),
                 )?;
                 assert_eq!(second, 0);
-                Ok(())
+                Ok::<(), rusqlite::Error>(())
             },
             |_, _| Ok(()),
         )?;
