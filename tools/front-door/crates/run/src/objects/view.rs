@@ -274,6 +274,22 @@ pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> 
 }
 
 pub(crate) fn restore_index(source: &ObjectSource, repo: &VerifiedRepo) -> Result<()> {
+    // An unmerged index needs its merge metadata and objects as well as the
+    // index itself. Keep the retained private view intact until settlement can
+    // restore those together; copying it first leaves an unusable host index.
+    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+    let unmerged = execute(
+        &git,
+        &source.refs.current_path()?,
+        repo.root_path(),
+        &args(&["ls-files", "--unmerged", "-z"]),
+        None,
+    )?;
+    if !unmerged.is_empty() {
+        return Err(RunError::Validation(
+            "stopped merge requires retained import recovery",
+        ));
+    }
     match source
         .refs
         .read_stable(OsStr::new("index"), 64 * 1024 * 1024)
@@ -290,7 +306,6 @@ pub(crate) fn restore_index(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
-    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
     let paths = execute(
         &git,
         repo.private_git_dir(),

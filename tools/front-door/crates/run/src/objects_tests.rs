@@ -1319,6 +1319,47 @@ fn oversized_received_pack_is_refused_with_a_clear_reason() -> TestResult {
 }
 
 #[test]
+fn unmerged_private_index_does_not_replace_host_index() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (attempt, scratch) = fixture.overlay()?;
+    let input = format!(
+        "0 {}\tfile\n100644 {} 1\tfile\n100644 {} 2\tfile\n100644 {} 3\tfile\n",
+        "0".repeat(40),
+        fixture.base_blob,
+        fixture.base_blob,
+        fixture.blob
+    );
+    super::execute_bounded(
+        &fixture.git,
+        &scratch.join("git-common"),
+        &fixture.lane,
+        &super::args(&["update-index", "--index-info"]),
+        None,
+        super::Execution {
+            input: Some(input.as_bytes()),
+            ..Default::default()
+        },
+    )?;
+    let host_index = fixture.worktree.repo().private_git_dir().join("index");
+    let before = fs::read(&host_index)?;
+    let source = super::bound_source(&attempt)?.ok_or("private source")?;
+    let error = super::restore_index(&source, fixture.worktree.repo()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("stopped merge requires retained import recovery")
+    );
+    assert_eq!(fs::read(host_index)?, before);
+    assert!(
+        !fixture
+            .git_overlay(&scratch, &["ls-files", "--unmerged"])?
+            .stdout
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
 fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestResult {
     for options in [
         vec!["--skip-worktree"],
