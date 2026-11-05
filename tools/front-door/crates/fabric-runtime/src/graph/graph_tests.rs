@@ -6619,6 +6619,12 @@ fn cap_failure_on_fallback_preserves_prior_attempt_outcome() {
     let first = &mut checkpoint.nodes[1].attempts[0];
     first.state = AttemptState::Terminal;
     first.outcome = Some(AttemptOutcome::AuthRequired);
+    first.launched = false;
+    first.attempt_ref = Some("refused".into());
+    owner.fallback_evidence.insert(
+        "refused".into(),
+        provenant_records::run::PreparationFailure::AuthRequired,
+    );
     let lowered = crate::config::GraphLimits {
         node_prompt_bytes: 100,
         ..Default::default()

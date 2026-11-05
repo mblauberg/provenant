@@ -1232,7 +1232,7 @@ mod tests {
             extra: Default::default(),
         })
         .unwrap();
-        assert_eq!(value["data"]["error"]["code"], "LAUNCH_UNKNOWN");
+        assert_eq!(value["data"]["error"]["code"], "launch_unknown");
         assert!(matches!(
             serde_json::from_value::<PeerResult>(value).unwrap(),
             PeerResult::Error { data: crate::hosts::PeerResultError { error: actual, .. }, .. } if actual == error

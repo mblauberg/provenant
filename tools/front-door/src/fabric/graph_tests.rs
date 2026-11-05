@@ -900,6 +900,8 @@ mod result_tests {
                 {"id":"ordinary","role":"plan","access":"read_only","prompt":"test"}]
         }))?;
         let mut checkpoint = graph_status_fixture().checkpoint;
+        checkpoint.nodes[0].attempts.remove(0);
+        checkpoint.nodes[0].attempts[0].key.route_index = 0;
         let display = "node ordinary expansion paused: planner fragment invalid: invalid fragment: missing nodes; fallback expansion paused: source requires a full commit ID";
         checkpoint.pause_reason = Some(display.into());
         checkpoint.nodes[0].expansion_pause = Some(format!("{display}\n[planner-fragment-retry-context:{}", provenant_core::hex(b"invalid fragment: missing nodes")));
