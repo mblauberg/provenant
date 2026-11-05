@@ -18,11 +18,11 @@ def describe(repo: Path) -> str:
         manifests.append("Cargo.toml")
     try:
         tracked = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "--", "Cargo.toml", "**/Cargo.toml",
+            ["git", "-C", str(repo), "ls-files", "-z", "--", "Cargo.toml", "**/Cargo.toml",
              "rust-toolchain", "rust-toolchain.toml", "**/rust-toolchain", "**/rust-toolchain.toml"],
             check=True, capture_output=True, text=True,
         )
-        for path in tracked.stdout.splitlines():
+        for path in filter(None, tracked.stdout.split("\0")):
             if Path(path).name == "Cargo.toml" and path not in manifests:
                 manifests.append(path)
             elif Path(path).name in ("rust-toolchain", "rust-toolchain.toml"):
