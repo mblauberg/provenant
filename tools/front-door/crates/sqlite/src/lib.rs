@@ -271,6 +271,68 @@ pub fn apply_migrations(
     Ok(())
 }
 
+/// Take a snapshot before upgrading an existing schema, then apply its steps.
+/// The caller must hold its write reservation across both operations.
+pub fn migrate<E>(
+    db: &Connection,
+    steps: &[&str],
+    start: usize,
+    snapshot: impl FnOnce() -> Result<(), E>,
+    after_step: impl FnMut(usize, &Connection) -> rusqlite::Result<()>,
+) -> Result<(), E>
+where
+    E: From<rusqlite::Error>,
+{
+    if start > 0 && start < steps.len() {
+        snapshot()?;
+    }
+    apply_migrations(db, steps, start, after_step).map_err(E::from)
+}
+
+/// Failure to create or durably record a pre-migration snapshot.
+#[derive(Debug)]
+pub enum SnapshotError {
+    Filesystem(FsError),
+    Sqlite(rusqlite::Error),
+    PathEncoding,
+    ExhaustedNames,
+}
+
+/// Create a WAL-aware snapshot alongside the database while the caller holds
+/// its write reservation. The directory must already be checked and private.
+pub fn snapshot_database(
+    directory: &Directory,
+    path: &Path,
+    database: &str,
+    stamp: i64,
+) -> Result<(), SnapshotError> {
+    let source = open_connection(&path.join(database), true).map_err(SnapshotError::Sqlite)?;
+    let mut suffix = 0_u32;
+    let name = loop {
+        let candidate = if suffix == 0 {
+            format!("{database}.bak-{stamp}")
+        } else {
+            format!("{database}.bak-{stamp}-{suffix}")
+        };
+        match directory.metadata_at(OsStr::new(&candidate), false) {
+            Err(error) if error.is_not_found() => break candidate,
+            Ok(_) => suffix = suffix.checked_add(1).ok_or(SnapshotError::ExhaustedNames)?,
+            Err(error) => return Err(SnapshotError::Filesystem(error)),
+        }
+    };
+    let target = path.join(&name);
+    let target = target.to_str().ok_or(SnapshotError::PathEncoding)?;
+    source
+        .execute("VACUUM INTO ?1", [target])
+        .map_err(SnapshotError::Sqlite)?;
+    directory
+        .open_read(OsStr::new(&name))
+        .and_then(|file| file.sync())
+        .map_err(SnapshotError::Filesystem)?;
+    directory.sync().map_err(SnapshotError::Filesystem)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,6 +580,78 @@ mod tests {
             db.query_row("SELECT id FROM second", [], |row| row.get::<_, i64>(0))?,
             42
         );
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_hook_runs_before_existing_schema_changes() -> rusqlite::Result<()> {
+        let db = Connection::open_in_memory()?;
+        let steps = [
+            "CREATE TABLE first (id INTEGER);",
+            "CREATE TABLE second (id INTEGER);",
+        ];
+        migrate(
+            &db,
+            &steps[..1],
+            0,
+            || -> rusqlite::Result<()> { panic!("a new database needs no snapshot") },
+            |_, _| Ok(()),
+        )?;
+        let mut snapshots = 0;
+        migrate(
+            &db,
+            &steps,
+            1,
+            || {
+                snapshots += 1;
+                let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+                assert_eq!(version, 1);
+                let second: i64 = db.query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE name='second'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(second, 0);
+                Ok::<(), rusqlite::Error>(())
+            },
+            |_, _| Ok(()),
+        )?;
+        assert_eq!(snapshots, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_hook_keeps_the_write_reservation() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = std::env::temp_dir().canonicalize()?.join(format!(
+            "provenant-sqlite-migration-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&temp)?;
+        let path = temp.join("store.sqlite3");
+        std::fs::File::create(&path)?;
+        let writer = open_connection(&path, false)?;
+        enable_wal(&writer).map_err(|_| "wal")?;
+        writer.execute_batch(
+            "CREATE TABLE first (id INTEGER); PRAGMA user_version=1; BEGIN IMMEDIATE;",
+        )?;
+        let contender = with_busy_timeout(Duration::ZERO, || open_connection(&path, false))?;
+        migrate(
+            &writer,
+            &["", "CREATE TABLE second (id INTEGER);"],
+            1,
+            || {
+                assert!(is_busy(
+                    &contender
+                        .execute_batch("INSERT INTO first VALUES (1)")
+                        .unwrap_err()
+                ));
+                Ok::<(), rusqlite::Error>(())
+            },
+            |_, _| Ok(()),
+        )?;
+        writer.execute_batch("COMMIT")?;
+        std::fs::remove_dir_all(&temp)?;
         Ok(())
     }
 }

@@ -133,14 +133,7 @@ fn timed_spacing(db: &Connection) -> Result<bool> {
     )?)
 }
 fn version(db: &Connection) -> Result<i64> {
-    match provenant_sqlite::read_version(db, 5) {
-        Ok(version) => Ok(version as i64),
-        Err(provenant_sqlite::VersionError::Unsupported(version)) => {
-            Err(RunError::Version(version))
-        }
-        Err(provenant_sqlite::VersionError::Unversioned) => Err(RunError::Version(0)),
-        Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
-    }
+    Ok(provenant_sqlite::read_version(db, 5)? as i64)
 }
 
 /// Take this attempt's lease when host and project counts and startup spacing

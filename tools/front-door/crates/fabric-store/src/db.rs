@@ -346,14 +346,26 @@ impl Store {
             locks,
             _owner: PhantomData,
         };
+        let initial_version = schema_version(&store.db)?;
         while schema_version(&store.db)? < MIGRATIONS.len() {
             let done = store.write(request, |tx| {
                 let version = schema_version(tx)?;
-                let Some(sql) = MIGRATIONS.get(version) else {
+                if version >= MIGRATIONS.len() {
                     return Ok(true);
-                };
-                tx.execute_batch(sql)?;
-                tx.pragma_update(None, "user_version", (version + 1) as i64)?;
+                }
+                provenant_sqlite::migrate(
+                    tx,
+                    &MIGRATIONS[..=version],
+                    version,
+                    || {
+                        if version == initial_version {
+                            let stamp = request.clock.wall_now()?.as_micros();
+                            provenant_sqlite::snapshot_database(&fabric, &path, database, stamp)?;
+                        }
+                        Ok::<(), Error>(())
+                    },
+                    |_, _| Ok(()),
+                )?;
                 Ok(false)
             })?;
             if done {

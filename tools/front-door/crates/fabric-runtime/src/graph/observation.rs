@@ -35,17 +35,16 @@ fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcom
     }
 }
 
-/// Legacy checkpoint validation accepts the historical rule, never as launch authority.
-pub(super) fn historical_fallback_admissible(
-    outcome: AttemptOutcome,
-    access: AccessMode,
-    launched: bool,
-) -> bool {
-    provenant_routing::historical_fallback_admissible(
-        routing_outcome(outcome),
-        access == AccessMode::WorktreeWrite,
-        launched,
-    )
+/// A persisted route may precede a fallback only when it did not launch.
+/// Launching the next route additionally requires live preparation evidence.
+pub(super) fn fallback_candidate(outcome: AttemptOutcome, launched: bool) -> bool {
+    !launched
+        && matches!(
+            outcome,
+            AttemptOutcome::AuthRequired
+                | AttemptOutcome::UsageLimited
+                | AttemptOutcome::AdapterUnavailable
+        )
 }
 
 /// A settled review task can be independently re-attempted without changing
@@ -71,7 +70,7 @@ pub(super) fn review_preparation_substitution(node: &PlannedNode, attempt: &Grap
         && !attempt.launched
         && attempt
             .outcome
-            .is_some_and(|outcome| historical_fallback_admissible(outcome, node.access, false))
+            .is_some_and(|outcome| fallback_candidate(outcome, false))
 }
 
 pub(super) fn live_fallback_allowed(

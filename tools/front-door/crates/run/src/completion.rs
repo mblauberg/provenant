@@ -198,8 +198,8 @@ mod tests {
     fn writer_preamble_states_the_slot_wait_rule_and_read_only_does_not() {
         let handoff = Path::new("/state/handoff.json");
         let writer = lane_preamble("Model policy.", true, handoff);
-        assert!(writer.contains(BUILD_SLOT_GUIDANCE));
-        assert!(writer.contains("/state/handoff.json"));
+        assert!(writer.contains("Build slots:"));
+        assert!(writer.contains("Progress handoff JSON: /state/handoff.json"));
         let reader = lane_preamble("Model policy.", false, handoff);
         assert!(!reader.contains("Build slots"));
         assert!(reader.starts_with("Model policy.\nProgress handoff JSON"));

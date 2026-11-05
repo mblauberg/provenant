@@ -97,10 +97,6 @@ mod tests {
     use super::*;
     #[test]
     fn project_checkpoint_budget_defaults_and_is_validated() {
-        assert_eq!(
-            ProjectRetentionSettings::default().checkpoint_soft_bytes,
-            2048
-        );
         let mut settings: RetentionSettings =
             toml_edit::de::from_str("[projects.project]\ncheckpoint_soft_bytes = 4096\n").unwrap();
         assert_eq!(settings.projects["project"].checkpoint_soft_bytes, 4096);

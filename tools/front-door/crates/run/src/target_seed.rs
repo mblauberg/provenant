@@ -278,6 +278,13 @@ mod lane_probe_tests {
         let modern = front.join("rust-toolchain.toml");
         std::fs::write(&modern, "[toolchain]\nchannel = '1.99.1'\n").unwrap();
         assert_eq!(lane_release_pin(&worktree, &home).unwrap(), "1.99.1");
+        let plain = front.join("rust-toolchain");
+        std::fs::remove_file(&modern).unwrap();
+        std::fs::write(&plain, "1.99.1\n").unwrap();
+        assert_eq!(lane_release_pin(&worktree, &home).unwrap(), "1.99.1");
+        std::fs::write(&modern, "[toolchain]\nchannel = '1.99.1'\n").unwrap();
+        assert!(lane_release_pin(&worktree, &home).is_err());
+        std::fs::remove_file(&plain).unwrap();
         std::fs::write(&settings, "[overrides]\n'/writer' = 'custom'\n").unwrap();
         assert!(lane_release_pin(&worktree, &home).is_err());
         std::fs::write(&settings, "[overrides]\n").unwrap();
@@ -289,9 +296,8 @@ mod lane_probe_tests {
         let env = [("RUSTUP_HOME".into(), home.join(".rustup").into_os_string())];
         assert!(lane_rustc_metadata(&worktree, &home, &env).is_err());
         std::fs::remove_file(&modern).unwrap();
-        std::fs::write(front.join("rust-toolchain"), "1.99.1\n").unwrap();
-        assert_eq!(lane_release_pin(&worktree, &home).unwrap(), "1.99.1");
-        std::fs::write(front.join("rust-toolchain"), "nightly\n").unwrap();
+        assert!(lane_release_pin(&worktree, &home).is_err());
+        std::fs::write(&modern, "[toolchain]\nchannel = 'nightly'\n").unwrap();
         assert!(lane_rustc_metadata(&worktree, &home, &env).is_err());
     }
 
@@ -338,7 +344,11 @@ mod lane_probe_tests {
         std::fs::create_dir_all(&front).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
-        std::fs::write(front.join("rust-toolchain"), "1.99.1\n").unwrap();
+        std::fs::write(
+            front.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = '1.99.1'\n",
+        )
+        .unwrap();
         let rustc = bin.join("rustc");
         std::fs::write(
             &rustc,

@@ -514,9 +514,8 @@ encoded. The attempt ends Rejected before launch and its siblings still start.
 
 Remote-tracking refs, their reflogs and shared config are read-only in writer
 lanes. The host refreshes origin before launch; a fetch that tries to update a
-tracking ref is denied. Dispatch
-with `--deliver-remote` and `--deliver-branch` to have run push the verified
-final commit after the lane finishes.
+tracking ref is denied. Dispatch with `--deliver push` to have run push the verified final commit to
+the lane branch after the lane finishes.
 
 Network-open profiles can read the existing `~/.config/gh` login and may use
 it to push; profiles deny access to `~/.ssh`. After a successful push,

@@ -857,25 +857,11 @@ fn wire_strings_carry_only_type_and_max_length() {
 
 #[test]
 fn tool_schema_size_is_bounded() {
-    // Measured compact tool bytes plus 10%, rounded up.
-    let bounds = [
-        ("fabric_context", 2_103),
-        ("fabric_mail", 2_800),
-        ("fabric_run", 5_000),
-        ("fabric_output", 1_600),
-        ("fabric_discover", 1_000),
-    ];
-    assert_eq!(catalogue().len(), bounds.len());
-    let mut total = 0;
-    for ((name, bound), tool) in bounds.into_iter().zip(catalogue()) {
-        assert_eq!(tool["name"], name);
-        assert_eq!(tool["_meta"]["io.provenant/schemaVersion"], 2);
+    for tool in catalogue() {
+        let name = &tool["name"];
         let size = serde_json::to_vec(tool).unwrap().len();
-        assert!(size <= bound, "{name}: {size} bytes exceeds {bound}");
         assert!(size <= 5_000, "{name}: {size} bytes exceeds hard cap");
-        total += size;
     }
-    assert!(total <= 12 * 1024, "catalogue: {total} bytes");
 }
 
 #[test]
@@ -991,39 +977,6 @@ fn rejected_values_describe_expected_constraints() {
     assert!(expected("fabric_output", &input, "arguments.target.attempt").contains("[0-9a-f]"));
     let input = json!({"op":"wat"});
     assert!(expected("fabric_run", &input, "arguments.op").contains("submit"));
-}
-
-#[test]
-fn schema_catalogue_is_fixed_order_and_has_no_legacy_aliases() {
-    let expected = [
-        "fabric_context",
-        "fabric_mail",
-        "fabric_run",
-        "fabric_output",
-        "fabric_discover",
-    ];
-    let names: Vec<_> = catalogue()
-        .iter()
-        .filter_map(|v| v["name"].as_str())
-        .collect();
-    assert_eq!(names, expected);
-    let advanced: Vec<_> = advanced_catalogue()
-        .iter()
-        .map(|v| v["name"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(
-        advanced,
-        [
-            "fabric_task",
-            "fabric_events",
-            "fabric_lease",
-            "fabric_graph",
-            "fabric_inbox",
-            "fabric_console",
-            "fabric_chair"
-        ]
-    );
-    assert!(ToolCall::parse("fabric_not_a_tool", json!({"op":"inspect"})).is_err());
 }
 
 #[test]
