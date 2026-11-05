@@ -139,7 +139,7 @@ pub(crate) mod peer_tests {
         if host_test("fabric::peer_tests::tick_warns_once_for_missing_worktree_and_advances_another_graph")? {
             return Ok(());
         }
-        use provenant_fabric_runtime::graph::{self, GraphJournal};
+        use provenant_fabric_runtime::graph;
         struct Seed { actor: String, at: provenant_core::WallTime }
         impl graph::AttemptOwner for Seed {
             type Error = FacadeError;
@@ -186,14 +186,12 @@ pub(crate) mod peer_tests {
         assert!(second.warnings.is_empty());
         assert_eq!(graph::FileJournal::collect_terminal(&roots.state, project, i128::MAX, &cancel, &clock)?, 1);
         assert!(graph::FileJournal::read_checkpoint(&roots.state, project, "a-missing")?.is_some());
-        let mut journal = graph::FileJournal::open(&roots.state, project, "a-missing", budget, &cancel, &clock)?;
-        let mut checkpoint = journal.load("a-missing")?.ok_or("missing graph")?;
-        checkpoint.cancelled = true;
-        checkpoint.nodes[0].state = graph::NodeState::Skipped;
-        checkpoint.asks.clear();
-        checkpoint.wake_at = None;
-        journal.save(&checkpoint)?;
-        drop(journal);
+        let factory = Factory {
+            context, project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        factory.graph(GraphInput::Cancel { extra: Default::default(), id: "a-missing".into(), reason: None }, budget, &cancel)?;
         assert_eq!(graph::FileJournal::collect_terminal(&roots.state, project, i128::MAX, &cancel, &clock)?, 1);
         assert!(graph::FileJournal::read_checkpoint(&roots.state, project, "a-missing")?.is_none());
         Ok(())
