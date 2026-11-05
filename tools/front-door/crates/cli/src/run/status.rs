@@ -615,7 +615,7 @@ pub(super) fn render_lanes(
     render_lanes_with_lineage(lanes, waits, next, root, cooldowns, &Default::default())
 }
 
-pub(super) fn project_lane(
+pub(crate) fn project_lane(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
     root: &Path,

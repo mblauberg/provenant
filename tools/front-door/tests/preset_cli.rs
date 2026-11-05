@@ -2361,7 +2361,10 @@ fn explicit_preset_and_no_task_id_never_read_experiments() -> Result<(), Box<dyn
     let output = fixture.run(&["--preset", "gate-only", "--task-id", WORK_ITEM])?;
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    assert!(matches!(result["status"].as_str(), Some("ok" | "waiting")), "{result}");
+    assert!(
+        matches!(result["status"].as_str(), Some("ok" | "waiting")),
+        "{result}"
+    );
     Ok(())
 }
 

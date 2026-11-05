@@ -55,6 +55,7 @@ pub use provider::{prepare_fixture, writer_fixture_plan};
 pub use reconcile::*;
 pub use resume::*;
 pub use review::review;
+pub(crate) use status::project_lane;
 pub use status::*;
 pub use submit::*;
 pub use telemetry::*;
