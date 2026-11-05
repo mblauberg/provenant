@@ -2280,9 +2280,28 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
                 .lines()
                 .find(|line| line.contains("advisory"))
                 .ok_or_else(|| format!("missing Opus writer advisory: {stderr}"))?;
-            assert!(advisory.contains("claude/claude-opus-5-5"), "{advisory}");
-            assert!(advisory.contains("codex/gpt-6.1-sol"), "{advisory}");
-            assert!(advisory.contains("principal"), "{advisory}");
+            let routes: provenant_routing::WriterAdvisory = toml_edit::de::from_str(include_str!(
+                "../crates/routing/assets/writer-advisory.toml"
+            ))?;
+            assert!(advisory.contains(model), "{advisory}");
+            assert!(
+                advisory.contains(routes.label.as_deref().ok_or("advisory label")?),
+                "{advisory}"
+            );
+            assert!(
+                routes
+                    .cheaper_models
+                    .iter()
+                    .any(|route| advisory.contains(route.as_str())),
+                "{advisory}"
+            );
+            assert!(
+                routes
+                    .pool_priority
+                    .iter()
+                    .any(|pool| advisory.contains(pool)),
+                "{advisory}"
+            );
             assert_eq!(
                 stderr
                     .lines()
