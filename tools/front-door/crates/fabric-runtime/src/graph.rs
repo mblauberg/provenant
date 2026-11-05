@@ -915,14 +915,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         expansion_depth: usize::MAX,
         ..limits.clone()
     };
-    let mut stored = journal
+    let stored = journal
         .load(&document.graph_id)
         .map_err(GraphError::Journal)?;
-    if let Some(checkpoint) = &mut stored {
-        plans::restore_legacy_topology(
+    if let Some(checkpoint) = &stored {
+        plans::validate_persisted_topology(
             document,
             &checkpoint.extensions,
-            &mut checkpoint.expansions,
+            &checkpoint.expansions,
             &unbounded,
         )
         .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;

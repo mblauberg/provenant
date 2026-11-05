@@ -563,10 +563,10 @@ pub(super) fn materialise_checkpoint_findings(
         expansion_depth: usize::MAX,
         ..crate::config::GraphLimits::default()
     };
-    let mut expansions = checkpoint.expansions.clone();
-    plans::restore_legacy_topology(document, &checkpoint.extensions, &mut expansions, &limits)
+    let expansions = &checkpoint.expansions;
+    plans::validate_persisted_topology(document, &checkpoint.extensions, expansions, &limits)
         .map_err(|(_, reason)| reason.to_owned())?;
-    let expanded = plans::expand(document, &checkpoint.extensions, &expansions, &limits)?;
+    let expanded = plans::expand(document, &checkpoint.extensions, expansions, &limits)?;
     let (plan, positions) = validate_flat_plan(&expanded, &limits).map_err(|e| e.to_string())?;
     if plan.nodes.len() != checkpoint.nodes.len()
         || plan

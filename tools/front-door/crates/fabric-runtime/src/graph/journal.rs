@@ -26,6 +26,10 @@ pub enum JournalError {
         "graph checkpoint predates node asks; finish or cancel it with the previous release, or cancel it here to retire the record"
     )]
     RetiredLoopCheckpoint,
+    #[error(
+        "graph checkpoint topology is incomplete or invalid; finish or cancel it with the previous release, or cancel it here to retire the record"
+    )]
+    InvalidTopology,
 }
 
 impl JournalError {
@@ -38,6 +42,7 @@ impl JournalError {
                 | Self::BadDigest
                 | Self::Canonical(_)
                 | Self::RetiredLoopCheckpoint
+                | Self::InvalidTopology
         )
     }
 
@@ -55,6 +60,7 @@ impl JournalError {
             Self::BadEnvelope => "bad_envelope",
             Self::BadDigest => "bad_digest",
             Self::RetiredLoopCheckpoint => "retired_loop_checkpoint",
+            Self::InvalidTopology => "invalid_topology",
         }
     }
 }
@@ -613,6 +619,12 @@ pub(super) fn decode_checkpoint(
     if digest.to_string() != stored.digest {
         return Err(JournalError::BadDigest);
     }
+    if stored.checkpoint.graph_id != graph_id
+        || stored.execution.document.graph_id != graph_id
+        || !stored.execution.directory.is_absolute()
+    {
+        return Err(JournalError::GraphMismatch);
+    }
     if stored.checkpoint.nodes.iter().any(|node| {
         ["loop_asks", "loop_inbox_error", "loop_decision_actor"]
             .iter()
@@ -620,12 +632,23 @@ pub(super) fn decode_checkpoint(
     }) {
         return Err(JournalError::RetiredLoopCheckpoint);
     }
-    if stored.checkpoint.graph_id != graph_id
-        || stored.execution.document.graph_id != graph_id
-        || !stored.execution.directory.is_absolute()
-    {
-        return Err(JournalError::GraphMismatch);
-    }
+    let limits = crate::config::GraphLimits {
+        nodes: usize::MAX,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
+        ..Default::default()
+    };
+    plans::validate_persisted_topology(
+        &stored.execution.document,
+        &stored.checkpoint.extensions,
+        &stored.checkpoint.expansions,
+        &limits,
+    )
+    .map_err(|_| JournalError::InvalidTopology)?;
     Ok(stored)
 }
 

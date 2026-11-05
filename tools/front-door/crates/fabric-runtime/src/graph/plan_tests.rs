@@ -57,7 +57,7 @@ fn raw_expansion_rejects_each_injected_topology_field() {
 
 #[test]
 fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
-    for (fallback, legacy) in [(false, false), (true, false), (false, true), (true, true)] {
+    for fallback in [false, true] {
         let mut doc = planner(8);
         let leaves: Vec<_> = (0..4).map(|i| json!({
             "id": format!("lens{i}"), "access":"read_only", "prompt":"Review",
@@ -84,8 +84,8 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
         assert_eq!(pending.status, GraphStatus::Pending);
         assert_eq!(pending.checkpoint.expansions.len(), 1);
         assert_eq!(pending.checkpoint.nodes.iter().find(|n| n.id == "after").unwrap().state, NodeState::Pending);
-        let mut wire = serde_json::to_value(&pending.checkpoint).unwrap();
-        if !legacy {
+        let wire = serde_json::to_value(&pending.checkpoint).unwrap();
+        {
             let nodes = wire["expansions"][0]["nodes"].as_array().unwrap();
             let boundary = nodes.iter().position(|node| node.get("composite").is_some()).unwrap();
             let member = nodes.iter().position(|node| node.get("composite").is_none()).unwrap();
@@ -106,12 +106,14 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
                 assert_eq!(error.code(), "bad_checkpoint");
                 assert!(error.to_string().contains(&id), "{error}");
             }
-        }
-        if legacy {
-            for node in wire["expansions"][0]["nodes"].as_array_mut().unwrap() {
-                node.as_object_mut().unwrap().remove("composite_members");
-                node.as_object_mut().unwrap().remove("after_expansion");
-            }
+            let mut missing = wire.clone();
+            let node = &mut missing["expansions"][0]["nodes"][boundary];
+            let id = node["id"].as_str().unwrap().to_owned();
+            node.as_object_mut().unwrap().remove("composite_members");
+            journal.0 = Some(serde_json::from_value(missing).unwrap());
+            let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
+            assert_eq!(error.code(), "bad_checkpoint");
+            assert!(error.to_string().contains(&id), "{error}");
         }
         journal.0 = Some(serde_json::from_value(wire).unwrap());
         let valid = journal.0.clone().unwrap();
@@ -128,9 +130,8 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
             terminal(AttemptOutcome::UsageLimited),
             terminal(AttemptOutcome::UsageLimited),
         ].into(), ..Default::default() };
-        let run = if legacy { resume(&doc, &mut owner, &mut journal) }
-            else { advance(&doc, &mut owner, &mut journal) }.unwrap();
-        assert_eq!(run.status, GraphStatus::Complete, "fallback={fallback}, legacy={legacy}");
+        let run = advance(&doc, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete, "fallback={fallback}");
         assert!(run.checkpoint.nodes.iter().all(|n| n.state.settled()));
         assert_eq!(run.checkpoint.nodes.iter().find(|n| n.id == "after").unwrap().state, NodeState::Blocked);
         assert!(run.checkpoint.nodes.iter().any(|n| n.advance_error_code.as_deref() == Some("usage_limited")));
