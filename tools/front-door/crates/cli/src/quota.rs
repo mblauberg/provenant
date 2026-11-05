@@ -1308,7 +1308,7 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
     );
     Ok(report.accounts)
 }
-fn execute(
+pub(crate) fn execute(
     command: &Quota,
     roots: &Roots,
     registry: &[provenant_providers::Registration],

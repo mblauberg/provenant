@@ -1333,8 +1333,8 @@ fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
 }
 
 #[test]
-fn registry_only_provider_prepares_its_selected_account() -> Result<(), Box<dyn std::error::Error>>
-{
+fn registry_only_provider_resolves_prepares_and_reports_quota()
+-> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Digest, OperationId, RunId, TaskId};
     use provenant_os::exec::SystemExecutor;
     use provenant_providers::{
@@ -1409,9 +1409,76 @@ fn registry_only_provider_prepares_its_selected_account() -> Result<(), Box<dyn 
             provenant_providers::command::Command.validate_provenance(provenance)
         }
     }
+    impl provenant_quota::QuotaSource for Fixture {
+        fn adapter_id(&self) -> &'static str {
+            "fixture-provider"
+        }
+        fn probe(
+            &self,
+            account: &provenant_quota::AccountScope,
+            input: &provenant_quota::QuotaProbeInput,
+        ) -> Result<provenant_quota::QuotaProbePlan, provenant_quota::QuotaError> {
+            Ok(provenant_quota::QuotaProbePlan {
+                kind: provenant_quota::QuotaEffectKind::Command,
+                account: account.clone(),
+                input: input.clone(),
+            })
+        }
+        fn decode(
+            &self,
+            plan: &provenant_quota::QuotaProbePlan,
+            _: &provenant_quota::ProbeCapture,
+        ) -> Result<provenant_quota::QuotaSnapshot, provenant_quota::QuotaError> {
+            Ok(provenant_quota::QuotaSnapshot {
+                schema_version: 1,
+                account: plan.account.clone(),
+                revision: 0,
+                status: provenant_quota::QuotaStatus::Available,
+                observed_unix_seconds: plan.input.now_unix_seconds,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![],
+                details: None,
+            })
+        }
+    }
+    struct Effects(std::cell::Cell<u32>);
+    impl provenant_quota::QuotaEffects for Effects {
+        fn accounts(
+            &self,
+        ) -> Result<Vec<provenant_quota::AccountScope>, provenant_quota::QuotaError> {
+            Ok(vec![provenant_quota::AccountScope {
+                adapter: "fixture-provider".into(),
+                account_key: "work".into(),
+                label: "work".into(),
+            }])
+        }
+        fn capture(
+            &self,
+            _: &provenant_quota::QuotaProbePlan,
+            _: Option<&provenant_quota::AccountRecord>,
+        ) -> Result<provenant_quota::ProbeCapture, provenant_quota::ProbeFailure> {
+            self.0.set(self.0.get() + 1);
+            Ok(provenant_quota::ProbeCapture {
+                stdout: vec![],
+                stderr: vec![],
+                exit_code: Some(0),
+                overflowed: false,
+            })
+        }
+    }
     static ADAPTER: Fixture = Fixture;
     let providers = [provenant_providers::Registration {
         adapter: &ADAPTER,
+        quota_source: Some(&ADAPTER),
+        quota: provenant_quota::QuotaPolicy {
+            adapter: "fixture-provider",
+            timer_seconds: 300,
+            panel_seconds: 120,
+            probe_seconds: 10,
+            low_power: true,
+            solo: false,
+        },
         ..provenant_providers::command::REGISTRATION
     }];
     let temp = tempfile::tempdir()?;
@@ -1440,6 +1507,27 @@ fn registry_only_provider_prepares_its_selected_account() -> Result<(), Box<dyn 
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let effects = Effects(std::cell::Cell::new(0));
+    let report = crate::quota::execute(
+        &crate::quota::Quota::Tick {
+            adapter: crate::quota::Filter {
+                adapter: Some("fixture-provider".into()),
+            },
+            trigger: crate::quota::Trigger::Manual,
+            power: crate::quota::Power::Ac,
+        },
+        &roots,
+        &providers,
+        &effects,
+    )?;
+    assert_eq!(effects.0.get(), 1);
+    assert!(
+        report
+            .accounts
+            .iter()
+            .any(|row| row.account.adapter == "fixture-provider"
+                && row.status == provenant_quota::QuotaStatus::Available)
+    );
     let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
     let cancel = CancelToken::new();
     let repo = utility.open_repo(
