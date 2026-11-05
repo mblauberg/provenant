@@ -326,10 +326,12 @@ fn hold_seed_for_fixture() {
     if std::fs::write(directory.join("entered"), b"entered").is_err() {
         return;
     }
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while directory.join("hold").exists() && std::time::Instant::now() < until {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let _ = provenant_test_support::wait_for(
+        "seed preparation release",
+        std::time::Duration::from_secs(30),
+        || !directory.join("hold").exists(),
+        |released| *released,
+    );
 }
 
 // A setup lock timeout occurs before Git preparation and before any guardian

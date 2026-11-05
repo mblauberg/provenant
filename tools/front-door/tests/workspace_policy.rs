@@ -25,7 +25,7 @@ const DIRECT: &[&str] = &[
 // docs/specs/rust-workspace.md#crate-layering, without the provenant- prefix.
 const LAYERS: &[(&str, &[&str])] = &[
     ("core", &[]),
-    // Test-only helpers, reachable only through dev-dependencies.
+    // Test-only helpers, reachable through dev-dependencies or optional fixture features.
     ("test-support", &[]),
     ("records", &["core"]),
     ("config", &["core", "records", "os"]),
@@ -967,8 +967,20 @@ fn check_internal_dependencies(
                 && (internal == name
                     || internal == "test-support"
                     || (name == "fabric-mcp" && internal == "fabric-store"));
+            let fixture_exception = internal == "test-support"
+                && kind == "dependencies"
+                && declared.get("optional").and_then(Item::as_bool) == Some(true)
+                && table
+                    .get("features")
+                    .and_then(|features| features.get("fixture"))
+                    .and_then(Item::as_array)
+                    .is_some_and(|features| {
+                        features
+                            .iter()
+                            .any(|feature| feature.as_str() == Some("dep:provenant-test-support"))
+                    });
             if (internal == "cli" && name != "provenant")
-                || !(allowed.contains(&internal) || dev_exception)
+                || !(allowed.contains(&internal) || dev_exception || fixture_exception)
             {
                 return Err(format!(
                     "{name} {kind}: {alias} ({package}) is not permitted by the crate layering table"

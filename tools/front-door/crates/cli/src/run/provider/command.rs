@@ -275,10 +275,12 @@ fn hold_command_preparation_for_fixture() {
     if std::fs::write(path.join("entered"), b"entered").is_err() {
         return;
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while path.join("hold").exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let _ = provenant_test_support::wait_for(
+        "command preparation release",
+        std::time::Duration::from_secs(30),
+        || !path.join("hold").exists(),
+        |released| *released,
+    );
     let _ = std::fs::write(path.join("released"), b"released");
 }
 

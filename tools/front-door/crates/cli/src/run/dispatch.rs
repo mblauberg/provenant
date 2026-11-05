@@ -630,9 +630,6 @@ pub(super) fn dispatch_inner(
     created: &mut Option<(PathBuf, String)>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<(Value, String, bool), Fail> {
-    let deadline = command
-        .wait
-        .and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds)));
     // Resolve the project default before admission, so child authority checks
     // see the same effective capabilities as the provider.
     let explicit = command.access.capability.clone();
@@ -811,7 +808,15 @@ pub(super) fn dispatch_inner(
         let call = request(&clock, &cancel)?;
         let session = open(edge, &call)?;
         if let Some(replayed) = replay_owned_dispatch(
-            &command, edge, &session, &call, workers, deadline, &capability_sources,
+            &command,
+            edge,
+            &session,
+            &call,
+            workers,
+            command
+                .wait
+                .and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds))),
+            &capability_sources,
         )? {
             return Ok(replayed);
         }
@@ -1472,6 +1477,11 @@ pub(super) fn dispatch_inner(
         Vec::new()
     };
     brief_warnings.extend(capability_warnings);
+    // Admission has its own budget. Start the launch and observation budget
+    // only once the run is ready to submit.
+    let deadline = command
+        .wait
+        .and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds)));
     let (record, started) = submit_with_host_and_wait(
         &session,
         edge,
@@ -1970,7 +1980,13 @@ pub(super) fn launch_with_deadline(
         "launch".into(),
         record.run_id.to_string().into(),
     ];
-    let result = provenant_os::exec::detached_receipt(&argv, edge.cwd, wait);
+    // Process startup and each admitted task need a usable receipt window
+    // even when the requested observation wait is very short.
+    let task_seconds = u64::try_from(record.task_ids.len()).unwrap_or(u64::MAX);
+    let preparation_budget =
+        Duration::from_secs(5_u64.saturating_add(task_seconds.saturating_sub(1)));
+    let result =
+        provenant_os::exec::detached_receipt(&argv, edge.cwd, wait.max(preparation_budget));
     // Unit tests run inside a test harness, which cannot re-execute itself as
     // the CLI. End-to-end tests exercise the actual worker process.
     #[cfg(test)]
