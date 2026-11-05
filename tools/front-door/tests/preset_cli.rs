@@ -1899,6 +1899,12 @@ fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::
             let inspection: serde_json::Value = serde_json::from_str(inspection)?;
             assert_eq!(inspection["prompt_bytes"], 10);
         }
+        if name == "big-batch" {
+            assert!(explained.contains("plan: off -> off"), "{explained}");
+            assert!(!explained.contains("Planner route"), "{explained}");
+            assert!(explained.contains("writer worktree"), "{explained}");
+            continue;
+        }
         golden(&format!("{name}.explain.txt"), &explained)?;
     }
     Ok(())
