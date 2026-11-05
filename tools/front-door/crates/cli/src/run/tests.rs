@@ -560,6 +560,63 @@ fn submodule_gitfile_is_not_a_linked_worktree() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn graph_quality_reports_missing_checkpoint_without_failing()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, OperationId, ProjectId, TaskId, WallTime};
+    use provenant_records::{AttemptFact, AttemptOutcome, Usage};
+    let temp = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(temp.path())?;
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("project"));
+    inputs.state_dir = Some(base.clone());
+    let root = provenant_core::StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let project = ProjectId::from_bytes([3; 16]);
+    let fact = AttemptFact {
+        context: Some(provenant_records::run::WorkContext {
+            graph_id: Some("retired".into()),
+            ..Default::default()
+        }),
+        attempt_id: AttemptId::from_bytes([1; 16]),
+        task_id: TaskId::from_bytes([2; 16]),
+        attempt_number: 1,
+        operation_id: OperationId::parse("quality-test")?,
+        project_id: project,
+        terminal_state: AttemptOutcome::Succeeded,
+        exit_code: Some(0),
+        queued_at: WallTime::from_micros(0)?,
+        started_at: None,
+        provider_ms: None,
+        finished_at: WallTime::from_micros(1)?,
+        resolved_route: None,
+        usage: Usage::default(),
+        reviewer: None,
+        delivery_id: None,
+        subject: None,
+        head: None,
+        output_refs: vec![],
+        requested_route: None,
+        applied_route: None,
+        observed_route: None,
+        verified_owner: None,
+        lineage: vec![],
+        reason: None,
+        trace: Default::default(),
+        transcript: None,
+    };
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let rows =
+        graph_quality_rows(&[&fact], None, &call, &root, project).map_err(|_| "quality report")?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["graph_id"], "retired");
+    assert_eq!(rows[0]["checkpoint"], "missing");
+    Ok(())
+}
+
+#[test]
 fn graph_quality_counts_only_executed_repair_rounds_and_leaf_findings() {
     use provenant_fabric_runtime::graph::NodeProgress;
     let node = |value| serde_json::from_value::<NodeProgress>(value).unwrap();

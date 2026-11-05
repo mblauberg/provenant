@@ -744,10 +744,11 @@ waiting without querying the host; explicit graph advance, resume and attempt
 settlement re-evaluate the gate. Graph status reads the saved snapshot.
 Pending CI gates persist their next `wake_at` and observation count in the
 checkpoint. The graph's `wake_at` is the earliest running CI deadline or open
-node ask deadline. The host's `provenant tick` advances only due graphs, checks
-the deadline again under the graph journal lock, and honours each gate's own
-deadline when several gates share a graph. Terminal and cancelled graphs do
-not wake. Restart resumes from the stored deadlines without an in-process timer.
+node ask deadline. The host's `provenant tick` advances pending graphs whose
+deadline is due or absent, checks the deadline again under the graph journal
+lock, and honours each gate's own deadline when several gates share a graph.
+Cancelled graphs with pending or running nodes are also advanced. Restart
+resumes from the stored deadlines without an in-process timer.
 
 `domains.fabric.graph.ci_poll_backoff` controls `initial_seconds` and
 `max_seconds`, both zero by default, making pending gates eligible on every tick. A positive
@@ -1419,14 +1420,20 @@ retries; switching a launched reader spends one.
 ### Settlement advances graphs
 
 After a run settles and its supervisor releases custody and writer locks,
-the supervisor advances pending graphs from the journal's retained document. A
-failed advance is recorded as `advance_error` until the next success;
-`resume` is the manual path. A lane settlement error is recorded only on graphs
-containing that attempt and does not stop other graphs from advancing.
-- Why: dependants progress without a daemon.
+the supervisor verifies the attempt's graph hint against that checkpoint and
+advances the matching graph from its retained document. If the hint is absent
+or does not match, the next tick can advance the graph. Pending markers make
+tick discovery independent of the number of terminal checkpoints; a missing
+sentinel or daily collection rebuilds them. A failed advance is recorded as
+`advance_error` until the next success; `resume` is the manual path. A lane
+settlement error is recorded on its matching graph. When a pending graph's
+worktree is missing, tick reports the graph once and continues with other
+work; restoring the worktree or cancelling the graph resolves the condition.
+Pending graphs remain protected from checkpoint retention.
+- Why: dependants progress without scanning unrelated terminal graphs.
 - Test: `crates/fabric-runtime/src/graph.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory`;
   `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`;
-  `src/fabric.rs::settlement_failure_in_one_graph_does_not_stop_another_graph`
+  `src/fabric/facade_tests.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ## Landing
@@ -1570,6 +1577,9 @@ checkout's scratch root (never a symlink), so briefs there stay readable from a
 linked worktree. The graph path error and CLI help name
 `.provenant/scratch/graphs`. Scratch is disposable operator data, separate from
 authoritative run state; expiry is owned by GC rather than graph execution.
+When terminal checkpoint retention expires, GC also removes matching scratch
+graph documents. Changed and unrelated documents are retained. A preset
+republishes its document if collection races with admission.
 
 Foreground preset waits prepare scratch and retain the graph document once
 before the first poll. A setup failure before graph admission fails the command

@@ -1002,8 +1002,7 @@ fn factory(
     })
 }
 
-/// Wake only expired journals. The snapshot is a discovery hint; the deadline
-/// is checked again while holding the same journal lock as explicit advance.
+/// Discover pending journals and check deadlines under the same lock as explicit advance.
 pub(crate) fn tick_graphs(
     resolved: &crate::roots::Resolved,
     now: provenant_core::WallTime,
@@ -1013,7 +1012,7 @@ pub(crate) fn tick_graphs(
     let mut report = crate::tick::Graphs::default();
     for binding in provenant_config::registered_projects(&resolved.roots)? {
         let project = binding.project_id();
-        let ids = match FileJournal::graph_ids(&resolved.roots.state, project) {
+        let ids = match FileJournal::pending_graph_ids(&resolved.roots.state, project) {
             Ok(ids) => ids,
             Err(error) => {
                 report.errors.push(format!("{project}: {error}"));
@@ -1022,14 +1021,34 @@ pub(crate) fn tick_graphs(
         };
         for id in ids {
             let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
-                let Some(checkpoint) =
-                    FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?
-                else {
+                let checkpoint =
+                    FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?;
+                let Some(checkpoint) = checkpoint else {
+                    // An already reported unreadable checkpoint must stay marked.
+                    if matches!(
+                        FileJournal::read_checkpoint(&resolved.roots.state, project, &id),
+                        Ok(None)
+                    ) {
+                        let clock = SystemClock::new();
+                        let cancel = CancelToken::new();
+                        match FileJournal::open(
+                            &resolved.roots.state,
+                            project,
+                            &id,
+                            WaitBudget::nonblocking(clock.mono_now()),
+                            &cancel,
+                            &clock,
+                        ) {
+                            Ok(mut journal) => journal.clear_stale_pending()?,
+                            Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+                                provenant_os::fs::FsError::LockTimeout { .. },
+                            )) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
                     return Ok(false);
                 };
-                if !graph_wake_due(&checkpoint, now) {
-                    return Ok(false);
-                }
+                let due_at_start = checkpoint.cancelled || graph_wake_due(&checkpoint, now);
                 let clock = SystemClock::new();
                 let cancel = CancelToken::new();
                 let budget = WaitBudget::cli(clock.mono_now(), 55)?;
@@ -1050,16 +1069,39 @@ pub(crate) fn tick_graphs(
                 let Some(checkpoint) = journal.load(&id)? else {
                     return Ok(false);
                 };
-                if !graph_wake_due(&checkpoint, clock.wall_now()?) {
-                    return Ok(false);
-                }
                 // Execution can be rebound to another worktree by a manual
                 // resume, so resolve it only after acquiring journal custody.
                 let Some(execution) =
                     FileJournal::pending_execution(&resolved.roots.state, project, &id)?
                 else {
+                    journal.clear_stale_pending()?;
                     return Ok(false);
                 };
+                match std::fs::metadata(&execution.directory) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let reason = format!(
+                            "graph {id}: worktree is missing; restore it or cancel this graph"
+                        );
+                        if FileJournal::read_advance_error(&resolved.roots.state, project, &id)?
+                            .as_deref()
+                            != Some(reason.as_str())
+                        {
+                            FileJournal::set_advance_error(
+                                &resolved.roots.state,
+                                project,
+                                &id,
+                                Some(&reason),
+                            )?;
+                            report.warnings.push(reason);
+                        }
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => {}
+                }
+                if !due_at_start || !graph_wake_due(&checkpoint, clock.wall_now()?) {
+                    return Ok(false);
+                }
                 let context =
                     Context::open(resolved.roots.clone(), &resolved.home, &execution.directory)?;
                 if context.identity.project != project || context.in_lane {
@@ -1143,7 +1185,17 @@ fn graph_wake_due(
             )
         })
     } else {
-        checkpoint.wake_at.is_some_and(|deadline| now >= deadline)
+        checkpoint.wake_at.is_none_or(|deadline| now >= deadline)
+            || checkpoint.nodes.iter().any(|node| {
+                use provenant_fabric_runtime::graph::NodeState;
+                node.state == NodeState::Running
+                    && !node.attempts.is_empty()
+                    && node
+                        .launch_retry
+                        .as_ref()
+                        .and_then(|retry| retry.wake_at)
+                        .is_none()
+            })
     }
 }
 fn landing_error(error: &(dyn std::error::Error + 'static)) -> FacadeError {
@@ -3438,7 +3490,7 @@ fn advance_graphs_after_settlement(
     settled: &provenant_run::HolderContext,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_fabric_runtime::graph::{FileJournal, advance_with_budget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
 
     let Some(host) = &settled.launch else {
         return Ok(());
@@ -3454,8 +3506,37 @@ fn advance_graphs_after_settlement(
     let settlement_error = settle_owned_worktree(settled, &roots, workers, None).err();
     let settlement_reason = settlement_error.as_ref().map(|error| error.to_string());
     let mut first_error = settlement_error.or_else(|| pressure_error.map(Into::into));
-    for id in FileJournal::graph_ids(&roots.state, settled.project_id)? {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let context = provenant_run::ExecutionContext {
+        state_root: roots.state.clone(),
+        project_id: settled.project_id,
+        actor_id: settled.actor_id,
+        read_prompts: true,
+    };
+    let store = provenant_run::RunStore::open(&context, &call)?;
+    let record = store.record(settled.attempt_id, &call)?;
+    if let Some(id) = matching_graph_hint(&roots.state, settled.project_id, &record) {
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let budget = WaitBudget::cli(clock.mono_now(), 55)?;
+            let mut journal = FileJournal::open(
+                &roots.state,
+                settled.project_id,
+                &id,
+                budget,
+                &cancel,
+                &clock,
+            )?;
+            let Some(checkpoint) = journal.load(&id)? else {
+                return Ok(());
+            };
+            if !checkpoint_matches_attempt(&checkpoint, &record) {
+                return Ok(());
+            }
             let Some(execution) =
                 FileJournal::pending_execution(&roots.state, settled.project_id, &id)?
             else {
@@ -3481,16 +3562,6 @@ fn advance_graphs_after_settlement(
                 mcp_project: None,
                 workers,
             };
-            let cancel = CancelToken::new();
-            let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-            let mut journal = FileJournal::open(
-                &roots.state,
-                settled.project_id,
-                &id,
-                budget,
-                &cancel,
-                &factory.clock,
-            )?;
             let mut owner = BoundGraphOwner {
                 factory: &factory,
                 integration_base: Some(BoundGraphBases {
@@ -3518,23 +3589,7 @@ fn advance_graphs_after_settlement(
         // If the attempt store itself refused the retention receipt, retain
         // the error on the graph containing this lane, without affecting
         // the status or advancement of any other graph.
-        let settlement_reason = settlement_reason.as_deref().filter(|_| {
-            FileJournal::read_checkpoint(&roots.state, settled.project_id, &id)
-                .ok()
-                .flatten()
-                .is_some_and(|checkpoint| {
-                    checkpoint.nodes.iter().any(|node| {
-                        node.attempts.iter().any(|attempt| {
-                            attempt
-                                .attempt_ref
-                                .as_deref()
-                                .and_then(|reference| reference.rsplit_once('/'))
-                                .and_then(|(_, attempt)| attempt.parse().ok())
-                                == Some(settled.attempt_id)
-                        })
-                    })
-                })
-        });
+        let settlement_reason = settlement_reason.as_deref();
         // The guardian's output is discarded, so `graph status` shows a failure.
         let advance_reason = result.as_ref().err().map(|error| error.to_string());
         let recorded = FileJournal::set_advance_error(
@@ -3551,6 +3606,38 @@ fn advance_graphs_after_settlement(
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+fn checkpoint_matches_attempt(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    record: &provenant_records::run::AttemptRecord,
+) -> bool {
+    checkpoint
+        .nodes
+        .iter()
+        .flat_map(|node| &node.attempts)
+        .any(|attempt| {
+            attempt
+                .attempt_ref
+                .as_deref()
+                .and_then(|reference| reference.rsplit('/').next())
+                == Some(record.attempt_id.to_string().as_str())
+                || graph_operation("graph-attempt-operation", &attempt.key)
+                    .is_ok_and(|operation| operation == record.operation_id)
+        })
+}
+
+fn matching_graph_hint(
+    root: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    record: &provenant_records::run::AttemptRecord,
+) -> Option<String> {
+    let id = record.context.as_ref()?.graph_id.as_deref()?;
+    provenant_fabric_runtime::graph::FileJournal::read_checkpoint(root, project, id)
+        .ok()
+        .flatten()
+        .filter(|checkpoint| checkpoint_matches_attempt(checkpoint, record))?;
+    Some(id.to_owned())
 }
 
 fn settle_owned_worktree(
@@ -3596,51 +3683,9 @@ fn settle_owned_worktree(
         && record.delivery.is_none()
         && store.delivered(record.attempt_id, &call)?.is_none()
     {
-        let mut ownership_unknown = false;
-        let ids = match provenant_fabric_runtime::graph::FileJournal::graph_ids(
-            &roots.state,
-            settled.project_id,
-        ) {
-            Ok(ids) => ids,
-            Err(_) => {
-                ownership_unknown = true;
-                Vec::new()
-            }
-        };
-        let mut graph_member = false;
-        for id in ids {
-            let checkpoint = match provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
-                &roots.state,
-                settled.project_id,
-                &id,
-            ) {
-                Ok(Some(checkpoint)) => checkpoint,
-                Ok(None) => continue,
-                Err(_) => {
-                    ownership_unknown = true;
-                    continue;
-                }
-            };
-            for node in &checkpoint.nodes {
-                for attempt in &node.attempts {
-                    if attempt
-                        .attempt_ref
-                        .as_deref()
-                        .and_then(|reference| reference.rsplit('/').next())
-                        == Some(record.attempt_id.to_string().as_str())
-                        || graph_operation("graph-attempt-operation", &attempt.key)
-                            .is_ok_and(|operation| operation == record.operation_id)
-                    {
-                        graph_member = true;
-                    }
-                }
-            }
-            if graph_member {
-                break;
-            }
-        }
-        // Unknown graph custody retains graph operations conservatively; unrelated lanes still settle.
-        if graph_member || ownership_unknown && record.operation_id.as_str().starts_with("graph-") {
+        let graph_member = matching_graph_hint(&roots.state, settled.project_id, &record).is_some();
+        // An unmatched graph operation retains custody without scanning other graphs.
+        if graph_member || record.operation_id.as_str().starts_with("graph-") {
             let reason = if graph_member {
                 "graph writer worktree retained for continuation, later rounds and explicit delivery"
             } else {
@@ -5644,12 +5689,53 @@ fn exact_route_refused(model: &str, excluded_families: &[String], require_distin
             .is_none_or(|family| excluded_families.contains(&family))
 }
 
+fn restore_scratch_source(
+    directory: &Path,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> Result<(), FacadeError> {
+    let directory = provenant_os::fs::Directory::open_anchor(directory)
+        .map_err(|_| FacadeError::io("access graph scratch"))?;
+    match directory.metadata_at(name, false) {
+        Ok(_) => Ok(()),
+        Err(error) if error.is_not_found() => {
+            match directory.atomic_write(
+                name,
+                ".graph-recover.",
+                bytes,
+                provenant_os::fs::PublishMode::NoReplace,
+            ) {
+                Ok(publication) => publication
+                    .require_durable()
+                    .map_err(|_| FacadeError::io("restore graph scratch")),
+                Err(error) if error.is_exists() => Ok(()),
+                Err(_) => Err(FacadeError::io("restore graph scratch")),
+            }
+        }
+        Err(_) => Err(FacadeError::io("access graph scratch")),
+    }
+}
+
 impl Factory {
     /// Read a project-local graph document through the confined, bounded helpers.
     fn read_graph_document(
         &self,
         path: &Path,
     ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
+        Ok(self.read_graph_document_bytes(path)?.0)
+    }
+
+    fn read_graph_document_bytes(
+        &self,
+        path: &Path,
+    ) -> Result<
+        (
+            provenant_fabric_runtime::graph::GraphDocument,
+            PathBuf,
+            Vec<u8>,
+        ),
+        FacadeError,
+    > {
         let path = provenant_os::fs::canonicalize(path)
             .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
         if !path.starts_with(&self.cwd) {
@@ -5658,7 +5744,8 @@ impl Factory {
         let bytes = provenant_os::fs::FileHandle::open_source(&path)
             .and_then(|mut file| file.read_bounded(8_388_608))
             .map_err(|_| FacadeError::io("access graph journal"))?;
-        decode_graph_document(&bytes)
+        let document = decode_graph_document(&bytes)?;
+        Ok((document, path, bytes))
     }
 
     /// The one selector resolver for graph status, cancel and resume: a graph
@@ -5800,6 +5887,7 @@ impl Factory {
             .validate_input(provenant_core::WaitTransport::Cli)
             .map_err(|error| FacadeError::invalid(error.to_string()))?;
         let resume = matches!(&input, GraphInput::Resume { .. });
+        let mut scratch_source = None;
         let document = match &input {
             GraphInput::Run { document, .. } | GraphInput::Resume { document, .. } => {
                 let scratch = match prepared_scratch {
@@ -5830,7 +5918,14 @@ impl Factory {
                     } else {
                         self.cwd.join(document)
                     };
-                    self.read_graph_document(&path)?
+                    let (document, source, bytes) = self.read_graph_document_bytes(&path)?;
+                    if let Ok(graphs) = provenant_os::fs::canonicalize(&scratch.join("graphs"))
+                        && source.parent() == Some(graphs.as_path())
+                        && let Some(name) = source.file_name()
+                    {
+                        scratch_source = Some((graphs, name.to_owned(), bytes));
+                    }
+                    document
                 };
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
@@ -6070,6 +6165,12 @@ impl Factory {
         )
         .map_err(|_| FacadeError::io("access graph journal"))?;
         if let Some(document) = &document {
+            // GC and admission hold this graph's lock. If collection removed
+            // the source after it was read, restore the exact bytes before
+            // publishing a new pending checkpoint or launching a node.
+            if let Some((directory, name, bytes)) = &scratch_source {
+                restore_scratch_source(directory, name, bytes)?;
+            }
             let integration_base = if journal.load(id).map_err(graph_journal_error)?.is_some() {
                 journal.integration_base()
             } else if let Some(branch) = &document.integration_branch {

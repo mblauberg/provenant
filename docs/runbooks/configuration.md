@@ -646,6 +646,7 @@ The optional `[gc]` section controls daily collection by the host tick:
 [gc]
 schedule = true
 idle_days = 7
+graph_checkpoint_days = 90
 # free_floor = "100G"
 # alert_below = "150G"
 
@@ -659,6 +660,10 @@ foreign_worktrees = "keep" # opt in with "merged-clean"
 `gc.schedule` defaults to true. Setting it to false prevents subsequent
 scheduled collections. The host tick continues to serve graph deadlines.
 `gc.idle_days` accepts 1 to 3650 (default 7).
+`gc.graph_checkpoint_days` retains terminal graph checkpoints for at least the
+configured number of days after their last save (default 90, range 1 to 3650).
+Pending graphs and graphs with open asks or observations remain available.
+Older reports can show a missing checkpoint for a collected graph.
 `gc.free_floor` defaults to 10% of the state volume's capacity, with a minimum
 of 50 GiB. Set it to override that floor. GC requests additional cache
 collection until available disk space reaches the floor, after the usual

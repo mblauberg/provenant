@@ -17,6 +17,21 @@ fn scratch_prepare_io_error_retains_its_cause() {
         if path == ".provenant/scratch"));
 }
 
+#[test]
+fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "waiter", "plan_digest": "plan", "nodes": []
+        }))?;
+    let now = provenant_core::WallTime::from_micros(1_000_000)?;
+    assert!(graph_wake_due(&checkpoint, now));
+    checkpoint.wake_at = Some(provenant_core::WallTime::from_micros(2_000_000)?);
+    assert!(!graph_wake_due(&checkpoint, now));
+    assert!(graph_wake_due(&checkpoint, checkpoint.wake_at.unwrap()));
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(dead_code)] // The worktree driver includes these helpers without libtest.
 pub(crate) mod peer_tests {
@@ -30,6 +45,9 @@ pub(crate) mod peer_tests {
     #[test]
     fn tick_reports_unreadable_once_and_advances_another_graph()
     -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::tick_reports_unreadable_once_and_advances_another_graph")? {
+            return Ok(());
+        }
         use provenant_fabric_runtime::graph;
         struct Seed {
             actor: String,
@@ -115,6 +133,163 @@ pub(crate) mod peer_tests {
         let second = tick_graphs(&resolved, now, &FreeWorkers)?;
         assert!(second.errors.is_empty(), "{:?}", second.errors);
         assert_eq!(second.advanced, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn tick_dispatches_waiting_node_without_a_deadline() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::tick_dispatches_waiting_node_without_a_deadline")? { return Ok(()); }
+        use provenant_fabric_runtime::graph;
+        struct Seed(String);
+        impl graph::AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String { self.0.clone() }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
+                _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: None })
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
+        let project = context.identity.project;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"waiter","nodes":[{"id":"one","prompt":"reply OK",
+            "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+        }))?;
+        let mut journal = graph::FileJournal::open(&roots.state, project, "waiter", budget, &cancel, &clock)?;
+        journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+            directory: rig.project.clone(), document: document.clone() })?;
+        let seeded = graph::advance_with_budget(&document, &mut Seed(context.identity.inbox.actor.to_string()),
+            &mut journal, &Default::default(), &Default::default())?;
+        assert!(seeded.checkpoint.wake_at.is_none());
+        let key = seeded.checkpoint.nodes[0].attempts[0].key.clone();
+        drop(journal);
+        let resolved = crate::roots::Resolved { assets: rig.project.clone(), home: rig.home.clone(), project: rig.project.clone(),
+            roots: roots.clone(), claude_config: None, codex_home: None };
+        let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+        assert_eq!(tick.advanced, 1, "{:?}", tick.errors);
+        let factory = Factory { context, project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
+            host_launch: None, mcp_project: None, workers: &FreeWorkers };
+        let owner = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
+        let operation = graph_operation("graph-attempt-operation", &key)?;
+        assert!(owner.store(&cancel)?.operation(&operation, &owner.call(&cancel))?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn tick_dispatches_capacity_waiter_with_future_decision() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::tick_dispatches_capacity_waiter_with_future_decision")? { return Ok(()); }
+        use provenant_fabric_runtime::graph;
+        struct Seed(String);
+        impl graph::AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String { self.0.clone() }
+            fn wall_now(&self) -> Option<provenant_core::WallTime> { SystemClock.wall_now().ok() }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
+                _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: None })
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
+        let project = context.identity.project;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"waiter","decision_session":"chair-session","nodes":[
+            {"id":"choose","kind":"decide","access":"read_only","decide":{"question":"Ship?",
+            "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],"default":"hold","timeout_seconds":3600}},
+            {"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+        }))?;
+        let mut journal = graph::FileJournal::open(&roots.state, project, "waiter", budget, &cancel, &clock)?;
+        journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+            directory: rig.project.clone(), document: document.clone() })?;
+        let seeded = graph::advance_with_budget(&document, &mut Seed(context.identity.inbox.actor.to_string()),
+            &mut journal, &Default::default(), &Default::default())?;
+        assert!(seeded.checkpoint.wake_at.unwrap() > clock.wall_now()?);
+        let key = seeded.checkpoint.nodes[1].attempts[0].key.clone();
+        drop(journal);
+        let resolved = crate::roots::Resolved { assets: rig.project.clone(), home: rig.home.clone(), project: rig.project.clone(),
+            roots: roots.clone(), claude_config: None, codex_home: None };
+        let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+        assert_eq!(tick.advanced, 1, "{:?}", tick.errors);
+        let factory = Factory { context, project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
+            host_launch: None, mcp_project: None, workers: &FreeWorkers };
+        let owner = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
+        let operation = graph_operation("graph-attempt-operation", &key)?;
+        assert!(owner.store(&cancel)?.operation(&operation, &owner.call(&cancel))?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::tick_warns_once_for_missing_worktree_and_advances_another_graph")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph;
+        struct Seed { actor: String, at: provenant_core::WallTime }
+        impl graph::AttemptOwner for Seed {
+            type Error = FacadeError;
+            fn actor(&self) -> String { self.actor.clone() }
+            fn wall_now(&self) -> Option<provenant_core::WallTime> { Some(self.at) }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute, _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>)
+                -> Result<graph::AttemptObservation, Self::Error> { Err(FacadeError::OwnerUnavailable) }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new().map_err(|e| format!("rig: {e}"))?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone()).map_err(|e| format!("roots: {e}"))?;
+        let context = Context::open(roots.clone(), &rig.home, &rig.project).map_err(|e| format!("context: {e}"))?;
+        let project = context.identity.project;
+        let clock = SystemClock;
+        let now = clock.wall_now()?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 10)?;
+        let mut seed = Seed { actor: context.identity.inbox.actor.to_string(), at: provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)? };
+        for id in ["a-missing", "b-present"] {
+            if id == "a-missing" { seed.at = now; }
+            else { seed.at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?; }
+            let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+                "schema_version":1, "graph_id":id, "decision_session":"chair-session",
+                "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{
+                    "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
+                    "default":"hold", "timeout_seconds":60
+                }}]
+            }))?;
+            let mut journal = graph::FileJournal::open(&roots.state, project, id, budget, &cancel, &clock)?;
+            journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+                directory: if id == "a-missing" { rig.root.join("removed-worktree") } else { rig.project.clone() },
+                document: document.clone() })?;
+            graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default()).map_err(|e| format!("seed: {e}"))?;
+        }
+        let resolved = crate::roots::Resolved { assets: rig.project.clone(), home: rig.home.clone(),
+            project: rig.project.clone(), roots: roots.clone(), claude_config: None, codex_home: None };
+        let first = tick_graphs(&resolved, now, &FreeWorkers)?;
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert_eq!(first.advanced, 1);
+        assert_eq!(first.warnings.len(), 1);
+        assert!(first.warnings[0].contains("a-missing"));
+        let second = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert!(second.warnings.is_empty());
+        assert_eq!(graph::FileJournal::collect_terminal(&roots.state, project, i128::MAX, &cancel, &clock)?, 1);
+        assert!(graph::FileJournal::read_checkpoint(&roots.state, project, "a-missing")?.is_some());
+        let factory = Factory {
+            context, project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        factory.graph(GraphInput::Cancel { extra: Default::default(), id: "a-missing".into(), reason: None }, budget, &cancel)?;
+        assert_eq!(graph::FileJournal::collect_terminal(&roots.state, project, i128::MAX, &cancel, &clock)?, 1);
+        assert!(graph::FileJournal::read_checkpoint(&roots.state, project, "a-missing")?.is_none());
         Ok(())
     }
 
@@ -526,6 +701,14 @@ pub(crate) mod peer_tests {
 
     impl SettlementFixture {
         fn resumed() -> Result<Self, Box<dyn std::error::Error>> {
+            Self::resumed_as("settlement-resume")
+        }
+
+        fn resumed_as(operation: &str) -> Result<Self, Box<dyn std::error::Error>> {
+            Self::settled_fixture(operation, None)
+        }
+
+        fn settled_fixture(operation: &str, graph_id: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
             use provenant_confinement::worktrees::{
                 self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
             };
@@ -582,12 +765,14 @@ pub(crate) mod peer_tests {
             let run = provenant_run::Service::new(&store).dispatch(
                 provenant_run::DispatchRequest {
                     chair: None,
-                    operation_id: "settlement-original".parse()?,
+                    operation_id: if graph_id.is_some() { operation } else { "settlement-original" }.parse()?,
                     concurrency: 1,
                     lane_depth: 1,
                     parent_attempt: None,
                     tasks: vec![provenant_run::DispatchTask {
-                        context: None,
+                        context: graph_id.map(|id| provenant_records::run::WorkContext {
+                            graph_id: Some(id.to_owned()), ..Default::default()
+                        }),
                         build_heavy: false,
                         title: None,
                         task_id: TaskId::from_bytes([3; 16]),
@@ -645,6 +830,18 @@ pub(crate) mod peer_tests {
                     Ok(())
                 },
             )?;
+            if graph_id.is_some() {
+                let record = store.record(prior, &call)?;
+                publish_success(&rig, &store, &record, info.head, &call)?;
+                let settled = provenant_run::HolderContext {
+                    schema_version: 1,
+                    roots: provenant_run::RootSeed { home: rig.home.clone(), checkout: rig.project.clone(), state_root: rig.state.clone() },
+                    project_id: identity.project, actor_id: identity.inbox.actor,
+                    run_id: record.run_id, attempt_id: record.attempt_id,
+                    host_delivery: None, launch: None, sealed: None,
+                };
+                return Ok(Self { rig, roots, store, settled, worktree: info.path });
+            }
             store.withdraw(
                 prior,
                 AttemptState::Queued {
@@ -658,7 +855,7 @@ pub(crate) mod peer_tests {
             let resume = provenant_run::Resume {
                 prior,
                 expected_generation: 0,
-                operation_id: "settlement-resume".parse()?,
+                operation_id: operation.parse()?,
                 run_id: RunId::from_bytes([30; 16]),
                 attempt_id: AttemptId::from_bytes([31; 16]),
                 prompt: "continue".into(),
@@ -978,10 +1175,270 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
-    fn settlement_failure_in_one_graph_does_not_stop_another_graph()
+    fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_hint_requires_a_matching_attempt")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+        let fixture = SettlementFixture::resumed()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request { clock: &clock, cancel: &cancel };
+        let mut record = fixture.store.record(fixture.settled.attempt_id, &call)?;
+        let document = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"hint-test","nodes":[{"id":"one","prompt":"work","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+        }))?;
+        let checkpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"hint-test","plan_digest":"digest","nodes":[{
+                "id":"one","worktree":null,"state":"running","attempts":[{
+                    "key":{"graph_id":"hint-test","node_id":"one","route_index":0},
+                    "route":{"adapter":"fixture","model":"fixture/model"},"state":"starting",
+                    "launched":true,"launch_actor":"fixture", "attempt_ref":format!("host/{}",record.attempt_id)
+                }]
+            }]
+        }))?;
+        let mut journal = FileJournal::open(&fixture.roots.state, fixture.settled.project_id, "hint-test", call.lock_budget(), &cancel, &clock)?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution { extra: Default::default(), integration_base: None, review_base: None, directory: fixture.rig.project.clone(), document })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).is_none());
+        record.context = Some(provenant_records::run::WorkContext { graph_id: Some("unknown".into()), ..Default::default() });
+        assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).is_none());
+        record.context.as_mut().ok_or("context")?.graph_id = Some("hint-test".into());
+        assert_eq!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).as_deref(), Some("hint-test"));
+        record.attempt_id = AttemptId::from_bytes([99; 16]);
+        assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_advances_only_matching_graph_and_retains_writer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::settlement_advances_only_matching_graph_and_retains_writer")? { return Ok(()); }
+        use provenant_fabric_runtime::graph;
+        struct Seed { reference: String, actor: String }
+        impl graph::AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String { self.actor.clone() }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
+                _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: Some(self.reference.clone()) })
+            }
+        }
+        let mut fixture = SettlementFixture::settled_fixture("graph-fixture", Some("matching"))?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let identity = Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?.identity;
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        for id in ["matching", "unrelated"] {
+            let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+                "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK",
+                "access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?;
+            let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id, id, budget, &cancel, &clock)?;
+            journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+                directory: fixture.rig.project.clone(), document: document.clone() })?;
+            let mut seed = Seed { reference: format!("{}/{}", identity.host, fixture.settled.attempt_id), actor: identity.inbox.actor.to_string() };
+            graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default())?;
+        }
+        fixture.settled.launch = Some(provenant_run::HostLaunchContext {
+            configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
+            executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, codex_home: None,
+            cargo_build_jobs: None, fixture_state_write: false,
+        });
+        advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
+        let matched = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "matching")?.ok_or("matching")?;
+        let other = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "unrelated")?.ok_or("unrelated")?;
+        assert_eq!(matched.nodes[0].state, graph::NodeState::Succeeded);
+        assert_eq!(other.nodes[0].state, graph::NodeState::Running);
+        assert!(fixture.worktree.exists());
+        let call = provenant_run::Request { clock: &clock, cancel: &cancel };
+        let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("receipt")?;
+        assert_eq!(receipt["state"], "retained");
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::settlement_and_tick_read_no_terminal_graphs_at_scale")? { return Ok(()); }
+        use provenant_fabric_runtime::graph;
+        struct Seed { reference: String, actor: String, at: provenant_core::WallTime }
+        impl graph::AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String { self.actor.clone() }
+            fn wall_now(&self) -> Option<provenant_core::WallTime> { Some(self.at) }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
+                _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: Some(self.reference.clone()) })
+            }
+        }
+        let mut fixture = SettlementFixture::settled_fixture("graph-count", Some("owner"))?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let identity = Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?.identity;
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        let now = clock.wall_now()?;
+        let mut seed = Seed { reference: format!("{}/{}", identity.host, fixture.settled.attempt_id), actor: identity.inbox.actor.to_string(), at: now };
+        for number in 0..20 {
+            let id = if number == 0 { "owner".to_owned() } else { format!("pending-{number:02}") };
+            let nodes = if number == 0 { serde_json::json!([{"id":"one","prompt":"reply OK","access":"worktree_write",
+                "worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]) }
+            else { serde_json::json!([{"id":"choose","kind":"decide","access":"read_only","decide":{
+                "question":"Ship?","options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
+                "default":"hold","timeout_seconds":3600}}]) };
+            let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+                "schema_version":1,"graph_id":id,"decision_session":"chair-session","nodes":nodes
+            }))?;
+            let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id, &id, budget, &cancel, &clock)?;
+            journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+                directory: fixture.rig.project.clone(), document: document.clone() })?;
+            graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default())?;
+        }
+        let mut terminal = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "owner")?.ok_or("owner")?;
+        let mut execution = graph::FileJournal::execution(&fixture.roots.state, fixture.settled.project_id, "owner")?.ok_or("execution")?;
+        terminal.nodes[0].state = graph::NodeState::Succeeded;
+        terminal.nodes[0].attempts.clear();
+        let directory = fixture.roots.state.as_path().join("fabric/graphs").join(fixture.settled.project_id.to_string());
+        for number in 0..5000 {
+            let id = format!("terminal-{number:04}");
+            terminal.graph_id = id.clone();
+            execution.document.graph_id = id.clone();
+            let digest = provenant_records::CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &(&terminal, &execution))?.to_string();
+            let envelope = serde_json::json!({"schema_version":1,"digest":digest,"checkpoint":terminal,"execution":execution});
+            std::fs::write(directory.join(format!("graph-{id}.json")), serde_json::to_vec(&envelope)?)?;
+        }
+        assert_eq!(graph::FileJournal::pending_graph_ids(&fixture.roots.state, fixture.settled.project_id)?.len(), 20);
+        graph::take_checkpoint_read_ids();
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        let reads = graph::take_checkpoint_read_ids();
+        assert!(!reads.is_empty());
+        assert!(reads.iter().all(|id| id == "owner"), "{reads:?}");
+        fixture.settled.launch = Some(provenant_run::HostLaunchContext {
+            configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
+            executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, codex_home: None,
+            cargo_build_jobs: None, fixture_state_write: false,
+        });
+        advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
+        let reads = graph::take_checkpoint_read_ids();
+        assert!(!reads.is_empty());
+        assert!(reads.iter().all(|id| id == "owner"), "{reads:?}");
+        let resolved = crate::roots::Resolved { assets: fixture.rig.project.clone(), home: fixture.rig.home.clone(),
+            project: fixture.rig.project.clone(), roots: fixture.roots.clone(), claude_config: None, codex_home: None };
+        let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let reads = graph::take_checkpoint_read_ids();
+        assert!(!reads.is_empty());
+        assert!(reads.iter().all(|id| id.starts_with("pending-")), "{reads:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn incorrect_graph_hints_defer_owning_graph_to_tick() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::incorrect_graph_hints_defer_owning_graph_to_tick")? { return Ok(()); }
+        use provenant_fabric_runtime::graph::{self, GraphJournal};
+        struct Seed { reference: String, actor: String }
+        impl graph::AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String { self.actor.clone() }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
+                _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: Some(self.reference.clone()) })
+            }
+        }
+        for hint in ["wrong", "unknown"] {
+            let mut fixture = SettlementFixture::settled_fixture("graph-mismatch", Some(hint))?;
+            let clock = SystemClock;
+            let cancel = CancelToken::new();
+            let identity = Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?.identity;
+            let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+            for id in ["owner", "wrong"] {
+                let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+                    "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK",
+                    "access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
+                }))?;
+                let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id, id, budget, &cancel, &clock)?;
+                journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+                    directory: fixture.rig.project.clone(), document: document.clone() })?;
+                let reference = if id == "owner" { format!("{}/{}", identity.host, fixture.settled.attempt_id) }
+                    else { format!("{}/{}", identity.host, AttemptId::from_bytes([99;16])) };
+                let mut seed = Seed { reference, actor: identity.inbox.actor.to_string() };
+                let mut run = graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default())?;
+                if id == "wrong" { run.checkpoint.nodes[0].state = graph::NodeState::Succeeded; journal.save(&run.checkpoint)?; }
+            }
+            fixture.settled.launch = Some(provenant_run::HostLaunchContext {
+                configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
+                executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, codex_home: None,
+                cargo_build_jobs: None, fixture_state_write: false,
+            });
+            advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
+            let before = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "owner")?.ok_or("owner")?;
+            assert_eq!(before.nodes[0].state, graph::NodeState::Running);
+            let resolved = crate::roots::Resolved { assets: fixture.rig.project.clone(), home: fixture.rig.home.clone(),
+                project: fixture.rig.project.clone(), roots: fixture.roots.clone(), claude_config: None, codex_home: None };
+            let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            let after = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "owner")?.ok_or("owner")?;
+            assert_eq!(after.nodes[0].state, graph::NodeState::Succeeded);
+            assert!(fixture.worktree.exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unmatched_settlement_hints_wait_for_tick() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::unmatched_settlement_hints_wait_for_tick")? { return Ok(()); }
+        use provenant_fabric_runtime::graph;
+        struct Seed { reference: String, actor: String }
+        impl graph::AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String { self.actor.clone() }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
+                _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: Some(self.reference.clone()) })
+            }
+        }
+        for hint in [None, Some("unknown"), Some("other")] {
+            let mut fixture = SettlementFixture::settled_fixture("graph-fixture", hint)?;
+            let clock = SystemClock;
+            let cancel = CancelToken::new();
+            let identity = Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?.identity;
+            let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+            for id in ["owner", "other"] {
+                let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+                    "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK",
+                    "access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
+                }))?;
+                let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id, id, budget, &cancel, &clock)?;
+                journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+                    directory: fixture.rig.project.clone(), document: document.clone() })?;
+                let attempt = if id == "owner" { fixture.settled.attempt_id } else { AttemptId::from_bytes([99; 16]) };
+                let mut seed = Seed { reference: format!("{}/{attempt}", identity.host), actor: identity.inbox.actor.to_string() };
+                graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default())?;
+            }
+            fixture.settled.launch = Some(provenant_run::HostLaunchContext {
+                configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
+                executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, codex_home: None,
+                cargo_build_jobs: None, fixture_state_write: false,
+            });
+            advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
+            let owner = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "owner")?.ok_or("owner")?;
+            assert_eq!(owner.nodes[0].state, graph::NodeState::Running, "hint: {hint:?}");
+            let resolved = crate::roots::Resolved { assets: fixture.rig.project.clone(), home: fixture.rig.home.clone(),
+                project: fixture.rig.project.clone(), roots: fixture.roots.clone(), claude_config: None, codex_home: None };
+            let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+            assert!(tick.advanced > 0, "hint: {hint:?}");
+            let owner = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "owner")?.ok_or("owner")?;
+            assert_eq!(owner.nodes[0].state, graph::NodeState::Succeeded, "hint: {hint:?}");
+            assert!(fixture.worktree.exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_without_hint_does_not_advance_unrelated_graphs()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(
-            "fabric::peer_tests::settlement_failure_in_one_graph_does_not_stop_another_graph",
+            "fabric::peer_tests::settlement_without_hint_does_not_advance_unrelated_graphs",
         )? {
             return Ok(());
         }
@@ -1080,8 +1537,8 @@ pub(crate) mod peer_tests {
             )?;
             assert_eq!(seeded.checkpoint.nodes[0].state, NodeState::Running);
         }
-        // An unsafe receipt path makes settlement itself fail before the graph
-        // loop. It must leave A observable and still allow B to complete.
+        // An unsafe receipt path makes settlement fail. With no graph hint,
+        // neither graph is advanced by this settlement.
         let receipt_path = fixture
             .rig
             .state
@@ -1117,7 +1574,7 @@ pub(crate) mod peer_tests {
                 "a-settlement-error"
             )?
             .as_deref(),
-            Some(settlement_error.as_str())
+            None
         );
         let completed = FileJournal::read_checkpoint(
             &fixture.roots.state,
@@ -1125,14 +1582,14 @@ pub(crate) mod peer_tests {
             "b-completes",
         )?
         .ok_or("B checkpoint")?;
-        assert_eq!(completed.nodes[0].state, NodeState::Succeeded);
+        assert_eq!(completed.nodes[0].state, NodeState::Running);
         assert!(
             FileJournal::pending_execution(
                 &fixture.roots.state,
                 fixture.settled.project_id,
                 "b-completes"
             )?
-            .is_none()
+            .is_some()
         );
         assert!(
             FileJournal::read_advance_error(
@@ -1143,6 +1600,17 @@ pub(crate) mod peer_tests {
             .is_none()
         );
         assert!(fixture.worktree.exists());
+        let resolved = crate::roots::Resolved {
+            assets: fixture.rig.project.clone(), home: fixture.rig.home.clone(),
+            project: fixture.rig.project.clone(), roots: fixture.roots.clone(),
+            claude_config: None, codex_home: None,
+        };
+        let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+        assert!(tick.advanced > 0);
+        let completed = FileJournal::read_checkpoint(
+            &fixture.roots.state, fixture.settled.project_id, "b-completes",
+        )?.ok_or("B checkpoint after tick")?;
+        assert_eq!(completed.nodes[0].state, NodeState::Succeeded);
         Ok(())
     }
 
@@ -2885,6 +3353,93 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
+    fn unmatched_graph_writer_keeps_its_worktree() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::unmatched_graph_writer_keeps_its_worktree")? {
+            return Ok(());
+        }
+        for corrupt in [false, true] {
+            let fixture = if corrupt {
+                SettlementFixture::settled_fixture("graph-unmatched", Some("broken"))?
+            } else {
+                SettlementFixture::resumed_as("graph-unmatched")?
+            };
+            let clock = SystemClock;
+            let cancel = CancelToken::new();
+            let call = provenant_run::Request { clock: &clock, cancel: &cancel };
+            if corrupt {
+                drop(provenant_fabric_runtime::graph::FileJournal::open(
+                    &fixture.roots.state, fixture.settled.project_id, "broken",
+                    call.lock_budget(), &cancel, &clock,
+                )?);
+                let path = fixture.roots.state.as_path().join("fabric/graphs")
+                    .join(fixture.settled.project_id.to_string()).join("graph-broken.json");
+                std::fs::write(path, b"invalid checkpoint")?;
+            }
+            settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+            let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?
+                .ok_or("missing settlement")?;
+            assert_eq!(receipt["state"], "retained");
+            assert!(receipt["reason"].as_str().is_some_and(|reason| !reason.is_empty()));
+            assert!(fixture.worktree.exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resumed_lane_settlement_ignores_terminal_graph()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::resumed_lane_settlement_ignores_terminal_graph")?
+        {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, GraphJournal};
+        let fixture = SettlementFixture::resumed()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"terminal-unrelated","nodes":[{"id":"one","prompt":"work",
+                "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+        }))?;
+        let checkpoint: graph::GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"terminal-unrelated","plan_digest":"digest",
+            "nodes":[{"id":"one","state":"succeeded","attempts":[]}]
+        }))?;
+        let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id,
+            "terminal-unrelated", WaitBudget::cli(clock.mono_now(), 10)?, &cancel, &clock)?;
+        journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+            directory: fixture.rig.project.clone(), document })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        graph::take_checkpoint_read_ids();
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        assert!(graph::take_checkpoint_read_ids().is_empty());
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let receipt = fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?
+            .ok_or("missing resumed settlement receipt")?;
+        assert_eq!(receipt["state"], "pruned", "{receipt}");
+        assert!(!fixture.worktree.exists());
+        assert!(
+            fixture
+                .rig
+                .state
+                .join("runs")
+                .join(fixture.settled.run_id.to_string())
+                .join("attempts")
+                .join(fixture.settled.attempt_id.to_string())
+                .join("worktree-settlement.json")
+                .is_file()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn resumed_lane_settlement_prunes_and_records_its_receipt()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::resumed_lane_settlement_prunes_and_records_its_receipt")?
@@ -2892,9 +3447,15 @@ pub(crate) mod peer_tests {
             return Ok(());
         }
         let fixture = SettlementFixture::resumed()?;
-        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
         let clock = SystemClock;
         let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 10)?;
+        drop(provenant_fabric_runtime::graph::FileJournal::open(
+            &fixture.roots.state, fixture.settled.project_id, "unrelated", budget, &cancel, &clock,
+        )?);
+        std::fs::write(fixture.roots.state.as_path().join("fabric/graphs")
+            .join(fixture.settled.project_id.to_string()).join("graph-unrelated.json"), b"invalid checkpoint")?;
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
         let call = provenant_run::Request {
             clock: &clock,
             cancel: &cancel,
