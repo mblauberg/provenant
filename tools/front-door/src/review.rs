@@ -118,6 +118,7 @@ mod tests {
                 request,
                 directory.path(),
                 &policy,
+                &[],
                 "explicit",
                 None,
             )
