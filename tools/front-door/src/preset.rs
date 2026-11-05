@@ -4204,63 +4204,66 @@ fn family(node: &Value) -> String {
     }
 }
 
-pub(super) fn pending_checks(document: &Value) -> Vec<Value> {
+pub(super) fn pending_checks(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Vec<Value> {
+    use provenant_fabric_runtime::graph::{AccessMode, GraphNode, NodeKind, SourceBinding};
+    use provenant_records::run::DeliveryMode;
     let mut ids = BTreeSet::new();
-    fn walk(nodes: &[Value], ids: &mut BTreeSet<String>) {
+    fn walk(nodes: &[GraphNode], ids: &mut BTreeSet<&'static str>) {
         for node in nodes {
             if node
-                .get("source")
-                .and_then(Value::as_object)
-                .is_some_and(|source| source.get("type").and_then(Value::as_str) != Some("commit"))
+                .source
+                .as_ref()
+                .is_some_and(|source| !matches!(source, SourceBinding::Commit { .. }))
             {
-                ids.insert("source".into());
+                ids.insert("source");
             }
-            if node["access"] == "worktree_write" {
-                ids.insert("worktree".into());
+            if node.access == AccessMode::WorktreeWrite {
+                ids.insert("worktree");
             }
-            if node["kind"] == "plan" {
-                ids.insert("planner_authority".into());
+            if node.kind == Some(NodeKind::Plan) {
+                ids.insert("planner_authority");
             }
-            let kind = node["kind"].as_str();
             let agent = !matches!(
-                kind,
-                Some("composite" | "loop" | "land" | "gate" | "decide")
+                node.kind,
+                Some(
+                    NodeKind::Composite
+                        | NodeKind::Loop
+                        | NodeKind::Land
+                        | NodeKind::Gate
+                        | NodeKind::Decide
+                )
             );
             if agent {
-                ids.insert("route_readiness".into());
+                ids.insert("route_readiness");
             }
-            for key in ["composite", "loop"] {
-                if let Some(children) = node
-                    .pointer(&format!("/{key}/nodes"))
-                    .or_else(|| node.pointer(&format!("/{key}/body")))
-                    .and_then(Value::as_array)
-                {
-                    walk(children, ids);
-                }
+            if let Some(group) = &node.composite {
+                walk(&group.nodes, ids);
+            }
+            if let Some(body) = &node.loop_body {
+                walk(&body.body, ids);
             }
         }
     }
-    walk(
-        document["nodes"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        &mut ids,
-    );
-    if document["delivery"]
-        .as_str()
-        .is_some_and(|d| d == "pr" || d.starts_with("integrate:"))
-        || document["nodes"].as_array().into_iter().flatten().any(|n| {
-            n["delivery"]
-                .as_str()
-                .is_some_and(|d| d == "pr" || d.starts_with("integrate:"))
-        })
+    walk(&document.nodes, &mut ids);
+    let delivery_needs_target = |delivery: &Option<DeliveryMode>| {
+        matches!(
+            delivery,
+            Some(DeliveryMode::Pr | DeliveryMode::Integrate(_))
+        )
+    };
+    if delivery_needs_target(&document.delivery)
+        || document
+            .nodes
+            .iter()
+            .any(|node| delivery_needs_target(&node.delivery))
     {
-        ids.insert("delivery_target".into());
+        ids.insert("delivery_target");
     }
     ids.into_iter()
         .map(|id| {
-            let reason = match id.as_str() {
+            let reason = match id {
                 "source" => "Source binding must be resolved and verified at execution.",
                 "worktree" => "Writer worktree ownership is checked at execution.",
                 "delivery_target" => "Delivery target is checked before delivery.",
@@ -4348,14 +4351,21 @@ pub(super) fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
 
 /// Count concrete writer nodes by their requested alias, retaining unknown and
 /// exact-model routes outside the advisory mix.
-pub(super) fn writer_tier_mix(nodes: &[Value]) -> [usize; 3] {
+pub(super) fn writer_tier_mix(nodes: &[provenant_fabric_runtime::graph::GraphNode]) -> [usize; 3] {
+    use provenant_fabric_runtime::graph::AccessMode;
     let mut counts = [0; 3];
     for node in nodes {
-        if node["access"] == "worktree_write" {
+        if node.access == AccessMode::WorktreeWrite {
             let tier = node
-                .pointer("/route/alias")
-                .or_else(|| node.pointer("/routes/0/alias"))
-                .and_then(Value::as_str);
+                .route
+                .as_ref()
+                .and_then(|route| route.alias.as_deref())
+                .or_else(|| {
+                    node.routes
+                        .as_ref()
+                        .and_then(|routes| routes.first())
+                        .and_then(|route| route.alias.as_deref())
+                });
             if let Some(index) = ["junior", "senior", "principal"]
                 .iter()
                 .position(|name| Some(*name) == tier)
@@ -4363,12 +4373,15 @@ pub(super) fn writer_tier_mix(nodes: &[Value]) -> [usize; 3] {
                 counts[index] += 1;
             }
         }
-        for pointer in ["/composite/nodes", "/loop/body"] {
-            if let Some(children) = node.pointer(pointer).and_then(Value::as_array) {
-                let nested = writer_tier_mix(children);
-                for (count, increment) in counts.iter_mut().zip(nested) {
-                    *count += increment;
-                }
+        for children in node
+            .composite
+            .iter()
+            .map(|group| group.nodes.as_slice())
+            .chain(node.loop_body.iter().map(|body| body.body.as_slice()))
+        {
+            let nested = writer_tier_mix(children);
+            for (count, increment) in counts.iter_mut().zip(nested) {
+                *count += increment;
             }
         }
     }
@@ -4383,6 +4396,8 @@ fn explain(
     globals: &provenant_cli::Globals,
 ) -> u8 {
     use std::io::Write;
+    let document: Result<provenant_fabric_runtime::graph::GraphDocument, String> =
+        serde_json::from_value(expansion.document.clone()).map_err(|error| error.to_string());
     let inspection = (|| -> Result<_, String> {
         let roots = crate::roots::resolve(
             globals,
@@ -4393,8 +4408,7 @@ fn explain(
         let config =
             provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
                 .map_err(|e| e.to_string())?;
-        let document: provenant_fabric_runtime::graph::GraphDocument =
-            serde_json::from_value(expansion.document.clone()).map_err(|e| e.to_string())?;
+        let document = document.as_ref().map_err(Clone::clone)?;
         let limits = config.domains.fabric.graph.limits.clone();
         let admission = document.admit(&limits);
         let inspection = document.inspect(&limits);
@@ -4420,17 +4434,16 @@ fn explain(
             Value::Null,
         ),
     };
-    let pending = pending_checks(&expansion.document);
+    let pending = document
+        .as_ref()
+        .map_or_else(|_| Vec::new(), pending_checks);
     let mut human = format!(
         "Graph {}\nLimits: {}\nAdmission: {}\nInspection: {}\n",
         expansion.document["graph_id"], limits, admission, metrics
     );
-    let tier_mix = writer_tier_mix(
-        expansion.document["nodes"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-    );
+    let tier_mix = document
+        .as_ref()
+        .map_or([0; 3], |document| writer_tier_mix(&document.nodes));
     let inverted = tier_mix[2] > tier_mix[1] || tier_mix[1] > tier_mix[0];
     let tier_mix_line = format!(
         "tier mix: junior {} / senior {} / principal {}",

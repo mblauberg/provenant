@@ -1057,8 +1057,16 @@ fn explain_pending_checks_follow_the_document() {
             json!({"nodes":[{"id":"plan","kind":"plan","access":"read_only","prompt":"x"}]}),
             vec!["planner_authority", "route_readiness"],
         ),
+        (
+            json!({"nodes":[{"id":"group","kind":"composite","access":"read_only","composite":{"nodes":[{"id":"writer","access":"worktree_write","worktree":"/repo/w","source":{"type":"node","node":"upstream"}}],"exports":[]}}]}),
+            vec!["route_readiness", "source", "worktree"],
+        ),
     ];
-    for (document, expected) in cases {
+    for (mut document, expected) in cases {
+        document["schema_version"] = json!(1);
+        document["graph_id"] = json!("pending");
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(document).unwrap();
         let checks = super::preset::pending_checks(&document);
         let ids: Vec<_> = checks
             .iter()
@@ -7613,16 +7621,17 @@ fn writer_tier_override_and_advisory_mix() {
     .unwrap();
     assert_eq!(explicit.document["nodes"][0]["route"]["alias"], "junior");
 
-    assert_eq!(
-        writer_tier_mix(expanded.document["nodes"].as_array().unwrap()),
-        [1, 0, 0]
-    );
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expanded.document.clone()).unwrap();
+    assert_eq!(writer_tier_mix(&document.nodes), [1, 0, 0]);
     let nodes = json!([
-        {"access":"worktree_write","route":{"alias":"senior"}},
-        {"access":"worktree_write","route":{"model":"provider/model"}},
-        {"composite":{"nodes":[{"access":"worktree_write","route":{"alias":"principal"}}]}}
+        {"id":"senior","access":"worktree_write","route":{"alias":"senior"}},
+        {"id":"exact","access":"worktree_write","route":{"model":"provider/model"}},
+        {"id":"group","access":"read_only","kind":"composite","composite":{"nodes":[{"id":"principal","access":"worktree_write","route":{"alias":"principal"}}],"exports":[]}}
     ]);
-    assert_eq!(writer_tier_mix(nodes.as_array().unwrap()), [0, 1, 1]);
+    let nodes: Vec<provenant_fabric_runtime::graph::GraphNode> =
+        serde_json::from_value(nodes).unwrap();
+    assert_eq!(writer_tier_mix(&nodes), [0, 1, 1]);
 }
 
 #[test]
