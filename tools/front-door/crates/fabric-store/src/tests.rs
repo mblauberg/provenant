@@ -729,32 +729,6 @@ fn busy_and_cancellation_are_bounded_and_leave_no_mutation() {
     );
 }
 #[test]
-fn cold_open_race_serialises_schema_setup() {
-    let f = Fixture::new();
-    let barrier = Arc::new(Barrier::new(2));
-    std::thread::scope(|scope| {
-        let start = || {
-            let barrier = barrier.clone();
-            let f = &f;
-            scope.spawn(move || {
-                barrier.wait();
-                let store = Store::open(&f.root, &f.request()).unwrap();
-                assert_eq!(
-                    store
-                        .db
-                        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
-                        .unwrap(),
-                    crate::db::MIGRATIONS.len() as i64
-                );
-            })
-        };
-        let first = start();
-        let second = start();
-        first.join().unwrap();
-        second.join().unwrap();
-    });
-}
-#[test]
 fn concurrent_cold_opens_wait_for_one_initialiser() {
     // SQLite never calls the busy handler on the switch to WAL, so without
     // the initialisation lock a second cold open reports busy at once.

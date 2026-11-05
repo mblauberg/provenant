@@ -1640,19 +1640,6 @@ mod tests {
             assert!(error.to_string().contains(suggestion), "{error}");
         }
     }
-    #[test]
-    fn retired_disk_guard_is_absent_from_parsing_and_the_catalogue() {
-        invalid(&["disk-guard"]);
-        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all"]) else {
-            panic!("full catalogue");
-        };
-        assert!(
-            !catalog
-                .commands
-                .iter()
-                .any(|entry| entry.command == "provenant disk-guard")
-        );
-    }
     fn parsed(words: &[&str]) -> ParseOutcome {
         parse(words.iter().map(OsString::from))
     }

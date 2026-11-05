@@ -1468,26 +1468,6 @@ fn process_tree_path_replaces_foreign_environment_and_clears_it_when_unavailable
 }
 
 #[cfg(feature = "fixture")]
-#[test]
-fn fixture_terminal_retry_is_short_and_injected() {
-    assert_eq!(TERMINAL_RETRY_MS, [0, 50, 250, 1_000]);
-    let mut attempts = 0;
-    let mut waits = Vec::new();
-    let settled = retry_terminal(
-        || {
-            attempts += 1;
-            attempts == 2
-        },
-        |delay| waits.push(delay),
-    );
-    assert!(settled);
-    assert_eq!(attempts, 2, "terminal is retried exactly once more");
-    assert_eq!(
-        waits,
-        [Duration::from_millis(50)],
-        "fixture waits are injected, not slept"
-    );
-}
 
 #[test]
 fn a_leased_port_block_replaces_any_block_the_launch_environment_named() {

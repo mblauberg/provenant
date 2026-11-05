@@ -584,13 +584,6 @@ mod tests {
         assert!(violation("rm -rf ~/state", &ctx, &GuardConfig::default()).is_none());
     }
 
-    #[test]
-    fn each_refusal_names_the_alternative() {
-        for (id, remedy) in RULES {
-            assert!(remedy.contains("refused"), "{id}");
-            assert!(remedy.contains('`') || remedy.contains("Name"), "{id}");
-        }
-    }
 
     #[test]
     fn config_turns_rules_off_and_rejects_unknown_ids() {

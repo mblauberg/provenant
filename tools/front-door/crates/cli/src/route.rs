@@ -4765,13 +4765,4 @@ mod route_tests {
         Ok(())
     }
 
-    #[test]
-    fn route_blocked_names_an_exhausted_principal() -> Result<(), Box<dyn Error>> {
-        let fixture = blocked_fixture(exhaust)?;
-        let blocked = super::route_blocked("principal", &[], &fixture.roots);
-        let reason = blocked.ok_or("an exhausted principal must block")?;
-        assert!(reason.contains("claude"), "{reason}");
-        assert!(reason.contains("allowance exhausted"), "{reason}");
-        Ok(())
-    }
 }

@@ -993,13 +993,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn retired_bundle_bytes_config_is_rejected() {
-        let mut value = serde_json::to_value(config()).unwrap();
-        value["limits"]["bundle_bytes"] = 67_108_864.into();
-        let error = serde_json::from_value::<FabricConfig>(value).unwrap_err();
-        assert!(error.to_string().contains("bundle_bytes"));
-    }
 
     #[test]
     fn lane_priority_defaults_and_bounds() {

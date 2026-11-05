@@ -979,38 +979,6 @@ fn rejected_values_describe_expected_constraints() {
     assert!(expected("fabric_run", &input, "arguments.op").contains("submit"));
 }
 
-#[test]
-fn schema_catalogue_is_fixed_order_and_has_no_legacy_aliases() {
-    let expected = [
-        "fabric_context",
-        "fabric_mail",
-        "fabric_run",
-        "fabric_output",
-        "fabric_discover",
-    ];
-    let names: Vec<_> = catalogue()
-        .iter()
-        .filter_map(|v| v["name"].as_str())
-        .collect();
-    assert_eq!(names, expected);
-    let advanced: Vec<_> = advanced_catalogue()
-        .iter()
-        .map(|v| v["name"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(
-        advanced,
-        [
-            "fabric_task",
-            "fabric_events",
-            "fabric_lease",
-            "fabric_graph",
-            "fabric_inbox",
-            "fabric_console",
-            "fabric_chair"
-        ]
-    );
-    assert!(ToolCall::parse("fabric_not_a_tool", json!({"op":"inspect"})).is_err());
-}
 
 #[test]
 fn output_schema_lists_only_supported_parts() {

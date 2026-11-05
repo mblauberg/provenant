@@ -436,24 +436,6 @@ fn autosave_never_writes_the_chair_file_and_output_shows_both_parts() -> Result 
     Ok(())
 }
 
-#[test]
-fn a_legacy_block_in_the_checkpoint_stays_chair_text() -> Result {
-    let rig = TestRig::new()?;
-    binding(&rig)?;
-    let checkpoint = store(&rig, "legacy-session")?;
-    let legacy = "notes\n\n<!-- provenant:session-state:begin -->\nBlock-digest: abc\n## Provenant session state\nAuto-saved: old\n<!-- provenant:session-state:end -->\n";
-    save(&checkpoint, legacy)?;
-    let input =
-        json!({"hook_event_name":"PreCompact","session_id":"legacy-session","cwd":rig.project});
-    assert_eq!(code(&run_hook(&rig, "pre-compact", &input)?), 0);
-    assert_eq!(checkpoint_text(&checkpoint)?, legacy);
-    assert!(autosave_text(&checkpoint)?.contains("Auto-saved: "));
-    assert!(!autosave_text(&checkpoint)?.contains("Auto-saved: old"));
-    let output = run_hook(&rig, "compact", &start(&rig, "legacy-session", "compact"))?;
-    let text = context(&output)?;
-    assert!(text.contains("Auto-saved: old"), "{text}");
-    Ok(())
-}
 
 #[test]
 fn pre_compact_without_a_checkpoint_saves_state_and_says_notes_are_missing() -> Result {

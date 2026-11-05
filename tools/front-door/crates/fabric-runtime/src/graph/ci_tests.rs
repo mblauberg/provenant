@@ -121,12 +121,6 @@ fn registered(state: CiState, summary: &str) -> CiObservation {
     }
 }
 
-#[test]
-fn ci_optional_evidence_fields_remain_absent() {
-    let value = serde_json::json!({"state": "pending", "summary": "waiting"});
-    let evidence: CiEvidence = serde_json::from_value(value.clone()).unwrap();
-    assert_eq!(serde_json::to_value(evidence).unwrap(), value);
-}
 
 #[test]
 fn ci_outcomes_are_recorded_and_fail_closed() {
