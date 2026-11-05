@@ -745,6 +745,7 @@ fn handoff_recovery_requires_a_settled_successor() -> Result {
 }
 /// Confined synthetic accounts exercise real launch, holder settlement and
 /// fresh retry routing without contacting a live provider service.
+#[allow(clippy::print_stderr)] // Preserve timing evidence in captured test output.
 fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -840,7 +841,7 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
                             "attempt_number": row["attempt_number"],
                             "state": row["state"],
                             "continuation": row["continuation"],
-                            "account": row["account"],
+                            "account": row["applied_route"]["account_key"],
                         })
                     })
                     .collect::<Vec<_>>()
@@ -854,6 +855,7 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
         |observation| observation.as_ref().is_ok_and(handoff_recovered),
     )
     .map_err(|error| format!("{error}; recovery history: {recovery_history:?}"))??;
+    eprintln!("handoff recovery timeline: {recovery_history:?}");
     assert!(lanes["data"]["ignored_settled"].is_null(), "{lanes}");
     let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
