@@ -1070,6 +1070,8 @@ fn oversized_deferred_review_is_refused_before_admission() {
     };
     let reason = document.admit(&limits).unwrap_err();
     assert!(reason.contains("graph checkpoint could reach"), "{reason}");
+    assert!(reason.contains("graph_checkpoint_bytes"), "{reason}");
+    assert!(reason.contains("graph checkpoint journal"), "{reason}");
     assert!(reason.contains("split the graph"), "{reason}");
 }
 

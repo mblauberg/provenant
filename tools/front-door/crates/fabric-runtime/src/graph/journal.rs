@@ -38,7 +38,10 @@ pub enum JournalError {
     InvalidGraphId,
     #[error("journal was opened for a different graph")]
     GraphMismatch,
-    #[error("graph checkpoint exceeds its byte limit")]
+    #[error(
+        "graph checkpoint exceeds its byte limit ({})",
+        checkpoint_limit_label()
+    )]
     TooLarge,
     #[error("checkpoint is visible but directory durability is unconfirmed")]
     DurabilityUnconfirmed(#[source] FsError),
@@ -66,6 +69,14 @@ pub enum JournalError {
         "graph checkpoint contains retired launched-route fallback history; finish or cancel it with the previous release, or cancel it here to retire the record"
     )]
     RetiredFallbackCheckpoint,
+}
+
+fn checkpoint_limit_label() -> String {
+    let bound = crate::config::GraphLimits::checkpoint_bytes_bound();
+    format!(
+        "limits.{}={}; set by {}",
+        bound.name, bound.maximum, bound.owner
+    )
 }
 
 impl JournalError {
@@ -739,7 +750,10 @@ impl GraphJournal for FileJournal {
             execution: execution.clone(),
         };
         let bytes = CanonicalV1::bytes(&stored)?;
-        if bytes.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
+        if crate::config::GraphLimits::checkpoint_bytes_bound()
+            .refusal(bytes.as_bytes().len())
+            .is_some()
+        {
             return Err(JournalError::TooLarge);
         }
         decode_checkpoint(bytes.as_bytes(), &self.graph_id)?;
@@ -914,7 +928,10 @@ pub(super) fn read_checkpoint_bytes(
     let mut bytes = Vec::new();
     let mut reader = file.take(MAX_CHECKPOINT_BYTES + 1);
     reader.read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+    if crate::config::GraphLimits::checkpoint_bytes_bound()
+        .refusal(bytes.len())
+        .is_some()
+    {
         return Err(JournalError::TooLarge);
     }
     Ok(Some(bytes))

@@ -1722,7 +1722,9 @@ mod result_tests {
     fn oversized_graph_checkpoint_is_refused_with_size_reason() {
         match super::graph_journal_error(provenant_fabric_runtime::graph::JournalError::TooLarge) {
             super::FacadeError::DispatchRefused { reason, .. } => {
-                assert!(reason.contains("byte limit"))
+                assert!(reason.contains("byte limit"));
+                assert!(reason.contains("graph_checkpoint_bytes"), "{reason}");
+                assert!(reason.contains("graph checkpoint journal"), "{reason}");
             }
             other => panic!("unexpected error: {other:?}"),
         }

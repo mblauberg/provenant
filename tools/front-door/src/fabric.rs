@@ -3419,10 +3419,10 @@ fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> 
             record: "graph checkpoint schema".into(),
             version: found,
         },
-        JournalError::TooLarge => FacadeError::DispatchRefused {
+        error @ JournalError::TooLarge => FacadeError::DispatchRefused {
             fact: None,
             disk: None,
-            reason: "graph checkpoint exceeds its byte limit".into(),
+            reason: error.to_string(),
         },
         JournalError::Filesystem(_)
         | JournalError::Io(_)

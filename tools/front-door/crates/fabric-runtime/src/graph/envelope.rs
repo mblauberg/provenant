@@ -133,10 +133,11 @@ pub(super) fn reason(
     extensions: &[String],
     plan: &PlannedGraph,
 ) -> Option<String> {
-    let bound = checkpoint_bound(document, expansions, extensions, plan);
-    (bound > MAX_CHECKPOINT_BYTES as usize).then(|| {
+    let size = checkpoint_bound(document, expansions, extensions, plan);
+    let bound = crate::config::GraphLimits::checkpoint_bytes_bound();
+    bound.refusal(size).map(|reason| {
         format!(
-            "graph checkpoint could reach {bound} bytes, over its {MAX_CHECKPOINT_BYTES}-byte limit; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts"
+            "graph checkpoint could reach {size} bytes, over its {}-byte limit: {reason}; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts", bound.maximum
         )
     })
 }

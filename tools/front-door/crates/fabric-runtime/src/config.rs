@@ -285,6 +285,9 @@ pub struct GraphBound<'a> {
     pub owner: &'static str,
 }
 
+/// Maximum size accepted by the graph checkpoint journal.
+pub const GRAPH_CHECKPOINT_BYTES: u64 = 16_777_216;
+
 impl GraphBound<'_> {
     pub fn maximum_u64(&self) -> u64 {
         u64::try_from(self.maximum).unwrap_or(u64::MAX)
@@ -301,6 +304,14 @@ impl GraphBound<'_> {
 }
 
 impl GraphLimits {
+    pub fn checkpoint_bytes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "graph_checkpoint_bytes",
+            maximum: GRAPH_CHECKPOINT_BYTES as usize,
+            owner: "graph checkpoint journal",
+        }
+    }
+
     /// Maximum byte length of graph and node identifiers in persisted records.
     pub fn identifier_bytes_bound() -> GraphBound<'static> {
         GraphBound {

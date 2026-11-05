@@ -170,7 +170,7 @@ fn graph_envelope_bound(
 }
 
 pub const MAX_CANCEL_REASON_BYTES: usize = 256;
-const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
+const MAX_CHECKPOINT_BYTES: u64 = crate::config::GRAPH_CHECKPOINT_BYTES;
 /// Every JSON member costs at least two bytes, so the byte limit binds first.
 const MAX_CHECKPOINT_MEMBERS: usize = MAX_CHECKPOINT_BYTES as usize / 2;
 const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
