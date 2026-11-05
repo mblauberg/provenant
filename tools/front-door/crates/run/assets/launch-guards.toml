@@ -130,9 +130,24 @@ boundary = "unclassified"
 reason = "Remaining missing anchors and path failures need classification or a tolerant fallback."
 
 [[guard]]
+site = "providers/src/launch.rs#filter_optional_grants"
+boundary = "warning"
+reason = "Optional discovered grants that cannot be represented in SBPL are omitted and reported; required grants remain subject to confinement validation."
+
+[[guard]]
+site = "providers/src/launch.rs#LaunchSpec::complete_tool_requirements"
+boundary = "warning"
+reason = "Unrepresentable optional write grants are omitted; unrepresentable library dependencies make the reported closure incomplete."
+
+[[guard]]
+site = "cli/src/run/provider/project_paths.rs#resolve"
+boundary = "warning"
+reason = "A configured optional project path whose canonical target cannot be represented is omitted with its setting key and reason."
+
+[[guard]]
 site = "confinement/src/permissions/render.rs#sbpl_path"
 boundary = "unclassified"
-reason = "A non-UTF-8 path cannot be represented by this SBPL encoder; optional grants need a warning fallback while required boundary paths must remain enforceable."
+reason = "Non-UTF-8 paths and unsupported control characters cannot be encoded in SBPL; remaining required path cases need classification while optional discoveries warn and are omitted."
 
 [[guard]]
 site = "confinement/src/permissions/probe.rs#system_backend"

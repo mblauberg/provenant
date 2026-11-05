@@ -472,6 +472,14 @@ pub fn is_codex_standalone_package(path: &Path) -> bool {
         && !is_credential_root(&below.iter().collect::<PathBuf>())
 }
 
+/// Whether a path can be encoded losslessly in the sandbox profile language.
+pub fn profile_path_representable(path: &Path) -> bool {
+    path.to_str().is_some_and(|text| {
+        text.chars()
+            .all(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+    })
+}
+
 pub(crate) fn validate_absolute(path: &Path) -> Result<(), PermissionError> {
     let bytes = path.as_os_str().as_encoded_bytes();
     if !path.is_absolute()

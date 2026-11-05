@@ -6990,6 +6990,148 @@ fn optional_discovered_grants_are_filtered_without_touching_required_grants()
 }
 
 #[test]
+fn optional_unrepresentable_discovery_is_omitted_with_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::OsStringExt;
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let target = home.join(std::ffi::OsString::from_vec(b"tool-\xff".to_vec()));
+    let required = crate::launch::subtree(&target);
+    let control = home.join("tool-\u{1}");
+    let mut grants = vec![
+        required.clone(),
+        required.clone(),
+        crate::launch::subtree(&control),
+    ];
+    let mut omitted = Vec::new();
+    crate::launch::filter_optional_grants(
+        &mut grants,
+        1,
+        &home,
+        crate::OmissionSource::Toolchain,
+        &mut omitted,
+    );
+    assert_eq!(grants, vec![required]);
+    assert_eq!(omitted.len(), 2);
+    assert_eq!(omitted[0].path, target);
+    assert_eq!(omitted[1].path, control);
+    let receipt = crate::AppliedAccess {
+        libraries: vec![],
+        staged_content: None,
+        toolchain_roots: vec![],
+        omitted_grants: omitted,
+    }
+    .receipt(&home);
+    assert_eq!(
+        receipt["omitted_grants"][1]["path"],
+        "<unrepresentable path>"
+    );
+    Ok(())
+}
+
+#[test]
+fn optional_unrepresentable_write_is_omitted_from_applied_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::OsStringExt;
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let target = home.join(std::ffi::OsString::from_vec(b"write-\xff".to_vec()));
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let mut route = route("cursor", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = &home;
+    let mut spec = crate::cursor::Cursor.prepare(input)?;
+    spec.tool_requirements = Default::default();
+    spec.tool_requirements
+        .writes
+        .push(crate::launch::subtree(&target));
+    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"));
+    assert!(
+        spec.profile
+            .spec
+            .tool_writes
+            .iter()
+            .all(|grant| grant.path != target)
+    );
+    assert!(
+        spec.omitted_discovery
+            .iter()
+            .any(|entry| entry.path == target)
+    );
+    let receipt = spec.applied_access().receipt(&home);
+    assert!(
+        receipt["omitted_grants"]
+            .as_array()
+            .ok_or("omissions")?
+            .iter()
+            .any(|entry| entry["reason"] == "unrepresentable_path")
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn unrepresentable_library_target_reports_incomplete_closure()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::OsStringExt;
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let home = root.join("home");
+    let executable = root.join("package/bin/provider");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(executable.parent().ok_or("package")?)?;
+    let library = root.join(std::ffi::OsString::from_vec(b"library-\xff.dylib".to_vec()));
+    std::fs::write(&library, test_macho(&[]))?;
+    let alias = root.join("library-link");
+    std::os::unix::fs::symlink(&library, &alias)?;
+    std::fs::write(&executable, test_macho(&[alias.to_str().ok_or("alias")?]))?;
+    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let mut route = route("opencode", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.executable = &executable;
+    input.home = &home;
+    let spec = crate::opencode::OpenCode.prepare(input)?;
+    let tool = spec
+        .prepared_tools()
+        .iter()
+        .find(|tool| tool.executable == executable)
+        .ok_or("tool")?;
+    assert_eq!(
+        tool.dependency_closure.outcome,
+        crate::ClosureOutcome::Incomplete
+    );
+    assert!(tool.dependency_closure.reasons.contains(
+        &crate::IncompleteReason::OmittedUnrepresentable(library.clone())
+    ));
+    assert!(
+        spec.profile
+            .spec
+            .runtime_reads
+            .iter()
+            .all(|grant| grant.path != library)
+    );
+    assert!(
+        spec.omitted_discovery
+            .iter()
+            .any(|entry| entry.path == library)
+    );
+    assert_eq!(tool.receipt()["reason"], "unrepresentable_path");
+    let receipt = spec.applied_access().receipt(&home);
+    assert!(
+        receipt["omitted_grants"]
+            .as_array()
+            .ok_or("omissions")?
+            .iter()
+            .any(|entry| entry["reason"] == "unrepresentable_path")
+    );
+    Ok(())
+}
+
+#[test]
 fn discovered_grants_in_credential_roots_are_omitted() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let home = temp.path().canonicalize()?;

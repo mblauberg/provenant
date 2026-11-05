@@ -88,10 +88,12 @@ impl PreparedToolRequirement {
     pub fn receipt(&self) -> serde_json::Value {
         use crate::{ClosureOutcome, IncompleteReason};
         let name = |path: &Path| {
-            path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
+            path.file_name().map_or_else(String::new, |name| {
+                name.to_str()
+                    .filter(|name| !name.chars().any(char::is_control))
+                    .unwrap_or("<unrepresentable>")
+                    .to_owned()
+            })
         };
         let outcome = match self.dependency_closure.outcome {
             ClosureOutcome::Complete => "complete",
@@ -113,6 +115,9 @@ impl PreparedToolRequirement {
                 }
                 IncompleteReason::OmittedProtected(path) => {
                     ("protected_root", Some(path.as_path()))
+                }
+                IncompleteReason::OmittedUnrepresentable(path) => {
+                    ("unrepresentable_path", Some(path.as_path()))
                 }
             };
             if !reasons.contains(&kind) {
@@ -147,7 +152,7 @@ impl OmittedGrant {
     }
 }
 
-/// Remove optional discoveries that resolve into credential roots, retaining evidence.
+/// Omit optional discoveries that cannot safely be represented or reach credentials.
 pub(crate) fn filter_optional_grants(
     grants: &mut Vec<PathGrant>,
     start: usize,
@@ -157,19 +162,28 @@ pub(crate) fn filter_optional_grants(
 ) {
     let mut index = start;
     while index < grants.len() {
-        let target = std::fs::canonicalize(&grants[index].path).ok();
-        if let Some(target) =
-            target.filter(|path| provenant_confinement::refuses_lane_root(path, true, Some(home)))
-        {
+        let candidate = &grants[index].path;
+        let target = std::fs::canonicalize(candidate).ok();
+        let omitted_path = target
+            .as_ref()
+            .filter(|path| provenant_confinement::refuses_lane_root(path, true, Some(home)))
+            .or_else(|| {
+                (!provenant_confinement::permissions::profile_path_representable(candidate))
+                    .then_some(candidate)
+            })
+            .or_else(|| {
+                target.as_ref().filter(|path| {
+                    !provenant_confinement::permissions::profile_path_representable(path)
+                })
+            })
+            .cloned();
+        if let Some(path) = omitted_path {
             grants.remove(index);
             if !omitted
                 .iter()
-                .any(|entry| entry.path == target && entry.source == source)
+                .any(|entry| entry.path == path && entry.source == source)
             {
-                omitted.push(OmittedGrant {
-                    path: target,
-                    source,
-                });
+                omitted.push(OmittedGrant { path, source });
             }
         } else {
             index += 1;
@@ -190,7 +204,7 @@ pub struct LaunchSpec {
     pub secret_input: Option<provenant_os::exec::SecretInput>,
     pub cwd: PathBuf,
     pub setup: Vec<SetupStep>,
-    /// Discovered optional grants omitted by the credential guard.
+    /// Discovered optional grants omitted during preparation.
     pub omitted_discovery: Vec<OmittedGrant>,
     /// Exact staged skill content and warnings used by this launch.
     pub user_skills: crate::StagedUserSkills,
@@ -217,6 +231,12 @@ impl AppliedAccess {
         use sha2::{Digest, Sha256};
         use std::os::unix::ffi::OsStrExt;
         let display = |path: &Path| {
+            if path
+                .to_str()
+                .is_none_or(|text| text.chars().any(char::is_control))
+            {
+                return "<unrepresentable path>".into();
+            }
             path.strip_prefix(home)
                 .map(|path| format!("~/{}", path.display()))
                 .unwrap_or_else(|_| {
@@ -244,7 +264,7 @@ impl AppliedAccess {
             "toolchain_roots": self.toolchain_roots.iter().map(grant).collect::<Vec<_>>(),
             "omitted_grants": self.omitted_grants.iter().map(|entry| serde_json::json!({
                 "code": "discovered_grant_omitted",
-                "reason": if entry.source == OmissionSource::ProviderPackage { "shared_package_prefix" } else if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) { "credential_root" } else { "protected_root" },
+                "reason": if entry.source == OmissionSource::ProviderPackage { "shared_package_prefix" } else if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) { "credential_root" } else if !provenant_confinement::permissions::profile_path_representable(&entry.path) { "unrepresentable_path" } else { "protected_root" },
                 "path": display(&entry.path),
                 "path_id": path_id(&entry.path),
                 "source": match entry.source { OmissionSource::UserSkill => "user_skill", OmissionSource::Toolchain => "toolchain", OmissionSource::ProviderConfig => "provider_config", OmissionSource::ProviderPackage => "provider_package" },
@@ -592,6 +612,34 @@ impl LaunchSpec {
                             });
                         }
                     }
+                    _ if !provenant_confinement::permissions::profile_path_representable(
+                        &candidate.path,
+                    ) =>
+                    {
+                        if !spec.omitted_discovery.iter().any(|entry| {
+                            entry.path == candidate.path
+                                && entry.source == OmissionSource::Toolchain
+                        }) {
+                            spec.omitted_discovery.push(OmittedGrant {
+                                path: candidate.path.clone(),
+                                source: OmissionSource::Toolchain,
+                            });
+                        }
+                    }
+                    Ok(path)
+                        if !provenant_confinement::permissions::profile_path_representable(
+                            &path,
+                        ) =>
+                    {
+                        if !spec.omitted_discovery.iter().any(|entry| {
+                            entry.path == path && entry.source == OmissionSource::Toolchain
+                        }) {
+                            spec.omitted_discovery.push(OmittedGrant {
+                                path,
+                                source: OmissionSource::Toolchain,
+                            });
+                        }
+                    }
                     _ => writes.push(candidate.clone()),
                 }
             }
@@ -664,6 +712,8 @@ impl LaunchSpec {
                     })
                 {
                     LibraryAccess::AlreadyCovered
+                } else if !provenant_confinement::permissions::profile_path_representable(path) {
+                    LibraryAccess::OmitUnrepresentable
                 } else {
                     LibraryAccess::Grant
                 }

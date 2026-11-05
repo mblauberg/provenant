@@ -1998,11 +1998,19 @@ mod receipt_tests {
 
 /// One warning line for an omitted grant, shown relative to the home directory.
 pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: &Path) -> String {
-    let display = entry
+    let display = if entry
         .path
-        .strip_prefix(home)
-        .map(|relative| format!("~/{}", relative.display()))
-        .unwrap_or_else(|_| "<external path; inspect on host>".into());
+        .to_str()
+        .is_none_or(|text| text.chars().any(char::is_control))
+    {
+        "<unrepresentable path; inspect on host>".into()
+    } else {
+        entry
+            .path
+            .strip_prefix(home)
+            .map(|relative| format!("~/{}", relative.display()))
+            .unwrap_or_else(|_| "<external path; inspect on host>".into())
+    };
     if entry.source == provenant_providers::OmissionSource::ProviderPackage {
         return format!(
             "omitted shared provider package grant {display}; using the executable only"
@@ -2010,6 +2018,8 @@ pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: 
     }
     let guard = if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) {
         "credential root guard"
+    } else if !provenant_confinement::permissions::profile_path_representable(&entry.path) {
+        "path cannot be represented in the sandbox profile"
     } else {
         "protected root guard"
     };
@@ -2273,6 +2283,25 @@ mod user_skills_tests {
         let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), false);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("executable only"));
+    }
+
+    #[test]
+    fn unrepresentable_discovery_reports_why_it_was_omitted() {
+        use std::os::unix::ffi::OsStringExt;
+        let entry = provenant_providers::OmittedGrant {
+            path: PathBuf::from(std::ffi::OsString::from_vec(b"/fixture/tool-\xff".to_vec())),
+            source: provenant_providers::OmissionSource::Toolchain,
+        };
+        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), false);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("cannot be represented"));
+        let control = provenant_providers::OmittedGrant {
+            path: PathBuf::from("/fixture/home/tool-\u{1}"),
+            source: provenant_providers::OmissionSource::Toolchain,
+        };
+        let warning = omission_warning(&control, Path::new("/fixture/home"));
+        assert!(warning.contains("unrepresentable path"));
+        assert!(!warning.contains('\u{1}'));
     }
 
     #[test]

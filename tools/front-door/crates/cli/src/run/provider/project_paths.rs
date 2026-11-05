@@ -15,6 +15,12 @@ pub(super) struct Context<'a> {
 }
 
 fn display_path(path: &Path, primary: &Path, home: &Path) -> String {
+    if path
+        .to_str()
+        .is_none_or(|text| text.chars().any(char::is_control))
+    {
+        return "<unrepresentable path; inspect project configuration on host>".into();
+    }
     if let Ok(relative) = path.strip_prefix(primary) {
         return format!("./{}", relative.display());
     }
@@ -77,6 +83,9 @@ fn resolve(
         .any(|root| overlaps(&path, &root.path))
     {
         return Err("protected_path");
+    }
+    if !provenant_confinement::permissions::profile_path_representable(&path) {
+        return Err("unrepresentable_path");
     }
     Ok(PathGrant {
         scope: if path.is_dir() {
@@ -525,6 +534,76 @@ mod tests {
             assert_eq!(receipt["warnings"][0]["reason"], "writable_root");
             assert_eq!(receipt["warnings"][1]["reason"], "not_directory");
         }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn exec_roots_omit_unrepresentable_canonical_targets() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let primary = root.join("repo");
+        let home = root.join("home");
+        std::fs::create_dir_all(&primary)?;
+        std::fs::create_dir_all(&home)?;
+        let target = primary.join(std::ffi::OsString::from_vec(b"tools-\xff".to_vec()));
+        std::fs::create_dir(&target)?;
+        std::os::unix::fs::symlink(&target, primary.join("tools-link"))?;
+        let grant = |path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: WorkScope::Project(ProjectId::from_bytes([2; 16])),
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+            permissions: PlanPermissions {
+                mode: AccessMode::ReadOnly,
+                read_only: None,
+                scratch: grant(root.join("scratch")),
+                private_state: None,
+                read_roots: vec![],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            },
+        })?;
+        let settings = crate::domains::ProjectLanesConfig {
+            exec_roots: vec!["tools-link".into()],
+            ..Default::default()
+        };
+        let mut profile = ProviderProfile {
+            spec: ProviderProfileSpec::default(),
+            observations: Default::default(),
+        };
+        let receipt = apply_to(
+            &mut Vec::new(),
+            &mut profile,
+            &plan,
+            Context {
+                cwd: &primary,
+                home: &home,
+                state_root: &root,
+                common_git: None,
+                worktree_gitdir: None,
+                writer: false,
+                settings: Some(&settings),
+                project: "example",
+            },
+        );
+        assert!(profile.spec.tool_exec_roots.is_empty());
+        assert_eq!(receipt["warnings"][0]["reason"], "unrepresentable_path");
+        assert_eq!(
+            receipt["warnings"][0]["key"],
+            "domains.lanes.projects.example.exec_roots[0]"
+        );
         Ok(())
     }
 

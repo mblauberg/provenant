@@ -902,6 +902,9 @@ pub(super) fn push_rule(
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) fn sbpl_path(path: &Path) -> Result<String, PermissionError> {
     let text = path.to_str().ok_or(PermissionError::NonUtf8Path)?;
+    if !profile_path_representable(path) {
+        return Err(PermissionError::InvalidPath(path.to_owned()));
+    }
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
         match character {

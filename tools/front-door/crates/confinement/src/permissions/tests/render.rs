@@ -14,6 +14,29 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
+fn profile_path_representability_matches_encoder() {
+    use std::os::unix::ffi::OsStringExt;
+    let unrepresentable =
+        PathBuf::from(std::ffi::OsString::from_vec(b"/fixture/name-\xff".to_vec()));
+    for path in [
+        Path::new("/fixture/normal"),
+        Path::new("/fixture/with\nline"),
+        Path::new("/fixture/with\t tab"),
+    ] {
+        assert!(profile_path_representable(path));
+        assert!(sbpl_path(path).is_ok());
+    }
+    for path in [
+        Path::new("/fixture/control-\u{1}"),
+        unrepresentable.as_path(),
+    ] {
+        assert!(!profile_path_representable(path));
+        assert!(sbpl_path(path).is_err());
+    }
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
 fn expanded_authentication_family_grants_only_selected_credentials() -> Result<(), PermissionError>
 {
     let (plan, mut profile) = write_grants_fixture();
