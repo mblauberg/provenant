@@ -75,8 +75,8 @@ process-only observations travel as warnings.
 
 Session handoff holds writer custody through WIP Git operations. It rechecks
 registration, branch, HEAD, Git operation markers and untracked files before
-writing; an unresolved writer observation prevents WIP but does not by itself
-prevent an observation-only handoff.
+writing; a held lease or unresolved custody prevents WIP. Process observations
+and incomplete census evidence are advisory and produce scoped warnings.
 
 ### Closed stop reasons; natural exit wins
 

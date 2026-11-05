@@ -213,7 +213,21 @@ fn inspect_context(
         let (live_writer, writer_unknown) = handoff_writer_state(&observation.occupancy);
         let writer_evidence = match &observation.occupancy {
             Occupancy::Unknown {
-                scope, evidence, ..
+                scope,
+                evidence,
+                source: worktrees::OccupancyUnknownSource::Custody,
+            } => Some(format!("{}: {evidence}", scope.display())),
+            _ => None,
+        };
+        let writer_advisory = match &observation.occupancy {
+            Occupancy::Observed { process } => Some(process.as_ref().map_or_else(
+                || format!("{}: a process was observed", path.display()),
+                |process| format!("{}: process {process} ({})", path.display(), process.kind),
+            )),
+            Occupancy::Unknown {
+                scope,
+                evidence,
+                source: worktrees::OccupancyUnknownSource::Census,
             } => Some(format!("{}: {evidence}", scope.display())),
             _ => None,
         };
@@ -230,6 +244,7 @@ fn inspect_context(
             live_writer,
             writer_unknown,
             writer_evidence,
+            writer_advisory,
             upstream,
             pushed,
         });
@@ -239,14 +254,28 @@ fn inspect_context(
 
 fn handoff_writer_state(occupancy: &Occupancy) -> (bool, bool) {
     (
-        matches!(occupancy, Occupancy::Held | Occupancy::Observed { .. }),
-        matches!(occupancy, Occupancy::Unknown { .. }),
+        matches!(occupancy, Occupancy::Held),
+        matches!(
+            occupancy,
+            Occupancy::Unknown {
+                source: worktrees::OccupancyUnknownSource::Custody,
+                ..
+            }
+        ),
     )
 }
 
 /// WIP mutates Git, so an unresolved writer state cannot grant custody.
 fn unsafe_wip(tree: &Tree) -> bool {
     tree.primary || tree.branch.is_none() || tree.live_writer || tree.writer_unknown || tree.unknown
+}
+
+fn write_writer_advisory(output: &mut impl io::Write, advisory: &str) -> io::Result<()> {
+    writeln!(
+        output,
+        "warning: {}",
+        provenant_fabric_runtime::hosts::plain_text(advisory, 4096)
+    )
 }
 
 fn wip_unsafe_description(tree: &Tree) -> String {
@@ -670,6 +699,12 @@ fn execute(
     let facts = worktrees::RepoFacts::default();
     let mut trees = inspect(&src, workers, &facts)?;
     let mut input = request(&trees)?;
+    for advisory in trees
+        .iter()
+        .filter_map(|tree| tree.writer_advisory.as_deref())
+    {
+        let _ = write_writer_advisory(&mut std::io::stderr().lock(), advisory);
+    }
     let problems: Vec<Tree> = trees
         .iter()
         .filter(|t| !t.problems().is_empty())
@@ -702,7 +737,7 @@ fn execute(
                 return Err(Refusal::refused(
                     "WIP_REFUSED",
                     format!(
-                        "--wip commits tracked changes in branch worktrees with no live writer, \
+                        "--wip commits tracked changes in branch worktrees with available writer custody, \
                          never the primary checkout or untracked files. Settle these first or \
                          pass --allow-dirty:\n{}",
                         unsafe_trees.join("\n")
@@ -1324,12 +1359,12 @@ mod tests {
             live_writer: false,
             writer_unknown: false,
             writer_evidence: None,
+            writer_advisory: None,
             upstream: None,
             pushed: false,
         };
         for state in [
             Occupancy::Held,
-            Occupancy::Observed { process: None },
             Occupancy::Unknown {
                 scope: tree.path.clone(),
                 evidence: "fixture".into(),
@@ -1339,8 +1374,23 @@ mod tests {
             (tree.live_writer, tree.writer_unknown) = handoff_writer_state(&state);
             assert!(unsafe_wip(&tree), "{state:?} must not permit Git writes");
         }
-        (tree.live_writer, tree.writer_unknown) = handoff_writer_state(&Occupancy::Available);
-        assert!(!unsafe_wip(&tree));
+        for advisory in [
+            Occupancy::Available,
+            Occupancy::Observed { process: None },
+            Occupancy::Unknown {
+                scope: tree.path.clone(),
+                evidence: "census incomplete".into(),
+                source: worktrees::OccupancyUnknownSource::Census,
+            },
+        ] {
+            (tree.live_writer, tree.writer_unknown) = handoff_writer_state(&advisory);
+            assert!(!unsafe_wip(&tree), "{advisory:?} is advisory");
+        }
+        let mut output = Vec::new();
+        write_writer_advisory(&mut output, "/repo/lane: census incomplete")
+            .expect("advisory written");
+        let output = String::from_utf8(output).expect("UTF-8 advisory");
+        assert!(output.contains("/repo/lane: census incomplete"));
         tree.writer_unknown = true;
         tree.writer_evidence = Some("/repo: process census incomplete".into());
         let refusal = wip_unsafe_description(&tree);
@@ -1365,6 +1415,16 @@ mod tests {
                     .iter()
                     .cloned()
                     .map(|path| (path, WorkerState::Free))
+                    .collect()
+            }
+        }
+        struct Bystander;
+        impl WorkerObserver for Bystander {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, WorkerState::Live))
                     .collect()
             }
         }
@@ -1409,6 +1469,7 @@ mod tests {
             live_writer: false,
             writer_unknown: false,
             writer_evidence: None,
+            writer_advisory: None,
             upstream: None,
             pushed: false,
         };
@@ -1431,6 +1492,23 @@ mod tests {
             .ok_or("missing lane")?;
         assert_eq!(row.upstream.as_deref(), Some(tree.head.as_str()));
         assert!(row.pushed);
+        let observed = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Bystander,
+            |context, cancel| inspect_context(context, &facts, cancel),
+        )?;
+        let observed = observed
+            .iter()
+            .find(|row| row.path == tree.path)
+            .ok_or("missing lane")?;
+        assert!(!unsafe_wip(observed));
+        assert!(observed.writer_advisory.as_deref().is_some_and(|warning| {
+            warning.contains(&tree.path.to_string_lossy().into_owned())
+                && warning.contains("process was observed")
+        }));
         let limited =
             worktrees::RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
         let overflow = crate::worktrees::with_context(
@@ -1469,6 +1547,15 @@ mod tests {
         assert_eq!(refused.code(), "WIP_REFUSED");
         assert!(!called.get());
         drop(held);
+        with_wip_custody(&roots, &home, &project, &Bystander, &facts, &tree, || {
+            called.set(true);
+            Ok(())
+        })
+        .map_err(|error| error.message)?;
+        assert!(
+            called.replace(false),
+            "a bystander must not block guarded WIP"
+        );
         provenant_os::fixture::run_git(&tree.path, &["commit", "--allow-empty", "-qm", "moved"])?;
         let refreshed = crate::worktrees::with_context(
             &roots,

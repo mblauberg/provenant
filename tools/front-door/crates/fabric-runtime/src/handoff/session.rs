@@ -106,6 +106,9 @@ pub struct Tree {
     /// Scoped evidence for an unresolved occupancy, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub writer_evidence: Option<String>,
+    /// Advisory process evidence that does not hold writer custody.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writer_advisory: Option<String>,
     /// `origin/<branch>` when it exists locally.
     pub upstream: Option<String>,
     /// The head is on `origin/<branch>`.
