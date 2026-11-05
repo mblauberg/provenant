@@ -130,6 +130,11 @@ boundary = "unclassified"
 reason = "Remaining missing anchors and path failures need classification or a tolerant fallback."
 
 [[guard]]
+site = "confinement/src/permissions/render.rs#sbpl_path"
+boundary = "unclassified"
+reason = "A non-UTF-8 path cannot be represented by this SBPL encoder; optional grants need a warning fallback while required boundary paths must remain enforceable."
+
+[[guard]]
 site = "confinement/src/permissions/probe.rs#system_backend"
 boundary = "credentials"
 reason = "Without an enforcing sandbox the lane could read credential stores outside its selected authentication grants."
