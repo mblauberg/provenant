@@ -7587,7 +7587,14 @@ fn copied_generator_evaluator_receives_the_same_request_and_nodes() {
             &["parameters.worktree='/repo/lane'".into()],
         )
         .unwrap();
-        documents.push(expansion.document["nodes"].clone());
+        let mut document = expansion.document;
+        // Names and layer origins are intentionally recorded as provenance;
+        // compare the entire executable document independently of that record.
+        document.as_object_mut().unwrap().remove("provenance");
+        let context = document["context"].as_object_mut().unwrap();
+        context.remove("preset");
+        context.remove("pattern");
+        documents.push(document);
     }
     assert_eq!(documents[0], documents[1]);
 }
