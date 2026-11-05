@@ -686,6 +686,7 @@ fn gc_project(
         workers,
         read_only,
         |context, cancel| {
+            let context = &WorktreeContext { facts, ..*context };
             if gc_primary_checkout(context.repo, context.executor, context.utility, cancel)?
                 != context.repo.root_path()
             {
@@ -1420,6 +1421,7 @@ fn with_context_mode<T>(
     let clock = SystemClock;
     let policy_workers = worktrees::CensusPolicyWorkers::from_roots(workers, roots)?;
     let workers = worktrees::CensusSession::new(&policy_workers, &clock);
+    let facts = worktrees::RepoFacts::default();
     let context = WorktreeContext {
         home,
         repo: &repo,
@@ -1427,6 +1429,7 @@ fn with_context_mode<T>(
         project_state: &project_state,
         executor: &executor,
         utility: &runtime,
+        facts: &facts,
         workers: &workers,
         clock: &clock,
         utility_budget: budget,

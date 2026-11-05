@@ -219,6 +219,9 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
         facts.symbolic_revision(&context, GitRevision::new("facts-ref")?, &cancel())?,
         Some("refs/heads/facts-ref".into())
     );
+    context.facts.capture_inventory(&context, &cancel())?;
+    read_worktrees(&context, &cancel())?;
+    assert!(context.facts.take_inventory(&context).is_none());
     let inventory_limit = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
     assert!(RepoFacts::with_limits(inventory_limit, 0).is_err());
     assert!(RepoFacts::with_limits(0, provenant_os::git::REPO_FACT_SCALAR_LIMIT).is_err());
@@ -2028,6 +2031,7 @@ impl WorkerObserver for UnknownWorkers {
 
 pub(super) struct TestContext<'a> {
     pub(super) fixture: &'a Fixture,
+    pub(super) facts: RepoFacts,
     pub(super) binding: ProjectBinding,
     pub(super) project_state: Directory,
     pub(super) workers: FreeWorkers,
@@ -2060,6 +2064,7 @@ impl<'a> TestContext<'a> {
         let lock_budget = WaitBudget::cli(clock.mono_now(), 5)?;
         Ok(Self {
             fixture,
+            facts: RepoFacts::default(),
             binding,
             project_state,
             workers: FreeWorkers,
@@ -2078,6 +2083,7 @@ impl<'a> TestContext<'a> {
             project_state: &self.project_state,
             executor: &self.fixture.executor,
             utility: &self.fixture.runtime,
+            facts: &self.facts,
             workers: &self.workers,
             clock: &self.clock,
             utility_budget: self.utility_budget,

@@ -180,6 +180,7 @@ fn inspect_context(
     facts: &worktrees::RepoFacts,
     cancel: &CancelToken,
 ) -> Result<Vec<Tree>, crate::worktrees::Error> {
+    let context = &worktrees::WorktreeContext { facts, ..*context };
     let infos = worktrees::list_with_facts(context, facts, cancel)?;
     let common = context.repo.common_git_dir();
     let primary = common

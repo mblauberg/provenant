@@ -369,6 +369,8 @@ pub struct WorktreeContext<'a> {
     pub project_state: &'a Directory,
     pub executor: &'a dyn Executor,
     pub utility: &'a UtilityRuntime,
+    /// Repository observations shared by operations in this context.
+    pub facts: &'a RepoFacts,
     pub workers: &'a dyn WorkerObserver,
     pub clock: &'a dyn Clock,
     /// Bounds Git reads. Keep it short: a stuck read is a defect to surface.

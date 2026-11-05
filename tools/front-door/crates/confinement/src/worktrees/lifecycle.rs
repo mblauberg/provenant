@@ -119,7 +119,7 @@ pub fn list_streaming(
     cancel: &CancelToken,
     report: impl FnMut(usize, Option<&WorktreeInfo>),
 ) -> Result<Vec<WorktreeObservation>, WorktreeError> {
-    list_impl(context, cancel, report, true, None)
+    list_impl(context, cancel, report, true, context.facts)
 }
 
 /// Read a complete worktree inventory through the command's facts session.
@@ -140,7 +140,7 @@ pub fn list_with_observation_and_facts(
     facts: &RepoFacts,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeObservation>, WorktreeError> {
-    list_impl(context, cancel, |_, _| {}, true, Some(facts))
+    list_impl(context, cancel, |_, _| {}, true, facts)
 }
 
 /// Inventory for GC. Cleanliness is checked only for candidates after the
@@ -150,7 +150,7 @@ pub fn list_for_gc(
     facts: &RepoFacts,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    Ok(list_impl(context, cancel, |_, _| {}, false, Some(facts))?
+    Ok(list_impl(context, cancel, |_, _| {}, false, facts)?
         .into_iter()
         .map(|observation| observation.info)
         .collect())
@@ -161,16 +161,13 @@ fn list_impl(
     cancel: &CancelToken,
     mut report: impl FnMut(usize, Option<&WorktreeInfo>),
     eager_git: bool,
-    facts: Option<&RepoFacts>,
+    facts: &RepoFacts,
 ) -> Result<Vec<WorktreeObservation>, WorktreeError> {
     validate_binding(context)?;
     let entries = {
         let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
         context.repo.revalidate()?;
-        match facts {
-            Some(facts) => facts.capture_inventory(context, cancel)?,
-            None => read_worktrees(context, cancel)?,
-        }
+        facts.capture_inventory(context, cancel)?
     };
     // A stale Git registration must not hide the remaining worktrees from GC.
     let candidates: Vec<_> = entries
@@ -321,7 +318,7 @@ pub fn create(
 ) -> Result<WorktreeInfo, WorktreeError> {
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
-    let facts = RepoFacts::default();
+    let facts = context.facts;
     let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
     context.repo.revalidate()?;
     let entries = read_worktrees(context, cancel)?;
@@ -331,7 +328,7 @@ pub fn create(
         .find(|entry| entry.branch.as_ref() == Some(&branch));
     if let Some(entry) = checked_out {
         return Err(if let Some(base) = request.base.as_deref() {
-            let base_oid = pin_revision(context, &facts, base, cancel)?;
+            let base_oid = pin_revision(context, facts, base, cancel)?;
             if !is_ancestor(context, base_oid, entry.head, cancel)? {
                 WorktreeError::BranchExistsWithBase {
                     branch: request.branch.clone(),
@@ -356,7 +353,7 @@ pub fn create(
     if let Some(existing_head) = existing
         && let Some(base) = request.base.as_deref()
     {
-        let base_oid = pin_revision(context, &facts, base, cancel)?;
+        let base_oid = pin_revision(context, facts, base, cancel)?;
         if !is_ancestor(context, base_oid, existing_head, cancel)? {
             return Err(WorktreeError::BranchExistsWithBase {
                 branch: request.branch.clone(),
@@ -394,7 +391,7 @@ pub fn create(
     let base = if let Some(existing) = existing {
         existing
     } else if let Some(base) = request.base.as_deref() {
-        pin_revision(context, &facts, base, cancel)?
+        pin_revision(context, facts, base, cancel)?
     } else {
         let head = GitRevision::new("HEAD").map_err(|_| WorktreeError::InvalidRequest)?;
         facts
@@ -462,7 +459,7 @@ pub fn create(
     if !root_identity.same_identity(&named_root) {
         return Err(WorktreeError::UnknownWriter);
     }
-    let primary_head = primary_head(context, &facts, cancel)?;
+    let primary_head = primary_head(context, facts, cancel)?;
     if let Err(cause) = execute_mutation(
         context,
         GitMutation::WorktreeAdd {
@@ -487,7 +484,7 @@ pub fn create(
     // Creating a linked worktree must leave the primary's HEAD, branch or
     // detached, exactly as it was (#1331). A hook or race that moved it is
     // reported rather than hidden; the worktree stays for the operator.
-    if primary_head != self::primary_head(context, &facts, cancel)? {
+    if primary_head != self::primary_head(context, facts, cancel)? {
         return Err(WorktreeError::PrimaryMoved);
     }
     context.repo.revalidate()?;
@@ -707,6 +704,7 @@ pub(super) fn execute_mutation(
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     // A failed or timed-out mutation may still have changed repository state.
+    let _ = context.facts.take_inventory(context);
     context.workers.invalidate();
     let outcome = execute_git_mutation(
         context.executor,
@@ -772,7 +770,10 @@ pub(super) fn branch_unchanged(
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     if checked_out_elsewhere(fresh, branch, Some(path))?
-        || resolve_ref(context, branch.clone(), cancel)? != head
+        || context
+            .facts
+            .resolve_commit(context, branch.clone(), cancel)?
+            != head
     {
         return Err(WorktreeError::IdentityChanged);
     }
@@ -984,7 +985,7 @@ pub(super) fn pin_integration(
     text: &str,
     cancel: &CancelToken,
 ) -> Result<(GitRefName, GitOid), WorktreeError> {
-    let facts = RepoFacts::default();
+    let facts = context.facts;
     let candidates = [
         GitRefName::new(text),
         GitRefName::branch(text),
@@ -996,7 +997,7 @@ pub(super) fn pin_integration(
         match facts.resolve_commit(context, candidate.clone(), cancel) {
             Ok(oid) => {
                 let oid = if candidate.as_str().starts_with("refs/remotes/") {
-                    pin_revision(context, &facts, candidate.as_str(), cancel)?
+                    pin_revision(context, facts, candidate.as_str(), cancel)?
                 } else {
                     oid
                 };
@@ -1064,7 +1065,9 @@ pub(super) fn pin_branch_ref(
     let reference = GitRefName::new(reference)
         .or_else(|_| GitRefName::branch(reference))
         .map_err(|_| WorktreeError::InvalidRequest)?;
-    let oid = resolve_ref(context, reference.clone(), cancel)?;
+    let oid = context
+        .facts
+        .resolve_commit(context, reference.clone(), cancel)?;
     Ok((reference, oid))
 }
 
@@ -1187,7 +1190,10 @@ pub(super) fn settle_branch(
         retain(outcome, branch, RetainReason::CheckedOut);
         return Ok(());
     }
-    match resolve_ref(context, branch.clone(), cancel) {
+    match context
+        .facts
+        .resolve_commit(context, branch.clone(), cancel)
+    {
         Ok(current) if current == tip => {}
         Ok(_) | Err(WorktreeError::NotFound) => {
             retain(outcome, branch, RetainReason::Changed);

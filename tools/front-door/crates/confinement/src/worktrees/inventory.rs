@@ -342,6 +342,8 @@ pub(super) fn read_worktrees(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<GitWorktree>, WorktreeError> {
+    // A guarded fresh read supersedes any advisory preview snapshot.
+    let _ = context.facts.take_inventory(context);
     let outcome = run_git(context, context.repo, GitRead::WorktreeList, cancel)?;
     if exit_code(&outcome)? != 0 {
         return Err(WorktreeError::InvalidOutput);
@@ -358,18 +360,6 @@ pub(super) fn read_branch_tips(
         return Err(WorktreeError::InvalidOutput);
     }
     parse_branch_tips(&outcome.stdout.bytes)
-}
-
-pub(super) fn resolve_ref(
-    context: &WorktreeContext<'_>,
-    name: GitRefName,
-    cancel: &CancelToken,
-) -> Result<GitOid, WorktreeError> {
-    let outcome = run_git(context, context.repo, GitRead::ResolveRef { name }, cancel)?;
-    if exit_code(&outcome)? != 0 {
-        return Err(WorktreeError::NotFound);
-    }
-    parse_oid(trim_ascii(&outcome.stdout.bytes))
 }
 
 pub fn is_ancestor(

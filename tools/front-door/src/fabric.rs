@@ -2454,6 +2454,10 @@ impl BinaryRunOwner<'_> {
             half(),
             self.factory.workers,
             |context, cancel| {
+                let context = &worktrees::WorktreeContext {
+                    facts: &facts,
+                    ..*context
+                };
                 let existing = worktrees::list_with_observation_and_facts(context, &facts, cancel)?
                     .into_iter()
                     .find(|entry| entry.info.branch.as_deref() == Some(branch.as_str()));
