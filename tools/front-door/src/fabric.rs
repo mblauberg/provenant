@@ -80,7 +80,6 @@ pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeErro
     }
 }
 
-<<<<<<< HEAD
 fn graph_writer_initialisation_error(
     commit: &str,
     error: provenant_confinement::worktrees::WorktreeError,
@@ -95,15 +94,17 @@ fn graph_writer_initialisation_error(
         FacadeError::Busy
     } else {
         FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
             reason: format!("initialise graph writer at {commit}: {error}"),
         }
     }
-=======
+}
+
 fn lane_timeout(deadline_seconds: Option<u64>, graph_timeout_seconds: u64) -> u64 {
     deadline_seconds
         .unwrap_or(graph_timeout_seconds)
         .min(graph_timeout_seconds)
->>>>>>> origin/main
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -4439,7 +4440,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         Some(effective.seconds)
     }
     type Error = FacadeError;
-<<<<<<< HEAD
     fn retry_allowance(
         &self,
         node: &provenant_records::ExtraFields,
@@ -4453,7 +4453,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         if host != self.factory.context.identity.host.to_string() {
             // Unknown remote lineage must never grant fresh retry allowance.
             return Ok(u64::from(provenant_routing::MAX_SETTLEMENT_RETRIES));
-=======
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(self.cancel)?;
+        let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
+        let call = owner.call(self.cancel);
+        let record = store.record(attempt, &call).map_err(run_error)?;
+        Ok(store
+            .policy_attempt_number(&record, &call)
+            .map_err(run_error)?
+            .saturating_sub(1))
+    }
 
     fn preparation_fallback_evidence(
         &mut self,
@@ -4587,7 +4602,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
         if host != self.factory.context.identity.host.to_string() {
             return Ok(false);
->>>>>>> origin/main
         }
         let owner = BinaryRunOwner {
             factory: self.factory,
@@ -4596,17 +4610,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             chair: None,
         };
         let store = owner.store(self.cancel)?;
-<<<<<<< HEAD
-        let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
-        let call = owner.call(self.cancel);
-        let record = store.record(attempt, &call).map_err(run_error)?;
-        Ok(store
-            .policy_attempt_number(&record, &call)
-            .map_err(run_error)?
-            .saturating_sub(1))
-    }
-
-=======
         let call = owner.call(self.cancel);
         let record = store
             .record(
@@ -4626,7 +4629,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .zip(task.head.as_ref())
             .is_some_and(|(base, head)| base == head))
     }
->>>>>>> origin/main
     fn respect_ci_wake(&self) -> bool {
         self.tick
     }
@@ -5115,15 +5117,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         )
                     },
                 )
-<<<<<<< HEAD
                 .map_err(|error| graph_writer_initialisation_error(commit, error))?;
-=======
-                .map_err(|error| FacadeError::DispatchRefused {
-                    fact: None,
-                    disk: None,
-                    reason: format!("initialise graph writer at {commit}: {error}"),
-                })?;
->>>>>>> origin/main
             }
             let delivery = if let Some(mode) = replay.delivery {
                 let branch = if let Some(path) = worktree {
@@ -5273,11 +5267,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                 effort: route.effort.clone(),
                             }
                         }
-<<<<<<< HEAD
-                        None if node.family_separation || !excluded_families.is_empty() => {
-=======
                         None if !avoided_families.is_empty() => {
->>>>>>> origin/main
                             provenant_records::run::RequestedRoute::Review {
                                 extra: Default::default(),
                                 name: route
@@ -5309,30 +5299,20 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     new_worktree: None,
                 }],
                 concurrency: Some(1),
-<<<<<<< HEAD
-                knobs: {
+                knobs: if let Some(knobs) = accepted_knobs {
+                    knobs
+                } else {
                     let mut knobs = Vec::new();
-                    if !self.exclude.is_empty() {
+                    if !exclude.is_empty() {
                         knobs.push(format!(
                             "routing.graph_exclude={}",
-                            serde_json::Value::from(self.exclude.clone())
+                            serde_json::Value::from(exclude)
                         ));
                     }
                     if let Some(retries) = node.settlement_retries {
                         knobs.push(format!("domains.routing.settlement_retries={retries}"));
                     }
                     knobs
-=======
-                knobs: if let Some(knobs) = accepted_knobs {
-                    knobs
-                } else if exclude.is_empty() {
-                    vec![]
-                } else {
-                    vec![format!(
-                        "routing.graph_exclude={}",
-                        serde_json::Value::from(exclude)
-                    )]
->>>>>>> origin/main
                 },
                 host: None,
             };
