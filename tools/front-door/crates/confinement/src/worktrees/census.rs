@@ -1095,13 +1095,14 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                                     && kind == ProcessEvidenceKind::ExecutableImage
                                 {
                                     h.kind = ProcessEvidenceKind::ExecutableImage;
+                                    h.cwd = Some(location.to_path_buf());
                                 }
                             })
                             .or_insert_with(|| ObservedProcess {
                                 pid,
                                 command: fact.command.clone(),
                                 kind,
-                                cwd: None,
+                                cwd: Some(location.to_path_buf()),
                             });
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(
