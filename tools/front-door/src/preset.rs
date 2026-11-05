@@ -1166,12 +1166,7 @@ pub fn expand_with(
     let typed: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document.clone()).map_err(|error| error.to_string())?;
     typed.check_composites(&layers.graph_limits)?;
-    let count = check_expansion(
-        document["nodes"]
-            .as_array()
-            .ok_or("nodes must be an array")?,
-        "",
-    )?;
+    let count = expanded_node_count(&typed.nodes);
     if let Some(reason) = layers.graph_limits.nodes_bound().refusal(count) {
         return Err(reason);
     }
@@ -2809,39 +2804,20 @@ fn composite(
     node
 }
 
-fn check_expansion(nodes: &[Value], prefix: &str) -> Result<usize, String> {
-    let mut count = 0usize;
-    for node in nodes {
-        let id = format!(
-            "{prefix}{}",
-            node["id"].as_str().ok_or("node ID must be a string")?
-        );
-        if id.len() > 64 {
-            return Err(format!("expanded node ID exceeds 64 bytes: {id}"));
-        }
-        count = count.saturating_add(1);
-        if let Some(children) = node
-            .get("composite")
-            .and_then(|spec| spec.get("nodes"))
-            .and_then(Value::as_array)
-        {
-            count = count.saturating_add(check_expansion(children, &format!("{id}--"))?);
-        }
-        if let Some(spec) = node.get("loop") {
-            let children = spec
-                .get("body")
-                .and_then(Value::as_array)
-                .ok_or("loop.body must be an array")?;
-            let rounds = spec
-                .get("max_rounds")
-                .and_then(Value::as_u64)
-                .ok_or("loop.max_rounds must be positive")? as usize;
-            count = count.saturating_add(
-                check_expansion(children, &format!("{id}--r{rounds}--"))?.saturating_mul(rounds),
-            );
-        }
-    }
-    Ok(count)
+fn expanded_node_count(nodes: &[provenant_fabric_runtime::graph::GraphNode]) -> usize {
+    nodes.iter().fold(0usize, |total, node| {
+        let children = node
+            .composite
+            .as_ref()
+            .map_or(0, |spec| expanded_node_count(&spec.nodes));
+        let rounds = node.loop_body.as_ref().map_or(0, |spec| {
+            expanded_node_count(&spec.body).saturating_mul(spec.max_rounds)
+        });
+        total
+            .saturating_add(1)
+            .saturating_add(children)
+            .saturating_add(rounds)
+    })
 }
 
 fn configured(globals: &provenant_cli::Globals) -> Result<Layers, String> {

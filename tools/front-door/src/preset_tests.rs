@@ -2048,6 +2048,22 @@ fn preset_node_limit_uses_the_host_admission_bound() {
     assert_eq!(error, document.admit(&layers.graph_limits).unwrap_err());
     assert!(error.contains("limits.nodes=1"), "{error}");
     assert!(error.contains("domains.fabric.graph.limits"), "{error}");
+
+    let loop_preset = "stages=[{id='repair',loop={max_rounds=2,until='check',stages=[{id='check',kind='gate',condition={type='budget'}}]}}]\n";
+    layers.insert("test", "counted-loop", loop_preset).unwrap();
+    layers.graph_limits.nodes = 2;
+    let error = expand(&layers, "counted-loop", "brief", &[]).unwrap_err();
+    let mut unlimited = Layers::empty();
+    unlimited
+        .insert("test", "counted-loop", loop_preset)
+        .unwrap();
+    let document: provenant_fabric_runtime::graph::GraphDocument = serde_json::from_value(
+        expand(&unlimited, "counted-loop", "brief", &[])
+            .unwrap()
+            .document,
+    )
+    .unwrap();
+    assert_eq!(error, document.admit(&layers.graph_limits).unwrap_err());
 }
 
 #[test]
