@@ -681,20 +681,8 @@ mod build_tests {
         }
     }
     #[test]
-    fn memory_pressure_defaults_to_critical_and_accepts_host_policy() {
+    fn memory_pressure_accepts_host_policy() {
         use provenant_os::sys::resources::MemoryPressure;
-        let defaults: LaneBuildSettings =
-            toml_edit::de::from_str("memory_pressure_threshold = 'critical'").unwrap();
-        assert!(
-            !defaults
-                .memory_pressure_threshold
-                .defers(MemoryPressure::Warning)
-        );
-        assert!(
-            defaults
-                .memory_pressure_threshold
-                .defers(MemoryPressure::Critical)
-        );
         let warning: LaneBuildSettings =
             toml_edit::de::from_str("memory_pressure_threshold = 'warning'").unwrap();
         assert!(

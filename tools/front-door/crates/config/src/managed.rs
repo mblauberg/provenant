@@ -832,7 +832,7 @@ pub fn tick_service_path(state: &Path) -> Option<PathBuf> {
 
 /// Receipt entries the scheduler owns, whichever platform wrote them.
 fn scheduler_entry(selector: &str) -> bool {
-    matches!(selector, "tick-agent" | "tick-service" | "gc-agent")
+    matches!(selector, "tick-agent" | "tick-service")
 }
 
 fn validate_removal(
@@ -1067,7 +1067,7 @@ pub fn plan_install(
             }
             if !matches!(
                 entry.selector.as_str(),
-                "binary" | "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
+                "binary" | "tick-agent" | "tick-service" | "shared-instruction"
             ) {
                 let Some(owner) = owner else {
                     continue;
@@ -1088,7 +1088,7 @@ pub fn plan_install(
                 || current.is_none()
                     && matches!(
                         entry.selector.as_str(),
-                        "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
+                        "tick-agent" | "tick-service" | "shared-instruction"
                     )
             {
                 actions.push(Action {
@@ -1102,7 +1102,7 @@ pub fn plan_install(
                 });
             } else if matches!(
                 entry.selector.as_str(),
-                "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
+                "tick-agent" | "tick-service" | "shared-instruction"
             ) {
                 snapshots.harness.findings.push(InstallFinding {
                     rule: "relinquished_modified_entry".into(),
@@ -1841,9 +1841,6 @@ impl Decoded {
 fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallError> {
     let mut receipt: InstallReceipt =
         provenant_records::decode_v1(bytes, Limits::CONFIG).map_err(InstallError::ReceiptDecode)?;
-    receipt
-        .entries
-        .retain(|entry| entry.selector != "disk-guard-agent");
     let state_root = targets.roots.state.as_path();
     normal_absolute(&receipt.bin_dir.to_path_buf()?)?;
     let mut harnesses = BTreeSet::new();
@@ -2082,7 +2079,7 @@ fn permitted_entry(
         }
         if matches!(
             entry.selector.as_str(),
-            "peer-agent" | "tick-agent" | "tick-service" | "gc-agent"
+            "peer-agent" | "tick-agent" | "tick-service"
         ) {
             let expected_path = match entry.selector.as_str() {
                 "peer-agent" => peer_agent_plist(state_root),
@@ -2094,9 +2091,7 @@ fn permitted_entry(
                         .flatten()
                 }
                 "tick-service" => tick_service_path(state_root),
-                // Only migration/removal reads this former install receipt entry.
-                _ => peer_agent_plist(state_root)
-                    .map(|path| path.with_file_name("dev.provenant.gc.plist")),
+                _ => None,
             };
             return Ok(expected_path.as_ref() == Some(&path)
                 && matches!(
@@ -2625,7 +2620,7 @@ pub fn uninstall(
         owner.as_ref().is_some_and(|id| selected.contains(id))
             || (matches!(
                 entry.selector.as_str(),
-                "peer-agent" | "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
+                "peer-agent" | "tick-agent" | "tick-service" | "shared-instruction"
             ) && selected == registered)
     };
 
