@@ -88,8 +88,13 @@ reason = "Unsupported access, session, route, authentication or command invocati
 
 [[guard]]
 site = "providers/src/cursor.rs#prepare"
-boundary = "unclassified"
-reason = "Unsupported selected authentication or missing private state refuses preparation."
+boundary = "credentials"
+reason = "The selected login and attempt-private state must be present before Cursor receives its credential access."
+
+[[guard]]
+site = "providers/src/cursor.rs#prepare"
+boundary = "authority"
+reason = "A resumed invocation requires its validated continuation identity."
 
 [[guard]]
 site = "providers/src/agy.rs#prepare"
@@ -98,13 +103,28 @@ reason = "Unsupported selected authentication or missing private state refuses p
 
 [[guard]]
 site = "providers/src/codex.rs#prepare"
-boundary = "unclassified"
-reason = "Unsupported selected authentication or missing private state refuses preparation."
+boundary = "credentials"
+reason = "The selected login and attempt-private state must be present before Codex receives its credential access."
+
+[[guard]]
+site = "providers/src/codex.rs#prepare"
+boundary = "authority"
+reason = "A resumed invocation requires its validated continuation identity, and Codex must use its clean configuration policy."
+
+[[guard]]
+site = "providers/src/claude.rs#prepare"
+boundary = "credentials"
+reason = "Claude receives only its selected account token through the host pipe, with no separate credential root grant."
+
+[[guard]]
+site = "providers/src/claude.rs#prepare"
+boundary = "authority"
+reason = "The token must match the selected account and a resumed invocation must retain its validated continuation identity."
 
 [[guard]]
 site = "providers/src/claude.rs#prepare"
 boundary = "unclassified"
-reason = "Authentication, token identity, continuation and private-state checks can refuse preparation; classify each case separately."
+reason = "Remaining private-state, path and runtime setup failures require classification."
 
 [[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
