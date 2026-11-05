@@ -300,3 +300,80 @@ impl RunStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::{call, clock, context, input, route};
+    use provenant_core::CancelToken;
+
+    #[test]
+    fn missing_priority_withdraws_acquired_custody()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+        let id = request.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
+        assert!(record.requested_priority.is_none());
+        let plan = PreparedLaunch {
+            argv: vec!["fixture".into()],
+            environment: Vec::new(),
+            stdin: Vec::new(),
+            secret_input: None,
+            cwd: temp.path().into(),
+            route: route(),
+            skipped_routes: Vec::new(),
+            observed_head: None,
+            repository: None,
+            confinement: None,
+        };
+        let acquire = |directory, scope, binding| {
+            custody::acquire_writer(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                call.cancel,
+                call.clock,
+            )
+        };
+        let result = store.hand_off(
+            &request.request.tasks[0],
+            plan,
+            provenant_core::ActorId::from_bytes([2; 16]),
+            &|_, _| Ok(Vec::new()),
+            &acquire,
+            &record,
+            60,
+            &call,
+        );
+        match result {
+            Err(HandOff::Local(reason)) => assert!(reason.contains("lane priority"), "{reason}"),
+            Err(HandOff::Busy) => panic!("custody busy"),
+            Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
+            Ok(()) => panic!("unexpected launch"),
+        }
+        let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let lease = custody::acquire_reader(
+            directory,
+            RunStore::scope(&record),
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
+        lease.withdraw_unlaunched()?;
+        Ok(())
+    }
+}
