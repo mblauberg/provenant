@@ -612,8 +612,10 @@ fn prepare(
     let package = package_root(input.executable)?;
     let scratch = &plan.scratch.path;
     // Scrub mode forces default permissions, regardless of --permission-mode.
-    let allowed_tools = if shell {
+    let allowed_tools = if shell && input.images.is_empty() {
         "Read,Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
+    } else if shell {
+        "Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
     } else {
         "Bash,Skill,mcp__fabric__*"
     };
@@ -622,7 +624,57 @@ fn prepare(
     } else {
         allowed_tools.to_owned()
     };
-    let mut setup = input.provenant.claude(scratch, &mut argv, &allowed_tools)?;
+    let mut image_rules = input
+        .images
+        .iter()
+        .map(|image| {
+            let path = image.to_str().ok_or(ProviderError::InvalidPath)?;
+            if !image.is_absolute() {
+                return Err(ProviderError::InvalidPath);
+            }
+            // Read rules use gitignore patterns; escape metacharacters in filenames.
+            let escaped: String = path
+                .chars()
+                .flat_map(|c| {
+                    if matches!(c, '*' | '?' | '[' | ']' | '\\' | ' ') {
+                        vec!['\\', c]
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect();
+            Ok(format!("Read(/{escaped})"))
+        })
+        .collect::<Result<Vec<_>, ProviderError>>()?;
+    if shell && !input.images.is_empty() {
+        // Keep reads of the lane's other roots approved without a blanket Read
+        // rule, which would also approve siblings of an attached image.
+        for root in &plan.read_roots {
+            if input.images.contains(&root.path) {
+                continue;
+            }
+            let path = root.path.to_str().ok_or(ProviderError::InvalidPath)?;
+            let escaped: String = path
+                .chars()
+                .flat_map(|c| {
+                    if matches!(c, '*' | '?' | '[' | ']' | '\\' | ' ') {
+                        vec!['\\', c]
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect();
+            let suffix = if root.scope == provenant_confinement::permissions::PathScope::Subtree {
+                "/**"
+            } else {
+                ""
+            };
+            image_rules.push(format!("Read(/{escaped}{suffix})"));
+        }
+    }
+    let mut setup = input
+        .provenant
+        .claude(scratch, &mut argv, &allowed_tools, &image_rules)?;
 
     let toolchain = shell || web;
     let path = if toolchain {
@@ -709,9 +761,6 @@ fn prepare(
         prompt.push_str("\n\nAttached images:\n");
         for image in input.images {
             prompt.push_str(&format!("- {}\n", image.display()));
-            if let Some(parent) = image.parent() {
-                argv.extend(["--add-dir".into(), parent.as_os_str().to_owned()]);
-            }
         }
     }
     let mut spec = LaunchSpec {

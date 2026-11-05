@@ -2461,13 +2461,72 @@ fn image_attachments_reach_codex_and_claude() -> Result<(), ProviderError> {
             for image in &images {
                 assert!(text.contains(&image.display().to_string()));
             }
+            assert!(!text.contains("/outside/sibling.png"));
             assert!(
-                spec.argv
+                !spec
+                    .argv
                     .windows(2)
                     .any(|pair| pair[0] == "--add-dir" && pair[1] == "/outside")
             );
+            let settings_path = &spec.argv[spec
+                .argv
+                .iter()
+                .position(|arg| arg == "--settings")
+                .unwrap()
+                + 1];
+            let settings = spec
+                .setup
+                .iter()
+                .find_map(|step| match step {
+                    SetupStep::WriteFile { path, bytes } if path.as_os_str() == settings_path => {
+                        Some(bytes)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let settings: serde_json::Value = serde_json::from_slice(settings).unwrap();
+            let rules = settings["permissions"]["allow"].as_array().unwrap();
+            assert!(rules.contains(&serde_json::json!(r"Read(//outside/first\ image.png)")));
+            assert!(rules.contains(&serde_json::json!("Read(//outside/second.png)")));
+            assert!(!rules.contains(&serde_json::json!("Read(//outside/sibling.png)")));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn claude_write_images_do_not_enable_unrestricted_read() -> Result<(), ProviderError> {
+    let images = vec![Path::new("/outside/image.png").to_owned()];
+    let prompt = Prompt::new("Describe the image".into());
+    let token = fixture_token();
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let mut input = fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    );
+    input.images = &images;
+    let spec = REGISTRY
+        .iter()
+        .find(|entry| entry.adapter.id() == "claude")
+        .unwrap()
+        .adapter
+        .prepare(input)?;
+    let allowed = spec
+        .argv
+        .iter()
+        .position(|arg| arg == "--allowedTools")
+        .unwrap();
+    assert!(
+        !spec.argv[allowed + 1]
+            .to_string_lossy()
+            .split(',')
+            .any(|tool| tool == "Read")
+    );
     Ok(())
 }
 
