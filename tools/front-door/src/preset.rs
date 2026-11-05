@@ -4553,10 +4553,10 @@ fn explain(
         tier_mix[0], tier_mix[1], tier_mix[2]
     );
     human.push_str(&format!("{tier_mix_line}\n"));
-    if inverted {
-        human.push_str(
-            "Warning: writer tier mix is inverted; consider whether lower tiers fit the work.\n",
-        );
+    let tier_mix_warning = inverted
+        .then_some("writer tier mix is inverted; consider whether lower tiers fit the work.");
+    if let Some(warning) = tier_mix_warning {
+        human.push_str(&format!("Warning: {warning}\n"));
     }
     if let Some(context) = expansion.document.get("context") {
         human.push_str(&format!(
@@ -4603,7 +4603,7 @@ fn explain(
         human.push_str(&format!("Warning: {warning}\n"));
     }
     let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"admission":admission,"inspection":metrics,"pending":pending,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
-    data["tier_mix"] = json!({"junior":tier_mix[0], "senior":tier_mix[1], "principal":tier_mix[2], "inverted":inverted, "line":tier_mix_line});
+    data["tier_mix"] = json!({"junior":tier_mix[0], "senior":tier_mix[1], "principal":tier_mix[2], "inverted":inverted, "line":tier_mix_line, "warning":tier_mix_warning});
     if !brief_warnings.is_empty() {
         data["warnings"] = json!(brief_warnings);
     }

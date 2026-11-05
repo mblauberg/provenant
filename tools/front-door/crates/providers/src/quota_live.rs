@@ -1427,7 +1427,7 @@ mod tests {
         }));
         assert_eq!(
             live.claude(&account, live.now() + 60, &mut QuotaDetails::default(),),
-            Err(ProbeFailure::Network)
+            Err(ProbeFailure::LoginExpired)
         );
         assert_eq!(live.login_expiry_unix_seconds(), Some(expires_ms / 1000));
         assert!(!live.state.join("quota-claude-refresh.json").exists());

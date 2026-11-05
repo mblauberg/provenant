@@ -3708,6 +3708,7 @@ mod route_tests {
             )
         };
         let before = resolve(&available)?;
+        // Current recorded sign-out evidence excludes until a healthy probe clears it.
         assert!(matches!(
             before.readiness,
             provenant_records::RouteReadiness::Unavailable {
@@ -3806,6 +3807,7 @@ mod route_tests {
                 &[],
             )
         };
+        // Current recorded sign-out evidence excludes until a login probe clears it.
         assert!(matches!(
             resolve(&available)?.readiness,
             provenant_records::RouteReadiness::Unavailable {
@@ -3877,6 +3879,7 @@ mod route_tests {
             None,
             &[],
         )?;
+        // Another account's probe does not clear this account's current sign-out.
         assert!(matches!(
             zen_result.readiness,
             provenant_records::RouteReadiness::Unavailable {

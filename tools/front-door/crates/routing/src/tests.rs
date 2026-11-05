@@ -1616,6 +1616,122 @@ fn availability() -> AvailabilityRecord {
 }
 
 #[test]
+fn stale_availability_is_selectable_but_current_account_wins()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let stale = AvailabilityRecord {
+        account_key: Some("stale".into()),
+        expires_unix_seconds: 90,
+        ..availability()
+    };
+    let current = AvailabilityRecord {
+        account_key: Some("current".into()),
+        ..availability()
+    };
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let records = [current, stale.clone()];
+    let mut context = RoutingContext {
+        availability: &records,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
+    assert_eq!(selected.account_key.as_deref(), Some("current"));
+    let only_stale = [stale];
+    context.availability = &only_stale;
+    let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
+    assert_eq!(selected.account_key.as_deref(), Some("stale"));
+    assert!(
+        matches!(selected.readiness, RouteReadiness::Ready { extra, .. } if extra.contains_key("availability_warning"))
+    );
+    let records = ["current", "stale"].map(|key| AvailabilityRecord {
+        account_key: Some(key.into()),
+        ..availability()
+    });
+    let readings = [
+        quota(
+            "codex/gpt-6-luna",
+            "current",
+            provenant_quota::QuotaStatus::Available,
+            1,
+            50,
+            120,
+        )?,
+        quota(
+            "codex/gpt-6-luna",
+            "stale",
+            provenant_quota::QuotaStatus::Available,
+            1,
+            50,
+            90,
+        )?,
+    ];
+    let lookup = readiness_over(vec![]);
+    let context = RoutingContext {
+        availability: &records,
+        quota: &readings,
+        readiness: Some(&lookup),
+        access: &access,
+        ..context
+    };
+    assert_eq!(
+        resolve(&request("codex/gpt-6-luna")?, &context)?
+            .account_key
+            .as_deref(),
+        Some("current")
+    );
+    Ok(())
+}
+
+#[test]
+fn all_exhausted_accounts_have_individual_remedies() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = ["one", "two"].map(|key| AvailabilityRecord {
+        account_key: Some(key.into()),
+        ..availability()
+    });
+    let readings = ["one", "two"].map(|key| {
+        let mut reading =
+            quota("codex/gpt-6-luna", key, QuotaStatus::Exhausted, 1, 50, 120).unwrap();
+        reading.snapshot.windows = vec![QuotaWindow {
+            pool: "secondary".into(),
+            window_seconds: Some(604_800),
+            used_basis_points: 10_000,
+            resets_unix_seconds: Some(10_000),
+        }];
+        reading
+    });
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let context = RoutingContext {
+        availability: &records,
+        quota: &readings,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
+    let details = selected.extra["account_exclusions"].to_string();
+    assert!(
+        details.contains("one")
+            && details.contains("two")
+            && details.contains("exhausted")
+            && details.contains("reset")
+    );
+    assert!(!details.contains("UnknownAvailability"));
+    Ok(())
+}
+
+#[test]
 fn resolves_an_available_provider_supplied_only_by_the_registry()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::{
@@ -2487,7 +2603,7 @@ fn availability_access_and_scoped_quota_are_independent_gates()
     context.availability = &records;
     assert_eq!(
         reason(&resolve(&query, &context)?),
-        Some(&RouteExclusionReason::StaleAvailability)
+        Some(&RouteExclusionReason::DisclosureDenied)
     );
     let records = [availability()];
     context.availability = &records;
@@ -2572,6 +2688,21 @@ fn availability_access_and_scoped_quota_are_independent_gates()
         reason(&resolve(&query, &context)?),
         Some(&RouteExclusionReason::Exhausted)
     );
+    for (expires, expected) in [(120, Some(RouteExclusionReason::AuthRequired)), (99, None)] {
+        let auth = [quota(
+            "codex/test",
+            "opaque-account",
+            QuotaStatus::AuthRequired,
+            1,
+            80,
+            expires,
+        )?];
+        let auth_context = RoutingContext {
+            quota: &auth,
+            ..context
+        };
+        assert_eq!(reason(&resolve(&query, &auth_context)?), expected.as_ref());
+    }
     let newer_unknown = [
         quota(
             "codex/test",
@@ -4562,6 +4693,7 @@ fn account_evidence_reasons_carry_their_repair_text() {
     let exhausted = exclusion_detail(&RouteExclusionReason::Exhausted);
     assert!(exhausted.contains("exhausted"));
     assert!(exhausted.contains("wait"));
+    assert!(exhausted.contains("reset"));
 }
 
 #[test]
@@ -5222,6 +5354,46 @@ fn readiness_access() -> [AccessContext<'static>; 2] {
     })
 }
 
+#[test]
+fn expired_login_observation_warns_and_remains_selectable() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_quota::{
+        ACCOUNT_ROUTE, LOCAL_HOST, LoginObservation, ReadinessFile, ReadinessScope,
+    };
+    let file = ReadinessFile {
+        login: Some(LoginObservation {
+            scope: ReadinessScope {
+                host: LOCAL_HOST.into(),
+                adapter: "codex".into(),
+                account_key: "opaque-account".into(),
+                route: ACCOUNT_ROUTE.into(),
+            },
+            observed_unix_seconds: 80,
+            valid_until_unix_seconds: 100,
+            expires_unix_seconds: Some(85),
+        }),
+        ..Default::default()
+    };
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [availability()];
+    let access = readiness_access();
+    for cached in [false, true] {
+        let lookup = |scope: &ReadinessScope, time| file.get(scope, if cached { 90 } else { time });
+        let context = RoutingContext {
+            availability: &records,
+            access: &access,
+            readiness: Some(&lookup),
+            ..context(&catalogue, &config, now()?)
+        };
+        let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
+        assert!(
+            matches!(selected.readiness, RouteReadiness::Ready { extra, .. } if extra.contains_key("availability_warning"))
+        );
+    }
+    Ok(())
+}
+
 fn agy_account(key: &str) -> AvailabilityRecord {
     AvailabilityRecord {
         adapter: "agy".into(),
@@ -5265,8 +5437,8 @@ fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::err
     for observed in [
         vec![],
         one(State::Ready, None, fresh),
-        one(State::Unknown, Some(Why::SignedOut), fresh),
         one(State::Unknown, Some(Why::UnreachablePeer), fresh),
+        one(State::Unavailable, Some(Why::CommandFailure), fresh),
     ] {
         assert!(
             matches!(status(observed.clone())?, RouteReadiness::Ready { .. }),
@@ -5275,25 +5447,45 @@ fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::err
     }
     // Unavailable excludes with the projected reason.
     for (why, expected) in [
-        (Why::SignedOut, RouteExclusionReason::AuthRequired),
-        (Why::LoginExpired, RouteExclusionReason::LoginExpired),
         (
             Why::MissingExecutable,
             RouteExclusionReason::MissingExecutable,
         ),
         (Why::AccountMismatch, RouteExclusionReason::AccountMismatch),
+        (Why::SignedOut, RouteExclusionReason::AuthRequired),
+        (Why::LoginExpired, RouteExclusionReason::LoginExpired),
         (Why::Exhausted, RouteExclusionReason::ProviderRefused),
         (Why::ProviderRefusal, RouteExclusionReason::ProviderRefused),
-        (
-            Why::CommandFailure,
-            RouteExclusionReason::UnknownAvailability,
-        ),
     ] {
         match status(one(State::Unavailable, Some(why), fresh))? {
             RouteReadiness::Unavailable { reason, .. } => assert_eq!(reason, expected, "{why:?}"),
             other => panic!("{why:?} must exclude: {other:?}"),
         }
     }
+    for (why, expected) in [
+        (Why::SignedOut, RouteExclusionReason::AuthRequired),
+        (Why::LoginExpired, RouteExclusionReason::LoginExpired),
+        (Why::AccountMismatch, RouteExclusionReason::AccountMismatch),
+    ] {
+        assert!(
+            matches!(status(one(State::Unknown, Some(why), fresh))?, RouteReadiness::Unavailable { reason, .. } if reason == expected)
+        );
+    }
+    let account_wide = observation(
+        "codex",
+        "opaque-account",
+        "*",
+        State::Unknown,
+        Some(Why::SignedOut),
+        fresh,
+    );
+    assert!(matches!(
+        status(vec![account_wide])?,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::AuthRequired,
+            ..
+        }
+    ));
     // At or beyond expiry, and before the observation, it reads unknown.
     for window in [(80, 100), (80, 90), (101, 200)] {
         assert!(matches!(
@@ -5392,7 +5584,15 @@ fn unavailable_account_moves_selection_to_an_alternate_account()
             Some(Why::LoginExpired),
             (80, 120),
         );
-        let chosen = pick(vec![expired])?;
+        let known = observation(
+            "codex",
+            other,
+            "codex/gpt-6-luna",
+            State::Ready,
+            None,
+            (80, 120),
+        );
+        let chosen = pick(vec![expired, known])?;
         assert_eq!(chosen.account_key.as_deref(), Some(other));
         assert!(matches!(chosen.readiness, RouteReadiness::Ready { .. }));
     }
