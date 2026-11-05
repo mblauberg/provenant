@@ -380,6 +380,11 @@ mod tests {
             call.clock,
         )?;
         lease.withdraw_unlaunched()?;
+        // Each handoff reserves a fresh publication file; these calls exercise
+        // separate failure paths against the same attempt fixture.
+        store
+            .attempt_dir(record.run_id, id, false)?
+            .unlink(std::ffi::OsStr::new("reserve"))?;
         let result = store.hand_off(
             &request.request.tasks[0],
             plan(),
@@ -396,6 +401,37 @@ mod tests {
             Err(HandOff::Busy) => panic!("busy"),
             Ok(()) => panic!("unexpected launch"),
         }
+        store
+            .attempt_dir(record.run_id, id, false)?
+            .unlink(std::ffi::OsStr::new("reserve"))?;
+        let result = store.hand_off(
+            &request.request.tasks[0],
+            plan(),
+            provenant_core::ActorId::from_bytes([2; 16]),
+            &|_, _| Ok(Vec::new()),
+            &|directory, scope, binding| {
+                let slot = directory.try_clone()?;
+                let lease = acquire(directory, scope, binding)?;
+                let evidence =
+                    slot.open_directory(std::ffi::OsStr::new(&scope.attempt.to_string()))?;
+                evidence.unlink(std::ffi::OsStr::new("settlement.json"))?;
+                evidence.mkdir(std::ffi::OsStr::new("settlement.json"), 0o700)?;
+                Ok(lease)
+            },
+            &record,
+            60,
+            &call,
+        );
+        match result {
+            Err(HandOff::Uncertain(_)) => {}
+            Err(HandOff::Local(reason)) => panic!("local: {reason}"),
+            Err(HandOff::Busy) => panic!("busy"),
+            Ok(()) => panic!("unexpected launch"),
+        }
+        assert!(custody::reservation_present(
+            &store.attempt_dir(record.run_id, id, false)?,
+            RunStore::scope(&record),
+        )?);
         Ok(())
     }
 }
