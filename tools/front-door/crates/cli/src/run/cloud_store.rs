@@ -224,6 +224,12 @@ mod tests {
         struct Fake;
         impl CloudProvider for Fake {
             type Error = ();
+            fn check_environment(
+                &mut self,
+                _: provenant_providers::cloud::CloudSubmission<'_>,
+            ) -> Result<(), ()> {
+                Ok(())
+            }
             fn submit(
                 &mut self,
                 request: provenant_providers::cloud::CloudSubmission<'_>,

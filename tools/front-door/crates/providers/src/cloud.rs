@@ -186,6 +186,7 @@ pub enum RemoteState {
 
 /// The task is supplied only at submission and is not stored in the job record.
 /// The caller must apply its normal credential scan before constructing it.
+#[derive(Clone, Copy)]
 pub struct CloudSubmission<'a> {
     pub job: &'a RemoteJob,
     pub task: &'a str,
@@ -194,6 +195,8 @@ pub struct CloudSubmission<'a> {
 /// A provider owns transport and authentication of its observations.
 pub trait CloudProvider {
     type Error;
+    /// Check the target before a model turn when the provider supports it.
+    fn check_environment(&mut self, request: CloudSubmission<'_>) -> Result<(), Self::Error>;
     fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, Self::Error>;
     fn observe(&mut self, remote_id: &str) -> Result<RemoteState, Self::Error>;
     /// True means the provider confirmed the job stopped.
@@ -211,6 +214,12 @@ pub trait CloudJobStore {
 #[derive(Debug)]
 pub enum CloudJobError<P, S> {
     Provider(P),
+    Environment {
+        target: String,
+        environment: String,
+        remedy: &'static str,
+        error: P,
+    },
     /// A failed submission can still have reached the provider. Do not retry.
     SubmitUnknown(P),
     /// Submission succeeded. Preserve this identity and do not blindly retry.
@@ -236,6 +245,12 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
     }
     job.remote_id.clear();
     job.state = RemoteState::Submitting;
+    provider.check_environment(CloudSubmission { job: &job, task }).map_err(|error| CloudJobError::Environment {
+        target: job.target.clone(),
+        environment: job.environment.clone(),
+        remedy: "Create or repair the named provider environment and select the repository, then retry.",
+        error,
+    })?;
     store.begin(&job).map_err(CloudJobError::Store)?;
     job.remote_id = provider
         .submit(CloudSubmission { job: &job, task })
@@ -322,6 +337,9 @@ mod lifecycle_tests {
     }
     impl CloudProvider for FakeProvider {
         type Error = ();
+        fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+            Ok(())
+        }
         fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, ()> {
             assert_eq!(request.job.commit, "a".repeat(40));
             assert_eq!(request.job.environment, "env");
@@ -434,10 +452,39 @@ mod lifecycle_tests {
         assert_eq!(job.state, RemoteState::Cancelled);
     }
     #[test]
+    fn cloud_environment_failure_names_target_and_never_submits() {
+        struct Missing;
+        impl CloudProvider for Missing {
+            type Error = ();
+            fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+                Err(())
+            }
+            fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
+                panic!("must not submit")
+            }
+            fn observe(&mut self, _: &str) -> Result<RemoteState, ()> {
+                panic!("must not observe")
+            }
+            fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+                panic!("must not cancel")
+            }
+        }
+        let mut store = FakeStore::default();
+        let error = submit(&mut Missing, &mut store, job(), "run tests").unwrap_err();
+        assert!(
+            matches!(error, CloudJobError::Environment { target, environment, remedy, .. } if target == "target" && environment == "env" && remedy.contains("Create or repair"))
+        );
+        assert!(store.saved.is_none());
+    }
+
+    #[test]
     fn cloud_submit_failure_retains_unknown_intent() {
         struct LostResponse;
         impl CloudProvider for LostResponse {
             type Error = ();
+            fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+                Ok(())
+            }
             fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
                 Err(())
             }
