@@ -7685,7 +7685,8 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
                 "--admission-timeout",
                 "60s",
             ])?;
-            cmd.wait = Some(15);
+            // A wait shorter than the contention must not refuse the lane.
+            cmd.wait = Some(1);
 
             let reply = dispatch_with_workers(cmd, edge, &Free);
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
