@@ -74,20 +74,10 @@ fn linked_fixture() -> Result<LinkedFixture, Box<dyn std::error::Error>> {
     let mut env: Vec<_> = std::env::vars_os()
         .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
         .collect();
-    env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
-    env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+    env.extend(provenant_os::fixture::fixture_git_settings());
     for args in [
         vec!["init", "-q", "-b", "fixture-base"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "base"],
         vec![
             "worktree",
             "add",
