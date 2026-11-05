@@ -4445,7 +4445,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         node: &provenant_records::ExtraFields,
         graph: &provenant_records::ExtraFields,
     ) -> Result<Option<(u8, String)>, Self::Error> {
-        graph_retry_allowance(node, graph, &self.factory.context.roots).map(Some)
+        Ok(Some(graph_retry_allowance(
+            node,
+            graph,
+            &self.factory.context.roots,
+        )))
     }
 
     fn retry_successors(&mut self, reference: &str) -> Result<u64, FacadeError> {
@@ -5528,46 +5532,46 @@ fn graph_retry_allowance(
     node: &provenant_records::ExtraFields,
     graph: &provenant_records::ExtraFields,
     roots: &provenant_core::Roots,
-) -> Result<(u8, String), FacadeError> {
-    let read =
-        |extra: &provenant_records::ExtraFields, key: &str| -> Result<Option<u8>, FacadeError> {
-            extra
-                .get(key)
-                .map(|retry| {
-                    let retries = retry
-                        .get("retries")
-                        .and_then(serde_json::Value::as_u64)
-                        .ok_or(FacadeError::InvalidInput { detail: None })?;
-                    u8::try_from(retries)
-                        .ok()
-                        .filter(|value| *value <= provenant_routing::MAX_SETTLEMENT_RETRIES)
-                        .ok_or(FacadeError::InvalidInput { detail: None })
-                })
-                .transpose()
-        };
-    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
-        .map_err(|error| FacadeError::DispatchRefused {
-            fact: None,
-            disk: None,
-            reason: error.to_string(),
-        })?;
-    let host = matches!(
-        config.origins.get("domains.routing.settlement_retries"),
-        Some(provenant_config::Origin::User { .. })
-    )
-    .then_some(config.domains.routing.settlement_retries);
-    let allowance = provenant_routing::resolve_retry_allowance(
-        read(node, "retry")?,
-        read(node, "preset_retry")?.or(read(graph, "retry")?),
-        host,
-    );
+) -> (u8, String) {
+    let mut warnings = Vec::new();
+    let mut read = |extra: &provenant_records::ExtraFields, key: &str| -> Option<u8> {
+        let retry = extra.get(key)?;
+        let value = retry
+            .get("retries")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value <= provenant_routing::MAX_SETTLEMENT_RETRIES);
+        if value.is_none() {
+            warnings.push(format!("ignored invalid {key}.retries"));
+        }
+        value
+    };
+    let node_retry = read(node, "retry");
+    let preset_retry = read(node, "preset_retry").or_else(|| read(graph, "retry"));
+    let host = match provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS) {
+        Ok(config) => matches!(
+            config.origins.get("domains.routing.settlement_retries"),
+            Some(provenant_config::Origin::User { .. })
+        )
+        .then_some(config.domains.routing.settlement_retries),
+        Err(_) => {
+            warnings.push("host retry setting unavailable".into());
+            None
+        }
+    };
+    let allowance = provenant_routing::resolve_retry_allowance(node_retry, preset_retry, host);
     let origin = match allowance.origin {
         provenant_routing::RetryAllowanceOrigin::Node => "node",
         provenant_routing::RetryAllowanceOrigin::Preset => "preset",
         provenant_routing::RetryAllowanceOrigin::HostConfig => "host_config",
         provenant_routing::RetryAllowanceOrigin::ShippedDefault => "shipped_default",
     };
-    Ok((allowance.retries, origin.into()))
+    let origin = if warnings.is_empty() {
+        origin.to_owned()
+    } else {
+        format!("{origin}; {}", warnings.join("; "))
+    };
+    (allowance.retries, origin)
 }
 
 /// A graph document's optional top-level `exclude` list of route-exclusion

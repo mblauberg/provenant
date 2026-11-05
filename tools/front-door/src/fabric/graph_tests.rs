@@ -1789,24 +1789,26 @@ mod retry_allowance_tests {
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         std::fs::create_dir_all(roots.state.as_path())?;
         let empty = Default::default();
-        assert_eq!(super::graph_retry_allowance(&empty, &empty, &roots)?, (2, "shipped_default".into()));
+        assert_eq!(super::graph_retry_allowance(&empty, &empty, &roots), (2, "shipped_default".into()));
         std::fs::write(roots.state.as_path().join("config.toml"), "schema_version=1\n[domains.routing]\nsettlement_retries=4\n")?;
-        assert_eq!(super::graph_retry_allowance(&empty, &empty, &roots)?, (4, "host_config".into()));
+        assert_eq!(super::graph_retry_allowance(&empty, &empty, &roots), (4, "host_config".into()));
         let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
         let profile = config.dispatch_profile(&["domains.routing.settlement_retries=1".into()])?;
         assert_eq!(profile.knobs["domains.routing.settlement_retries"], 1);
         let preset = serde_json::from_value(serde_json::json!({"retry":{"retries":3}}))?;
-        assert_eq!(super::graph_retry_allowance(&empty, &preset, &roots)?, (3, "preset".into()));
+        assert_eq!(super::graph_retry_allowance(&empty, &preset, &roots), (3, "preset".into()));
         let node = serde_json::from_value(serde_json::json!({"retry":{"retries":0}}))?;
-        assert_eq!(super::graph_retry_allowance(&node, &preset, &roots)?, (0, "node".into()));
+        assert_eq!(super::graph_retry_allowance(&node, &preset, &roots), (0, "node".into()));
         let inherited = serde_json::from_value(serde_json::json!({"preset_retry":{"retries":0}}))?;
-        assert_eq!(super::graph_retry_allowance(&inherited, &preset, &roots)?, (0, "preset".into()));
+        assert_eq!(super::graph_retry_allowance(&inherited, &preset, &roots), (0, "preset".into()));
         for (node, graph) in [(&empty, &empty), (&empty, &preset), (&node, &preset), (&inherited, &preset)] {
-            assert_display(super::graph_retry_allowance(node, graph, &roots)?)?;
+            assert_display(super::graph_retry_allowance(node, graph, &roots))?;
         }
         for retry in [serde_json::json!({"retries":-1}), serde_json::json!({"retries":33}), serde_json::json!({"retries":"two"})] {
             let invalid = serde_json::from_value(serde_json::json!({"retry":retry}))?;
-            assert!(super::graph_retry_allowance(&invalid, &empty, &roots).is_err());
+            let (retries, origin) = super::graph_retry_allowance(&invalid, &empty, &roots);
+            assert_eq!(retries, 4);
+            assert!(origin.contains("ignored invalid retry.retries"), "{origin}");
         }
         Ok(())
     }
