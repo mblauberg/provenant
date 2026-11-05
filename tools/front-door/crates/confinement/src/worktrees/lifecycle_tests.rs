@@ -649,12 +649,30 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         path.to_str().ok_or("path")?,
     ])?;
     let slot = writer_directory(context.project_state, &path)?;
-    let guard = slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
-    let attempt = slot.current_path()?.join("retained-attempt");
-    fs::create_dir(&attempt)?;
-    fs::write(attempt.join("reservation.json"), "reservation")?;
+    let scope = provenant_supervisor::custody::Scope {
+        run: provenant_core::RunId::from_bytes([11; 16]),
+        attempt: provenant_core::AttemptId::from_bytes([12; 16]),
+        generation: 1,
+    };
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    let attempt = slot.current_path()?.join(scope.attempt.to_string());
+    let reservation = fs::read(attempt.join("reservation.json"))?;
     fs::write(attempt.join("import-retained.json"), "retained")?;
-    drop(guard);
+    drop(lease);
+    let listing = provenant_supervisor::custody::list_writer_reservations(context.project_state)?;
+    assert!(listing.issues.is_empty());
+    assert!(
+        listing
+            .reservations
+            .iter()
+            .any(|record| record.scope == scope)
+    );
 
     assert!(matches!(
         cache_writer_probe(context.project_state, &path),
@@ -693,7 +711,7 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         Err(WorktreeError::LockBusy)
     ));
     assert!(load_owner(&tree)?.is_none());
-    assert_eq!(fs::read(attempt.join("reservation.json"))?, b"reservation");
+    assert_eq!(fs::read(attempt.join("reservation.json"))?, reservation);
     assert_eq!(fs::read(attempt.join("import-retained.json"))?, b"retained");
     let entries = read_worktrees(&context, &cancel())?;
     let entry = entries
