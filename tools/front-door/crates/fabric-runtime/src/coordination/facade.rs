@@ -435,8 +435,8 @@ impl FacadeError {
             }
             Self::InvalidInput { detail: None } => projected = projected.detail("invalid input").next("check the input and retry"),
             Self::Busy => projected = projected.detail("service is busy").next("wait for host capacity before retrying"),
-            Self::PeerProtocolMismatch { peer, remote, expected } => {
-                projected = projected.detail(crate::hosts::protocol_mismatch_message(peer, *remote, *expected))
+            Self::PeerProtocolMismatch { remote, expected, .. } => {
+                projected = projected.detail(format!("peer protocol {remote} is incompatible with expected protocol {expected}"))
                     .next("upgrade both hosts to compatible protocol versions");
             }
             Self::DispatchUnobserved { .. } => projected = projected.detail("disk observation failed").next("restore the host disk observation before retrying"),
@@ -804,6 +804,21 @@ mod diagnostic_tests {
             FacadeError::from(&Error::SchemaVersion(1)),
             FacadeError::StateCorrupt
         );
+    }
+
+    #[test]
+    fn protocol_projection_omits_untrusted_peer_name() {
+        let error = FacadeError::PeerProtocolMismatch {
+            peer: "/private/TOKEN_SENTINEL\u{1b}".into(),
+            remote: 3,
+            expected: 6,
+        };
+        let projected = error.diagnostic();
+        let wire = serde_json::to_string(&projected).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        assert!(!wire.contains("/private"));
+        assert!(projected.detail.unwrap().contains('3'));
+        assert!(projected.next.is_some());
     }
 
     #[test]

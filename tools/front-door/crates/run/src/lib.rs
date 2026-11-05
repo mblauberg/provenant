@@ -655,8 +655,13 @@ impl RunError {
                 diagnostic =
                     diagnostic.fact(DiagnosticFact::GenerationConflict(*current_generation));
             }
+            Self::Io(_) => {
+                diagnostic = diagnostic.next("inspect the host I/O failure before retrying");
+            }
             Self::OperationIo { operation, .. } => {
-                diagnostic = diagnostic.fact(DiagnosticFact::Filesystem { operation });
+                diagnostic = diagnostic
+                    .fact(DiagnosticFact::Filesystem { operation })
+                    .next("inspect the host I/O failure before retrying");
             }
             Self::Filesystem(error) | Self::Publication(error) => {
                 use provenant_os::fs::FsError;
@@ -672,18 +677,36 @@ impl RunError {
                 };
                 diagnostic = diagnostic.fact(DiagnosticFact::Filesystem { operation });
             }
-            Self::Admission(AdmissionError::Disk { .. }) => {
-                diagnostic = diagnostic.next("free disk space above gc.free_floor before retrying")
+            Self::Admission(AdmissionError::Disk { free, floor }) => {
+                diagnostic = diagnostic
+                    .detail(format!(
+                        "disk space: {free} bytes available; gc.free_floor is {floor} bytes"
+                    ))
+                    .next("free disk space above gc.free_floor before retrying");
             }
             Self::Admission(AdmissionError::MemoryPressure { .. }) => {
-                diagnostic = diagnostic.next("reduce host memory pressure before retrying")
+                diagnostic = diagnostic
+                    .detail("host memory pressure reached domains.fabric.lanes.memory_pressure_threshold")
+                    .next("reduce host memory pressure before retrying");
             }
-            Self::Admission(AdmissionError::Processes { .. }) => {
-                diagnostic = diagnostic.next("reduce host process use before retrying")
+            Self::Admission(AdmissionError::Processes { used, limit }) => {
+                diagnostic = diagnostic
+                    .detail(format!("host user process count is {used} of the operating system limit {limit}"))
+                    .next("reduce host process use or raise the per-user process limit before retrying");
             }
-            Self::Admission(AdmissionError::LaneCap { .. }) => {
-                diagnostic =
-                    diagnostic.next("wait for an active lane to finish or adjust the lane limit")
+            Self::Admission(AdmissionError::LaneCap {
+                active,
+                limit,
+                scope,
+            }) => {
+                let setting = if *scope == "project" {
+                    "max_project_writer_lanes"
+                } else {
+                    "max_writer_lanes"
+                };
+                diagnostic = diagnostic
+                    .detail(format!("{active} of {limit} writer lanes are active; domains.fabric.lanes.{setting} is the limit"))
+                    .next(format!("wait for a writer lane to finish or adjust domains.fabric.lanes.{setting}"));
             }
             Self::SetupLockTimeout { seconds } => {
                 diagnostic = diagnostic
@@ -780,6 +803,51 @@ mod diagnostic_projection_tests {
     use std::path::{Path, PathBuf};
 
     #[test]
+    fn resource_refusals_name_limits_and_corrective_actions() {
+        let cases = [
+            (
+                AdmissionError::Disk { free: 1, floor: 2 },
+                "gc.free_floor",
+                "disk",
+            ),
+            (
+                AdmissionError::MemoryPressure {
+                    level: "TOKEN_SENTINEL".into(),
+                },
+                "memory_pressure_threshold",
+                "memory",
+            ),
+            (
+                AdmissionError::Processes { used: 3, limit: 4 },
+                "operating system limit",
+                "process",
+            ),
+            (
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    scope: "project",
+                },
+                "max_project_writer_lanes",
+                "writer",
+            ),
+        ];
+        for (cause, limit, corrective) in cases {
+            let diagnostic = RunError::Admission(cause).diagnostic(Destination::Remote {
+                repository: None,
+                home: None,
+            });
+            assert!(diagnostic.detail.as_deref().unwrap().contains(limit));
+            assert!(diagnostic.next.as_deref().unwrap().contains(corrective));
+            assert!(
+                !serde_json::to_string(&diagnostic)
+                    .unwrap()
+                    .contains("TOKEN_SENTINEL")
+            );
+        }
+    }
+
+    #[test]
     fn raw_io_source_is_not_a_safe_fact() {
         let error = RunError::Io(std::io::Error::other("TOKEN_SENTINEL\u{1b}[31m"));
         let projection = error.diagnostic(Destination::Remote {
@@ -790,6 +858,7 @@ mod diagnostic_projection_tests {
         assert!(!encoded.contains("TOKEN_SENTINEL"));
         assert_eq!(projection.code, "IO");
         assert!(projection.detail.is_none());
+        assert!(projection.next.is_some());
     }
 
     #[test]

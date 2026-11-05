@@ -389,7 +389,7 @@ fn actionable_failures_have_specific_repairs_without_unrelated_advice() {
             "dispatch",
             "REFUSED",
             "insufficient disk space: 99 bytes available, floor 100 bytes; run `provenant gc --free-floor 100B`",
-            Some("Run `provenant gc --apply`, then retry when free space reaches gc.free_floor."),
+            None,
         ),
         ("config show", "CONFIG", "invalid configuration", None),
     ] {
@@ -408,7 +408,7 @@ fn actionable_failures_have_specific_repairs_without_unrelated_advice() {
                     .message
                     .contains("99 bytes available, floor 100 bytes")
             );
-            assert!(error.message.ends_with("provenant gc --apply`"));
+            assert!(error.message.ends_with("provenant gc --free-floor 100B`"));
         }
     }
 }

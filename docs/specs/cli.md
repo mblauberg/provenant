@@ -450,7 +450,9 @@ Run refusals may include `category`, `detail` and `next` alongside the
 established error envelope. These are bounded, terminal-safe facts selected by
 the owner. The local CLI can name an absolute worktree or refused grant;
 remote diagnostics need a repository or home anchor or use an inspection
-action. A writer with unknown custody remains refused until custody is checked.
+action. Resource projections name the observed limits and the relevant setting
+or operating-system limit; their actions name the condition to correct. A writer
+with unknown custody remains refused until custody is checked.
 - Why: agents and tests act on the code, and a reworded message must break
   neither.
 - Test: `crates/run/src/service_tests.rs::each_refusal_has_its_own_stable_code`;

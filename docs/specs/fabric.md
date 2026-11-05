@@ -328,8 +328,10 @@ operation to inspect instead of directing a new launch.
 The graph runtime owns static admission for presets, raw documents and planner
 fragments. It validates schema capability, the configured structural limits,
 the expanded plan, the worst-case checkpoint envelope and selected output
-kinds before submission. Recovery uses the same schema-capability predicate.
-For composites, the declared exports are the static public capability; admission
+kinds before submission. `GraphDocument::admit` returns a typed admission
+stage with the original reason; callers can distinguish schema, composite, plan,
+structural-limit, envelope and output-kind failures. Recovery uses the same
+schema-capability predicate. For composites, the declared exports are the static public capability; admission
 checks consumers against that contract and validates export references and
 selector shapes. Whether a selected member actually made an output available is
 runtime evidence and remains visible in the composite settlement.

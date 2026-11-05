@@ -247,14 +247,6 @@ fn apply_repair(command: &str, error: &mut CommandError, json: bool) {
     error.repair = match (command, error.code.as_str()) {
         ("install", "HOME") => Some("Set HOME to your absolute home directory, then rerun `provenant install`.".into()),
         ("gc", "GC") => Some("Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.".into()),
-        (_, _) if error.message.starts_with("insufficient disk space") => {
-            // The CLI owner still renders its old floor override. Keep the
-            // observed volume and floor, and give the actionable command here.
-            if let Some((figures, _)) = error.message.split_once("; run `") {
-                error.message = format!("{figures}; run `provenant gc --apply`");
-            }
-            Some("Run `provenant gc --apply`, then retry when free space reaches gc.free_floor.".into())
-        }
         _ => None,
     };
     if !json && let Some(repair) = &error.repair {

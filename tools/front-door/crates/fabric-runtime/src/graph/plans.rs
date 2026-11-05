@@ -1109,9 +1109,9 @@ fn fragment(
     // Pattern wrappers are ordinary static composites. Expand them before the
     // fragment is validated so the host limits see every child.
     let local = composites::expand(&local, &generous())?;
-    validate_schema(&local).map_err(str::to_owned)?;
+    validate_schema(&local).map_err(|error| error.to_string())?;
     let (plan, _) = validate_flat_plan(&local, &generous()).map_err(str::to_owned)?;
-    validate_output_kinds(&local)?;
+    validate_output_kinds(&local).map_err(|error| error.to_string())?;
     let mut nodes: Vec<GraphNode> = plan
         .nodes
         .iter()
@@ -1587,9 +1587,9 @@ pub(super) fn settle(
                 return Err("loop writers must share one worktree".into());
             }
         }
-        validate_schema(&preview).map_err(str::to_owned)?;
+        validate_schema(&preview).map_err(|error| error.to_string())?;
         let (plan, positions) = validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
-        validate_output_kinds(&preview)?;
+        validate_output_kinds(&preview).map_err(|error| error.to_string())?;
         if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
             return Err(reason);
         }
@@ -1641,10 +1641,10 @@ pub(super) fn settle(
                         fallback_expansion(&node.id, spec, source, node.require_skill_location)?;
                     let mut preview = document.clone();
                     append(&mut preview, &addition);
-                    validate_schema(&preview).map_err(str::to_owned)?;
+                    validate_schema(&preview).map_err(|error| error.to_string())?;
                     let (plan, positions) =
                         validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
-                    validate_output_kinds(&preview)?;
+                    validate_output_kinds(&preview).map_err(|error| error.to_string())?;
                     if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
                         return Err(reason);
                     }

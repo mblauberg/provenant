@@ -85,7 +85,7 @@ pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
     kinds
 }
 
-pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), String> {
+pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), AdmissionError> {
     let by_id: std::collections::BTreeMap<_, _> =
         document.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     for consumer in &document.nodes {
@@ -110,13 +110,13 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Stri
                         .map(|v| format!("{v:?}").to_lowercase())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    return Err(format!(
+                    return Err(AdmissionError::OutputKind(format!(
                         "node {} selects {} from {}, which supplies only {}",
                         consumer.id,
                         format!("{kind:?}").to_lowercase(),
                         source_id,
                         labels
-                    ));
+                    )));
                 }
             }
         }
@@ -124,12 +124,12 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Stri
     Ok(())
 }
 
-pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), &'static str> {
+pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), AdmissionError> {
     let has_v2 = document.review_base.is_some() || nodes_have_v2(&document.nodes);
     // Version 2 is a superset: it may omit every v2 field, but version 1
     // cannot carry one.
     if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {
-        return Err("schema version");
+        return Err(AdmissionError::Schema("schema version".into()));
     }
     Ok(())
 }
@@ -169,7 +169,7 @@ pub(super) fn validate_plan_with_limits(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
-    document.admit(limits)?;
+    document.admit(limits).map_err(|error| error.to_string())?;
     validate_replay_plan(document, limits)
 }
 
@@ -177,7 +177,7 @@ pub(super) fn validate_replay_plan(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
-    validate_schema(document).map_err(String::from)?;
+    validate_schema(document).map_err(|error| error.to_string())?;
     let expansion_limits = crate::config::GraphLimits {
         nodes: limits.nodes.max(16_384),
         expansion_depth: limits.expansion_depth.max(64),

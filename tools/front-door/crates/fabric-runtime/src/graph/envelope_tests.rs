@@ -1029,6 +1029,8 @@ fn oversized_deferred_review_is_refused_before_admission() {
         ..Default::default()
     };
     let reason = document.admit(&limits).unwrap_err();
+    assert!(matches!(reason, AdmissionError::Envelope(_)));
+    let reason = reason.to_string();
     assert!(reason.contains("graph checkpoint could reach"), "{reason}");
     assert!(reason.contains("split the graph"), "{reason}");
 }
@@ -1209,7 +1211,7 @@ fn review_reservation_includes_declared_large_template_outputs() {
     }
     assert!(add_ci_limit(&mut fixture));
     let document: GraphDocument = serde_json::from_value(fixture).unwrap();
-    let reason = document.admit(&Default::default()).unwrap_err();
+    let reason = document.admit(&Default::default()).unwrap_err().to_string();
     assert!(reason.contains("graph checkpoint could reach"), "{reason}");
     assert!(reason.contains("split the graph"), "{reason}");
 }

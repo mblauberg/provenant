@@ -4087,7 +4087,7 @@ prompt = "Look at ${prompt}"
     let expansion = expand(&layers, "outer", "brief", &[]).unwrap();
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(expansion.document).unwrap();
-    let error = document.admit(&Default::default()).unwrap_err();
+    let error = document.admit(&Default::default()).unwrap_err().to_string();
     assert!(error.contains("look"), "{error}");
     assert!(error.contains("inner"), "{error}");
     assert!(error.contains("commit"), "{error}");
@@ -4105,7 +4105,9 @@ fn selection(stages: &str) -> Result<Expansion, String> {
     let expansion = expand(&layers, "sel", "brief", &[])?;
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(expansion.document.clone()).map_err(|error| error.to_string())?;
-    document.admit(&Default::default())?;
+    document
+        .admit(&Default::default())
+        .map_err(|error| error.to_string())?;
     Ok(expansion)
 }
 

@@ -11,6 +11,14 @@ fn document(version: u32, nodes: Value) -> GraphDocument {
 }
 
 #[test]
+fn admission_returns_typed_cause_with_original_text() {
+    let graph = document(3, json!([{"id":"n","prompt":"x","access":"read_only"}]));
+    let error = graph.admit(&Default::default()).unwrap_err();
+    assert!(matches!(error, AdmissionError::Schema(_)));
+    assert_eq!(error.to_string(), "schema version");
+}
+
+#[test]
 fn admission_schema_matrix() {
     let plain = json!([{"id":"n","prompt":"x","access":"read_only"}]);
     assert!(validate_schema(&document(1, plain.clone())).is_ok());
@@ -124,6 +132,8 @@ fn admission_output_kind_matrix() {
         ]),
     );
     let error = validate_output_kinds(&selected_commit).unwrap_err();
+    assert!(matches!(error, AdmissionError::OutputKind(_)));
+    let error = error.to_string();
     for part in ["consumer", "source", "commit", "result", "findings"] {
         assert!(error.contains(part), "{error}");
     }
@@ -229,6 +239,11 @@ fn admission_structural_limits_name_the_key() {
         let mut limits = crate::config::GraphLimits::default();
         configure(&mut limits);
         let refusal = graph.admit(&limits).unwrap_err();
+        assert!(
+            matches!(refusal, AdmissionError::StructuralLimit(_)),
+            "{refusal}"
+        );
+        let refusal = refusal.to_string();
         assert!(refusal.contains(&format!("limits.{key}")), "{refusal}");
     }
 }

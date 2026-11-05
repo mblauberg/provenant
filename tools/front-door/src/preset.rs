@@ -3717,7 +3717,7 @@ fn explain(
         }
         Ok((limits, Err(reason), metrics)) => (
             json!(limits),
-            json!({"status":"refused","reason":reason}),
+            json!({"status":"refused","reason":reason.to_string()}),
             metrics.map_or(Value::Null, |m| json!(m)),
         ),
         Ok((limits, Ok(()), Err(reason))) => (
