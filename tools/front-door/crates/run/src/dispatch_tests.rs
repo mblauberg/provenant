@@ -4787,18 +4787,6 @@ fn batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins() {
             .collect(),
         ..HarnessProfile::default()
     };
-    let registry = profile(&[
-        ("lanes.max_concurrency", 8),
-        ("lanes.max_concurrency_read_only", 16),
-    ]);
-    assert_eq!(concurrency(None, &registry, false, None), 8, "writer batch");
-    assert_eq!(
-        concurrency(None, &registry, true, None),
-        16,
-        "read-only batch"
-    );
-    assert_eq!(concurrency(Some(3), &registry, false, None), 3);
-    assert_eq!(concurrency(Some(3), &registry, true, None), 3);
     let tuned = profile(&[
         ("lanes.max_concurrency", 2),
         ("lanes.max_concurrency_read_only", 5),
@@ -4811,17 +4799,13 @@ fn batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins() {
     assert!(reader_default >= writer_default);
     assert_eq!(concurrency(Some(3), &bare, false, None), 3);
     assert_eq!(concurrency(Some(3), &bare, true, None), 3);
-    assert_eq!(concurrency(None, &registry, true, Some(3)), 3, "bounded");
+    assert_eq!(concurrency(None, &tuned, true, Some(3)), 3, "bounded");
     assert_eq!(
         concurrency(None, &tuned, true, Some(7)),
         5,
         "a cap, not a floor"
     );
-    assert_eq!(
-        concurrency(Some(12), &registry, true, Some(3)),
-        12,
-        "explicit"
-    );
+    assert_eq!(concurrency(Some(12), &tuned, true, Some(3)), 12, "explicit");
 }
 
 #[test]
