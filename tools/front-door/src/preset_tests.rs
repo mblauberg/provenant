@@ -96,6 +96,22 @@ stages = [{id="branch", role="scout", count=3, min_successful=2}, {id="synthesis
 }
 
 #[test]
+fn repeated_stage_minimum_keeps_explicit_external_dependencies() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "dependencies", r#"
+stages = [{id="a", role="scout"}, {id="b", role="scout"}, {id="workers", role="scout", count=2, min_successful=1, depends_on=["a"]}]
+"#).unwrap();
+    let expanded = expand(&layers, "dependencies", "brief", &[]).unwrap();
+    let group = &expanded.document["nodes"][2];
+    assert_eq!(group["depends_on"], json!(["b", "a"]));
+    for child in group["composite"]["nodes"].as_array().unwrap() {
+        assert_eq!(child["depends_on"], json!(["a"]));
+    }
+    let _: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expanded.document).unwrap();
+}
+
+#[test]
 fn fan_out_minimum_is_optional_and_bounded_by_width() {
     let layers = Layers::empty();
     for name in ["fan-out", "fan-out-synthesise"] {

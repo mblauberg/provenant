@@ -6056,7 +6056,7 @@ impl Factory {
             }
         };
         if matches!(input, GraphInput::Status { .. }) {
-            let mut checkpoint = match FileJournal::read_checkpoint(
+            let mut checkpoint = match FileJournal::read_status_checkpoint(
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,

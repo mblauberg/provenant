@@ -2257,11 +2257,26 @@ impl StageBuilder<'_> {
                 1,
             )?;
             let exports = selected_inputs(&ends, &outputs);
+            let mut boundary_deps = deps.to_vec();
+            for child in &children {
+                if let Some(dependencies) = child.get("depends_on").and_then(Value::as_array) {
+                    for dependency in dependencies {
+                        let name = dependency
+                            .as_str()
+                            .ok_or("dependencies must be node names")?;
+                        if !children.iter().any(|child| child["id"] == name)
+                            && !boundary_deps.iter().any(|existing| existing == name)
+                        {
+                            boundary_deps.push(name.to_owned());
+                        }
+                    }
+                }
+            }
             nodes.push(composite(
                 id,
                 children,
                 exports,
-                deps,
+                &boundary_deps,
                 &outputs,
                 Some(minimum),
             ));

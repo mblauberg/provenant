@@ -69,6 +69,59 @@ pub use plans::{
     RemainingBudgets,
 };
 
+fn recover_minima(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) -> bool {
+    let mut recovered = false;
+    for (progress, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
+        if progress.min_successful.is_none()
+            && let Some(minimum) = planned
+                .composite
+                .as_ref()
+                .and_then(|spec| spec.min_successful)
+        {
+            progress.min_successful = Some(minimum);
+            recovered = true;
+        }
+    }
+    recovered
+}
+
+fn recover_status_minima(
+    document: &GraphDocument,
+    checkpoint: &mut GraphCheckpoint,
+) -> Result<(), ()> {
+    let limits = crate::config::GraphLimits {
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
+        ..plans::generous()
+    };
+    plans::validate_persisted_topology(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &limits,
+    )
+    .map_err(|_| ())?;
+    let expanded = plans::expand(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &limits,
+    )
+    .map_err(|_| ())?;
+    let (plan, _) = validate_flat_plan(&expanded, &limits).map_err(|_| ())?;
+    if checkpoint.nodes.len() != plan.nodes.len()
+        || checkpoint
+            .nodes
+            .iter()
+            .zip(&plan.nodes)
+            .any(|(progress, planned)| progress.id != planned.id)
+    {
+        return Err(());
+    }
+    recover_minima(checkpoint, &plan);
+    Ok(())
+}
+
 // Reserve the existing family-separation envelope for sibling groups too.
 fn bounded_envelope_plan(plan: &PlannedGraph) -> PlannedGraph {
     let mut bounded = plan.clone();
@@ -1071,21 +1124,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
     };
 
-    // Older checkpoints predate outcome reporting. Recover their declared
-    // minima from the validated plan when they are next advanced.
-    let mut recovered_minimum = false;
-    for (progress, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
-        if progress.min_successful.is_none()
-            && let Some(minimum) = planned
-                .composite
-                .as_ref()
-                .and_then(|spec| spec.min_successful)
-        {
-            progress.min_successful = Some(minimum);
-            recovered_minimum = true;
-        }
-    }
-    if recovered_minimum {
+    if recover_minima(&mut checkpoint, &plan) {
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
 
