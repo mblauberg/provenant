@@ -3978,6 +3978,27 @@ fn lanes_give_a_settled_lane_its_settlement_reason() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn lanes_expose_exhausted_continuations_in_text_and_json() -> Result<(), Box<dyn std::error::Error>>
+{
+    let reason = "model reported unfinished work; continuation limit exhausted";
+    let lane = lane_fixture(
+        1,
+        4,
+        run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: run::Outcome::Failed,
+            exit_code: Some(0),
+            finished_at: WallTime::from_micros(100)?,
+            reason: Some(reason.into()),
+        },
+    )?;
+    let (data, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
+    assert_eq!(data["lanes"][0]["settlement"]["reason"], reason);
+    assert!(human.contains(reason));
+    Ok(())
+}
+
+#[test]
 fn newest_settled_of_names_the_settled_attempt_of_one_task()
 -> Result<(), Box<dyn std::error::Error>> {
     let now = WallTime::from_micros(100)?;

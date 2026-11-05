@@ -86,7 +86,11 @@ pub(super) fn assess_model_result(
                 .is_some_and(|session| !session.is_empty());
         return Ok(run::ResultAssessment {
             cause: Some(run::PolicyCause::Unfinished),
-            refusal: Some("model reported unfinished work".into()),
+            refusal: Some(if policy_attempt > u64::from(policy.lane.max_continuations.unwrap_or(0)) {
+                "model reported unfinished work; continuation limit exhausted"
+            } else {
+                "model reported unfinished work"
+            }.into()),
             retry: (policy_attempt <= u64::from(policy.lane.max_continuations.unwrap_or(0))).then(|| run::PolicyRetry {
                 schema_version: 2,
                 cause: run::PolicyCause::Unfinished, action: if resume { run::PolicyAction::Resume } else { run::PolicyAction::Retry },
@@ -410,6 +414,27 @@ mod tests {
         )?;
         assert_eq!(assessment.cause, Some(run::PolicyCause::Unfinished));
         assert!(assessment.refusal.is_some());
+        unfinished_policy.lane.max_continuations = Some(1);
+        let continuing = assess_model_result(
+            &unfinished_policy,
+            task,
+            &record,
+            &decoded,
+            Some(&handoff),
+            1,
+        )?;
+        let exhausted = assess_model_result(
+            &unfinished_policy,
+            task,
+            &record,
+            &decoded,
+            Some(&handoff),
+            2,
+        )?;
+        assert!(continuing.retry.is_some());
+        assert!(exhausted.retry.is_none());
+        assert_ne!(continuing.refusal, exhausted.refusal);
+        assert!(exhausted.refusal.unwrap().contains("exhausted"));
         decoded.outcome = run::Outcome::QuotaLimited;
         let decision = assess_settlement_retry(
             &provenant_routing::RoutingConfig::default(),
