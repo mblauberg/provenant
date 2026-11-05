@@ -1,5 +1,9 @@
 use super::*;
 
+#[path = "events.rs"]
+mod events;
+pub use events::{GraphEvent, GraphEventKind};
+
 #[cfg(test)]
 thread_local! { pub(super) static CHECKPOINT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
@@ -120,6 +124,21 @@ pub struct FileJournal {
 }
 
 impl FileJournal {
+    /// Read complete event records in order, ignoring a torn final record.
+    pub fn read_events(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Vec<GraphEvent>, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        match graph_directory(root, project) {
+            Ok(directory) => events::read(&directory, graph_id),
+            Err(error) if error.is_not_found() => Ok(Vec::new()),
+            Err(error) => Err(error.into()),
+        }
+    }
     /// A successful explicit delivery reopens only nodes fenced by that attempt.
     pub fn retry_delivered_attempt(
         root: &StateRoot,
@@ -743,6 +762,13 @@ impl GraphJournal for FileJournal {
             return Err(JournalError::TooLarge);
         }
         decode_checkpoint(bytes.as_bytes(), &self.graph_id)?;
+        let previous = load_checkpoint(&self.directory, &self.graph_id)?;
+        events::append_changes(
+            &self.directory,
+            &self.graph_id,
+            previous.as_ref().map(|stored| &stored.checkpoint),
+            checkpoint,
+        )?;
         let markers = open_or_create(&self.directory, OsStr::new("pending"))?;
         let pending = stored_pending(&stored);
         if pending {
