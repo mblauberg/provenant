@@ -9,6 +9,7 @@ import errno
 import json
 import os
 import tempfile
+from urllib.parse import parse_qsl, urlsplit
 from pathlib import Path
 import subprocess
 import sys
@@ -20,6 +21,15 @@ def git(*args):
 
 def tracked_changed():
     return bool(git("status", "--porcelain", "--untracked-files=no"))
+
+
+def credential_bearing_location(location):
+    parsed = urlsplit(location)
+    if parsed.username is not None or parsed.password is not None:
+        return True
+    private_names = ("token", "secret", "password", "signature", "credential", "api_key")
+    return any(any(name in key.lower() for name in private_names)
+               for key, _ in parse_qsl(parsed.query, keep_blank_values=True))
 
 
 def main():
@@ -36,6 +46,8 @@ def main():
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command or not args.test.strip() or not args.log_location.strip() or not args.job_id.strip() or not args.nonce.strip():
         parser.error("a command, job ID, nonce, test name and log location are required")
+    if credential_bearing_location(args.log_location):
+        parser.error("log location must not contain credentials")
     if git("ls-files", "--", ".provenant-cloud-result.json"):
         parser.error("the cloud result path must not already be tracked")
     before = git("rev-parse", "--verify", "HEAD^{commit}")
