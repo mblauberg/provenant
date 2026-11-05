@@ -89,9 +89,7 @@ pub use provenant_records::run::LaneWait;
 pub trait Resources {
     fn memory(&self) -> std::io::Result<MemorySample>;
     /// Observe one process when deciding whether a recorded guardian is gone.
-    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-        provenant_supervisor::census::SystemProcessObserver.observe(pid)
-    }
+    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation;
     fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
         match self.observe_process(i64::from(std::process::id())) {
             provenant_supervisor::census::ProcessObservation::Present(fact) if !fact.zombie => {
@@ -129,6 +127,9 @@ pub trait Resources {
 const RECLAIM_EVERY: u32 = 30;
 pub struct SystemResources;
 impl Resources for SystemResources {
+    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+        provenant_supervisor::census::SystemProcessObserver.observe(pid)
+    }
     fn memory(&self) -> std::io::Result<MemorySample> {
         resources::memory()
     }
@@ -1014,6 +1015,12 @@ mod process_wait_tests {
 
     struct Full;
     impl Resources for Full {
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            crate::tests::HostFacts::new(100).guardian_identity()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
             Ok(MemorySample {
                 available_bytes: 100,
@@ -1063,6 +1070,12 @@ mod process_wait_tests {
         budget: Budget,
     }
     impl Resources for Probes {
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            crate::tests::HostFacts::new(100).guardian_identity()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
             Ok(MemorySample {
                 available_bytes: 100,

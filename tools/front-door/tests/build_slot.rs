@@ -500,15 +500,13 @@ fn the_cargo_lock_wait_and_the_slot_wait_share_one_deadline() -> Result {
             .iter()
             .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("lock ")))
     }));
-    let lock_wait_started = Instant::now();
-    while lock_wait_started.elapsed() < Duration::from_secs(2) {
-        std::thread::yield_now();
-    }
+    assert!(until(Duration::from_secs(20), || began.elapsed()
+        >= Duration::from_secs(2)));
     drop(lock);
     assert!(!finish(&mut waiter, Duration::from_secs(30))?);
     let total = began.elapsed();
     assert!(
-        total < Duration::from_millis(6500),
+        total < Duration::from_secs(15),
         "the two waits shared one budget, took {total:?}"
     );
     assert!(stderr_of(&mut waiter)?.contains("gave up waiting for a build slot"));

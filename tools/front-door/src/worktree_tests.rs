@@ -60,6 +60,10 @@ struct Fixture;
 /// use the real fixture volumes and processes that custody verifies.
 struct FixtureResources;
 impl provenant_run::Resources for FixtureResources {
+    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+        let _ = pid;
+        provenant_supervisor::census::ProcessObservation::Absent
+    }
     fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
         Ok(provenant_os::sys::resources::MemorySample {
             available_bytes: 100,

@@ -1,6 +1,6 @@
 //! Dispatch, admission, holder and control behaviour at Run's owner boundary.
 //! Fake providers and resources stand in for adapters and the host.
-use super::tests::{call, clock, context, exit, input, route};
+use super::tests::{HostFacts, call, clock, context, exit, input, route};
 use super::*;
 use provenant_confinement::permissions::{PathGrant, PathScope};
 use provenant_core::{AttemptId, CancelToken, Clock, MonoTime, RunId, TaskId, TestClock, WallTime};
@@ -2513,17 +2513,19 @@ fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
     Ok(())
 }
 
-struct Host {
-    available: u64,
-}
-
 #[test]
 fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
     use provenant_os::sys::resources::MemoryPressure;
     struct Pressured(MemoryPressure);
     impl Resources for Pressured {
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            crate::tests::HostFacts::new(100).guardian_identity()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
-            Host { available: 100 }.memory()
+            HostFacts::new(100).memory()
         }
         fn pressure(
             &self,
@@ -2593,8 +2595,14 @@ fn admission_refuses_near_the_user_process_limit() -> TestResult {
     use provenant_os::sys::resources::ProcessBudget;
     struct Processes(ProcessBudget);
     impl Resources for Processes {
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            crate::tests::HostFacts::new(100).guardian_identity()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
-            Host { available: 100 }.memory()
+            HostFacts::new(100).memory()
         }
         fn process_budget(&self) -> std::io::Result<ProcessBudget> {
             Ok(self.0)
@@ -2651,11 +2659,14 @@ fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
         pressure: MemoryPressure,
     }
     impl Resources for Probe {
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            crate::tests::HostFacts::new(100).guardian_identity()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
-            Host {
-                available: self.available,
-            }
-            .memory()
+            HostFacts::new(self.available).memory()
         }
         fn pressure(
             &self,
@@ -2727,7 +2738,7 @@ fn invalid_optional_build_settings_use_defaults_without_blocking_admission() -> 
         )?;
         assert!(
             store
-                .admit(id, &attempt, &Host { available: 100 }, &clock, &cancel)
+                .admit(id, &attempt, &HostFacts::new(100), &clock, &cancel)
                 .is_ok(),
             "{assignment}"
         );
@@ -2741,8 +2752,11 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
         remaining: Cell<u32>,
     }
     impl Resources for Observation {
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
-            Host { available: 100 }.memory()
+            HostFacts::new(100).memory()
         }
         fn disk(&self, _: &Directory) -> std::io::Result<u64> {
             Ok(u64::MAX)
@@ -2753,7 +2767,7 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
                 self.remaining.set(remaining - 1);
                 None
             } else {
-                SystemResources.guardian_identity()
+                crate::tests::HostFacts::new(100).guardian_identity()
             }
         }
     }
@@ -2823,7 +2837,7 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
             let dir = store.attempt_dir(run.run_id, id, false)?;
             assert_eq!(
                 store
-                    .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
+                    .admit(id, &dir, &HostFacts::new(100), &clock, &cancel)?
                     .state,
                 AttemptState::Running {
                     extra: Default::default()
@@ -2856,7 +2870,7 @@ fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
     let dir = store.attempt_dir(run.run_id, id, false)?;
     assert_eq!(
         store
-            .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
+            .admit(id, &dir, &HostFacts::new(100), &clock, &cancel)?
             .state,
         AttemptState::Running {
             extra: Default::default()
@@ -2932,17 +2946,6 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
     Ok(())
 }
 
-impl Resources for Host {
-    fn memory(&self) -> std::io::Result<MemorySample> {
-        Ok(MemorySample {
-            available_bytes: self.available,
-            total_bytes: 100,
-        })
-    }
-    fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-        Ok(u64::MAX)
-    }
-}
 #[derive(Default)]
 pub(super) struct Fake {
     network: Cell<Option<NetworkAccess>>,
@@ -3978,7 +3981,7 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         None,
         &call,
     )?;
-    let starved = Host { available: 1 };
+    let starved = HostFacts::new(1);
     assert!(matches!(
         store.admit(id, &attempt, &starved, &clock, &cancel),
         Err(RunError::Refused)
@@ -4131,13 +4134,7 @@ fn a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_roo
     let first_id = starting(&writable, &first, &call)?;
     let second_id = starting(&writable, &second, &call)?;
     let attempt = writable.attempt_dir(first.run_id, first_id, false)?;
-    writable.admit(
-        first_id,
-        &attempt,
-        &Host { available: 100 },
-        &clock,
-        &cancel,
-    )?;
+    writable.admit(first_id, &attempt, &HostFacts::new(100), &clock, &cancel)?;
     let waiting = writable.record(second_id, &call)?;
     let waits = |registry: Option<&std::path::Path>| -> Result<String> {
         let reader = RunStore::open_read_only(&nested, &call)?.ok_or(RunError::NotFound)?;
@@ -4360,7 +4357,7 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
             ),
             "an unreadable {name} refuses, with no wall-clock fallback"
         );
-        let admitted = store.admit(lane_id, &attempt, &Host { available: 100 }, &host, &cancel);
+        let admitted = store.admit(lane_id, &attempt, &HostFacts::new(100), &host, &cancel);
         let refused = admitted.err().ok_or("admit must refuse")?;
         assert_eq!(refused.code(), "HOST_CLOCK", "{name}: {refused}");
         assert_eq!(
@@ -4644,6 +4641,12 @@ struct RivalStarts<'a> {
     started: Cell<bool>,
 }
 impl Resources for RivalStarts<'_> {
+    fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+        crate::tests::HostFacts::new(100).guardian_identity()
+    }
+    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+        crate::tests::HostFacts::new(100).observe_process(pid)
+    }
     fn memory(&self) -> std::io::Result<MemorySample> {
         if !self.started.replace(true) {
             self.clock.pass_ms(1_000);
@@ -4730,7 +4733,7 @@ fn memory_floor_refuses_both_lane_classes() -> TestResult {
         let run = lane(seed, writer);
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
-        let admitted = store.admit(id, &attempt, &Host { available }, &clock, &cancel);
+        let admitted = store.admit(id, &attempt, &HostFacts::new(available), &clock, &cancel);
         if available < 5 {
             assert!(
                 matches!(admitted, Err(RunError::Refused)),
@@ -5655,7 +5658,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     );
     drop(held);
     // The waiting guardian sees the actual request before admission.
-    let host = Host { available: 100 };
+    let host = HostFacts::new(100);
     assert!(matches!(
         store.admit(starting, &dir, &host, &clock, &cancel),
         Err(RunError::Cancelled)
@@ -8330,6 +8333,12 @@ fn disk_pause_wait_ignores_false_missing_symlinked_and_oversized_observations() 
 fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
     struct Disk(u64);
     impl Resources for Disk {
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            crate::tests::HostFacts::new(100).guardian_identity()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
             Ok(MemorySample {
                 total_bytes: 100,
@@ -8398,6 +8407,12 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
         helps: bool,
     }
     impl Resources for Disk {
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            crate::tests::HostFacts::new(100).guardian_identity()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
             Ok(MemorySample {
                 total_bytes: 100,
@@ -8465,8 +8480,14 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
 fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
     struct Disk(u64);
     impl Resources for Disk {
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            crate::tests::HostFacts::new(100).guardian_identity()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
-            Host { available: 100 }.memory()
+            HostFacts::new(100).memory()
         }
         fn disk(&self, _: &Directory) -> std::io::Result<u64> {
             Ok(self.0)
@@ -8518,6 +8539,12 @@ fn admission_rereads_gc_floor_after_submission_and_while_waiting() -> TestResult
         samples: Cell<u64>,
     }
     impl Resources for Disk<'_> {
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            crate::tests::HostFacts::new(100).guardian_identity()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
             Ok(MemorySample {
                 total_bytes: 100,
@@ -8570,6 +8597,12 @@ fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
         samples: Cell<u64>,
     }
     impl Resources for Disk<'_> {
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            crate::tests::HostFacts::new(100).guardian_identity()
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
         fn memory(&self) -> std::io::Result<MemorySample> {
             Ok(MemorySample {
                 total_bytes: 100,

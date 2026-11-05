@@ -2054,6 +2054,15 @@ mod disk_admission_tests {
         };
         struct Limited;
         impl Resources for Limited {
+            fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+                crate::tests::HostFacts::new(100).guardian_identity()
+            }
+            fn observe_process(
+                &self,
+                pid: i64,
+            ) -> provenant_supervisor::census::ProcessObservation {
+                crate::tests::HostFacts::new(100).observe_process(pid)
+            }
             fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
                 Ok(provenant_os::sys::resources::MemorySample {
                     available_bytes: 100,

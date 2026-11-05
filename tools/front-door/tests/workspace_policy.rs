@@ -457,9 +457,51 @@ fn is_fixture_source(name: &str) -> bool {
         .and_then(|stem| stem.to_str())
         .unwrap_or_default();
     is_test_source(name)
-        || matches!(stem, "fixture" | "fixtures" | "test_support")
+        || matches!(
+            stem,
+            "fixture" | "fixtures" | "fake" | "fakes" | "test_support"
+        )
         || stem.starts_with("fixture_")
+        || stem.starts_with("fake_")
+        || stem.ends_with("_fake")
+        || stem.ends_with("_fakes")
         || name.contains("/fixtures/")
+        || name.contains("/test-support/")
+}
+
+// Resolve out-of-line modules declared in a fixture or directly under cfg(test).
+fn fixture_module_paths(path: &Path, source: &str, fixture: bool) -> Vec<PathBuf> {
+    let tokens = rust_tokens(source);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let Some(parent) = path.parent() else {
+        return Vec::new();
+    };
+    let module_dir = if matches!(stem, "lib" | "main" | "mod") {
+        parent.to_path_buf()
+    } else {
+        parent.join(stem)
+    };
+    let mut paths = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        if *token != "mod" || tokens.get(i + 2) != Some(&";") {
+            continue;
+        }
+        let cfg_test = i >= 7
+            && tokens[..i]
+                .windows(7)
+                .rev()
+                .take(5)
+                .any(|w| w == ["#", "[", "cfg", "(", "test", ")", "]"]);
+        if fixture || cfg_test {
+            let name = tokens[i + 1];
+            paths.push(module_dir.join(format!("{name}.rs")));
+            paths.push(module_dir.join(name).join("mod.rs"));
+        }
+    }
+    paths
 }
 
 #[test]
@@ -498,13 +540,65 @@ fn fixtures_do_not_call_direct_sleep() -> Result<(), Box<dyn Error>> {
         "#[cfg(any(test, unix))] fn production() { std::thread::sleep(delay); }",
         false
     ));
+    assert!(is_fixture_source("src/pr/fakes.rs"));
     let mut sources = Vec::new();
     for root in source_roots() {
         rust_sources(&root, &mut sources)?;
     }
+    assert!(
+        fixture_module_paths(Path::new("src/lib.rs"), "#[cfg(test)] mod hidden;", false)
+            .contains(&PathBuf::from("src/hidden.rs"))
+    );
+    assert!(
+        fixture_module_paths(Path::new("src/hidden.rs"), "mod nested;", true)
+            .contains(&PathBuf::from("src/hidden/nested.rs"))
+    );
+    assert!(fixture_module_paths(Path::new("src/lib.rs"), "mod production;", false).is_empty());
+    // Follow test-only module declarations transitively.
+    let mut test_modules = std::collections::HashSet::new();
+    loop {
+        let before = test_modules.len();
+        for path in &sources {
+            let source = fs::read_to_string(path)?;
+            let fixture = is_fixture_source(&path.to_string_lossy()) || test_modules.contains(path);
+            test_modules.extend(fixture_module_paths(path, &source, fixture));
+        }
+        if test_modules.len() == before {
+            break;
+        }
+    }
     for path in sources {
-        let source = fs::read_to_string(&path)?;
-        if fixture_sleep_violation(&source, is_fixture_source(&path.to_string_lossy())) {
+        let mut source = fs::read_to_string(&path)?;
+        // The shared bounded polling primitive is the sole direct-sleep exception.
+        if path.ends_with("crates/test-support/src/lib.rs") {
+            let tokens = rust_tokens(&source);
+            if let Some(start) = tokens.windows(2).position(|w| w == ["fn", "wait_for"]) {
+                let Some(open) = (start..tokens.len()).find(|&i| tokens[i] == "{") else {
+                    return Err("wait_for has no body".into());
+                };
+                let mut depth = 0;
+                let mut end = open;
+                for (i, token) in tokens.iter().enumerate().skip(open) {
+                    if *token == "{" {
+                        depth += 1;
+                    }
+                    if *token == "}" {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                    }
+                }
+                let begin = tokens[start].as_ptr() as usize - source.as_ptr() as usize;
+                let finish = tokens[end].as_ptr() as usize - source.as_ptr() as usize + 1;
+                source.replace_range(begin..finish, "");
+            }
+        }
+        if fixture_sleep_violation(
+            &source,
+            is_fixture_source(&path.to_string_lossy()) || test_modules.contains(&path),
+        ) {
             return Err(format!(
                 "{} calls or imports direct sleep in a fixture",
                 path.display()
