@@ -50,6 +50,7 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     "no matching attempts",
                 ));
             }
+            let selected_ids = selected.clone();
             let target = &targets[0];
             let resolved = targets::local(&session, target, &call)?;
             let bound = match (resolved.attempt, resolved.task) {
@@ -139,6 +140,22 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                 )?;
                 apply_cancel_wait(&mut data, &lanes, timed_out, &mut status);
                 human.push_str(&rendered);
+            } else {
+                let lanes = selected_ids
+                    .into_iter()
+                    .map(|id| session.service().status(id, &call))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let waits = session.store.lane_waits(&lanes, &call);
+                let successors = policy_successors(&session, &lanes, &call)?;
+                let (rendered, _) = render_lanes_with_lineage(
+                    &lanes,
+                    &waits,
+                    None,
+                    session.context.state_root.as_path(),
+                    None,
+                    &successors,
+                );
+                data["lanes"] = rendered["lanes"].clone();
             }
             Ok((data, human))
         })(),

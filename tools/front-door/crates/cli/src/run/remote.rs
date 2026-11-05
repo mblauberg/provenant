@@ -1586,6 +1586,7 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
             }
             let peer = Peer::open_for(edge, [placement])?;
             let mut receipts = Vec::new();
+            let mut observed = Vec::new();
             let mut human = String::new();
             for (index, (host, attempt)) in selected.iter().enumerate() {
                 let operation_id = if selected.len() == 1 {
@@ -1625,6 +1626,7 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                             attempt: record, ..
                         } if record.attempt_id == *attempt => {
                             let state = state_and_reason(&record.state).0;
+                            observed.push(record.clone());
                             // A live attempt has a stop request, not an exit.
                             let tag = if super::settled(&record.state).0 {
                                 state.as_str()
@@ -1669,6 +1671,10 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                     data["reason"] = json!(format!("provider silent; lane {id} is still running"));
                 }
                 human.push_str(&text);
+            } else {
+                let (rendered, _) =
+                    render_with_waits(&observed, &[], &selected, edge.roots.state.as_path());
+                data["lanes"] = rendered["lanes"].clone();
             }
             Ok((data, human))
         })(),

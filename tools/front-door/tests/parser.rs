@@ -912,6 +912,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let prompt = rig.command(&["output", &attempt, "--part", "prompt", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
     assert_eq!(value["data"]["bytes"]["data"], "hello");
+    let output_lane = value["data"].clone();
     // `RUN/ATTEMPT` and `--host local` name the same local attempt, and a
     // `--tail` above the bound is clamped, not refused (#1837).
     let run_attempt = format!(
@@ -972,6 +973,29 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         value["data"]["receipts"][0]["receipt"]["state"],
         "already_terminal"
     );
+    assert!(value["data"].is_object());
+    let status = rig.command(&["status", &attempt, "--json"])?;
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout.bytes)?;
+    for field in [
+        "run_id",
+        "task_id",
+        "attempt_id",
+        "state",
+        "cause",
+        "retry_of",
+        "superseded_by",
+    ] {
+        assert_eq!(output_lane[field], lane[field], "output {field}");
+        assert_eq!(
+            value["data"]["lanes"][0][field], lane[field],
+            "cancel {field}"
+        );
+        assert_eq!(
+            status["data"]["lanes"][0][field], lane[field],
+            "status {field}"
+        );
+    }
+
     // This rejected attempt launched no provider, and the fixture has no
     // provider executable for fresh fallback. Refusal must neither add an
     // attempt nor spend the continuation, including operation retries.
