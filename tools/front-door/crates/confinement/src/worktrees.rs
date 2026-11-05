@@ -10,7 +10,7 @@ mod owner;
 pub use census::*;
 pub use context::{with_context, with_context_using_workers};
 pub use custody::*;
-pub use gc::{WorktreeGcPolicy, WorktreeGcReport, collect};
+pub use gc::{OutputEntry, WorktreeGcPolicy, WorktreeGcReport, collect};
 pub use inventory::*;
 pub use lifecycle::*;
 pub use owner::{

@@ -35,6 +35,88 @@ use std::os::unix::fs::PermissionsExt;
 pub(super) struct FreeWorkers;
 
 #[test]
+fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Error>> {
+    for scenario in ["preview", "idle", "unowned", "recent", "live", "unknown"] {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore output"])?;
+        let test = TestContext::new(&fixture)?;
+        let mut context = test.context();
+        let path = fixture._temp.path().join("foreign-output");
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "foreign-output",
+            path.to_str().ok_or("path")?,
+        ])?;
+        fs::create_dir(path.join("target"))?;
+        fs::write(path.join("target/artifact"), "output")?;
+        fs::write(path.join("untracked"), "source")?;
+        let mut lane = list(&context, &cancel())?
+            .into_iter()
+            .find(|lane| lane.path == path)
+            .ok_or("missing tree")?;
+        if scenario != "unowned" {
+            lane.writer = WriterState::Unknown;
+        } else {
+            assert_eq!(lane.owner, OwnerStatus::Unowned);
+            assert_eq!(lane.writer, WriterState::Free);
+        }
+        let live = NamedLive;
+        let unknown = UnknownWorkers;
+        if scenario == "live" {
+            context.workers = &live;
+        }
+        if scenario == "unknown" {
+            context.workers = &unknown;
+        }
+        let report = collect(
+            &context,
+            &[lane],
+            &WorktreeGcPolicy {
+                upstream: None,
+                terminal: &|_| false,
+                no_live_lanes: &|_| true,
+                regenerable: &["target".into()],
+                keep: &[],
+                written_before_ns: if scenario == "recent" { 0 } else { i128::MAX },
+                dry_run: scenario == "preview",
+                foreign_merged_clean: false,
+            },
+            &cancel(),
+        )?;
+        assert!(path.is_dir(), "{scenario}");
+        assert_eq!(fs::read_to_string(path.join("untracked"))?, "source");
+        assert_eq!(
+            path.join("target/artifact").exists(),
+            !matches!(scenario, "idle" | "unowned"),
+            "{scenario}"
+        );
+        if scenario == "preview" {
+            assert!(
+                report.idle_output.iter().any(
+                    |entry| entry.path == path.join("target") && entry.reason == "would_remove"
+                )
+            );
+        }
+        if matches!(scenario, "idle" | "unowned") {
+            assert!(
+                report
+                    .idle_output
+                    .iter()
+                    .any(|entry| entry.path == path.join("target") && entry.removed)
+            );
+        }
+        if matches!(scenario, "recent" | "live" | "unknown") {
+            assert!(report.idle_output.iter().all(|entry| !entry.removed));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Error>> {
     for existing_slot in [false, true] {
         let fixture = Fixture::new()?;

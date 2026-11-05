@@ -536,6 +536,16 @@ fn gc_data_summary(data: &GcData) -> String {
         {
             human.push_str(&format!("{} {}\n", output.reason, output.path.display()));
         }
+        for output in project
+            .idle_output
+            .iter()
+            .filter(|entry| entry.reason == "would_remove")
+        {
+            human.push_str(&format!(
+                "would reclaim idle output {}\n",
+                output.path.display()
+            ));
+        }
     }
     for path in &data.unobserved_projects {
         human.push_str(&format!("unobserved project {}\n", path.display()));
@@ -1510,6 +1520,23 @@ mod gc_preview_tests {
             let json = serde_json::to_value(&data).unwrap_or_default();
             assert_eq!(json["provider_state"]["expired_events"], 3);
         }
+    }
+    #[test]
+    fn gc_preview_names_idle_output_and_why_it_qualifies() {
+        let mut data = GcData::default();
+        let mut project = worktrees::WorktreeGcReport::default();
+        project.idle_output.push(worktrees::OutputEntry {
+            path: "/checkout/target".into(),
+            removed: false,
+            reason: "would_remove".into(),
+        });
+        data.worktree_cleanup.push(project);
+        assert!(gc_data_summary(&data).contains("would reclaim idle output /checkout/target"));
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(
+            json["worktree_cleanup"][0]["idle_output"][0]["reason"],
+            "would_remove"
+        );
     }
     #[test]
     fn gc_default_output_aggregates_routine_rows_and_keeps_exceptions() {

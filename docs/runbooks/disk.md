@@ -56,7 +56,8 @@ and GC preview below to investigate it.
    overrides that default.
    Idle ignored declared output can qualify without a terminal lane when
    writer custody is free and no lane is live. Nested repositories protect
-   their containing output directory. Unknown writers remain protected
+   their containing output directory. Unknown-writer worktrees can have idle
+   ignored output reclaimed after a complete free census; the worktrees remain
    unless the project opts into `foreign_worktrees = "merged-clean"`. See the [configuration runbook](configuration.md#lane-cache-collection).
    Set `gc.alert_below` for a Fabric event and gc log message once per low-space
    dip. GC does not sweep arbitrary `/private/tmp/provenant-*` paths.

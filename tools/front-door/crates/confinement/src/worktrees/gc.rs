@@ -61,6 +61,33 @@ pub fn collect(
         if lane.path == primary {
             continue;
         }
+        // An unknown writer does not make ignored output disposable. Require
+        // a complete free census and writer exclusion before considering it.
+        // This is independent of the policy for removing foreign worktrees.
+        if (lane.writer == WriterState::Unknown
+            || (!lane.path.starts_with(&managed)
+                && lane.owner == OwnerStatus::Unowned
+                && lane.writer == WriterState::Free))
+            && !policy.regenerable.is_empty()
+        {
+            if let Some(entry) = entries.iter().find(|entry| entry.path == lane.path) {
+                let result = prune_unknown_output(
+                    context,
+                    entry,
+                    lane,
+                    policy,
+                    cancel,
+                    &mut report.idle_output,
+                );
+                if let Err(error) = result {
+                    report.idle_output.push(OutputEntry {
+                        path: lane.path.clone(),
+                        removed: false,
+                        reason: error.to_string(),
+                    });
+                }
+            }
+        }
         if !lane.path.starts_with(&managed) && !policy.foreign_merged_clean {
             continue;
         }
@@ -302,6 +329,88 @@ pub fn collect(
         }
     }
     Ok(report)
+}
+
+fn prune_unknown_output(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    lane: &WorktreeInfo,
+    policy: &WorktreeGcPolicy<'_>,
+    cancel: &CancelToken,
+    output: &mut Vec<OutputEntry>,
+) -> Result<(), WorktreeError> {
+    if !(policy.no_live_lanes)(&lane.path) {
+        return Err(WorktreeError::UnknownWriter);
+    }
+    let locked = lock_worktree(context, entry, cancel, policy.dry_run)?;
+    {
+        let _repository = repository_lock(context, LockMode::Shared, cancel)?;
+        tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
+    }
+    census_free(context, &lane.path)?;
+    if !(policy.no_live_lanes)(&lane.path) {
+        return Err(WorktreeError::UnknownWriter);
+    }
+    let repo = locked.verified.repo();
+    if policy.written_before_ns != i128::MAX
+        && newest_worktree(
+            repo.root_dir(),
+            0,
+            &mut 1_000_000,
+            std::time::Instant::now(),
+        )? >= policy.written_before_ns
+    {
+        return Err(FsError::RaceRefused {
+            name: "recent worktree activity".into(),
+        }
+        .into());
+    }
+    let protected = output_protection(context, repo, policy.keep, cancel)?;
+    walk_output(
+        repo.root_dir(),
+        &lane.path,
+        Path::new(""),
+        policy,
+        &protected,
+        output,
+        0,
+    )?;
+    Ok(())
+}
+
+// Count source and output writes alike; never follow symlinks or traverse the
+// worktree's Git administrative files. An incomplete walk keeps the output.
+#[allow(clippy::disallowed_methods)]
+fn newest_worktree(
+    directory: &Directory,
+    depth: usize,
+    remaining: &mut usize,
+    started: std::time::Instant,
+) -> Result<i128, FsError> {
+    if depth >= 64 {
+        return Err(FsError::EntryLimit { limit: 64 });
+    }
+    let mut newest = directory.metadata()?.modified_ns;
+    for name in entry_names(directory, 100_000)? {
+        if name == ".git" {
+            continue;
+        }
+        if *remaining == 0 || started.elapsed() >= std::time::Duration::from_secs(5) {
+            return Err(FsError::EntryLimit { limit: 1_000_000 });
+        }
+        *remaining -= 1;
+        let metadata = directory.metadata_at(&name, false)?;
+        newest = newest.max(metadata.modified_ns);
+        if metadata.kind == FileKind::Directory {
+            newest = newest.max(newest_worktree(
+                &directory.open_verified_directory(&name)?,
+                depth + 1,
+                remaining,
+                started,
+            )?);
+        }
+    }
+    Ok(newest)
 }
 
 /// Managed trees are kept while they sit at the integration tip or are a
