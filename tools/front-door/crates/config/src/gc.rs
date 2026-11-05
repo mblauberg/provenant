@@ -5,7 +5,7 @@ use std::{
     path::{Component, Path},
 };
 
-/// Kernel pressure level at which new lanes wait. The memory floor still applies.
+/// Kernel pressure level at which new lanes wait. The memory floor is advisory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryPressureThreshold {

@@ -1135,7 +1135,7 @@ pub struct AdmissionTicket {
     pub generation: u64,
     pub holder: Option<ActorId>,
     pub active: bool,
-    /// Available memory floor as basis points of installed memory.
+    /// Advisory available-memory floor as basis points of installed memory.
     pub memory_floor_basis_points: u64,
     pub disk_floor_bytes: u64,
     /// Spacing for this lane's class, fixed at submission.

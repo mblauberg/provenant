@@ -653,6 +653,7 @@ error_kinds! {
     DiskFloor => "DISK_FLOOR", "Free disk space is below gc.free_floor; run `provenant gc --apply`.";
     Processes => "HOST_PROCESSES", "The user process limit has insufficient headroom.";
     MemoryPressure => "MEMORY_PRESSURE", "Host memory pressure is too high to admit a lane.";
+    MemoryFloor => "MEMORY_FLOOR", "Available host memory is below the advisory admission floor.";
     LaneCap => "LANE_CAP", "The host or project writer lane cap is reached.";
     BuildSettings => "BUILD_SETTINGS", "The host lane build settings are invalid.";
     GuardianIdentity => "GUARDIAN_IDENTITY", "The guardian process identity could not be observed.";
@@ -684,6 +685,7 @@ impl ErrorKind {
     /// Stable category shared by the output adapters.
     pub const fn category(self) -> &'static str {
         match self {
+            Self::MemoryFloor => "warning",
             Self::Invalid
             | Self::OperationConflict
             | Self::NotFound

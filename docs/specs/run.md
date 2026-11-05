@@ -367,14 +367,14 @@ Admission and operation insertion are one transaction, and the immutable
 request is published before acknowledgement. No launch, probe, wait or
 supervisor call happens inside a transaction. Admission bounds active lanes
 at the fixed ceilings of 64 per host and 32 per project (writers also by the configured caps below) and queued lanes at 256 per host, with
-memory and disk floors, startup spacing and a deadline.
+the disk floor, startup spacing and a deadline. The unconfigured memory floor
+is advisory and emits `MEMORY_FLOOR` with a next action.
 
 On macOS, Critical kernel memory pressure defers both classes by default.
 `domains.fabric.lanes.memory_pressure_threshold` accepts `critical`, `warning`
-(Warning or Critical) or `never`. The memory floor applies at every pressure
-level, including when the pressure gate is disabled. An unavailable or unknown
-pressure sample is logged and falls back to the floor; Linux uses the floor.
-Disk and memory floors apply to both classes. Build slots do not gate
+(Warning or Critical) or `never`. An unavailable or unknown pressure sample is
+logged. Low available memory warns on both classes without holding admission.
+The disk floor applies to both classes. Build slots do not gate
 admission: a host-wide build throttle (not a hard cap), by default
 max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) slots, gates each
 compiling cargo command a lane runs (`provenant_os::build_slots`, reached
@@ -423,7 +423,8 @@ one spacing. If the clock or the boot identity cannot be read the claim is refus
 judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
 `lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
-memory floor (5 %) and the live `gc.free_floor` disk floor refuse both classes.
+memory floor (5 %) warns for both classes; the live `gc.free_floor` disk floor
+can refuse both classes.
 The disk default is 10 % of the state volume, with a 50 GiB minimum. A ticket with no class is a writer; opening a version 1 ledger upgrades it in
 place, in one transaction, carrying any wall-time start across as a start of now under the current boot
 for each class, whatever its age and without reading the wall clock, so the
@@ -457,7 +458,7 @@ lane; silence never counts as completion or settlement.
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
 - Test: `crates/run/src/ledger.rs::tests::{live_guardian_fences_busy_replaced_and_corrupt_store, cross_boot_malformed_and_readable_row_removal_release}`;
-  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, idle_writers_are_admitted_beyond_the_build_limit, the_writer_cap_refuses_at_its_limit_and_names_it, out_of_range_build_settings_do_not_block_admission}`;
+  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_and_low_advisory_memory_do_not_refuse, idle_writers_are_admitted_beyond_the_build_limit, the_writer_cap_refuses_at_its_limit_and_names_it, out_of_range_build_settings_do_not_block_admission}`;
   `crates/providers/src/lane.rs::tests::claude_shell_restores_jobs_after_scrub`;
   `crates/os/src/build_slots.rs::tests::{slots_are_bounded_and_reusable, contention_never_exceeds_the_limit, read_only_slot_files_cannot_be_created_unlinked_or_replaced_yet_still_lock, the_slot_descriptor_is_close_on_exec, a_process_that_outlives_the_holder_does_not_keep_the_slot, a_wait_reports_progress_then_times_out_naming_the_slots, waiting_for_a_cargo_lock_reports_progress_and_times_out}`;
   `crates/providers/src/lane.rs::tests::{the_cargo_shim_hands_the_command_to_the_build_slot_gate, the_cargo_shim_refuses_settings_that_cannot_be_trusted, no_write_grant_of_the_finished_lane_profile_reaches_the_slot_directory}`;
@@ -469,7 +470,7 @@ lane; silence never counts as completion or settlement.
   `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;
   `::writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock`;
   `::read_only_lanes_are_spaced_2_seconds_apart`;
-  `::memory_floor_refuses_both_lane_classes`;
+  `::memory_floor_warns_for_both_lane_classes`;
   `::project_cap_allows_up_to_32_active_lanes`;
   `::legacy_tickets_without_a_class_are_treated_as_writers`;
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;

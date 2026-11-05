@@ -156,7 +156,7 @@ pub struct AdmissionWindow {
 
 pub use provenant_records::run::LaneWait;
 
-/// Resource probes. A failed probe queues; it never admits unchecked.
+/// Resource probes for configured admission guards and advisory observations.
 pub trait Resources {
     fn memory(&self) -> std::io::Result<MemorySample>;
     /// Observe one process when deciding whether a recorded guardian is gone.
@@ -546,7 +546,7 @@ impl RunStore {
                                         probe_error(error)
                                     )
                                 } else {
-                                    "host capacity: active lane caps and memory or disk floors"
+                                    "host capacity: active lane caps and disk floor"
                                         .to_owned()
                                 }
                             }
@@ -849,6 +849,7 @@ impl RunStore {
         let mut retries = 0_u64;
         let mut refusal = None;
         let mut below_floor = 0_u32;
+        let mut warned_memory_floor = false;
         loop {
             let call = Request { clock, cancel };
             let ticket = self.ticket(&self.db, id)?;
@@ -896,14 +897,28 @@ impl RunStore {
                 })
                 .ok()
                 .filter(|budget| !budget.has_room());
+            if !warned_memory_floor
+                && let Some(warning) =
+                    memory_floor_warning(resources.memory(), ticket.memory_floor_basis_points)
+            {
+                eprintln!(
+                    "admission warning [{}]: {}; next: {}",
+                    warning.code,
+                    warning
+                        .detail
+                        .as_deref()
+                        .unwrap_or("memory availability is low"),
+                    warning.next.as_deref().unwrap_or("inspect host memory")
+                );
+                warned_memory_floor = true;
+            }
             let fits = match (
-                resources.memory(),
                 pressure,
                 resources.disk(attempt),
                 disk_floor_bytes,
                 settings,
             ) {
-                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(settings)) => {
+                (pressure, Ok(disk), Ok(floor), Ok(settings)) => {
                     let pressure =
                         pressure.filter(|level| settings.memory_pressure_threshold.defers(*level));
                     let mut disk = disk;
@@ -932,13 +947,7 @@ impl RunStore {
                             })
                         })
                     };
-                    pressure.is_none()
-                        && processes.is_none()
-                        && memory.total_bytes > 0
-                        && u128::from(memory.available_bytes) * 10_000
-                            >= u128::from(memory.total_bytes)
-                                * u128::from(ticket.memory_floor_basis_points)
-                        && disk >= floor
+                    pressure.is_none() && processes.is_none() && disk >= floor
                 }
                 _ => {
                     refusal = None;
@@ -1194,6 +1203,33 @@ fn deadline(from: WallTime, seconds: u64) -> Result<WallTime> {
         .and_then(|duration| from.checked_add(duration))
         .map_err(|_| RunError::Validation("admission deadline"))
 }
+
+/// The shipped memory floor has no host setting, so it can only warn.
+fn memory_floor_warning(
+    sample: std::io::Result<MemorySample>,
+    floor_basis_points: u64,
+) -> Option<provenant_records::diagnostic::Diagnostic> {
+    let detail = match sample {
+        Ok(sample) if sample.total_bytes > 0 => {
+            if u128::from(sample.available_bytes) * 10_000
+                >= u128::from(sample.total_bytes) * u128::from(floor_basis_points)
+            {
+                return None;
+            }
+            format!(
+                "available memory is {} of {} bytes, below the shipped advisory floor of {floor_basis_points} basis points",
+                sample.available_bytes, sample.total_bytes
+            )
+        }
+        _ => "host memory availability could not be observed for the shipped advisory floor".into(),
+    };
+    Some(
+        ErrorKind::MemoryFloor
+            .diagnostic()
+            .detail(detail)
+            .next("reduce host memory use or inspect host memory before continuing"),
+    )
+}
 pub(crate) fn update_attempt(
     tx: &Connection,
     old: &AttemptRecord,
@@ -1218,6 +1254,39 @@ pub(crate) fn update_attempt(
 #[cfg(test)]
 mod process_wait_tests {
     use super::*;
+
+    #[test]
+    fn memory_floor_warning_has_safe_code_detail_and_action() {
+        let warning = memory_floor_warning(
+            Ok(MemorySample {
+                available_bytes: 1,
+                total_bytes: 100,
+            }),
+            500,
+        )
+        .unwrap();
+        assert_eq!(warning.code, "MEMORY_FLOOR");
+        assert_eq!(warning.category.as_deref(), Some("warning"));
+        assert!(warning.detail.unwrap().contains("500 basis points"));
+        assert!(warning.next.is_some());
+        assert!(
+            memory_floor_warning(
+                Ok(MemorySample {
+                    available_bytes: 5,
+                    total_bytes: 100
+                }),
+                500
+            )
+            .is_none()
+        );
+        let warning =
+            memory_floor_warning(Err(std::io::Error::other("TOKEN_SENTINEL")), 500).unwrap();
+        assert!(
+            !serde_json::to_string(&warning)
+                .unwrap()
+                .contains("TOKEN_SENTINEL")
+        );
+    }
 
     struct LowMemory;
     impl Resources for LowMemory {

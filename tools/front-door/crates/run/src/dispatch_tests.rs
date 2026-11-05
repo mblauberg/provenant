@@ -2651,7 +2651,7 @@ fn admission_refuses_near_the_user_process_limit() -> TestResult {
 }
 
 #[test]
-fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
+fn pressure_errors_and_low_advisory_memory_do_not_refuse() -> TestResult {
     use provenant_os::sys::resources::MemoryPressure;
     struct Probe {
         available: u64,
@@ -2683,8 +2683,8 @@ fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
     }
     for (available, error, threshold, pressure, admitted) in [
         (100, true, None, MemoryPressure::Normal, true),
-        (4, false, None, MemoryPressure::Normal, false),
-        (4, false, Some("never"), MemoryPressure::Critical, false),
+        (4, false, None, MemoryPressure::Normal, true),
+        (4, false, Some("never"), MemoryPressure::Critical, true),
     ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -4665,7 +4665,7 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
     Ok(())
 }
 #[test]
-fn memory_floor_refuses_both_lane_classes() -> TestResult {
+fn memory_floor_warns_for_both_lane_classes() -> TestResult {
     // Each case has its own store and ledger, so only the floor can decide it.
     for (seed, writer, available) in [
         (50, true, 1),
@@ -4685,29 +4685,21 @@ fn memory_floor_refuses_both_lane_classes() -> TestResult {
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
         let admitted = store.admit(id, &attempt, &HostFacts::new(available), &clock, &cancel);
-        if available < 5 {
-            assert!(
-                matches!(admitted, Err(RunError::Refused)),
-                "1% memory is under the 5% floor (writer: {writer})"
-            );
-        } else {
-            assert_eq!(
-                admitted?.state,
-                AttemptState::Running {
-                    extra: Default::default()
-                },
-                "writer: {writer}"
-            );
-        }
+        assert_eq!(
+            admitted?.state,
+            AttemptState::Running {
+                extra: Default::default()
+            },
+            "writer: {writer}"
+        );
     }
     Ok(())
 }
 
 #[test]
-fn admission_uses_injected_memory_floor_and_host_facts() -> TestResult {
-    // Exercise both sides of the injected 1% floor. No host memory or process
-    // table is consulted, and the virtual clock supplies the admission time.
-    for (available, fits) in [(0, false), (1, true), (2, true), (100, true)] {
+fn admission_warns_for_unconfigured_memory_floor_without_refusing() -> TestResult {
+    // Both sides of the unconfigured floor admit; the floor is advisory.
+    for available in [0, 1, 2, 100] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -4727,14 +4719,9 @@ fn admission_uses_injected_memory_floor_and_host_facts() -> TestResult {
             &clock,
             &cancel,
         );
-        if fits {
-            let admitted = admitted?;
-            assert!(matches!(admitted.state, AttemptState::Running { .. }));
-            assert_eq!(admitted.started_at, Some(clock.wall_now()?));
-        } else {
-            assert!(matches!(admitted, Err(RunError::Refused)));
-            assert_eq!(clock.mono_now(), MonoTime::from_micros(1_000_000));
-        }
+        let admitted = admitted?;
+        assert!(matches!(admitted.state, AttemptState::Running { .. }));
+        assert_eq!(admitted.started_at, Some(clock.wall_now()?));
     }
     Ok(())
 }

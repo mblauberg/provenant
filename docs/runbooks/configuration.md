@@ -182,7 +182,7 @@ admission deadline and is then refused with a reason that names the cap, its
 scope and the key to raise. On macOS it defers starts at critical kernel
 memory pressure by default. Set `domains.fabric.lanes.memory_pressure_threshold`
 to `warning` to defer at warning and critical, or `never` to disable this gate.
-The 5 % memory floor applies on every platform and the disk floor
+The 5 % memory floor warns on every platform; the disk floor
 applies to both classes. `lanes` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s
 left of 2.0 s`.
@@ -203,7 +203,7 @@ do not inherit project defaults. `--capability` adds a grant and
 `--no-capability` removes it for an invocation.
 
 Build slots gate builds, not lanes. A writer is admitted on the writer caps
-and the memory and disk floors alone, however many writers are live, so one
+and configured resource guards, however many writers are live, so one
 project's idle writers never block another's. The slots are a build throttle,
 not a hard cap and not a security boundary: they share CPU and memory fairly
 among our own lanes. `max_concurrent_builds` is the number of cargo builds
