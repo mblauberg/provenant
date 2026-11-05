@@ -1,5 +1,98 @@
 #[cfg(test)]
 #[test]
+fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{self, WorkerObserver, WorkerState};
+    use std::collections::BTreeMap;
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, WorkerState::Free))
+                .collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let project = temp.path().join("project");
+    let remote = temp.path().join("remote.git");
+    for path in [&home, &state, &project, &remote] {
+        std::fs::create_dir_all(path)?;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    provenant_os::fixture::run_git(&remote, &["init", "--bare", "-q"])?;
+    provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+    provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+    provenant_os::fixture::run_git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().ok_or("remote path")?,
+        ],
+    )?;
+    provenant_os::fixture::run_git(&project, &["push", "origin", "HEAD:refs/heads/main"])?;
+    let initial = String::from_utf8(provenant_os::fixture::run_git(
+        &project,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            let pinned = remote_base(
+                context,
+                "HEAD",
+                std::time::Duration::from_secs(30),
+                true,
+                &cancel,
+            )
+            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            assert_eq!(pinned.to_string(), initial.trim());
+            Ok(())
+        },
+    )?;
+    provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "local only"])?;
+    worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            assert!(matches!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    false,
+                    &cancel
+                ),
+                Err(FacadeError::BaseUnreachable)
+            ));
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
 fn peer_adoption_checks_lease_and_treats_census_as_advisory()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{self, WorkerObserver, WorkerState};

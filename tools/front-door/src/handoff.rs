@@ -1129,15 +1129,30 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
             if time.is_zero() {
                 return failed("the peer call budget ran out".into());
             }
-            let base = crate::fabric::remote_base(
+            let base = crate::worktrees::with_context(
+                &target.context.roots,
+                target.home,
                 target.cwd,
-                &format!("origin/{branch}"),
-                time / 2,
-                !fetched,
+                remaining(),
+                target.workers,
+                |context, cancel| {
+                    let context = &worktrees::WorktreeContext {
+                        facts: &facts,
+                        ..*context
+                    };
+                    Ok(crate::fabric::remote_base(
+                        context,
+                        &format!("origin/{branch}"),
+                        time / 2,
+                        !fetched,
+                        cancel,
+                    ))
+                },
             );
             fetched = true;
             let base = match base {
-                Ok(base) => base,
+                Ok(Ok(base)) => base,
+                Ok(Err(error)) => return failed(format!("origin/{branch}: {error}")),
                 Err(error) => return failed(format!("origin/{branch}: {error}")),
             };
             let made = crate::worktrees::with_context(

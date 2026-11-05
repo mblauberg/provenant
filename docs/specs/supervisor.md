@@ -28,6 +28,9 @@ handoff uses one facts session for its inventory, upstream commit reads and
 WIP rechecks, refreshing mutable evidence after its own Git writes. Target-side
 handoff recreation reuses an identity-bound advisory inventory between branches;
 guarded reads and attempted mutations invalidate it before authorising writes.
+Peer and handoff base resolution pins through the facts session and then checks
+that exact commit against remote-tracking refs, so a moved ref cannot change the
+commit after the reachability check.
 
 ### Worktree census sessions
 

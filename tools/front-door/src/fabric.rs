@@ -1539,24 +1539,19 @@ pub(crate) const GIT_REDIRECTS: &[&str] = &[
     "GIT_CONFIG_COUNT",
     "GIT_TERMINAL_PROMPT",
 ];
-/// Fetch every remote with this host's own Git authority, then require `base`
-/// on a remote-tracking ref, so a peer writer never starts from a commit only
-/// this clone has. Returns the pinned base commit.
-fn fetch_remote_base(
-    project: &Path,
-    base: &str,
-    timeout: std::time::Duration,
-) -> Result<provenant_core::GitOid, FacadeError> {
-    remote_base(project, base, timeout, true)
-}
-/// [`fetch_remote_base`], skipping the fetch when `fetch` is false so a caller
-/// pinning several bases fetches once.
+/// Fetch with host Git authority, resolve through the command facts session,
+/// and require the pinned commit on a remote-tracking ref. A caller pinning
+/// several bases may skip later fetches.
 pub(crate) fn remote_base(
-    project: &Path,
+    context: &provenant_confinement::worktrees::WorktreeContext<'_>,
     base: &str,
     timeout: std::time::Duration,
     fetch: bool,
+    cancel: &CancelToken,
 ) -> Result<provenant_core::GitOid, FacadeError> {
+    let project = context.repo.root_path();
+    let revision = provenant_confinement::repo::GitRevision::new(base)
+        .map_err(|_| FacadeError::BaseUnreachable)?;
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
     let git = provenant_os::git::git_executable().ok_or(FacadeError::OwnerUnavailable)?;
     let environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
@@ -1594,7 +1589,11 @@ pub(crate) fn remote_base(
     if fetch {
         git_output(&["fetch", "--all", "--no-tags", "--no-recurse-submodules"])?;
     }
-    let contains = format!("--contains={base}");
+    let oid = context
+        .facts
+        .resolve_revision(context, revision, cancel)
+        .map_err(|_| FacadeError::BaseUnreachable)?;
+    let contains = format!("--contains={oid}");
     let refs = git_output(&[
         "for-each-ref",
         "--count=1",
@@ -1605,12 +1604,7 @@ pub(crate) fn remote_base(
     if refs.iter().all(u8::is_ascii_whitespace) {
         return Err(FacadeError::BaseUnreachable);
     }
-    let commit = format!("{base}^{{commit}}");
-    let oid = git_output(&["rev-parse", "--verify", "--end-of-options", &commit])?;
-    std::str::from_utf8(&oid)
-        .ok()
-        .and_then(|oid| provenant_core::GitOid::parse(oid.trim()).ok())
-        .ok_or(FacadeError::BaseUnreachable)
+    Ok(oid)
 }
 
 struct BinaryRunOwner<'a> {
@@ -2440,12 +2434,27 @@ impl BinaryRunOwner<'_> {
             std::time::Duration::from_micros(micros)
         };
         let project = &self.factory.cwd;
+        let facts = worktrees::RepoFacts::default();
         let base = if replay {
             None
         } else {
-            Some(fetch_remote_base(project, &spec.base, half())?)
+            let resolved = crate::worktrees::with_context(
+                &self.factory.context.roots,
+                &self.factory.home,
+                project,
+                half(),
+                self.factory.workers,
+                |context, cancel| {
+                    let context = &worktrees::WorktreeContext {
+                        facts: &facts,
+                        ..*context
+                    };
+                    Ok(remote_base(context, &spec.base, half(), true, cancel))
+                },
+            )
+            .map_err(|_| FacadeError::io("resolve peer base"))?;
+            Some(resolved?)
         };
-        let facts = worktrees::RepoFacts::default();
         let (info, warning) = crate::worktrees::with_context(
             &self.factory.context.roots,
             &self.factory.home,
