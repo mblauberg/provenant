@@ -655,18 +655,43 @@ enum WorktreeAdmissionError {
 impl WorktreeAdmissionError {
     fn is_transient(&self) -> bool {
         use provenant_confinement::worktrees::WorktreeError;
-        match self {
+        use provenant_core::retry::{RetryCause, is_transient};
+        let cause = match self {
             Self::Own(worktree::OwnWorktreeError::Other(run::RunError::Writer(err)))
-            | Self::Run(run::RunError::Writer(err)) => matches!(
-                err,
+            | Self::Run(run::RunError::Writer(err)) => match err {
                 WorktreeError::RegistryLockTimeout
-                    | WorktreeError::LockBusy
-                    | WorktreeError::UnknownWriter
-                    | WorktreeError::UnknownWriterAt { .. }
-                    | WorktreeError::CensusUnknown { .. }
-                    | WorktreeError::IncompleteCensus { .. }
-            ),
-            _ => false,
+                | WorktreeError::LockBusy
+                | WorktreeError::UnknownWriter
+                | WorktreeError::UnknownWriterAt { .. }
+                | WorktreeError::CensusUnknown { .. }
+                | WorktreeError::IncompleteCensus { .. } => RetryCause::Contention,
+                _ => RetryCause::Permanent,
+            },
+            _ => RetryCause::Permanent,
+        };
+        is_transient(cause)
+    }
+}
+
+#[cfg(test)]
+mod writer_admission_retry_tests {
+    use super::*;
+    use provenant_confinement::worktrees::WorktreeError;
+
+    #[test]
+    fn admission_retries_contention_but_not_a_live_or_dirty_writer() {
+        for error in [
+            WorktreeError::RegistryLockTimeout,
+            WorktreeError::LockBusy,
+            WorktreeError::UnknownWriter,
+        ] {
+            assert!(WorktreeAdmissionError::Run(run::RunError::Writer(error)).is_transient());
+        }
+        for error in [
+            WorktreeError::LiveWriter,
+            WorktreeError::Dirty(String::new()),
+        ] {
+            assert!(!WorktreeAdmissionError::Run(run::RunError::Writer(error)).is_transient());
         }
     }
 }
