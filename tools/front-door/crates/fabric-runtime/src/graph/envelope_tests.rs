@@ -1291,3 +1291,22 @@ fn whole_review_reservation_covers_frame_verifier_and_synthesis() {
     let after = graph_envelope_bound(&document, &[addition], &[], &plan);
     assert!(after <= before, "review expansion grew {before} to {after}");
 }
+
+#[test]
+fn routing_stratum_flows_from_graph_to_nodes() {
+    let mut document = mixed();
+    document.context = Some(provenant_records::run::WorkContext {
+        risk_tier: Some("substantial".into()),
+        task_kind: Some("repair".into()),
+        ..Default::default()
+    });
+    document.nodes[1].context = Some(provenant_records::run::WorkContext {
+        task_kind: Some("review".into()),
+        ..Default::default()
+    });
+    let plan = planned(&document);
+    let node = plan.nodes.iter().find(|node| node.id == "review").unwrap();
+    let context = node_context(&plan, node);
+    assert_eq!(context.risk_tier.as_deref(), Some("substantial"));
+    assert_eq!(context.task_kind.as_deref(), Some("review"));
+}

@@ -1599,6 +1599,7 @@ mod tests {
         let config = RoutingConfig::default();
         let context = RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -1681,6 +1682,7 @@ mod tests {
         let config = RoutingConfig::default();
         let context = RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -1747,6 +1749,7 @@ mod tests {
         let base = RoutingConfig::default();
         let context = RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &base,
             registry: REGISTRY,
@@ -1909,6 +1912,7 @@ mod tests {
         }];
         let context = RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,

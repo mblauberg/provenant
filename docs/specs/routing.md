@@ -166,6 +166,31 @@ the section validator reports the record with code `moved_to_schedule.starts`,
 warning carrying the code. In a rule that enforces a lane restriction the
 error is reported at the key and refuses the configuration.
 
+### Expiring model choice preferences
+
+`domains.routing.model_choices` is an array of inline tables with `dimension =
+"model"`, `risk_tier`, `task_kind`, exact `preferred` model and an RFC 3339
+`expires`. The last matching row wins until its exclusive expiry. A missing or
+invalid expiry drops the row with a warning. Remove a row to revoke it, or use
+`provenant route override clear --risk-tier TIER --task-kind KIND`. Set one with
+`provenant route override set --model ADAPTER/ID --risk-tier TIER --task-kind
+KIND --until RFC3339`; `route override list` shows its activity. Pacing rows
+are independent.
+
+A dispatch with both context values prefers the model in its named route, if
+it is eligible. The normal account, confidentiality, exclusion,
+launch and model-policy checks still apply; unavailable candidates fall back to
+the ordinary route. An explicit model pin wins. Preset dispatch copies its
+`--risk-tier` and `--task-kind` into graph context; graph authors can set the
+same context fields. Missing context does not match.
+
+- Why: a reviewed outcome can guide later route selection without extending
+  authority or making an indefinite policy change.
+- Tests: `crates/routing/src/tests.rs#model_choice_selects_only_eligible_pool_members_before_expiry`,
+  `crates/cli/src/route.rs#model_override_set_and_clear_preserve_expiry_and_pacing`
+- Owner: `crates/routing/src/resolve.rs#select_pool`,
+  `crates/cli/src/route.rs#set_model_choice`
+
 ### Go monthly allowance floor
 
 Every OpenCode Go candidate, including an explicit or uncatalogued exact ID,

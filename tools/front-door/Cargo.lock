@@ -784,6 +784,7 @@ dependencies = [
  "provenant-core",
  "provenant-os",
  "provenant-records",
+ "provenant-routing",
  "serde",
  "serde_json",
  "tempfile",

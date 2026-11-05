@@ -2245,7 +2245,7 @@ pub(crate) mod peer_tests {
         let access: Vec<_> = members.iter().map(|member| AccessContext { adapter: member.model.adapter(), disclosure_ref: "fixture", confinement_ref: "fixture" }).collect();
         let mut config = RoutingConfig::default();
         config.pools.insert("retry-trial".into(), members.clone());
-        let context = RoutingContext { policy_account_hint: None, catalogue: &catalogue, config: &config,
+        let context = RoutingContext { policy_account_hint: None, choice_context: None, catalogue: &catalogue, config: &config,
             registry: provenant_providers::REGISTRY, availability: &availability, quota: &[], capacity_cooldowns: &[], accounts: &[], quota_policies: &[], access: &access,
             now: provenant_core::WallTime::from_micros(100_000_000)?, host: "fixture", readiness: None };
         let request = RouteRequest { intent: Default::default(), choice: RouteChoice::NamedRoute(RouteName::parse("retry-trial")?), effort: None, confidential: false, fallback: Fallback::None };

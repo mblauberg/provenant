@@ -139,6 +139,10 @@ pub struct WorkContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
@@ -166,6 +170,8 @@ impl WorkContext {
     pub fn valid(&self) -> bool {
         [
             &self.work_item,
+            &self.risk_tier,
+            &self.task_kind,
             &self.graph_id,
             &self.node_id,
             &self.preset,

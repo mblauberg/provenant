@@ -13,11 +13,12 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 jiff = { workspace = true }
 provenant-os = { workspace = true }
+provenant-routing = { workspace = true }
+toml_edit = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-toml_edit = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
