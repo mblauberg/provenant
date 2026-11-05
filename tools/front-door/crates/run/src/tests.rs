@@ -2515,6 +2515,71 @@ fn temporary_tracking_upgrade_drops_version_two_spacing() -> TestResult {
 }
 
 #[test]
+fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    // Shape the store exactly as version 7 left it.
+    RunStore::open(&context, &call)?
+        .db
+        .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
+    let store = RunStore::open(&context, &call)?;
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 8);
+    let operation = OperationId::parse("admit-after-upgrade")?;
+    assert!(store.admission_window(&operation, &call)?.is_none());
+    let deadline = WallTime::from_micros(1_000_000)?;
+    store.save_admission_window(
+        &operation,
+        crate::AdmissionWindow {
+            deadline,
+            wake_at: None,
+        },
+        &call,
+    )?;
+    assert!(store.admission_window(&operation, &call)?.is_some());
+    let backups = std::fs::read_dir(temp.path().join("state"))?
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run.sqlite3.bak-")
+        })
+        .count();
+    assert_eq!(backups, 1, "the upgrade keeps one pre-migration copy");
+    Ok(())
+}
+
+#[test]
+fn a_store_failure_names_its_cause_only_on_the_local_host() {
+    use provenant_records::diagnostic::Destination;
+    let error = RunError::Sqlite(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(1),
+        Some("no such table: example".to_owned()),
+    ));
+    let local = error.diagnostic(Destination::Local);
+    assert!(
+        local
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("no such table"))
+    );
+    let remote = error.diagnostic(Destination::Remote {
+        repository: None,
+        home: None,
+    });
+    assert!(remote.detail.is_none());
+}
+
+#[test]
 fn the_store_refuses_a_version_newer_than_eight() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -2528,6 +2593,21 @@ fn the_store_refuses_a_version_newer_than_eight() -> TestResult {
         RunStore::open(&context, &call),
         Err(RunError::Version(9))
     ));
+    let state = context.state_root.as_path();
+    let version: i64 = provenant_sqlite::open_connection(&state.join("run.sqlite3"), true)?
+        .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+            r.get(0)
+        })?;
+    assert_eq!(version, 9, "a refused store stays as it was");
+    assert!(
+        !std::fs::read_dir(state)?
+            .filter_map(std::result::Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run.sqlite3.bak-")),
+        "a refused store takes no backup"
+    );
     Ok(())
 }
 

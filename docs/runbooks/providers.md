@@ -536,8 +536,9 @@ exercises the Claude writer profile; it is not yet a complete adapter and
 access-mode matrix.
 
 When a lane's decoded answer or captured stdout or stderr contains a path-bearing
-permission error, the result includes a bounded excerpt identifying the path whose
-access grant may be missing. The error alone does not establish which rule denied
+permission error, the settlement reason includes a bounded excerpt identifying the
+path whose access grant may be missing. The answer itself stays as the provider
+wrote it. The error alone does not establish which rule denied
 the operation: filesystem permissions or another sandbox may be responsible.
 Errors kept only in an unreported provider transcript are not visible there.
 

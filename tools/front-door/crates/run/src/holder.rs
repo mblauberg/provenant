@@ -1548,9 +1548,7 @@ impl RunStore {
                 decoded.reason = Some(format!("cancelled: {reason}"));
             }
         }
-        let diagnostic = denial.map(|note| format!("\n\n{note}\n"));
-        let answer_limit =
-            (RESULT_LIMIT as usize).saturating_sub(diagnostic.as_ref().map_or(0, String::len));
+        let answer_limit = RESULT_LIMIT as usize;
         if decoded.result.len() > answer_limit {
             let mut end = answer_limit;
             while !decoded.result.is_char_boundary(end) {
@@ -1664,11 +1662,6 @@ impl RunStore {
             decoded.outcome = Outcome::Failed;
             decoded.reason = Some("provider result is empty or incomplete".into());
         }
-        // Diagnostics are not provider answers. Add them only after answer
-        // validation, and reserve room so a full capture cannot hide the path.
-        if let Some(note) = diagnostic {
-            decoded.result.push_str(&note);
-        }
         // Decoding can reveal credential markers hidden by JSON escapes in
         // the already-filtered capture. Seal only a filtered rendering.
         // A filter failure withholds the result instead of blocking settlement
@@ -1769,6 +1762,14 @@ impl RunStore {
         } else {
             partial.clear();
         }
+        // A denial is a diagnostic, not part of the provider's answer: the
+        // handoff, findings and verdict blocks must stay as the provider wrote them.
+        if let Some(note) = denial {
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note,
+            });
+        }
         // External delivery runs only from the committed decision below.
         let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
         let delivery_applicable = succeeded_before_stop
@@ -1816,6 +1817,7 @@ impl RunStore {
         } else if cancelled {
             decoded.outcome = Outcome::Cancelled;
         }
+        let decoded_reason = decoded.reason.take().map(bounded_reason);
         let publication = TerminalPublication {
             outcome: decoded.outcome,
             finished_at,
@@ -1824,7 +1826,7 @@ impl RunStore {
                 u64::try_from(finished_at.as_micros().saturating_sub(started.as_micros()) / 1000)
                     .ok()
             }),
-            reason: decoded.reason,
+            reason: decoded_reason,
             result: &result,
             complete: decoded.complete,
             redacted: true,
@@ -1950,6 +1952,20 @@ fn path_denial_hint(stderr: &[u8]) -> Option<String> {
     ))
 }
 
+/// Terminal evidence refuses a longer reason, so every published reason fits.
+const REASON_LIMIT: usize = 4096;
+
+fn bounded_reason(mut reason: String) -> String {
+    if reason.len() > REASON_LIMIT {
+        let mut end = REASON_LIMIT;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+    }
+    reason
+}
+
 /// A lane's own words in a one-line reason: bounded and on one line.
 fn bounded_note(note: &str) -> String {
     provenant_confinement::redact::bounded_line(note, 240)
@@ -1958,6 +1974,15 @@ fn bounded_note(note: &str) -> String {
 #[cfg(test)]
 mod host_clock_tests {
     use super::*;
+
+    #[test]
+    fn a_published_reason_fits_terminal_evidence_on_a_character_boundary() {
+        let long = "é".repeat(REASON_LIMIT);
+        let bounded = bounded_reason(long.clone());
+        assert!(bounded.len() <= REASON_LIMIT);
+        assert!(long.starts_with(&bounded));
+        assert_eq!(bounded_reason("short".into()), "short");
+    }
 
     #[test]
     fn path_denial_hints_require_a_path_and_redact_known_tokens() {
