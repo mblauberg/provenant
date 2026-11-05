@@ -73,6 +73,30 @@ fn validate_result(job: &RemoteJob) -> Result<(), Error> {
 impl CloudJobStore for AttemptCloudStore {
     type Error = Error;
 
+    fn begin(&mut self, job: &RemoteJob) -> Result<(), Error> {
+        if job.state != RemoteState::Submitting || !job.remote_id.is_empty() {
+            return Err(Error::Identity);
+        }
+        let record = Record {
+            schema_version: 2,
+            job: job.clone(),
+            extra: BTreeMap::new(),
+        };
+        let bytes = serde_json::to_vec(&record)?;
+        if bytes.len() as u64 > LIMIT {
+            return Err(FsError::TooLarge { limit: LIMIT }.into());
+        }
+        self.directory
+            .atomic_write(
+                OsStr::new(FILE),
+                ".cloud-job-",
+                &bytes,
+                PublishMode::NoReplace,
+            )?
+            .require_durable()?;
+        Ok(())
+    }
+
     fn save(&mut self, job: &RemoteJob) -> Result<(), Error> {
         validate_result(job)?;
         let previous = self.record()?;
@@ -92,7 +116,6 @@ impl CloudJobStore for AttemptCloudStore {
                 &old.target,
                 &old.environment,
                 &old.repository,
-                &old.remote_id,
                 &old.commit,
                 &old.requested_model,
                 &old.requested_effort,
@@ -101,11 +124,18 @@ impl CloudJobStore for AttemptCloudStore {
                 &job.target,
                 &job.environment,
                 &job.repository,
-                &job.remote_id,
                 &job.commit,
                 &job.requested_model,
                 &job.requested_effort,
             ) {
+                return Err(Error::Identity);
+            }
+            if old.remote_id != job.remote_id
+                && !(old.state == RemoteState::Submitting
+                    && old.remote_id.is_empty()
+                    && !job.remote_id.is_empty()
+                    && job.state == RemoteState::Running)
+            {
                 return Err(Error::Identity);
             }
         }
@@ -224,8 +254,9 @@ mod tests {
         let mut store = AttemptCloudStore::new(Directory::open_anchor(temp.path())?);
         let mut request = job();
         request.remote_id.clear();
-        let submitted =
-            submit(&mut Fake, &mut store, request, "run tests").map_err(|e| format!("{e:?}"))?;
+        let submitted = submit(&mut Fake, &mut store, request.clone(), "run tests")
+            .map_err(|e| format!("{e:?}"))?;
+        assert!(submit(&mut Fake, &mut store, request, "run tests").is_err());
         drop(store);
         let mut store = AttemptCloudStore::new(Directory::open_anchor(temp.path())?);
         let mut recovered = store.load()?.ok_or("missing job")?;

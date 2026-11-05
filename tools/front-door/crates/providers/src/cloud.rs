@@ -172,8 +172,12 @@ pub struct RemoteJob {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RemoteState {
+    /// Submission was attempted or is about to be attempted; custody is unknown.
+    Submitting,
     Running,
-    Finished { result: CloudResult },
+    Finished {
+        result: CloudResult,
+    },
     Cancelled,
     CancellationUnconfirmed,
 }
@@ -197,6 +201,8 @@ pub trait CloudProvider {
 /// The run owner supplies an attempt-scoped store whose save is durable.
 pub trait CloudJobStore {
     type Error;
+    /// Create the submission intent exactly once; an existing intent is not a retry.
+    fn begin(&mut self, job: &RemoteJob) -> Result<(), Self::Error>;
     fn save(&mut self, job: &RemoteJob) -> Result<(), Self::Error>;
 }
 
@@ -209,6 +215,8 @@ pub enum CloudJobError<P, S> {
         error: S,
     },
     Store(S),
+    /// The submission may have reached the provider but no ID was recorded.
+    SubmissionUnknown,
     Result(CloudResultError),
 }
 
@@ -219,6 +227,9 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
     mut job: RemoteJob,
     task: &str,
 ) -> Result<RemoteJob, CloudJobError<P::Error, S::Error>> {
+    job.remote_id.clear();
+    job.state = RemoteState::Submitting;
+    store.begin(&job).map_err(CloudJobError::Store)?;
     job.remote_id = provider
         .submit(CloudSubmission { job: &job, task })
         .map_err(CloudJobError::Provider)?;
@@ -243,6 +254,9 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
         RemoteState::Finished { .. } | RemoteState::Cancelled
     ) {
         return Ok(());
+    }
+    if job.state == RemoteState::Submitting {
+        return Err(CloudJobError::SubmissionUnknown);
     }
     let state = provider
         .observe(&job.remote_id)
@@ -270,6 +284,9 @@ pub fn cancel<P: CloudProvider, S: CloudJobStore>(
         RemoteState::Finished { .. } | RemoteState::Cancelled
     ) {
         return Ok(());
+    }
+    if job.state == RemoteState::Submitting {
+        return Err(CloudJobError::SubmissionUnknown);
     }
     let confirmed = provider
         .cancel(&job.remote_id)
@@ -321,6 +338,13 @@ mod lifecycle_tests {
     }
     impl CloudJobStore for FakeStore {
         type Error = ();
+        fn begin(&mut self, job: &RemoteJob) -> Result<(), ()> {
+            if self.saved.is_some() {
+                return Err(());
+            }
+            self.saved = Some(job.clone());
+            Ok(())
+        }
         fn save(&mut self, job: &RemoteJob) -> Result<(), ()> {
             if self.fail {
                 Err(())
@@ -414,6 +438,17 @@ mod lifecycle_tests {
         assert!(
             matches!(error, CloudJobError::SaveAfterSubmit { job, .. } if job.remote_id == "remote-1")
         );
+        assert_eq!(provider.submitted, 1);
+        let mut uncertain = store.saved.clone().unwrap();
+        assert_eq!(uncertain.state, RemoteState::Submitting);
+        assert!(matches!(
+            reconcile(&mut provider, &mut store, &mut uncertain),
+            Err(CloudJobError::SubmissionUnknown)
+        ));
+        assert!(matches!(
+            submit(&mut provider, &mut store, job(), "run tests"),
+            Err(CloudJobError::Store(()))
+        ));
         assert_eq!(provider.submitted, 1);
     }
 }
