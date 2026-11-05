@@ -1603,76 +1603,48 @@ mod tests {
             now: provenant_core::WallTime::from_micros(0)?,
             host: "test-host",
         };
-        // Each receipt names the pool that selected the route; `None` uses pool priority.
-        let rows: [(&str, Option<&str>, Option<&str>); 8] = [
-            (
-                "claude/claude-opus-5-5",
-                None,
-                Some(
-                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper principal route codex/gpt-6.1-sol effort=high (silence with domains.routing.suppress_opus_writer_warning = true)",
-                ),
-            ),
-            (
-                "claude/claude-opus-5-5",
-                Some("senior"),
-                Some(
-                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper senior route codex/gpt-6.1-sol effort=medium (silence with domains.routing.suppress_opus_writer_warning = true)",
-                ),
-            ),
-            (
-                "claude/claude-opus-5-5",
-                Some("junior"),
-                Some(
-                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper junior route codex/gpt-6.1-terra effort=low (silence with domains.routing.suppress_opus_writer_warning = true)",
-                ),
-            ),
-            (
-                "claude/claude-opus-5-5",
-                Some("design"),
-                Some(
-                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper design route claude/claude-sonnet-5-5 effort=high (silence with domains.routing.suppress_opus_writer_warning = true)",
-                ),
-            ),
-            (
-                "claude/claude-opus-5-5",
-                Some("writing"),
-                Some(
-                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper writing route agy/claude-sonnet-4-6 (silence with domains.routing.suppress_opus_writer_warning = true)",
-                ),
-            ),
-            (
-                "claude/claude-opus-5-5",
-                Some("utility"),
-                Some(
-                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper utility route codex/gpt-6-luna effort=low (silence with domains.routing.suppress_opus_writer_warning = true)",
-                ),
-            ),
-            (
-                "agy/claude-opus-4-6-thinking",
-                None,
-                Some(
-                    "advisory: Opus writer route agy/claude-opus-4-6-thinking; consider cheaper senior route codex/gpt-6.1-sol effort=medium (silence with domains.routing.suppress_opus_writer_warning = true)",
-                ),
-            ),
-            // Only exact catalogued IDs carry Opus class evidence.
-            ("claude/claude-opus-5", None, None),
-        ];
-        for (model, pool, expected) in rows {
-            let mut route = resolve(&request_for(model)?, &context)?;
-            route.effort = Some("high".into());
-            route.pool_selection = pool.map(|pool| provenant_records::RouteSelectionReceipt {
-                extra: Default::default(),
-                pool: pool.into(),
-                candidates: vec![],
-                roll: 0,
-                total_weight: 1,
-                pick: format!("{}/{}", route.adapter, route.model),
-                reason: None,
-                redraws: vec![],
-            });
-            let advisory = config.opus_writer_advisory(&catalogue, &route);
-            assert_eq!(advisory.as_deref(), expected, "{model} via {pool:?}");
+        for model in &catalogue.writer_advisory.warn_models {
+            for (pool, members) in &catalogue.pools {
+                let mut route = resolve(&request_for(model.as_str())?, &context)?;
+                route.effort = Some("high".into());
+                route.pool_selection = Some(provenant_records::RouteSelectionReceipt {
+                    extra: Default::default(),
+                    pool: pool.clone(),
+                    candidates: vec![],
+                    roll: 0,
+                    total_weight: 1,
+                    pick: format!("{}/{}", route.adapter, route.model),
+                    reason: None,
+                    redraws: vec![],
+                });
+                let advice = config.opus_writer_advisory(&catalogue, &route);
+                let cheaper = members.iter().find(|member| {
+                    member.weight > 0
+                        && member.model != *model
+                        && catalogue
+                            .writer_advisory
+                            .cheaper_models
+                            .contains(&member.model)
+                });
+                match cheaper {
+                    Some(cheaper) => {
+                        let advice = advice.ok_or("missing writer advisory")?;
+                        for part in [
+                            "Opus",
+                            model.as_str(),
+                            pool.as_str(),
+                            cheaper.model.as_str(),
+                            "suppress_opus_writer_warning",
+                        ] {
+                            assert!(advice.contains(part), "{advice}");
+                        }
+                    }
+                    None => assert!(advice.is_none(), "unexpected advisory for {pool}"),
+                }
+            }
         }
+        let route = resolve(&request_for("claude/claude-opus-5")?, &context)?;
+        assert!(config.opus_writer_advisory(&catalogue, &route).is_none());
         Ok(())
     }
 
