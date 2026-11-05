@@ -870,6 +870,20 @@ fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
     )?;
     assert_eq!(
         assessment.refusal.as_deref(),
+        Some("model reported unfinished work")
+    );
+    assert!(assessment.retry.is_none());
+    let assessment = run::Providers::assess_result(
+        &registry,
+        &input.request.tasks[0],
+        &record,
+        &decoded,
+        Some(&handoff),
+        None,
+        3,
+    )?;
+    assert_eq!(
+        assessment.refusal.as_deref(),
         Some("model reported unfinished work; continuations exhausted")
     );
     assert!(assessment.retry.is_none());

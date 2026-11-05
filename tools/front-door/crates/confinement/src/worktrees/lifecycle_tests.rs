@@ -2685,7 +2685,7 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn gc_skips_unmanaged_worktrees_and_their_output() -> Result<(), Box<dyn Error>> {
+fn gc_reclaims_unmanaged_output_but_keeps_worktree() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     fs::write(fixture.root.join(".gitignore"), "target/\n")?;
     fixture.run(&["add", ".gitignore"])?;
@@ -2730,12 +2730,15 @@ fn gc_skips_unmanaged_worktrees_and_their_output() -> Result<(), Box<dyn Error>>
         },
         &cancel(),
     )?;
-    assert!(target.join("artifact").is_file());
+    assert!(!target.join("artifact").exists());
     assert!(unmanaged.is_dir());
     assert!(branch_exists(&fixture, "gc-unmanaged"));
     assert!(report.worktrees.removed.is_empty());
     assert!(report.worktrees.retained.is_empty());
     assert!(report.output.is_empty());
+    assert_eq!(report.idle_output.len(), 1);
+    assert_eq!(report.idle_output[0].path, target);
+    assert!(report.idle_output[0].removed);
     Ok(())
 }
 

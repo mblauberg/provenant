@@ -1175,26 +1175,32 @@ mod cargo_setup_tests {
                 )
                 .unwrap();
                 send.send(index).unwrap();
-                std::thread::sleep(Duration::from_millis(125));
+                let start = std::time::Instant::now();
+                provenant_test_support::wait_for(
+                    "slow holder",
+                    Duration::from_secs(5),
+                    || start.elapsed(),
+                    |elapsed| *elapsed >= Duration::from_millis(125),
+                )
+                .unwrap();
             }));
-            let until = std::time::Instant::now() + Duration::from_secs(5);
-            loop {
-                let count = std::fs::read_dir(temp.path().join("provenant-lane-setup-queue"))
-                    .map(|entries| {
-                        entries
-                            .filter_map(std::result::Result::ok)
-                            .filter(|entry| {
-                                entry.file_name().to_string_lossy().starts_with("ticket-")
-                            })
-                            .count()
-                    })
-                    .unwrap_or(0);
-                if count == index + 1 {
-                    break;
-                }
-                assert!(std::time::Instant::now() < until, "waiter did not queue");
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            provenant_test_support::wait_for(
+                "waiter to queue",
+                Duration::from_secs(5),
+                || {
+                    std::fs::read_dir(temp.path().join("provenant-lane-setup-queue"))
+                        .map(|entries| {
+                            entries
+                                .filter_map(std::result::Result::ok)
+                                .filter(|entry| {
+                                    entry.file_name().to_string_lossy().starts_with("ticket-")
+                                })
+                                .count()
+                        })
+                        .unwrap_or(0)
+                },
+                |count| *count == index + 1,
+            )?;
         }
         let released = std::time::Instant::now();
         drop(initial);
@@ -1231,14 +1237,16 @@ mod cargo_setup_tests {
             .arg("writer::cargo_setup_tests::setup_lock_recovers_after_holder_dies")
             .env(CHILD_DIR, temp.path())
             .spawn()?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !temp.path().join("ready").exists() {
-            if child.try_wait()?.is_some() || std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("holder did not acquire the setup lock".into());
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        let ready = provenant_test_support::wait_for(
+            "holder to acquire setup lock",
+            Duration::from_secs(10),
+            || (temp.path().join("ready").exists(), child.try_wait()),
+            |(ready, exited)| *ready || !matches!(exited, Ok(None)),
+        );
+        if !matches!(ready, Ok((true, Ok(None)))) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("holder did not acquire the setup lock".into());
         }
         let directory = Directory::open_anchor(temp.path())?;
         let held = directory.try_lock_existing(name, LockMode::Exclusive);
@@ -1254,23 +1262,24 @@ mod cargo_setup_tests {
             .map(drop)
             .map_err(|error| error.to_string())
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let queued = loop {
-            let count = std::fs::read_dir(temp.path().join("provenant-lane-setup-queue"))
-                .map(|entries| {
-                    entries
-                        .filter_map(std::result::Result::ok)
-                        .any(|entry| entry.file_name().to_string_lossy().starts_with("ticket-"))
-                })
-                .unwrap_or(false);
-            if count {
-                break true;
-            }
-            if waiter.is_finished() || std::time::Instant::now() >= deadline {
-                break false;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        };
+        let queued = provenant_test_support::wait_for(
+            "waiter to queue",
+            Duration::from_secs(5),
+            || {
+                (
+                    std::fs::read_dir(temp.path().join("provenant-lane-setup-queue"))
+                        .map(|entries| {
+                            entries.filter_map(std::result::Result::ok).any(|entry| {
+                                entry.file_name().to_string_lossy().starts_with("ticket-")
+                            })
+                        })
+                        .unwrap_or(false),
+                    waiter.is_finished(),
+                )
+            },
+            |(queued, finished)| *queued || *finished,
+        )
+        .is_ok_and(|(queued, _)| queued);
         child.kill()?;
         child.wait()?;
         assert!(queued, "waiter did not enter the queue");
