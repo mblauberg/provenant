@@ -294,7 +294,18 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
             .cli
             .run("codex", &["cloud", "status", &job.remote_id], None)?;
         let lower = out.to_ascii_lowercase();
-        if lower.contains("running") || lower.contains("pending") || lower.contains("queued") {
+        if [
+            "environment setup failed",
+            "setup_failed",
+            "environment_missing",
+            "environment not found",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+        {
+            Ok(crate::cloud::RemoteState::SetupFailed { detail: out })
+        } else if lower.contains("running") || lower.contains("pending") || lower.contains("queued")
+        {
             Ok(crate::cloud::RemoteState::Running)
         } else if ["completed", "finished", "succeeded", "failed"]
             .iter()
@@ -518,6 +529,13 @@ mod adapter_tests {
         codex.cli.response = "status: running".into();
         assert_eq!(codex.observe(&job).unwrap(), RemoteState::Running);
         assert!(!codex.cancel(&job).unwrap());
+        codex.cli.response = "environment setup failed".into();
+        let mut diagnosed = job.clone();
+        diagnosed.state = codex.observe(&job).unwrap();
+        let diagnostic = diagnosed.environment_diagnostic().unwrap();
+        assert_eq!(diagnostic.target, "target");
+        assert_eq!(diagnostic.environment, "env");
+        assert!(diagnostic.remedy.contains("repair"));
         codex.cli.response = "unexpected".into();
         assert!(codex.observe(&job).unwrap_err().contains("unexpected"));
     }
