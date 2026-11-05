@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#![allow(clippy::disallowed_methods)] // Spawns the worker and a fake forge under test.
 use std::{
     fs,
     io::{Read, Write},
