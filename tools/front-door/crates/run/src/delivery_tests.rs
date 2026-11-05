@@ -833,15 +833,7 @@ fn terminal_imports_private_objects_before_quarantine_reads_the_lane()
             )?;
             for args in [
                 vec!["add", "private.txt"],
-                vec![
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.invalid",
-                    "commit",
-                    "-qm",
-                    "private commit",
-                ],
+                vec!["commit", "-qm", "private commit"],
             ] {
                 let argv: Vec<OsString> = std::iter::once(executable.as_os_str().to_owned())
                     .chain(args.into_iter().map(Into::into))
@@ -1107,6 +1099,7 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
      -> std::result::Result<String, Box<dyn std::error::Error>> {
         let output = provenant_os::fixture::git_command_at(&git)
             .env_clear()
+            .envs(provenant_os::fixture::fixture_git_settings())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -1122,19 +1115,7 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
         Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     };
     run(&git_dir, &["init", "-q"])?;
-    run(
-        &git_dir,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "initial",
-        ],
-    )?;
+    run(&git_dir, &["commit", "--allow-empty", "-qm", "initial"])?;
     run(&remote, &["init", "-q"])?;
     run(&remote, &["config", "--local", "core.bare", "true"])?;
     run(
@@ -1169,19 +1150,7 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
     );
     // Packed refs let the fixture advertise both spellings even on a
     // case-insensitive host. The new commit makes an accidental fetch visible.
-    run(
-        &git_dir,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "newer",
-        ],
-    )?;
+    run(&git_dir, &["commit", "--allow-empty", "-qm", "newer"])?;
     let newer = run(&git_dir, &["rev-parse", "HEAD"])?;
     run(&remote, &["update-ref", "-d", "refs/heads/main"])?;
     std::fs::write(
@@ -1249,6 +1218,7 @@ impl OriginFixture {
     ) -> std::result::Result<String, Box<dyn std::error::Error>> {
         let output = provenant_os::fixture::git_command_at(&self.git)
             .env_clear()
+            .envs(provenant_os::fixture::fixture_git_settings())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -1298,16 +1268,7 @@ impl OriginFixture {
     }
 
     fn commit(&self, message: &str) -> std::result::Result<String, Box<dyn std::error::Error>> {
-        self.local(&[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            message,
-        ])?;
+        self.local(&["commit", "--allow-empty", "-qm", message])?;
         self.local(&["rev-parse", "HEAD"])
     }
 
@@ -2978,9 +2939,10 @@ impl PrepareFixture {
             environment: vec![
                 ("HOME".into(), home.into_os_string()),
                 ("PATH".into(), "/usr/bin:/bin".into()),
-                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ],
+            ]
+            .into_iter()
+            .chain(provenant_os::fixture::fixture_git_settings())
+            .collect(),
             writer: WriterRequest {
                 extra: Default::default(),
                 project,
@@ -2996,16 +2958,7 @@ impl PrepareFixture {
             },
         };
         fixture.git(&["init", "-q"])?;
-        fixture.git(&[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "Initial",
-        ])?;
+        fixture.git(&["commit", "--allow-empty", "-qm", "Initial"])?;
         let remote = root.join("remote.git");
         fixture.git(&["init", "--bare", "-q", remote.to_str().ok_or("remote")?])?;
         fixture.git(&["remote", "add", "origin", remote.to_str().ok_or("remote")?])?;
@@ -3058,10 +3011,6 @@ impl PrepareFixture {
         self.git(&[
             "-C",
             path.to_str().ok_or("commit path")?,
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
             "commit",
             "--allow-empty",
             "-qm",
@@ -3216,20 +3165,34 @@ impl PrepareFixture {
             // child can briefly share the dropped lock's open file description
             // until it execs. Retry for about five seconds.
             let mut resumed = None;
-            provenant_test_support::wait_for(
+            let (_, observation) = provenant_test_support::wait_for(
                 "resumed settlement owner",
                 Duration::from_secs(5),
                 || {
-                    let result = crate::settlement::Guard::claim(&attempt, scope, &clock);
-                    let ready = !matches!(result, Ok(None));
-                    resumed = Some(result);
-                    ready
+                    let result = crate::settlement::Guard::claim_observed(&attempt, scope, &clock);
+                    let retryable = matches!(
+                        &result,
+                        Ok((
+                            None,
+                            Some(
+                                crate::settlement::ClaimRefusal::DriverLease
+                                    | crate::settlement::ClaimRefusal::JournalLock
+                            )
+                        ))
+                    );
+                    let observation = match &result {
+                        Ok((None, reason)) => format!("claim refused: {reason:?}"),
+                        Ok((Some(_), _)) => "claimed".to_owned(),
+                        Err(error) => format!("claim error: {error}"),
+                    };
+                    resumed = Some(result.map(|(driver, _)| driver));
+                    (retryable, observation)
                 },
-                |ready| *ready,
+                |(retryable, _)| !retryable,
             )?;
             settlement = resumed
                 .ok_or("no claim attempted")??
-                .ok_or("resumed owner")?;
+                .ok_or_else(|| format!("resumed owner: {observation}"))?;
         }
         let review = launch.terminal(
             &state,
@@ -3323,15 +3286,7 @@ fn merge_upstream_then_edit(
     fixture: &PrepareFixture,
     remote_ref: &str,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    fixture.lane_git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "merge",
-        "--no-edit",
-        remote_ref,
-    ])?;
+    fixture.lane_git(&["merge", "--no-edit", remote_ref])?;
     std::fs::write(
         fixture.writer.worktree.join("source.txt"),
         "writer source\n",
@@ -3450,15 +3405,7 @@ fn terminal_exempts_merged_upstream_protected_changes()
                 )?;
                 fixture.lane_git(&["add", "source.txt"])?;
                 fixture.commit(&fixture.writer.worktree, "Writer source")?;
-                fixture.lane_git(&[
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.invalid",
-                    "merge",
-                    "--no-edit",
-                    "origin/main",
-                ])?;
+                fixture.lane_git(&["merge", "--no-edit", "origin/main"])?;
                 if protected {
                     std::fs::write(
                         fixture.writer.worktree.join(".github/ci.yml"),

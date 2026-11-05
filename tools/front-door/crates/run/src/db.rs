@@ -271,7 +271,7 @@ impl RunStore {
             launched_tasks: Default::default(),
             _owner: PhantomData,
         };
-        if schema_version < 8 {
+        if schema_version < SCHEMA_VERSION {
             // Read legacy paths once, outside the migration transaction. The
             // initialisation lock serialises migrations. Unreadable paths and
             // in-flight attempts keep the conservative retained default.
@@ -283,19 +283,9 @@ impl RunStore {
             store.write(request, |tx| {
                 let current = version(tx)?;
                 let start = usize::try_from(current).map_err(|_| RunError::Version(current))?;
-                let steps = [
-                    include_str!("schema.sql"),
-                    include_str!("schema_v2.sql"),
-                    include_str!("schema_v3.sql"),
-                    include_str!("schema_v4.sql"),
-                    include_str!("schema_v5.sql"),
-                    include_str!("schema_v6.sql"),
-                    include_str!("schema_v7.sql"),
-                    include_str!("schema_v8.sql"),
-                ];
                 provenant_sqlite::migrate(
                     tx,
-                    &steps,
+                    &SCHEMA_STEPS,
                     start,
                     || {
                         // The write reservation excludes commits through the snapshot and upgrade.
@@ -436,8 +426,23 @@ pub(crate) fn open_database(
     }
     Ok((root, db, initialisation))
 }
+/// Ordered run-store migrations. A step's index is the version it upgrades from,
+/// so the current version follows from this list and a new step cannot be missed
+/// when an existing store opens.
+const SCHEMA_STEPS: [&str; 8] = [
+    include_str!("schema.sql"),
+    include_str!("schema_v2.sql"),
+    include_str!("schema_v3.sql"),
+    include_str!("schema_v4.sql"),
+    include_str!("schema_v5.sql"),
+    include_str!("schema_v6.sql"),
+    include_str!("schema_v7.sql"),
+    include_str!("schema_v8.sql"),
+];
+const SCHEMA_VERSION: i64 = SCHEMA_STEPS.len() as i64;
+
 fn version(db: &Connection) -> Result<i64> {
-    Ok(provenant_sqlite::read_version(db, 8)? as i64)
+    Ok(provenant_sqlite::read_version(db, SCHEMA_STEPS.len())? as i64)
 }
 pub(crate) fn private(directory: &Directory) -> Result<()> {
     let m = directory.metadata()?;

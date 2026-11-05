@@ -711,7 +711,6 @@ mod tests {
             let out = provenant_os::fixture::git_command()
                 .arg("-C")
                 .arg(&dir)
-                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
                 .args(args)
                 .output()
                 .unwrap();

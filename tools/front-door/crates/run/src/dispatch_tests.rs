@@ -3347,7 +3347,7 @@ fn empty_success_is_assessed_before_settlement_rejects_it() -> TestResult {
 }
 
 #[test]
-fn failed_lane_result_preserves_path_denial_evidence() -> TestResult {
+fn failed_lane_reason_preserves_path_denial_evidence() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -3380,15 +3380,14 @@ fn failed_lane_result_preserves_path_denial_evidence() -> TestResult {
         ..Fake::default()
     };
     store.finish(id, &dir, &observed, &fake, &call)?;
-    let result = artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or("result")?;
-    let result = String::from_utf8(result)?;
-    assert!(result.contains("/fixture/missing-grant"), "{result}");
-    assert!(result.contains("access grant"), "{result}");
+    let reason = terminal_reason(&store, id, &call)?;
+    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(reason.contains("access grant"), "{reason}");
     Ok(())
 }
 
 #[test]
-fn successful_lane_result_preserves_stdout_path_denial_evidence() -> TestResult {
+fn a_lane_without_a_handoff_reports_a_stdout_path_denial_in_its_reason() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -3422,11 +3421,49 @@ fn successful_lane_result_preserves_stdout_path_denial_evidence() -> TestResult 
         ..Fake::default()
     };
     store.finish(id, &dir, &observed, &fake, &call)?;
-    let result = artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or("result")?;
-    let result = String::from_utf8(result)?;
-    assert!(result.contains("/fixture/missing-grant"), "{result}");
-    assert!(result.contains("access grant"), "{result}");
+    let reason = terminal_reason(&store, id, &call)?;
+    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(reason.contains("access grant"), "{reason}");
     assert_eq!(terminal(&store, id, &call)?, Outcome::ReviewRequired);
+    Ok(())
+}
+
+#[test]
+fn a_path_denial_leaves_a_finished_lanes_answer_and_success_intact() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
+    artifacts::seal(&dir, "stderr.log", b"", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let answer = "cat: /fixture/missing-grant: Operation not permitted\nI used the brief instead.\n\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```\n";
+    let fake = Fake {
+        observed: Some(route()),
+        answer: Some(answer.into()),
+        ..Fake::default()
+    };
+    store.finish(id, &dir, &observed, &fake, &call)?;
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
+    let result = artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or("result")?;
+    assert_eq!(String::from_utf8(result)?, answer);
+    let reason = terminal_reason(&store, id, &call)?;
+    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
     Ok(())
 }
 
@@ -3466,10 +3503,9 @@ fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
         ..Fake::default()
     };
     let record = store.finish(id, &dir, &observed, &fake, &call)?;
-    let result = artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or("result")?;
-    let result = String::from_utf8(result)?;
-    assert!(result.contains("/fixture/missing-grant"), "{result}");
-    assert!(result.contains("access grant"), "{result}");
+    let reason = terminal_reason(&store, id, &call)?;
+    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(reason.contains("access grant"), "{reason}");
     assert_eq!(terminal(&store, id, &call)?, Outcome::Failed);
     assert!(store.staged_policy_retry(&record)?.is_some());
     Ok(())
@@ -5691,6 +5727,13 @@ fn finish_reactions(store: &RunStore) -> TestResult {
         })?;
     }
     Ok(())
+}
+
+fn terminal_reason(store: &RunStore, id: AttemptId, call: &Request<'_>) -> Result<String> {
+    match store.record(id, call)?.state {
+        AttemptState::Terminal { reason, .. } => Ok(reason.unwrap_or_default()),
+        _ => Err(RunError::Nonterminal),
+    }
 }
 
 fn terminal(store: &RunStore, id: AttemptId, call: &Request<'_>) -> Result<Outcome> {

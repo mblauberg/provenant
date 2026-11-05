@@ -583,7 +583,10 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
             .chain(args.iter().map(std::ffi::OsStr::new))
             .map(Into::into)
             .collect::<Vec<_>>();
-        let output = executor.execute(ExecOptions::new(&argv, &repo, Duration::from_secs(10)))?;
+        let env = provenant_os::fixture::git_env();
+        let mut options = ExecOptions::new(&argv, &repo, Duration::from_secs(10));
+        options.env = Some(&env);
+        let output = executor.execute(options)?;
         assert!(
             output.termination == Termination::Exit(0),
             "git failed: {}",
@@ -594,54 +597,16 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     run_git(&["init"])?;
     std::fs::write(repo.join("file"), "base\n")?;
     run_git(&["add", "file"])?;
-    run_git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.test",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "fixture",
-    ])?;
+    run_git(&["commit", "--allow-empty", "-m", "fixture"])?;
     run_git(&["checkout", "-b", "side"])?;
     std::fs::write(repo.join("file"), "side\n")?;
     run_git(&["add", "file"])?;
-    run_git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.test",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "side",
-    ])?;
+    run_git(&["commit", "--allow-empty", "-m", "side"])?;
     run_git(&["checkout", "-"])?;
     std::fs::write(repo.join("file"), "main\n")?;
     run_git(&["add", "file"])?;
-    run_git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.test",
-        "commit",
-        "-m",
-        "main",
-    ])?;
-    run_git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.test",
-        "merge",
-        "--no-ff",
-        "-s",
-        "ours",
-        "side",
-        "-m",
-        "merge",
-    ])?;
+    run_git(&["commit", "-m", "main"])?;
+    run_git(&["merge", "--no-ff", "-s", "ours", "side", "-m", "merge"])?;
     let worktree = root.join("linked");
     run_git(&[
         "worktree",

@@ -636,8 +636,9 @@ mod tests {
                 options: ExecOptions<'_>,
             ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
                 let mut env = options.env.unwrap_or_default().to_vec();
-                env.retain(|(key, _)| key != "HOME");
+                env.retain(|(key, _)| key != "HOME" && !key.to_string_lossy().starts_with("GIT_"));
                 env.push(("HOME".into(), self.home.as_os_str().to_owned()));
+                env.extend(provenant_os::fixture::fixture_git_settings());
                 let mut adjusted = ExecOptions::new(options.argv, options.cwd, options.timeout);
                 adjusted.env = Some(&env);
                 adjusted.stdin = options.stdin;
@@ -666,19 +667,7 @@ mod tests {
             &["init", "--bare", bare.to_str().ok_or("bare path")?],
         )?;
         git(temp.path(), &["init", repo.to_str().ok_or("repo path")?])?;
-        git(
-            &repo,
-            &[
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "test",
-            ],
-        )?;
+        git(&repo, &["commit", "--allow-empty", "-m", "test"])?;
         git(
             &repo,
             &[

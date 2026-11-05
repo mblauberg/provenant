@@ -617,6 +617,14 @@ impl RunError {
                     ));
                 }
             }
+            Self::Sqlite(error)
+                if matches!(
+                    destination,
+                    provenant_records::diagnostic::Destination::Local
+                ) =>
+            {
+                diagnostic = diagnostic.detail(format!("run store: {error}"));
+            }
             Self::GenerationConflict { current_generation } => {
                 diagnostic =
                     diagnostic.fact(DiagnosticFact::GenerationConflict(*current_generation));
