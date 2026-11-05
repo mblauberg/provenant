@@ -268,6 +268,9 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         error: CancelRowError {
             code: "NOT_FOUND".into(),
             message: "gone".into(),
+            cause: None,
+            repair: None,
+            diagnostic: None,
         },
     });
     let mut data = CancelData {
@@ -305,7 +308,7 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         json!({"state": "settling", "phase": "delivery"}),
         json!({"state": "finished"}),
         json!({"state": "temporary_removed"}),
-        json!({"state": "temporary_retained", "path": "/tmp/a", "reason": "retained"}),
+        json!({"state": "temporary_retained", "path": {"kind":"path", "root":"/", "relative":{"encoding":"utf8", "path":"tmp/a"}}, "reason": "retained"}),
         json!({"state": "withdrawn"}),
         json!({"state": "escaped", "pids": [123]}),
         json!({"state": "uncertain", "reason": {"kind": "no_launch_summary"}}),

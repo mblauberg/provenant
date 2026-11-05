@@ -165,8 +165,10 @@ fn peer_failure_fail(failure: PeerFailure) -> Fail {
         );
     }
     let (status, kind) = crate::fabric::facade_outcome(&error);
+    let projection = error.diagnostic();
     Fail {
         detail: Some(Box::new(error)),
+        projection: Some(Box::new(projection)),
         ..Fail::new(status, kind, format!("peer: {message}"))
     }
 }
@@ -1672,7 +1674,7 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                     Err(fail) => {
                         status = Status::Failed;
                         human.push_str(&format!("{attempt} error: {}\n", fail.message));
-                        json!({ "attempt_id": attempt, "host": host, "error": { "code": fail.kind.code(), "message": fail.message } })
+                        json!({ "attempt_id": attempt, "host": host, "error": super::command_error(&fail) })
                     }
                 };
                 receipts.push(row);
@@ -2391,6 +2393,23 @@ mod tests {
             "{}",
             fail.message
         );
+    }
+
+    #[test]
+    fn peer_refusal_keeps_owner_code_and_safe_facts() {
+        use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+        let fail = peer_failure_fail(
+            FacadeError::DispatchRefused {
+                fact: Some(DispatchRefusalFact::DetachedWriter),
+                disk: None,
+                reason: "writer refused".into(),
+            }
+            .into(),
+        );
+        let error = json!(super::super::command_error(&fail));
+        assert_eq!(error["code"], "REFUSED");
+        assert_eq!(error["detail"], "writer needs a branch");
+        assert!(error["next"].as_str().is_some_and(|next| !next.is_empty()));
     }
 
     #[test]

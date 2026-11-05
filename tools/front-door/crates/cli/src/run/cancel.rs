@@ -83,7 +83,7 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     Err(fail) => {
                         status = Status::Failed;
                         human.push_str(&format!("{id} error: {}\n", fail.message));
-                        json!({ "attempt_id": id, "error": { "code": fail.kind.code(), "message": fail.message } })
+                        json!({ "attempt_id": id, "error": command_error(&fail) })
                     }
                 };
                 receipts.push(row);
@@ -120,7 +120,13 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                                 status = Status::Failed;
                             }
                             human.push_str(&format!("{id} {}\n", reconcile_summary(state)));
-                            rows.push(json!({ "attempt_id": id, "found": state }));
+                            let mut found = json!(state);
+                            if let run::Reconciled::TemporaryRetained { path, .. } = state {
+                                found["path"] = json!(
+                                    provenant_records::AbsolutePathWire::from_path(path).ok()
+                                );
+                            }
+                            rows.push(json!({ "attempt_id": id, "found": found }));
                         }
                         data["recovered"] = Value::Array(rows);
                     }

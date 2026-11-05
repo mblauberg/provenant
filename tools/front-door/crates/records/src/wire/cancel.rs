@@ -36,6 +36,10 @@ pub const CANCEL_STATES: &[&str] = &[
 pub struct CancelRowError {
     pub code: String,
     pub message: String,
+    pub cause: Option<String>,
+    pub repair: Option<String>,
+    #[serde(flatten)]
+    pub diagnostic: Option<crate::diagnostic::DiagnosticFields>,
 }
 
 /// One row of `receipts`: the attempt and either its receipt or its error.
@@ -72,7 +76,7 @@ pub enum ReconciledWire {
     Finished,
     TemporaryRemoved,
     TemporaryRetained {
-        path: std::path::PathBuf,
+        path: crate::AbsolutePathWire,
         reason: String,
     },
     Withdrawn,
