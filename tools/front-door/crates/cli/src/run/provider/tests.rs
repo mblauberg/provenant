@@ -1,4 +1,34 @@
 #[test]
+fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
+    use provenant_providers::ProviderError;
+    use provenant_routing::FallbackOutcome;
+    for error in [
+        ProviderError::LoginRequired,
+        ProviderError::CredentialUnavailable,
+        ProviderError::CredentialNotFound,
+        ProviderError::CredentialExpired,
+    ] {
+        assert_eq!(
+            provider_preparation_fallback(&error),
+            FallbackOutcome::AuthRequired
+        );
+    }
+    for error in [
+        ProviderError::UnsupportedPolicy,
+        ProviderError::IdentityMismatch,
+        ProviderError::UnknownIdentity,
+        ProviderError::InvalidPath,
+        ProviderError::IsolatedKeychainUnavailable("fixture".into()),
+        ProviderError::Malformed,
+    ] {
+        assert_eq!(
+            provider_preparation_fallback(&error),
+            FallbackOutcome::Other
+        );
+    }
+}
+
+#[test]
 fn codex_auth_reprobe_uses_selected_home_and_trusts_status()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor, Termination};

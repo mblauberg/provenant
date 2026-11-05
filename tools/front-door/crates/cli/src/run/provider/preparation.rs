@@ -15,6 +15,21 @@ pub(super) fn violates_account_pin(
     })
 }
 
+/// A provider's typed login refusal can be retried before handoff. Policy,
+/// identity and path errors remain unclassified and stop route switching.
+pub(super) fn provider_preparation_fallback(
+    error: &provenant_providers::ProviderError,
+) -> provenant_routing::FallbackOutcome {
+    use provenant_providers::ProviderError;
+    match error {
+        ProviderError::LoginRequired
+        | ProviderError::CredentialUnavailable
+        | ProviderError::CredentialNotFound
+        | ProviderError::CredentialExpired => provenant_routing::FallbackOutcome::AuthRequired,
+        _ => provenant_routing::FallbackOutcome::Other,
+    }
+}
+
 // Resolve only PATH, leaving the rest of the daemon environment intact. The
 // login shell runs from the account home, never the writer's checkout.
 fn host_dependency_path(
@@ -1517,7 +1532,13 @@ pub(super) fn prepare_candidates(
         let mut spec = match prepare(&provider_route) {
             Ok(spec) => spec,
             Err(error) => {
-                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                previous_outcome = provider_preparation_fallback(&error);
+                let kind = if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired {
+                    SkipKind::AuthRequired
+                } else {
+                    SkipKind::Refused
+                };
+                reasons.push(skip(&label, kind, error.to_string()));
                 continue;
             }
         };
@@ -1531,7 +1552,14 @@ pub(super) fn prepare_candidates(
             spec = match prepare(&without_skills) {
                 Ok(spec) => spec,
                 Err(error) => {
-                    reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                    previous_outcome = provider_preparation_fallback(&error);
+                    let kind =
+                        if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired {
+                            SkipKind::AuthRequired
+                        } else {
+                            SkipKind::Refused
+                        };
+                    reasons.push(skip(&label, kind, error.to_string()));
                     continue;
                 }
             };
