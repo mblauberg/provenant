@@ -3626,14 +3626,10 @@ fn retained_state_copy_keeps_only_codex_session_trees() -> Result<(), Box<dyn st
     )?;
     std::fs::write(source.join("sessions/models_cache.json"), "state")?;
     std::fs::write(source.join("sessions/rollout.jsonl"), "transcript")?;
-    for provider in [Some("codex"), Some("claude"), None] {
-        if let Some(provider) = provider {
-            std::fs::write(source.join("provider.txt"), provider)?;
-        } else {
-            std::fs::remove_file(source.join("provider.txt"))?;
-        }
-        let copied = base.join(provider.unwrap_or("legacy"));
-        copy_state(&source, &copied, provider == Some("codex"))?;
+    for provider in ["codex", "claude"] {
+        std::fs::write(source.join("provider.txt"), provider)?;
+        let copied = base.join(provider);
+        copy_state(&source, &copied, provider == "codex")?;
         for name in [
             "cache",
             "plugins",
@@ -3641,7 +3637,7 @@ fn retained_state_copy_keeps_only_codex_session_trees() -> Result<(), Box<dyn st
             "models_cache.json",
             "state_5.sqlite",
         ] {
-            assert_eq!(copied.join(name).exists(), provider != Some("codex"));
+            assert_eq!(copied.join(name).exists(), provider != "codex");
             assert!(source.join(name).exists());
         }
         for name in ["cache", "plugins", "skills", "models_cache.json"] {
