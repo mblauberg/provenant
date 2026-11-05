@@ -774,6 +774,12 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         .find(|lane| lane.path == path)
         .ok_or("lane")?;
     assert_eq!(lane.writer, WriterState::Busy);
+    let observation = list_with_observation(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.info.path == path)
+        .ok_or("retained worktree")?;
+    assert_eq!(observation.occupancy, Occupancy::Held);
+    fs::write(path.join("uncommitted"), "preserve unfinished work")?;
     let tree = verify_worktree(&fixture.repo, &path)?;
     let new_owner = WorktreeOwner {
         attempt_id: None,
@@ -829,6 +835,12 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
     };
     collect(&context, &lanes, &policy, &cancel())?;
     assert!(path.join("target/artifact").is_file());
+    assert_eq!(
+        fs::read_to_string(path.join("uncommitted"))?,
+        "preserve unfinished work"
+    );
+    assert_eq!(fs::read(attempt.join("reservation.json"))?, reservation);
+    assert_eq!(fs::read(attempt.join("import-retained.json"))?, b"retained");
 
     // Settlement can retain historical evidence after clearing the reservation.
     fs::remove_file(attempt.join("reservation.json"))?;
