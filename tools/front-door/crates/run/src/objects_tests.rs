@@ -280,21 +280,13 @@ fn git(
     let mut command = provenant_os::fixture::git_command_at(executable);
     command
         .env_clear()
+        .envs(provenant_os::fixture::fixture_git_settings())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .args([
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "-c",
-            "gc.auto=0",
-            "-c",
-            "maintenance.auto=false",
-        ])
+        .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
         .args(args)
         .current_dir(cwd);
     if let Some(objects) = objects {
@@ -429,6 +421,7 @@ impl Fixture {
     fn git_overlay(&self, scratch: &Path, args: &[&str]) -> TestResult<Output> {
         let output = provenant_os::fixture::git_command_at(&self.git)
             .env_clear()
+            .envs(provenant_os::fixture::fixture_git_settings())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -437,16 +430,7 @@ impl Fixture {
             .env("GIT_COMMON_DIR", scratch.join("git-common"))
             .env("GIT_WORK_TREE", &self.lane)
             .env("GIT_OBJECT_DIRECTORY", &self.source)
-            .args([
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "-c",
-                "gc.auto=0",
-                "-c",
-                "maintenance.auto=false",
-            ])
+            .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
             .args(args)
             .current_dir(&self.lane)
             .output()?;
