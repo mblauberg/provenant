@@ -118,7 +118,28 @@ pub fn list_with_observation(
 pub fn list_streaming(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
+    report: impl FnMut(usize, Option<&WorktreeInfo>),
+) -> Result<Vec<WorktreeObservation>, WorktreeError> {
+    list_impl(context, cancel, report, true)
+}
+
+/// Inventory for GC. Cleanliness is checked only for candidates after the
+/// policy and custody checks, rather than running Git in every checkout.
+pub fn list_for_gc(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    Ok(list_impl(context, cancel, |_, _| {}, false)?
+        .into_iter()
+        .map(|observation| observation.info)
+        .collect())
+}
+
+fn list_impl(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
     mut report: impl FnMut(usize, Option<&WorktreeInfo>),
+    eager_git: bool,
 ) -> Result<Vec<WorktreeObservation>, WorktreeError> {
     validate_binding(context)?;
     let entries = {
@@ -151,8 +172,12 @@ pub fn list_streaming(
         let (dirty, writer, registration_unknown) = if path == primary {
             owner = OwnerStatus::Primary;
             (
-                worktree_dirty_at(context, context.repo, cancel)
-                    .unwrap_or(WorktreeCondition::Unknown),
+                if eager_git {
+                    worktree_dirty_at(context, context.repo, cancel)
+                        .unwrap_or(WorktreeCondition::Unknown)
+                } else {
+                    WorktreeCondition::Unknown
+                },
                 combine_worker_state(WorkerState::Unknown, observed),
                 true,
             )
@@ -170,8 +195,12 @@ pub fn list_streaming(
                         disk_writer_state(context.project_state, &path)
                     };
                     (
-                        worktree_dirty_at(context, worktree.repo(), cancel)
-                            .unwrap_or(WorktreeCondition::Unknown),
+                        if eager_git {
+                            worktree_dirty_at(context, worktree.repo(), cancel)
+                                .unwrap_or(WorktreeCondition::Unknown)
+                        } else {
+                            WorktreeCondition::Unknown
+                        },
                         if entry.locked || entry.prunable {
                             WriterState::Unknown
                         } else {

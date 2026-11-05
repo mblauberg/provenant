@@ -41,6 +41,27 @@ pub fn collect(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
+    collect_impl(context, lanes, policy, cancel, false)
+}
+
+/// Collect against [`list_for_gc`], checking candidate cleanliness under
+/// writer exclusion before using it to authorise cleanup.
+pub fn collect_lazy(
+    context: &WorktreeContext<'_>,
+    lanes: &[WorktreeInfo],
+    policy: &WorktreeGcPolicy<'_>,
+    cancel: &CancelToken,
+) -> Result<WorktreeGcReport, WorktreeError> {
+    collect_impl(context, lanes, policy, cancel, true)
+}
+
+fn collect_impl(
+    context: &WorktreeContext<'_>,
+    lanes: &[WorktreeInfo],
+    policy: &WorktreeGcPolicy<'_>,
+    cancel: &CancelToken,
+    lazy_cleanliness: bool,
+) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
     // A preview describes one inventory snapshot. Applied cleanup refreshes
     // the inventory under custody before mutation.
@@ -182,6 +203,25 @@ pub fn collect(
             }
             continue;
         }
+        let checked;
+        let lane = if lazy_cleanliness {
+            let locked = match lock_worktree(context, entry, cancel, policy.dry_run) {
+                Ok(locked) => locked,
+                Err(error) => {
+                    retain_error(&mut report.worktrees, &branch, error);
+                    continue;
+                }
+            };
+            let dirty = worktree_dirty_at(context, locked.verified.repo(), cancel)
+                .unwrap_or(WorktreeCondition::Unknown);
+            checked = WorktreeInfo {
+                dirty,
+                ..lane.clone()
+            };
+            &checked
+        } else {
+            lane
+        };
         if !matches!(
             lane.dirty,
             WorktreeCondition::Clean | WorktreeCondition::Ignored
@@ -1069,8 +1109,9 @@ fn collect_foreign(
     if !is_ancestor(context, lane.head, upstream, cancel)? {
         return Ok(None);
     }
+    let mut info = lane.clone();
     if policy.dry_run {
-        preview_foreign(
+        let observed = preview_foreign(
             context,
             preview_entries,
             entry,
@@ -1079,6 +1120,9 @@ fn collect_foreign(
             policy,
             cancel,
         )?;
+        if info.dirty == WorktreeCondition::Unknown {
+            info.dirty = observed;
+        }
     } else {
         // remove_tree_when verifies once, under writer custody.
         remove_and_finalise(
@@ -1100,7 +1144,7 @@ fn collect_foreign(
             outcome,
         )?;
     }
-    Ok(Some(lane.clone()))
+    Ok(Some(info))
 }
 
 /// Preview against the command's inventory snapshot without creating state.
@@ -1113,7 +1157,7 @@ fn preview_foreign(
     branch: &GitRefName,
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
-) -> Result<(), WorktreeError> {
+) -> Result<WorktreeCondition, WorktreeError> {
     let verified = verify_probed_worktree(context, &lane.path, cancel)?;
     // A missing slot means no writer has ever held this tree.
     let writer = {
@@ -1123,7 +1167,7 @@ fn preview_foreign(
             _ => WorktreeError::UnknownWriter,
         })?
     };
-    let recheck = || -> Result<(), WorktreeError> {
+    let recheck = || -> Result<WorktreeCondition, WorktreeError> {
         verified.repo().revalidate()?;
         tree_unchanged(entries, entry, lane.head)?;
         if let Some(detail) = census_refusal_detail(context, &lane.path) {
@@ -1133,11 +1177,11 @@ fn preview_foreign(
             return Err(WorktreeError::UnknownWriter);
         }
         match worktree_dirty_at(context, verified.repo(), cancel)? {
-            WorktreeCondition::Clean | WorktreeCondition::Ignored => Ok(()),
+            state @ (WorktreeCondition::Clean | WorktreeCondition::Ignored) => Ok(state),
             _ => Err(WorktreeError::Dirty(String::new())),
         }
     };
-    recheck()?;
+    let observed = recheck()?;
     let protected = output_protection(context, verified.repo(), policy.keep, cancel)?;
     let mut output = Vec::new();
     let preview = WorktreeGcPolicy {
@@ -1160,7 +1204,7 @@ fn preview_foreign(
     recheck()?;
     branch_unchanged(context, entries, branch, &lane.path, lane.head, cancel)?;
     drop(writer);
-    Ok(())
+    Ok(observed)
 }
 
 #[cfg(test)]

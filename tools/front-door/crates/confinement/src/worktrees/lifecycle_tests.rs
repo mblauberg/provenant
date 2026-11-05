@@ -146,6 +146,147 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingGit<'a> {
+        inner: &'a dyn Executor,
+        inspections: AtomicUsize,
+    }
+    impl Executor for CountingGit<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options
+                .argv
+                .iter()
+                .any(|arg| arg == "status" || arg == "ls-files")
+            {
+                self.inspections.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.execute(options)
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    for index in 0..4 {
+        let path = fixture.root.join(format!("foreign-{index}"));
+        fixture.run(&["worktree", "add", "--detach", path.to_str().ok_or("path")?])?;
+    }
+    let git = CountingGit {
+        inner: context.executor,
+        inspections: AtomicUsize::new(0),
+    };
+    context.executor = &git;
+    let lanes = list_for_gc(&context, &cancel())?;
+    let report = collect_lazy(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| false,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    assert!(report.worktrees.removed.is_empty());
+    assert_eq!(git.inspections.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[test]
+fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = create(
+        &context,
+        WorktreeCreate {
+            branch: "dirty-candidate".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    fs::write(lane.path.join("untracked"), "keep")?;
+    let lanes = list_for_gc(&context, &cancel())?;
+    let report = collect_lazy(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    assert!(
+        report
+            .worktrees
+            .retained
+            .iter()
+            .any(|entry| entry.branch == "dirty-candidate" && entry.reason == RetainReason::Dirty)
+    );
+    assert!(lane.path.join("untracked").exists());
+    Ok(())
+}
+
+#[test]
+fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = create(
+        &context,
+        WorktreeCreate {
+            branch: "lazy-gitlink".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let marker = fixture._temp.path().join("lazy-filter-ran");
+    let poison = add_poisoned_gitlink(&fixture, &lane.path, "sub", &marker)?;
+    assert_raw_git_runs_poison_filter(&fixture, &poison)?;
+    poison.arm()?;
+    let lanes = list_for_gc(&context, &cancel())?;
+    let report = collect_lazy(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    assert!(!marker.exists());
+    assert!(
+        report
+            .worktrees
+            .retained
+            .iter()
+            .any(|entry| entry.branch == "lazy-gitlink" && entry.reason == RetainReason::Dirty)
+    );
+    assert!(lane.path.exists());
+    Ok(())
+}
+
+#[test]
 fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Error>> {
     for scenario in [
         "preview", "idle", "aged", "unowned", "recent", "index", "live", "unknown",

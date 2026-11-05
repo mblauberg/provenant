@@ -699,7 +699,7 @@ fn gc_project(
                         .join("worktrees")
                         .join(context.binding.project_id().to_string()),
                 )?,
-                lanes: worktrees::list(context, cancel)?,
+                lanes: worktrees::list_for_gc(context, cancel)?,
             })
         },
     )
@@ -1140,7 +1140,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     .wall_now()
                     .map(|now| i128::from(now.as_micros()) * 1_000)
                     .map_err(|_| Error::Budget)?;
-                let mut report = worktrees::collect(
+                let mut report = worktrees::collect_lazy(
                     context,
                     &project.lanes,
                     &worktrees::WorktreeGcPolicy {
