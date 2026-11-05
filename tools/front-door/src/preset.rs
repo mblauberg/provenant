@@ -3948,6 +3948,44 @@ fn scan_preset_value(value: &Value) -> Result<(), PresetInputError> {
         _ => Ok(()),
     }
 }
+// Path fields are execution context, not content sent as a user secret. Keep
+// the rest of the document (including role cards and provenance) in the scan.
+fn scan_preset_graph(document: &Value) -> Result<(), PresetInputError> {
+    let mut content = document.clone();
+    if let Some(nodes) = content.get_mut("nodes").and_then(Value::as_array_mut) {
+        visit_nodes(nodes, &mut |node| {
+            if let Some(object) = node.as_object_mut() {
+                object.remove("worktree");
+                object.remove("read_roots");
+                if let Some(review) = object.get_mut("review").and_then(Value::as_object_mut) {
+                    review.remove("worktree");
+                }
+            }
+            Ok(())
+        })
+        .map_err(PresetInputError::Invalid)?;
+    }
+    if let Some(subject) = content
+        .pointer_mut("/provenance/resolved_subject")
+        .and_then(Value::as_object_mut)
+    {
+        subject.remove("worktree");
+    }
+    // Origins record the filesystem location of preset and role definitions.
+    if let Some(provenance) = content.get_mut("provenance").and_then(Value::as_object_mut) {
+        if let Some(origins) = provenance.get_mut("origins").and_then(Value::as_object_mut) {
+            for origin in origins.values_mut() {
+                *origin = Value::Null;
+            }
+        }
+        if let Some(roles) = provenance.get_mut("roles").and_then(Value::as_object_mut) {
+            for role in roles.values_mut().filter_map(Value::as_object_mut) {
+                role.remove("origin");
+            }
+        }
+    }
+    scan_preset_value(&content)
+}
 struct PresetInputs {
     bytes: Vec<u8>,
     params: Vec<(String, Value)>,
@@ -4390,7 +4428,7 @@ pub fn run(
             );
         }
     };
-    if scan_preset_value(&expansion.document).is_err() {
+    if scan_preset_graph(&expansion.document).is_err() {
         return crate::fail(
             "run",
             provenant_records::Outcome::Refused,
@@ -4399,11 +4437,18 @@ pub fn run(
             globals,
         );
     }
+    // Advice may include text outside the graph, such as the full spec.
+    // Suppress matches without changing whether explain and launch accept it.
+    if provenant_run::Service::scan(&String::from_utf8_lossy(&deferred_stderr)).is_err() {
+        deferred_stderr.clear();
+    }
     {
         use std::io::Write;
         let _ = std::io::stderr().lock().write_all(&deferred_stderr);
         for warning in &expansion.warnings {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            if provenant_run::Service::scan(warning).is_ok() {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            }
         }
     }
     if request.explain {

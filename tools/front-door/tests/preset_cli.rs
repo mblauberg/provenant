@@ -3508,3 +3508,174 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
     }
     Ok(())
 }
+
+#[test]
+fn deliver_spec_secret_is_not_printed_by_advice() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    std::fs::write(project.join("spec.md"), format!("missing/{secret}#symbol"))?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "ordinary brief")?;
+    for explain in [false, true] {
+        let mut command = fixture_cli();
+        command
+            .current_dir(&project)
+            .env(
+                "PROVENANT_ROOT",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            )
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "deliver", "--prompt-file"])
+            .arg(&prompt)
+            .args(["--set", "parameters.spec='spec.md'"]);
+        if explain {
+            command.arg("--explain");
+        }
+        let output = command.output()?;
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(result["error"]["code"], "SECRET_INPUT", "{result}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
+    }
+    Ok(())
+}
+
+#[test]
+fn deliver_advice_suppresses_secret_beyond_spec_excerpt() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    std::fs::write(
+        project.join("spec.md"),
+        format!("{}\nmissing/{secret}#symbol", "ordinary ".repeat(3000)),
+    )?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "ordinary brief")?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let output = fixture_cli()
+        .current_dir(&project)
+        .env(
+            "PROVENANT_ROOT",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        )
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", "deliver", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--set", "parameters.spec='spec.md'", "--wait", "1s"])
+        .output()?;
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_ne!(result["error"]["code"], "SECRET_INPUT", "{result}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
+    Ok(())
+}
+
+#[test]
+fn preset_bound_path_is_not_a_secret_but_prompt_is() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let token = format!("sk-{}", "a".repeat(48));
+    let project = temp.path().join(&token);
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'task', role = 'lens.house' }]\n",
+    )?;
+    std::fs::write(
+        project.join(".provenant/roles.toml"),
+        "[roles.\"lens.house\"]\ntier = 'senior'\ncard = 'ordinary card'\n",
+    )?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let prompt = temp.path().join("brief");
+    for secret in [false, true] {
+        std::fs::write(&prompt, if secret { &token } else { "ordinary brief" })?;
+        for explain in [false, true] {
+            let mut command = fixture_cli();
+            command
+                .current_dir(&project)
+                .env(
+                    "PROVENANT_ROOT",
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                )
+                .env("XDG_CONFIG_HOME", temp.path().join("config"))
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .args(["--json", "--state-dir"])
+                .arg(temp.path().join("state"))
+                .args(["run", "--preset", "gate-only", "--prompt-file"])
+                .arg(&prompt)
+                .arg("--read-root")
+                .arg(&project);
+            if explain {
+                command.arg("--explain");
+            }
+            let output = command.output()?;
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            if secret {
+                assert_eq!(result["error"]["code"], "SECRET_INPUT", "{result}");
+                assert!(!String::from_utf8_lossy(&output.stdout).contains(&token));
+                assert!(!String::from_utf8_lossy(&output.stderr).contains(&token));
+            } else if explain {
+                assert!(output.status.success(), "{result}");
+            } else {
+                // The graph starts; the isolated fixture has no provider adapter.
+                assert!(result["data"]["graph_id"].is_string(), "{result}");
+                assert_eq!(
+                    result["data"]["graph"]["checkpoint"]["nodes"][0]["attempts"][0]["outcome"],
+                    "adapter_unavailable",
+                    "{result}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
