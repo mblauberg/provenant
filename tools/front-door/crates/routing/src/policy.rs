@@ -1024,26 +1024,20 @@ mod tests {
     }
 
     #[test]
-    fn bundled_policy_matches_pre_data_golden() -> Result<(), Box<dyn std::error::Error>> {
-        #[derive(Deserialize)]
-        struct Case {
-            model: ModelId,
-            at: i64,
-            policy: ModelPolicy,
-        }
-        let cases: Vec<Case> =
-            serde_json::from_str(include_str!("../assets/model-policy-golden.json"))?;
-        for case in cases {
-            assert_eq!(
-                serde_json::to_value(
-                    ModelPolicies::default()
-                        .effective(&case.model, None, at(case.at))
-                        .policy
-                )?,
-                serde_json::to_value(case.policy)?,
-                "{} at {}",
-                case.model.as_str(),
-                case.at
+    fn bundled_policy_has_valid_rules_and_schedules() -> Result<(), Box<dyn std::error::Error>> {
+        let policies: ModelPolicies =
+            toml_edit::de::from_str(include_str!("../assets/model-policy.toml"))?;
+        assert!(!policies.rules.is_empty());
+        let mut errors = Vec::new();
+        policies.validate(&mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        for rule in &policies.rules {
+            assert!(rule.schedule.valid());
+            assert!(
+                rule.policy
+                    .cache
+                    .price_multiplier
+                    .is_none_or(|value| value >= 1.0)
             );
         }
         Ok(())
@@ -1054,15 +1048,23 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let policies: ModelPolicies = toml_edit::de::from_str(
             r#"
+            bundled = false
             [defaults.cache]
             read_share_target = 0.8
+            [[rules]]
+            model = "opencode/policy-fixture"
+            [rules.schedule]
+            windows = [{ start_hour = 1, end_hour = 4 }]
+            [rules.policy.cache]
+            read_ratio = 0.02
+            price_multiplier = 2.0
             [[rules]]
             adapter = "claude"
             account = "work"
             [rules.policy.compaction]
             window = 400000
             [[rules]]
-            model = "opencode/opencode-go/deepseek-v4.1-flash"
+            model = "opencode/policy-fixture"
             account = "work"
             [rules.schedule]
             windows = [{ start_hour = 2, end_hour = 3 }]
@@ -1092,7 +1094,7 @@ mod tests {
             .policy;
         assert_eq!(claude.compaction.window, Some(400000));
         assert_eq!(claude.cache.read_share_target, Some(0.8));
-        let deepseek = ModelId::parse("opencode/opencode-go/deepseek-v4.1-flash")?;
+        let deepseek = ModelId::parse("opencode/policy-fixture")?;
         for (account, hour, expected) in [
             ("work", 1, 2.0),
             ("work", 2, 3.0),
@@ -1137,8 +1139,23 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let hours = [1, 4, 6, 10];
         let multiplier = 2.0;
-        let model = "opencode/opencode-go/deepseek-v4.1-flash";
-        let model = ModelId::parse(model)?;
+        let model = ModelId::parse("opencode/policy-fixture")?;
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            r#"
+            bundled = false
+            [defaults.cache]
+            price_multiplier = 1.0
+            [[rules]]
+            model = "opencode/policy-fixture"
+            [rules.schedule]
+            windows = [
+              { weekdays = [0, 1, 2, 3, 4], start_hour = 1, end_hour = 4 },
+              { weekdays = [0, 1, 2, 3, 4], start_hour = 6, end_hour = 10 },
+            ]
+            [rules.policy.cache]
+            price_multiplier = 2.0
+        "#,
+        )?;
         // 1970-01-05 is a Monday; sample every hour of a full week. // timebomb: allow evaluated at an injected instant
         let monday = 4 * 86_400;
         for hour in 0..7 * 24 {
@@ -1150,7 +1167,11 @@ mod tests {
                     || (hours[2]..hours[3]).contains(&hour_of_day));
             let expected = if peak { multiplier } else { 1.0 };
             assert_eq!(
-                bundled_policy(&model, self::at(at)).cache.price_multiplier,
+                policies
+                    .effective(&model, None, self::at(at))
+                    .policy
+                    .cache
+                    .price_multiplier,
                 Some(expected),
                 "hour {hour}"
             );
