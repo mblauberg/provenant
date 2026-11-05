@@ -365,6 +365,12 @@ pub enum RunError {
         "Git setup lock provenant-lane-setup.lock timed out after {seconds}s; increase domains.fabric.lanes.setup_lock_wait_seconds"
     )]
     SetupLockTimeout { seconds: u64 },
+    #[error("writer import retained for worktree {}, run {run}, attempt {attempt}", worktree.display())]
+    RetainedWriterImport {
+        worktree: std::path::PathBuf,
+        run: provenant_core::RunId,
+        attempt: provenant_core::AttemptId,
+    },
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: attempt reservation retained")]
@@ -658,6 +664,22 @@ impl RunError {
                 diagnostic = diagnostic
                     .detail(format!("provenant-lane-setup.lock was held for the {seconds}s wait"))
                     .next("retry after the current Git setup finishes, or increase domains.fabric.lanes.setup_lock_wait_seconds");
+            }
+            Self::RetainedWriterImport {
+                run,
+                attempt,
+                worktree,
+            } => {
+                diagnostic = diagnostic
+                    .detail(match safe_path(worktree, destination) {
+                        Some(path) => {
+                            format!("worktree {path}; retained run {run}, attempt {attempt}")
+                        }
+                        None => format!("retained run {run}, attempt {attempt}"),
+                    })
+                    .next(format!(
+                        "to release the fence and recover the preserved private Git manually, run `provenant reconcile --abandon {run}/{attempt} --reason 'recover retained work manually'`; this stops automatic import"
+                    ));
             }
             _ => {}
         }

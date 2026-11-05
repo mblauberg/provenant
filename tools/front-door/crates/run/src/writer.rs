@@ -353,6 +353,13 @@ struct ImportFence {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct MergeRestored {
+    pub schema_version: u64,
+    pub scope: provenant_supervisor::custody::Scope,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GitPins {
     schema_version: u64,
     scope: provenant_supervisor::custody::Scope,
@@ -1854,6 +1861,7 @@ impl crate::RunStore {
     ) -> provenant_supervisor::custody::Result<provenant_supervisor::custody::CustodyLease> {
         let slot = directory.try_clone()?;
         let lease = acquire(directory, scope, binding)?;
+        let mut retained_scope = None;
         let checked = (|| -> Result<()> {
             call.check()?;
             let metadata = slot.metadata()?;
@@ -1895,9 +1903,8 @@ impl crate::RunStore {
                     if retained.schema_version != 1 || retained.scope != fence.scope {
                         return Err(RunError::Conflict);
                     }
-                    return Err(RunError::Validation(
-                        "predecessor writer import remains unresolved",
-                    ));
+                    retained_scope = Some(fence.scope);
+                    return Ok(());
                 }
             }
             Ok(())
@@ -1907,6 +1914,15 @@ impl crate::RunStore {
             return Err(provenant_supervisor::custody::CustodyError::Io(
                 std::io::Error::other(error.to_string()),
             ));
+        }
+        if let Some(retained) = retained_scope {
+            lease.withdraw_unlaunched()?;
+            return Err(
+                provenant_supervisor::custody::CustodyError::ImportRetained {
+                    run: retained.run,
+                    attempt: retained.attempt,
+                },
+            );
         }
         Ok(lease)
     }
@@ -2115,6 +2131,11 @@ impl WriterLaunch {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
         let import_cancel = settlement.cancellation();
+        let merge_objects = source
+            .as_ref()
+            .map(|source| crate::objects::merge_objects(source, self.worktree.repo()))
+            .transpose()?
+            .unwrap_or_default();
         if settlement.phase() == crate::settlement::Phase::Import {
             settlement.begin_import()?;
             #[cfg(test)]
@@ -2123,11 +2144,12 @@ impl WriterLaunch {
                     "injected Git import failure",
                 )));
             }
-            crate::objects::settle_cancel(
+            crate::objects::settle_many(
                 &git_executable,
                 self.worktree.repo(),
                 source.as_ref().map(|source| &source.objects),
                 verified_tip,
+                &merge_objects,
                 Some(&import_cancel),
                 Some(custody),
             )?;
@@ -2146,6 +2168,17 @@ impl WriterLaunch {
             )?;
             // The private index may contain staged edits which the host's
             // quarantine must observe. Restore it only after receive succeeds.
+            if !merge_objects.is_empty()
+                && crate::objects::resolve_ref(
+                    &git_executable,
+                    self.worktree.repo(),
+                    self.branch.as_str(),
+                )? != verified_tip
+            {
+                return Err(RunError::Validation(
+                    "writer branch advanced before stopped merge could be restored",
+                ));
+            }
             if let Some(source) = &source
                 && crate::objects::resolve_ref(
                     &git_executable,
@@ -2154,6 +2187,23 @@ impl WriterLaunch {
                 )? == verified_tip
             {
                 crate::objects::restore_index(source, self.worktree.repo())?;
+                if !merge_objects.is_empty() {
+                    crate::artifacts::seal(
+                        attempt,
+                        "merge-restored.json",
+                        &crate::db::bytes(&MergeRestored {
+                            schema_version: 1,
+                            scope: custody.scope(),
+                        })?,
+                        crate::RECORD_LIMIT,
+                    )?;
+                }
+                crate::objects::clear_import_refs(
+                    &git_executable,
+                    self.worktree.repo(),
+                    custody.scope().attempt,
+                    &merge_objects,
+                )?;
             }
             settlement.advance(crate::settlement::Phase::Record)?;
         }

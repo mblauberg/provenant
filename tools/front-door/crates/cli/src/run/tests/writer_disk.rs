@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn retained_import_refusal_names_worktree_attempt_and_recovery() {
+    let run_id = provenant_core::RunId::from_bytes([3; 16]);
+    let attempt = AttemptId::from_bytes([4; 16]);
+    let failure = check_launch_policy(&[run::Started::Refused {
+        attempt: AttemptId::from_bytes([1; 16]),
+        kind: run::RefusalKind::RetainedImport {
+            run: run_id,
+            attempt,
+            worktree: "/tmp/writer".into(),
+        },
+        reason: "retained".into(),
+    }])
+    .expect_err("retained import must refuse");
+    assert_eq!(failure.kind.code(), "WRITER_IMPORT_RETAINED");
+    assert!(failure.message.contains("/tmp/writer"));
+    assert!(failure.message.contains(&attempt.to_string()));
+    let diagnostic = failure.projection.expect("diagnostic");
+    assert!(
+        diagnostic
+            .next
+            .iter()
+            .any(|next| next.contains(&format!("reconcile --abandon {run_id}/{attempt}")))
+    );
+}
+
+#[test]
 fn setup_timeout_is_promoted_only_without_a_progressing_sibling() {
     let refused = || run::Started::Refused {
         attempt: AttemptId::from_bytes([1; 16]),

@@ -275,6 +275,13 @@ reservation still prevents another writer from editing that worktree. A terminal
 import refusal releases the reservation and retains private Git for host
 recovery. A lane wait returns a terminal outcome only after custody is released,
 so host pickup does not need a second reconcile after a successful wait.
+For a stopped merge, settlement imports the merge parents and staged objects
+through the verified Git import, then restores the unmerged index and merge
+metadata in the worktree. A continuation writer receives that merge state and
+can resolve and commit it. If import remains fenced, the refusal identifies
+the retained attempt and provides the explicit abandonment command. Abandonment
+keeps the private Git evidence but stops automatic import; recover that work
+manually before relying on a later writer.
 See [publication order](../specs/run.md#publication-order) and
 [lane Git and import](../specs/run.md#lane-git-and-import).
 

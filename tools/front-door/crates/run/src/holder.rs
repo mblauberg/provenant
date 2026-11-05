@@ -3124,10 +3124,11 @@ mod writer_recovery_tests {
                     Err(error) => error,
                     Ok(_) => panic!("retained import must exclude a competing writer"),
                 };
-                assert!(
-                    refusal.to_string().contains("import"),
-                    "unexpected refusal after the lock was released: {refusal}"
-                );
+                assert!(matches!(
+                    refusal,
+                    custody::CustodyError::ImportRetained { run, attempt }
+                        if run == scope.run && attempt == scope.attempt
+                ));
                 let found = store.reconcile_with_observer(
                     run.run_id,
                     &providers,

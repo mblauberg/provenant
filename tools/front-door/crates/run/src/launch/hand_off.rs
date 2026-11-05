@@ -67,6 +67,9 @@ impl RunStore {
         {
             return Err(local("writer confinement", &"does not match the task"));
         }
+        let writer_path = writer
+            .as_ref()
+            .map(|writer| writer.worktree.path().to_path_buf());
         let mut lease = match writer {
             Some(writer) => {
                 let (directory, binding) = writer
@@ -79,12 +82,14 @@ impl RunStore {
             // fixture guardian and its reservation share one boot observer.
             None => acquire_writer(directory()?, scope, custody::WriterBinding::read_only()),
         }
-        .map_err(|e| {
-            if matches!(e, custody::CustodyError::Busy) {
-                HandOff::Busy
-            } else {
-                local("custody", &e)
-            }
+        .map_err(|e| match e {
+            custody::CustodyError::Busy => HandOff::Busy,
+            custody::CustodyError::ImportRetained { run, attempt } => HandOff::RetainedImport {
+                run,
+                attempt,
+                worktree: writer_path.clone().unwrap_or_default(),
+            },
+            error => local("custody", &error),
         })?;
         if record.retry_of.is_some()
             && let Some(writer) = plan

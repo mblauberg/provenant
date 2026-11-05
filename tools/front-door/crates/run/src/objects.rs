@@ -17,7 +17,7 @@ mod view;
 use view::object_binding;
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};
-pub(crate) use view::{bound_source, prepare_bound, private_tip, restore_index};
+pub(crate) use view::{bound_source, merge_objects, prepare_bound, private_tip, restore_index};
 
 fn invalid() -> RunError {
     RunError::Validation("lane Git import failed")
@@ -175,6 +175,33 @@ pub(crate) fn resolve_ref(git: &Path, repo: &VerifiedRepo, reference: &str) -> R
         None,
     )?;
     GitOid::parse(std::str::from_utf8(&bytes).map_err(|_| invalid())?.trim()).map_err(|_| invalid())
+}
+
+pub(crate) fn clear_import_refs(
+    git: &Path,
+    repo: &VerifiedRepo,
+    attempt: provenant_core::AttemptId,
+    objects: &[GitOid],
+) -> Result<()> {
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let input = objects
+        .iter()
+        .map(|oid| format!("delete refs/provenant/import-extra/{attempt}/{oid}\n"))
+        .collect::<String>();
+    execute_bounded(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&["update-ref", "--stdin"]),
+        None,
+        Execution {
+            input: Some(input.as_bytes()),
+            ..Execution::default()
+        },
+    )?;
+    Ok(())
 }
 
 // Shared objects are host-owned. receive-pack checks newly introduced content
@@ -490,11 +517,24 @@ pub(crate) fn settle(
     settle_cancel(git, repo, source, head, None, None)
 }
 
+#[cfg(test)]
 pub(crate) fn settle_cancel(
     git: &Path,
     repo: &VerifiedRepo,
     source: Option<&Directory>,
     head: GitOid,
+    cancel: Option<&CancelToken>,
+    custody: Option<&provenant_supervisor::custody::Recovery>,
+) -> Result<()> {
+    settle_many(git, repo, source, head, &[], cancel, custody)
+}
+
+pub(crate) fn settle_many(
+    git: &Path,
+    repo: &VerifiedRepo,
+    source: Option<&Directory>,
+    head: GitOid,
+    extra: &[GitOid],
     cancel: Option<&CancelToken>,
     custody: Option<&provenant_supervisor::custody::Recovery>,
 ) -> Result<()> {
@@ -567,17 +607,6 @@ pub(crate) fn settle_cancel(
             .map(|arg| format!("'{}'", arg.to_string_lossy().replace('\'', "'\\''")))
             .collect::<Vec<_>>()
             .join(" ");
-        let stage = format!("refs/provenant/import/{head}");
-        let mut push = args(&[
-            "-c",
-            "protocol.file.allow=always",
-            "push",
-            "--no-verify",
-            "--porcelain",
-        ]);
-        push.push(format!("--receive-pack={receiver}").into());
-        push.push(repo.common_git_dir().into());
-        push.push(format!("{head}:{stage}").into());
         // Git resolves the alternate path again. Recheck custody immediately
         // before letting the sender access any lane-controlled path.
         if custody.is_some_and(|custody| {
@@ -593,17 +622,40 @@ pub(crate) fn settle_cancel(
                 "lane object directory identity changed",
             ));
         }
-        execute_bounded(
-            git,
-            &path,
-            repo.root_path(),
-            &push,
-            cancel,
-            Execution {
-                timeout,
-                ..Execution::default()
-            },
-        )?;
+        let scope = custody
+            .map(|held| held.scope().attempt.to_string())
+            .unwrap_or_else(|| provenant_core::AttemptId::from_bytes([0; 16]).to_string());
+        let mut refspecs = vec![format!("{head}:refs/provenant/import/{head}")];
+        refspecs.extend(
+            extra
+                .iter()
+                .map(|oid| format!("{oid}:refs/provenant/import-extra/{scope}/{oid}")),
+        );
+        refspecs.sort();
+        refspecs.dedup();
+        for chunk in refspecs.chunks(128) {
+            let mut push = args(&[
+                "-c",
+                "protocol.file.allow=always",
+                "push",
+                "--no-verify",
+                "--porcelain",
+            ]);
+            push.push(format!("--receive-pack={receiver}").into());
+            push.push(repo.common_git_dir().into());
+            push.extend(chunk.iter().map(Into::into));
+            execute_bounded(
+                git,
+                &path,
+                repo.root_path(),
+                &push,
+                cancel,
+                Execution {
+                    timeout,
+                    ..Execution::default()
+                },
+            )?;
+        }
         Ok(())
     })();
     let cleanup = crate::artifacts::remove_entry_tree(repo.common_dir(), &name);
