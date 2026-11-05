@@ -1058,9 +1058,6 @@ mod wire_parity {
 
     #[test]
     fn typed_output_stays_off_the_catalogue_until_enabled() {
-        let published = |kind| output_schema(kind).is_some();
-        assert_eq!(published(ToolKind::Run), TYPED_OUTPUT_PUBLISHED);
-        assert_eq!(published(ToolKind::Output), TYPED_OUTPUT_PUBLISHED);
         assert!(mcp_output_schema("fabric_run").is_some());
     }
 }

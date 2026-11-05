@@ -1,2 +1,0 @@
-provenant: IO: host writer delivery failed at Integrate: git worktree list output exceeded the 8388608-byte host limit
-next: run `provenant help run`

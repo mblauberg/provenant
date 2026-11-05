@@ -5054,7 +5054,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             });
             // A crash can leave an accepted operation without a checkpoint
             // reference. Preserve its immutable labels, including legacy None.
-            let mut prepared_without_request = false;
             let mut accepted_knobs = None;
             let mut accepted_route = None;
             let mut accepted_retry_limit = None;
@@ -5072,7 +5071,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     Err(provenant_run::RunError::NotFound)
                         if operation.state == provenant_run::OperationState::Prepared =>
                     {
-                        prepared_without_request = true;
                         Some(node.context)
                     }
                     Err(error) => return Err(run_error(error)),
@@ -5381,35 +5379,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             )
             .map_err(dispatch_refused)?;
             grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
-            let legacy_input = prepared_without_request.then(|| {
-                let mut legacy = input.clone();
-                let SubmitInput::Submit { tasks, .. } = &mut legacy;
-                for task in tasks {
-                    task.context = None;
-                }
-                legacy
-            });
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
-            let receipt = match owner.submit_with_access(
-                input,
-                self.budget,
-                self.cancel,
-                grants.clone(),
-                retry_limit,
-            ) {
-                Err(FacadeError::OperationConflict) if legacy_input.is_some() => {
-                    // Store admission still requires the reserved digest to match
-                    // exactly. Only legacy metadata is retried, once.
-                    owner.submit_with_access(
-                        legacy_input.ok_or(FacadeError::StateCorrupt)?,
-                        self.budget,
-                        self.cancel,
-                        grants,
-                        retry_limit,
-                    )?
-                }
-                result => result?,
-            };
+            let receipt =
+                owner.submit_with_access(input, self.budget, self.cancel, grants, retry_limit)?;
             owner.actor = None;
             let target = receipt
                 .targets
@@ -5996,7 +5968,7 @@ impl Factory {
                 Ok(checkpoint) => checkpoint.ok_or(FacadeError::NotFound)?,
                 Err(error) if error.is_unreadable() => {
                     return Ok(unreadable_snapshot(format!(
-                        "Graph record is unreadable ({error}); cancel it to retire the record. Active attempts and writer fences are not released."
+                        "Graph {id} record is unreadable ({error}); cancel it to retire the record. Inspect active attempts and writer fences."
                     )));
                 }
                 Err(error) => return Err(graph_journal_error(error)),
@@ -6025,11 +5997,59 @@ impl Factory {
                 budget,
                 cancel,
                 &self.clock,
+                |checkpoint| {
+                    let Some(checkpoint) = checkpoint else {
+                        return Ok(());
+                    };
+                    let mut first_error = None;
+                    let mut owner = BinaryRunOwner {
+                        factory: self,
+                        allow_remote: true,
+                        actor: None,
+                        chair: None,
+                    };
+                    for attempt in checkpoint.nodes.iter().flat_map(|node| &node.attempts) {
+                        if attempt.state != provenant_fabric_runtime::graph::AttemptState::Terminal
+                            && let Err(error) =
+                                self.cancel_graph_attempt(&mut owner, attempt, budget, cancel)
+                        {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                    if let (Some(instance_id), Some(actor)) =
+                        (&checkpoint.instance_id, &checkpoint.ask_actor)
+                    {
+                        for ask in checkpoint.asks.iter().filter(|ask| !ask.closed) {
+                            let scope = provenant_fabric_runtime::graph::AskScope {
+                                graph_id: &checkpoint.graph_id,
+                                instance_id,
+                                actor,
+                                ask,
+                            };
+                            if let Err(error) = graph_ask_edge(self, cancel, scope, true) {
+                                first_error.get_or_insert(error);
+                            }
+                        }
+                    } else if checkpoint.asks.iter().any(|ask| !ask.closed) {
+                        first_error.get_or_insert(FacadeError::StateCorrupt);
+                    }
+                    if let Err(error) = self.close_legacy_loop_asks(checkpoint, cancel) {
+                        first_error.get_or_insert(error);
+                    }
+                    if let Some(error) = first_error {
+                        return Err(Box::new(error));
+                    }
+                    Ok(())
+                },
             )
-            .map_err(graph_journal_error)?
+            .map_err(|error| FacadeError::DispatchRefused {
+                reason: format!("cancel graph {id}: {error}"),
+                fact: None,
+                disk: None,
+            })?
         {
             return Ok(unreadable_snapshot(
-                "Unreadable graph record retired. Active attempts were not cancelled and writer fences were not released.".into(),
+                "Unreadable graph record retired. Identifiable attempts and inbox requests were cancelled; unidentifiable work and writer fences require inspection.".into(),
             ));
         }
         let mut journal = FileJournal::open(
@@ -6232,9 +6252,6 @@ impl Factory {
             {
                 first_error.get_or_insert_with(|| FacadeError::io("close cancelled graph asks"));
             }
-            if let Err(error) = self.close_legacy_loop_asks(&checkpoint, cancel) {
-                first_error.get_or_insert(error);
-            }
             if let Some(error) = first_error {
                 return Err(error);
             }
@@ -6284,6 +6301,9 @@ impl Factory {
         checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
         cancel: &CancelToken,
     ) -> Result<(), FacadeError> {
+        if checkpoint.instance_id.is_none() {
+            return Ok(());
+        }
         let actors: std::collections::BTreeSet<_> =
             provenant_fabric_runtime::graph::legacy_loop_asks(checkpoint)
                 .into_iter()

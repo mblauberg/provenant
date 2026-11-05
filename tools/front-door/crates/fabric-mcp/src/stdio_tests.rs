@@ -598,7 +598,7 @@ fn all_workers_dead_after_service_open_failure_is_fatal() {
         false,
         Timeouts {
             input_read: Duration::from_millis(40),
-            event: Duration::from_secs(30),
+            event: Duration::from_millis(2),
             ..TIMEOUTS
         },
     );
@@ -626,7 +626,7 @@ fn all_workers_dead_after_service_open_failure_is_fatal() {
             "frames: {frames:?}"
         );
     }
-    let result = server.wait_result(TEST_WAIT);
+    let result = server.wait_result(Duration::from_secs(30));
     assert!(matches!(result, Err(Error::Worker)), "result: {result:?}");
 }
 

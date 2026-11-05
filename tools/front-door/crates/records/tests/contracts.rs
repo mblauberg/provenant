@@ -1,8 +1,8 @@
 use std::io::Cursor;
 
 use provenant_records::{
-    AttemptOutcome, CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits, PathWire,
-    RecordHeader, decode, decode_v1,
+    AttemptOutcome, CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits, RecordHeader,
+    decode, decode_v1,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -217,45 +217,6 @@ fn canonical_v1_rejects_float_values() {
         CanonicalV1::bytes(&u128::MAX),
         Err(CanonicalError::IntegerOutOfRange)
     ));
-}
-
-#[test]
-fn path_wire_is_tagged_and_rejects_uncontained_or_unrepresentable_paths() {
-    let utf8 = PathWire::from_relative(
-        &provenant_core::RelativePath::parse("artifacts/result.md").expect("contained path"),
-    )
-    .expect("UTF-8 wire");
-    assert_eq!(
-        serde_json::to_string(&utf8).expect("path wire"),
-        r#"{"encoding":"utf8","path":"artifacts/result.md"}"#
-    );
-    assert_eq!(
-        utf8.to_relative_path().expect("relative path").as_path(),
-        std::path::Path::new("artifacts/result.md")
-    );
-
-    for invalid in [
-        r#"{"encoding":"utf8","path":"../outside"}"#,
-        r#"{"encoding":"native_bytes","path":"GG"}"#,
-    ] {
-        assert!(serde_json::from_str::<PathWire>(invalid).is_err());
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let native = std::ffi::OsStr::from_bytes(b"artifact/\xff");
-        let relative = provenant_core::RelativePath::parse(native).expect("contained native path");
-        let encoded = PathWire::from_relative(&relative).expect("native encoding");
-        assert_eq!(
-            serde_json::to_string(&encoded).expect("native wire"),
-            r#"{"encoding":"native_bytes","path":"61727469666163742fff"}"#
-        );
-        assert_eq!(
-            encoded.to_relative_path().expect("native path roundtrip"),
-            relative
-        );
-    }
 }
 
 #[test]

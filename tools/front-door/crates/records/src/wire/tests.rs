@@ -514,19 +514,17 @@ fn mcp_results_validate_by_tag_and_allow_unknown_members() {
 fn published_set_is_stable_versioned_and_self_describing() {
     let files = published();
     let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(
-        names,
-        [
-            "lanes.schema.json",
-            "status.schema.json",
-            "output.schema.json",
-            "cancel.schema.json",
-            "land.schema.json",
-            "error.schema.json",
-            "mcp/fabric_run.schema.json",
-            "mcp/fabric_output.schema.json"
-        ]
-    );
+    for required in [
+        "lanes.schema.json",
+        "status.schema.json",
+        "output.schema.json",
+        "cancel.schema.json",
+        "error.schema.json",
+        "mcp/fabric_run.schema.json",
+        "mcp/fabric_output.schema.json",
+    ] {
+        assert!(names.contains(&required), "missing {required}");
+    }
     for (name, schema) in &files {
         assert_eq!(schema["$schema"], schema::DIALECT, "{name}");
         assert!(

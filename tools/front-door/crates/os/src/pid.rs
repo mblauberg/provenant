@@ -251,32 +251,14 @@ pub trait CwdObserver: Send + Sync {
         false
     }
 
-    /// System real/effective/saved uids only after kernel signing status, daemon
-    /// image and sealed system-volume checks. Missing evidence returns None.
-    /// This supports a caller's explicit risk policy, not non-occupancy proof.
-    fn sealed_platform_uids(&self, _pid: i64) -> Option<ProcessUids> {
-        None
-    }
-
-    fn ignored_unreadable_uids(
-        &self,
-        pid: i64,
-        _entries: &[CensusIgnoreEntry],
-    ) -> Option<ProcessUids> {
-        self.sealed_platform_uids(pid)
-            .filter(|uids| uids.all_system())
-    }
-
-    /// Same authority as `ignored_unreadable_uids`, retaining the failed image
-    /// condition for diagnostics. The caller must first observe actual EPERM.
+    /// The caller must first observe an actual permission denial. Missing
+    /// evidence never grants an exception.
     fn unreadable_policy_uids(
         &self,
-        pid: i64,
-        entries: &[CensusIgnoreEntry],
+        _pid: i64,
+        _entries: &[CensusIgnoreEntry],
     ) -> Result<UnreadablePolicyExcusal, UnreadablePolicyFailure> {
-        self.ignored_unreadable_uids(pid, entries)
-            .map(|uids| UnreadablePolicyExcusal { uids })
-            .ok_or_else(|| "image policy evidence unavailable".into())
+        Err("image policy evidence unavailable".into())
     }
 
     /// Diagnostic only; failure to read any field cannot grant the exception.
@@ -321,20 +303,6 @@ impl CwdObserver for SystemCwdObserver {
             .filter(|pid| *pid > 0)
             .ok_or("positive OS pid unavailable")?;
         crate::sys::pid::unreadable_policy_uids(pid, entries)
-    }
-
-    fn sealed_platform_uids(&self, pid: i64) -> Option<ProcessUids> {
-        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
-        crate::sys::pid::sealed_platform_uids(pid)
-    }
-
-    fn ignored_unreadable_uids(
-        &self,
-        pid: i64,
-        entries: &[CensusIgnoreEntry],
-    ) -> Option<ProcessUids> {
-        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
-        crate::sys::pid::ignored_unreadable_uids(pid, entries)
     }
 
     fn process_details(&self, pid: i64) -> Option<String> {
@@ -465,7 +433,7 @@ mod tests {
             Err(PidError::Refused { .. })
         ));
         for pid in [-1, 0, i64::MAX] {
-            assert_eq!(SystemCwdObserver.sealed_platform_uids(pid), None);
+            assert!(SystemCwdObserver.unreadable_policy_uids(pid, &[]).is_err());
         }
     }
 }

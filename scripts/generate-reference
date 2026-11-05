@@ -164,9 +164,8 @@ def schema_files(data):
     text += (
         "\n## Edge error codes\n\n"
         "Stable `error.code` values emitted outside the run owner (those are listed in the\n"
-        "[CLI reference](cli.md#error-codes)). `legacy_spelling` codes keep the spelling\n"
-        "consumers already match on; `umbrella` codes cover a command family until an\n"
-        "owner splits them.\n\n| Code | Kind | Meaning |\n|---|---|---|\n"
+        "[CLI reference](cli.md#error-codes)). `umbrella` codes cover a command family\n"
+        "until an owner splits them.\n\n| Code | Kind | Meaning |\n|---|---|---|\n"
     )
     for entry in data["error-codes"]:
         text += f"| `{entry['code']}` | {entry['kind']} | {entry['summary'].replace('|', '&#124;')} |\n"

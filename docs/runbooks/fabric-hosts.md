@@ -42,6 +42,17 @@ top-level `dispatch --host`. The Rust CLI grammar lives in
 
 ## Local graphs
 
+Before upgrading across the prepared-operation replay change, finish or cancel
+active graphs with the old binary and wait for their attempts to settle. A
+prepared graph operation from the older binary may otherwise need a new graph
+ID after the upgrade; inspect the existing attempts and their custody first.
+Checkpoints with pre-node-ask loop state, incomplete expansion topology or old
+fallback history that switched after a launch are unreadable after the upgrade.
+If one remains, use `provenant fabric graph status <id>` to see the remedy and
+`provenant fabric graph cancel <id>` to retire its record.
+Retirement does not cancel its attempts or close old inbox requests; inspect
+and settle those first.
+
 Use a graph for a writer followed by a review. Create and register the writer's
 worktree first with `provenant worktree create`, then save the following
 as a graph file in the project:
@@ -620,7 +631,7 @@ and the agent runs it in a fresh `fabric peer --in-process` child inside the
 login session, where the keychain is readable. When the agent is not
 listening, `fabric peer` handles the request itself as before. A request that
 reached the agent is never retried in process; a lost reply surfaces as an
-error and, for a mutation, as `launch_unknown`. The agent runs at most 64
+error and, for a mutation, as `LAUNCH_UNKNOWN`. The agent runs at most 64
 requests concurrently. Excess connections close immediately and surface as
 the peer agent's stable empty-reply error.
 
@@ -683,7 +694,7 @@ the other hosts. Unprobed or unreachable peers omit `protocol`.
 
 The released v1 peer-agent can hide a decode refusal in its log and close
 without a reply. This ambiguous failure remains `home_unavailable` for reads
-and `launch_unknown` for mutations, since it can also follow execution. Inspect
+and `LAUNCH_UNKNOWN` for mutations, since it can also follow execution. Inspect
 the peer-agent log and upgrade both hosts before retrying.
 
 Readers in this release report `upgrade_required` when a stored record,
@@ -834,7 +845,7 @@ grammar `RUN[/TASK[/ATTEMPT]]`, also accepting `RUN/ATTEMPT` and unique hex
 prefixes of at least eight characters. An ambiguous prefix lists candidates.
 
 The peer transport does not silently fall back to local placement. A mutation
-whose reply is lost can return `launch_unknown`; retain its operation ID and
+whose reply is lost can return `LAUNCH_UNKNOWN`; retain its operation ID and
 reconcile the recorded outcome before submitting replacement work. The host
 owner also reports `peer_version`, `home_unavailable` and `state_corrupt` for
 version, reachability and frame failures.

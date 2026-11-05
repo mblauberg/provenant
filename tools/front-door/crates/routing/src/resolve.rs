@@ -1500,16 +1500,6 @@ pub fn resolve_with_seed(
     )
 }
 
-/// Dispatch-only account filter; its routing decision also uses the stable
-/// operation/task seed carried by the attempt.
-pub fn resolve_for_account(
-    request: &RouteRequest,
-    context: &RoutingContext<'_>,
-    account: Option<&str>,
-) -> Result<ResolvedRoute, RoutingError> {
-    resolve_for_account_with_seed(request, context, account, "route-preview", 0)
-}
-
 pub fn resolve_for_account_with_seed(
     request: &RouteRequest,
     context: &RoutingContext<'_>,

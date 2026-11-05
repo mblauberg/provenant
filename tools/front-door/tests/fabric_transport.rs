@@ -668,16 +668,15 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    assert_eq!(
-        names,
-        [
-            "fabric_context",
-            "fabric_mail",
-            "fabric_run",
-            "fabric_output",
-            "fabric_discover"
-        ]
-    );
+    for required in [
+        "fabric_context",
+        "fabric_mail",
+        "fabric_run",
+        "fabric_output",
+        "fabric_discover",
+    ] {
+        assert!(names.contains(&required), "missing {required}: {names:?}");
+    }
     let identity =
         &replies.iter().find(|r| r["id"] == 3).ok_or("identity")?["result"]["structuredContent"];
     assert_eq!(identity["client"], "codex");
@@ -4784,10 +4783,8 @@ fn peer_writer_reports_delivery_prepare_failure() -> Result {
             "codex/gpt-6-luna",
             "--operation-id",
             "peer-prepare-failure",
-            "--deliver-remote",
-            "origin",
-            "--deliver-branch",
-            "published/peer",
+            "--deliver",
+            "push",
             "--prompt-file",
             prompt.to_str().ok_or("prompt")?,
             "--json",

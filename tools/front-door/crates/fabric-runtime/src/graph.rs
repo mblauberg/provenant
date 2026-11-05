@@ -952,14 +952,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         expansion_depth: usize::MAX,
         ..limits.clone()
     };
-    let mut stored = journal
+    let stored = journal
         .load(&document.graph_id)
         .map_err(GraphError::Journal)?;
-    if let Some(checkpoint) = &mut stored {
-        plans::restore_legacy_topology(
+    if let Some(checkpoint) = &stored {
+        plans::validate_persisted_topology(
             document,
             &checkpoint.extensions,
-            &mut checkpoint.expansions,
+            &checkpoint.expansions,
             &unbounded,
         )
         .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
@@ -986,18 +986,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
     let mut checkpoint = match stored {
         Some(checkpoint) => {
-            if let Some(reason) = loops::legacy(&checkpoint) {
-                if checkpoint.cancelled && !resume {
-                    let mut checkpoint = checkpoint;
-                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
-                    return Ok(GraphRun {
-                        status: GraphStatus::Cancelled,
-                        checkpoint,
-                        advance_error: None,
-                    });
-                }
-                return Err(GraphError::Refused(reason));
-            }
             let mut validation = checkpoint.clone();
             restore_cancelled_nodes(&mut validation)
                 .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
@@ -1778,9 +1766,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         break;
                     }
                     Some(last)
-                        if last.outcome.is_some_and(|outcome| {
-                            historical_fallback_admissible(outcome, node.access, last.launched)
-                        }) =>
+                        if last
+                            .outcome
+                            .is_some_and(|outcome| fallback_candidate(outcome, last.launched)) =>
                     {
                         let Some(outcome) = last.outcome else { break };
                         let evidence = last.attempt_ref.as_deref().and_then(|reference| {
