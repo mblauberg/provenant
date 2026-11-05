@@ -2,7 +2,7 @@
 use crate::launch::{exact, subtree};
 use crate::{ProviderError, SetupStep};
 use provenant_confinement::permissions::ProviderProfileSpec;
-use provenant_core::{AttemptId, RUN_STATE_DIRECTORY_ENV};
+use provenant_core::{AttemptId, RUN_STATE_DIRECTORY_ENV, STATE_DIRECTORY_ENV};
 use provenant_records::Harness;
 use serde_json::Value;
 use std::{
@@ -373,6 +373,7 @@ impl LaneRuntime<'_> {
             "PROVENANT_LANE_DEPTH": self.depth.to_string(),
             "PROVENANT_PARENT_ATTEMPT_ID": self.attempt.to_string(),
             RUN_STATE_DIRECTORY_ENV: self.child_state,
+            STATE_DIRECTORY_ENV: self.state,
             "HOME": self.home,
             "PROVENANT_ROOT": self.assets,
             "PROVENANT_GIT": self.git,
@@ -448,6 +449,23 @@ impl LaneRuntime<'_> {
         setup: &mut Vec<SetupStep>,
         scrubbed_git_config: bool,
     ) -> Result<(), ProviderError> {
+        // Pin the CLI's context in its launcher too: providers may replace
+        // HOME or scrub the shell environment. Children still use the host's
+        // configuration and identity, with custody in their private Run store.
+        let entry = self.mcp(Harness::Codex)?;
+        let mut script = String::from("#!/bin/sh\n");
+        for (key, value) in entry["env"].as_object().ok_or(ProviderError::Malformed)? {
+            let value = value.as_str().ok_or(ProviderError::InvalidPath)?;
+            if value.chars().any(char::is_control) {
+                return Err(ProviderError::InvalidPath);
+            }
+            script.push_str(&format!("export {key}={}\n", shell_quote(value)));
+        }
+        let executable = self.executable.to_str().ok_or(ProviderError::InvalidPath)?;
+        if executable.chars().any(char::is_control) {
+            return Err(ProviderError::InvalidPath);
+        }
+        script.push_str(&format!("exec {} \"$@\"\n", shell_quote(executable)));
         // A private name also pins ordinary shell `git`, independently of
         // PATH's system shim and of the override executable's basename.
         install_git(
@@ -461,6 +479,10 @@ impl LaneRuntime<'_> {
             },
             scrubbed_git_config,
         )?;
+        setup.push(SetupStep::WriteExecutable {
+            path: scratch.join("bin/provenant"),
+            bytes: script.into_bytes(),
+        });
         env.extend([
             (
                 "PROVENANT_AGENT_LABEL".into(),
@@ -468,6 +490,7 @@ impl LaneRuntime<'_> {
             ),
             ("PROVENANT_ROOT".into(), self.assets.into()),
             ("PROVENANT_GIT".into(), self.git.into()),
+            (STATE_DIRECTORY_ENV.into(), self.state.into()),
             ("PROVENANT_LANE_DEPTH".into(), self.depth.to_string().into()),
             (
                 "PROVENANT_PARENT_ATTEMPT_ID".into(),
@@ -1493,6 +1516,110 @@ mod tests {
                     format!("lane-{}", lane.attempt)
                 );
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn lane_path_pins_provenant_and_child_context_after_shell_scrubbing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{Adapter, Prompt, codex::Codex};
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let executable = root.join("host's provenant");
+        // Process-edge stand-in observes the actual launcher, without a
+        // provider login or a nested native sandbox.
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '<%s>' \"$@\"\nprintf '\\n%s\\n' \"$HOME\" \"$PROVENANT_STATE_DIR\" \"$PROVENANT_RUN_STATE_DIR\" \"$PROVENANT_PARENT_ATTEMPT_ID\" \"$PROVENANT_LANE_DEPTH\" \"$PROVENANT_GIT\" \"$PROVENANT_ROOT\" \"$PROVENANT_AGENT_LABEL\"\n",
+        )?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let plan = crate::tests::fixture_access_plan(crate::Access::ReadOnly, Some("login"), true);
+        let mut route = crate::tests::route("codex", "fixture-model");
+        route.account_key = None;
+        let prompt = Prompt::new("fixture prompt".into());
+        let mut input =
+            crate::tests::fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.provenant.executable = &executable;
+        let lane = &input.provenant;
+        let child_state = lane.child_state.to_owned();
+        let host_state = lane.state.to_owned();
+        let expected_context = [
+            lane.home.display().to_string(),
+            lane.state.display().to_string(),
+            lane.child_state.display().to_string(),
+            lane.attempt.to_string(),
+            lane.depth.to_string(),
+            lane.git.display().to_string(),
+            lane.assets.display().to_string(),
+            format!("lane-{}", lane.attempt),
+        ];
+        let spec = Codex.prepare(input)?;
+        let scratch = &plan.permissions().scratch.path;
+        let bin = scratch.join("bin");
+        let path = spec
+            .env
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .ok_or("PATH")?;
+        assert!(std::env::split_paths(&path.1).any(|entry| entry == bin));
+        let bytes = spec
+            .setup
+            .iter()
+            .find_map(|step| match step {
+                SetupStep::WriteExecutable { path, bytes } if path == &bin.join("provenant") => {
+                    Some(bytes)
+                }
+                _ => None,
+            })
+            .ok_or("provenant launcher")?;
+        // Stage outside the synthetic plan's /fixture paths.
+        let staged_bin = root.join("bin");
+        std::fs::create_dir(&staged_bin)?;
+        let launcher = staged_bin.join("provenant");
+        std::fs::write(&launcher, bytes)?;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700))?;
+        assert!(
+            spec.profile
+                .spec
+                .process_executables
+                .contains(&exact(&executable))
+        );
+        assert!(
+            spec.profile
+                .spec
+                .state_writes
+                .contains(&subtree(&child_state))
+        );
+        assert!(
+            !spec
+                .profile
+                .spec
+                .state_writes
+                .contains(&subtree(&host_state))
+        );
+        for args in [
+            vec!["run", "--mode", "read-only", "--prompt", "two words"],
+            vec!["output", "child-id"],
+        ] {
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", "exec provenant \"$@\"", "lane"])
+                .args(&args)
+                .env_clear()
+                .env("PATH", &staged_bin)
+                .env("HOME", root.join("private-provider-home"))
+                .output()?;
+            assert!(output.status.success(), "{output:?}");
+            let expected = format!(
+                "{}\n{}\n",
+                args.iter()
+                    .map(|arg| format!("<{arg}>"))
+                    .collect::<String>(),
+                expected_context.join("\n\n"),
+            );
+            assert_eq!(String::from_utf8(output.stdout)?, expected);
         }
         Ok(())
     }

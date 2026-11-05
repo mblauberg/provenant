@@ -1182,8 +1182,14 @@ Nested submission uses a dedicated store under the submitting attempt,
 selected by `PROVENANT_RUN_STATE_DIR`; identity and config stay on the
 original root. The host launches only accepted operations, under the rules
 in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
+Claude and Codex lanes expose the host-selected `provenant` on their private
+`PATH`. Its launcher pins the original home, configuration root, child Run
+store and parent attempt context even when a provider scrubs shell variables.
+A lane can submit `provenant run --mode read-only` and read its child's
+`provenant output` through the existing child-store grants.
 - Why: a lane must not reach the parent's database or other runs.
 - Test: `src/worktree_tests.rs::lane_prepare_isolates_nested_state`
+- Test: `crates/providers/src/lane.rs::tests::lane_path_pins_provenant_and_child_context_after_shell_scrubbing`
 - Owner: `crates/run/src/plan.rs`
 
 ## Not provided
