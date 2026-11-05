@@ -324,7 +324,7 @@ impl WriterLaunch {
         self.base
     }
 
-    /// Bind a graph writer to its immutable source. The instruction snapshot
+    /// Bind a graph writer to its immutable source. The launch preparation
     /// rechecks this prepared base while holding writer custody before launch.
     pub fn require_source(&self, expected: GitOid) -> Result<()> {
         if self.base != expected {
@@ -2257,36 +2257,25 @@ impl WriterLaunch {
         scope: provenant_supervisor::custody::Scope,
     ) -> Result<()> {
         seal_writer_ownership(attempt, &self.worktree)?;
-        let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), true)?;
         let utility = runtime(state)?;
-        let executor =
-            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let cancel = CancelToken::new();
-        let git = provenant_confinement::Git::new(
-            &executor,
+        let head = self
+            .worktree
+            .repo()
+            .private_dir()
+            .read_stable(OsStr::new("HEAD"), 1024)?;
+        if std::str::from_utf8(&head).map(str::trim).ok()
+            != Some(format!("ref: {}", self.branch.as_str()).as_str())
+        {
+            return Err(RunError::WriterHeadNotLaneBranch);
+        }
+        let head = crate::objects::resolve_ref(
+            utility.git_program_path(),
             self.worktree.repo(),
-            &utility,
-            budget()?,
-            &cancel,
-        );
-        let paths = git
-            .writer_instruction_paths(&self.review_exempt)
-            .map_err(error(
-                "list writer instruction paths",
-                Some(self.worktree.path()),
-            ))?;
-        let snapshot = git
-            .snapshot_instructions(scope, &paths, &archive)
-            .map_err(error(
-                "snapshot writer instructions",
-                Some(self.worktree.path()),
-            ))?;
-        if snapshot.head() != self.base {
+            self.branch.as_str(),
+        )?;
+        if head != self.base {
             return Err(RunError::Validation("writer base changed before launch"));
         }
-        snapshot
-            .persist(&archive)
-            .map_err(error("persist writer instruction snapshot", None))?;
         crate::artifacts::seal(
             attempt,
             "writer-git-pins.json",
@@ -2327,16 +2316,14 @@ impl WriterLaunch {
         state: &Path,
         attempt: &Directory,
         custody: &provenant_supervisor::custody::Recovery,
-        remote: &str,
-        base_ref: Option<&str>,
         settlement: &mut crate::settlement::Driver,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if custody.observe() != provenant_supervisor::custody::RecoveryState::Absent {
             return Err(RunError::Validation(
                 "writer object import requires absent custody",
             ));
         }
-        let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), false)?;
+        let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), true)?;
         let base = custody
             .writer_base(
                 self.worktree.repo().root_dir(),
@@ -2352,7 +2339,7 @@ impl WriterLaunch {
             .base()
             .ok_or(RunError::Validation("settlement base missing"))?;
         // The raw branch OID is only a name until the complete graph has been
-        // hash-checked. Do this before instruction recovery, diffs or ancestry.
+        // hash-checked. Do this before ancestry checks.
         let source = crate::objects::bound_source(attempt)?;
         let git_executable = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
         let shared_tip = crate::objects::resolve_ref(
@@ -2414,8 +2401,7 @@ impl WriterLaunch {
                 base,
                 verified_tip,
             )?;
-            // The private index may contain staged edits which the host's
-            // quarantine must observe. Restore it only after receive succeeds.
+            // Restore the private index only after receive succeeds.
             if !merge_objects.is_empty()
                 && crate::objects::resolve_ref(
                     &git_executable,
@@ -2459,19 +2445,6 @@ impl WriterLaunch {
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
         let cancel = import_cancel;
-        let git = provenant_confinement::Git::new(
-            &executor,
-            self.worktree.repo(),
-            &utility,
-            budget()?,
-            &cancel,
-        );
-        let snapshot = git
-            .recover_instruction_snapshot(custody, base, &archive)
-            .map_err(error(
-                "recover writer instruction snapshot",
-                Some(self.worktree.path()),
-            ))?;
         let oid = |repo: &provenant_confinement::repo::VerifiedRepo, operation| -> Result<GitOid> {
             let output = provenant_confinement::run_utility(
                 &executor,
@@ -2510,89 +2483,6 @@ impl WriterLaunch {
                 "writer head changed during object verification",
             ));
         }
-        // Remote refs only refine attribution. Missing or stale refs must not
-        // prevent quarantine from publishing evidence against the lane start.
-        let comparison_base = (|| -> Result<GitOid> {
-            // Only the delivery remote's own refs count: a commit reachable
-            // from another remote (a fork's origin, say) was never reviewed
-            // for this delivery, so it must not be exempted.
-            let head = provenant_confinement::run_utility(
-                &executor,
-                provenant_confinement::GitRead::RemoteHead {
-                    remote: remote.into(),
-                },
-                self.worktree.repo(),
-                &utility,
-                budget()?,
-                &cancel,
-            )
-            .map_err(error(
-                "resolve writer remote HEAD",
-                Some(self.worktree.path()),
-            ))?;
-            let name = if head.termination == provenant_os::exec::Termination::Exit(0)
-                && !head.stdout.truncated
-            {
-                GitRefName::remote_tracking(
-                    std::str::from_utf8(&head.stdout.bytes)
-                        .map_err(error(
-                            "decode writer remote HEAD",
-                            Some(self.worktree.path()),
-                        ))?
-                        .trim()
-                        .strip_prefix("refs/remotes/")
-                        .ok_or(RunError::Validation("writer delivery target is not remote"))?,
-                )
-                .map_err(error(
-                    "parse writer remote HEAD",
-                    Some(self.worktree.path()),
-                ))?
-            } else {
-                // No remote HEAD: use the lane's base branch on that remote.
-                let base_ref = base_ref.ok_or(RunError::Validation(
-                    "writer delivery target cannot be resolved",
-                ))?;
-                GitRefName::remote_tracking(format!("{remote}/{base_ref}"))
-                    .map_err(error("parse writer base ref", Some(self.worktree.path())))?
-            };
-            let target = oid(
-                self.worktree.repo(),
-                provenant_confinement::GitRead::ResolveRef { name },
-            )?;
-            oid(
-                self.worktree.repo(),
-                provenant_confinement::GitRead::MergeBase {
-                    left: target,
-                    right: verified_tip,
-                },
-            )
-        })()
-        .unwrap_or(snapshot.head());
-        let outcome = git
-            .quarantine_instructions_at(
-                custody,
-                &snapshot,
-                comparison_base,
-                verified_tip,
-                &archive,
-                &self.review_exempt,
-            )
-            .map_err(error(
-                "quarantine writer instructions",
-                Some(self.worktree.path()),
-            ))?;
-        let (evidence, review, protected_paths) = match outcome {
-            provenant_confinement::quarantine::QuarantineOutcome::Restored {
-                evidence_digest,
-                ..
-            } => (evidence_digest, false, Vec::new()),
-            provenant_confinement::quarantine::QuarantineOutcome::ReviewRequired {
-                evidence_digest,
-                paths,
-            } => (evidence_digest, true, paths),
-        };
-        let result =
-            archive.read_bounded(OsStr::new("quarantine-result.json"), crate::RECORD_LIMIT)?;
         crate::holder::seal_manifest(
             &archive,
             "manifest.json",
@@ -2600,9 +2490,7 @@ impl WriterLaunch {
                 schema_version: 1,
                 scope: custody.scope(),
                 kind: "quarantine_manifest",
-                evidence_digest: evidence,
-                result_digest: provenant_records::CanonicalV1::file_digest(&result),
-                review_required: review,
+                disposition: "writer_settled",
             })?,
             crate::RECORD_LIMIT,
         )?;
@@ -2632,11 +2520,11 @@ impl WriterLaunch {
             &crate::db::bytes(&WriterTerminal {
                 schema_version: 1,
                 head: verified_tip,
-                protected_paths,
+                protected_paths: Vec::new(),
             })?,
             crate::RECORD_LIMIT,
         )?;
-        Ok(review)
+        Ok(())
     }
 }
 /// How many dirty paths a reason names before it counts the rest.
@@ -2739,9 +2627,7 @@ struct WriterManifest {
     schema_version: u64,
     scope: provenant_supervisor::custody::Scope,
     kind: &'static str,
-    evidence_digest: provenant_records::FileDigest,
-    result_digest: provenant_records::FileDigest,
-    review_required: bool,
+    disposition: &'static str,
 }
 
 /// Remove the empty generated staging directory under attempt exclusion.
