@@ -1715,7 +1715,8 @@ mod tests {
             head: base,
             dirty: WorktreeCondition::Clean,
             writer: WriterState::Free,
-            owner: worktrees::OwnerStatus::Unknown,
+            owner: Err("worktree registration was not observed".into()),
+            primary: false,
         };
         assert_eq!(worktree_warning(&info, &base), None);
         info.head = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();

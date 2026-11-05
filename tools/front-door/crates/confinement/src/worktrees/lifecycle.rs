@@ -192,11 +192,12 @@ fn list_impl(
             .get(&path)
             .copied()
             .unwrap_or(WorkerState::Unknown);
-        let mut owner = OwnerStatus::Unknown;
+        let mut owner = Err("worktree registration could not be verified".to_owned());
         let mut owner_evidence = None;
         let mut registration_evidence = None;
-        let (dirty, writer, disk, registration_unknown) = if path == primary {
-            owner = OwnerStatus::Primary;
+        let is_primary = path == primary;
+        let (dirty, writer, disk, registration_unknown) = if is_primary {
+            owner = Ok(None);
             (
                 if eager_git {
                     worktree_dirty_at(context, context.repo, cancel)
@@ -220,12 +221,11 @@ fn list_impl(
             match verified {
                 Ok(worktree) => {
                     owner = match load_owner(&worktree) {
-                        Ok(Some(_)) => OwnerStatus::Registered,
-                        Ok(None) => OwnerStatus::Unowned,
+                        Ok(record) => Ok(record),
                         Err(error) => {
-                            owner_evidence =
-                                Some(format!("owner record could not be read: {error}"));
-                            OwnerStatus::Unknown
+                            let evidence = format!("owner record could not be read: {error}");
+                            owner_evidence = Some(evidence.clone());
+                            Err(evidence)
                         }
                     };
                     let disk = if entry.locked || entry.prunable {
@@ -318,6 +318,7 @@ fn list_impl(
                 dirty,
                 writer,
                 owner,
+                primary: is_primary,
             },
             occupancy,
         };
@@ -530,7 +531,8 @@ pub fn create(
         branch: Some(branch.as_str().to_owned()),
         head: entry.head,
         dirty: WorktreeCondition::Clean,
-        owner: OwnerStatus::Unowned,
+        owner: Ok(None),
+        primary: false,
         writer: match writer {
             WorkerState::Free => WriterState::Free,
             WorkerState::Live => WriterState::Live,
@@ -961,7 +963,8 @@ pub(super) fn remove_tree_when(
             .map(|branch| branch.as_str().to_owned()),
         head: expected_head,
         dirty: WorktreeCondition::Clean,
-        owner: OwnerStatus::Unknown,
+        owner: Err("worktree registration was not observed".into()),
+        primary: false,
         writer: WriterState::Free,
     };
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;

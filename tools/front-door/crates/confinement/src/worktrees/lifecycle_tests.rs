@@ -744,7 +744,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         if scenario != "unowned" {
             lane.writer = WriterState::Unknown;
         } else {
-            assert_eq!(lane.owner, OwnerStatus::Unowned);
+            assert!(lane.is_unowned());
             assert_eq!(lane.writer, WriterState::Free);
         }
         let live = NamedLive;
@@ -1555,7 +1555,19 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
         label: None,
     };
     save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
-    assert_eq!(load_owner(&tree)?, Some(owner));
+    assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+    let registered = list_with_observation(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.info.path == info.path)
+        .ok_or("missing registered worktree")?;
+    assert_eq!(
+        registered.info.owner.as_ref().ok().and_then(Option::as_ref),
+        Some(&owner)
+    );
+    assert_eq!(
+        serde_json::to_value(&registered.info)?["owner"],
+        "registered"
+    );
     let owner_path = tree.repo().private_git_dir().join("provenant-owner.json");
     let saved = fs::read(&owner_path)?;
     fs::write(&owner_path, b"invalid owner record")?;
@@ -1565,6 +1577,14 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
         .find(|entry| entry.info.path == info.path)
         .ok_or("missing worktree")?;
     assert_eq!(observation.info.writer, WriterState::Unknown);
+    assert!(
+        observation
+            .info
+            .owner
+            .as_ref()
+            .is_err_and(|evidence| evidence.contains("owner record could not be read"))
+    );
+    assert_eq!(serde_json::to_value(&observation.info)?["owner"], "unknown");
     let policy = WorktreeGcPolicy {
         upstream: Some(info.head),
         terminal: &|_| true,

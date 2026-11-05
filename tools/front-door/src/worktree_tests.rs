@@ -2373,8 +2373,11 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
     assert!(
         trees
             .iter()
-            .any(|tree| tree["branch"] == "refs/heads/feature/topic" && tree["dirty"] == "clean")
+            .any(|tree| tree["branch"] == "refs/heads/feature/topic"
+                && tree["dirty"] == "clean"
+                && tree["owner"] == "unowned")
     );
+    assert!(trees.iter().any(|tree| tree["owner"] == "primary"));
     let cache = prepare_lane_cache(
         &rig,
         &rig.project.join(".worktrees/feature-topic"),

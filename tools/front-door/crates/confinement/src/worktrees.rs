@@ -459,16 +459,6 @@ pub enum OccupancyUnknownSource {
     Custody,
 }
 
-/// Observed lane-ownership registration; absence does not prove custody is free.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OwnerStatus {
-    Registered,
-    Unowned,
-    Unknown,
-    Primary,
-}
-
 /// CLI result facts are serialize-only. Its absolute path is emitted through
 /// the explicit root-plus-PathWire envelope below, never lossy `Path::display`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -478,7 +468,27 @@ pub struct WorktreeInfo {
     pub head: GitOid,
     pub dirty: WorktreeCondition,
     pub writer: WriterState,
-    pub owner: OwnerStatus,
+    /// The existing owner record, or the evidence that it could not be read.
+    pub owner: Result<Option<WorktreeOwner>, String>,
+    pub primary: bool,
+}
+
+impl WorktreeInfo {
+    pub fn is_unowned(&self) -> bool {
+        !self.primary && matches!(self.owner, Ok(None))
+    }
+
+    fn owner_label(&self) -> &'static str {
+        if self.primary {
+            "primary"
+        } else {
+            match &self.owner {
+                Ok(Some(_)) => "registered",
+                Ok(None) => "unowned",
+                Err(_) => "unknown",
+            }
+        }
+    }
 }
 
 impl Serialize for WorktreeInfo {
@@ -493,8 +503,8 @@ impl Serialize for WorktreeInfo {
         state.serialize_field("head", &self.head)?;
         state.serialize_field("dirty", &self.dirty)?;
         state.serialize_field("writer", &self.writer)?;
-        state.serialize_field("owner", &self.owner)?;
-        if self.owner == OwnerStatus::Unowned {
+        state.serialize_field("owner", self.owner_label())?;
+        if self.is_unowned() {
             state.serialize_field("next", "This checkout has no Provenant lane owner; it may have been created outside Provenant. Inspect its custody, then select it explicitly with --worktree <path>.")?;
         }
         state.end()

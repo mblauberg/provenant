@@ -1525,7 +1525,8 @@ mod human_tests {
             head: GitOid::parse(&"4a".repeat(20))?,
             dirty: worktrees::WorktreeCondition::Dirty,
             writer: worktrees::WriterState::Live,
-            owner: worktrees::OwnerStatus::Unknown,
+            owner: Err("worktree registration was not observed".into()),
+            primary: false,
         })
     }
 
@@ -1571,7 +1572,7 @@ mod human_tests {
     #[test]
     fn worktree_list_distinguishes_unowned_from_uncertain_custody() -> Check {
         let mut tree = info("/repo/native checkout")?;
-        tree.owner = worktrees::OwnerStatus::Unowned;
+        tree.owner = Ok(None);
         tree.writer = worktrees::WriterState::Unknown;
         let value = serde_json::to_value(&tree)?;
         assert_eq!(value["owner"], "unowned");
@@ -1580,7 +1581,7 @@ mod human_tests {
         assert!(
             human(serde_json::to_value(Data::Listed(vec![tree.clone()]))?).contains("--worktree")
         );
-        tree.owner = worktrees::OwnerStatus::Unknown;
+        tree.owner = Err("worktree registration was not observed".into());
         assert!(serde_json::to_value(&tree)?.get("next").is_none());
         assert_eq!(tree.writer, worktrees::WriterState::Unknown);
         Ok(())

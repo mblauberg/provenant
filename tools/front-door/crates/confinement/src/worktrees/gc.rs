@@ -106,7 +106,7 @@ fn collect_impl(
         // This is independent of the policy for removing foreign worktrees.
         if (lane.writer == WriterState::Unknown
             || (!lane.path.starts_with(&managed)
-                && lane.owner == OwnerStatus::Unowned
+                && lane.is_unowned()
                 && lane.writer == WriterState::Free))
             && !policy.regenerable.is_empty()
             && let Some(entry) = entries.iter().find(|entry| entry.path == lane.path)
