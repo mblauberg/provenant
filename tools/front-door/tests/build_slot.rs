@@ -185,16 +185,16 @@ fn more_builds_than_slots_compile_serially() -> Result {
         .map(|_| rig.held_build(1))
         .collect::<Result<Vec<_>>>()?;
     for started in 1..=4 {
-        assert!(provenant_test_support::wait_for(
-            "build slot readiness",
+        let _observation = provenant_test_support::wait_for(
+            &format!("{started} builds started"),
             Duration::from_secs(30),
-            || {
-                rig.log().is_ok_and(|log| {
+            || rig.log().map_err(|error| error.to_string()),
+            |log| {
+                log.as_ref().is_ok_and(|log| {
                     log.iter().filter(|line| line.starts_with("start ")).count() >= started
                 })
             },
-            |ready| *ready
-        )?);
+        )?;
         rig.release()?;
     }
     for child in &mut children {
@@ -222,16 +222,16 @@ fn two_slots_allow_two_builds_at_once_and_no_more() -> Result {
         .map(|_| rig.held_build(2))
         .collect::<Result<Vec<_>>>()?;
     for started in 2..=4 {
-        assert!(provenant_test_support::wait_for(
-            "build slot readiness",
+        let _observation = provenant_test_support::wait_for(
+            &format!("{started} builds started"),
             Duration::from_secs(30),
-            || {
-                rig.log().is_ok_and(|log| {
+            || rig.log().map_err(|error| error.to_string()),
+            |log| {
+                log.as_ref().is_ok_and(|log| {
                     log.iter().filter(|line| line.starts_with("start ")).count() >= started
                 })
             },
-            |ready| *ready
-        )?);
+        )?;
         rig.release()?;
     }
     rig.release()?;
@@ -271,22 +271,26 @@ fn waiting_commands_keep_separate_markers() -> Result {
     holder.kill()?;
     holder.wait()?;
     // The first to finish removes only its own marker.
-    assert!(provenant_test_support::wait_for(
-        "build slot readiness",
+    let _observation = provenant_test_support::wait_for(
+        "first build starts and one marker remains",
         Duration::from_secs(30),
-        || { rig.started("start") && rig.markers().len() == 1 },
-        |ready| *ready
-    )?);
+        || (rig.log().map_err(|error| error.to_string()), rig.markers()),
+        |(log, markers)| {
+            log.as_ref()
+                .is_ok_and(|log| log.iter().any(|line| line.starts_with("start")))
+                && markers.len() == 1
+        },
+    )?;
     rig.release()?;
-    assert!(provenant_test_support::wait_for(
-        "build slot readiness",
+    let _observation = provenant_test_support::wait_for(
+        "second build starts",
         Duration::from_secs(30),
-        || {
-            rig.log()
+        || rig.log().map_err(|error| error.to_string()),
+        |log| {
+            log.as_ref()
                 .is_ok_and(|log| log.iter().filter(|line| line.starts_with("start ")).count() == 2)
         },
-        |ready| *ready
-    )?);
+    )?;
     rig.release()?;
     assert!(finish(&mut first, Duration::from_secs(30))?);
     assert!(finish(&mut second, Duration::from_secs(30))?);
