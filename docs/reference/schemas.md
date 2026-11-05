@@ -53,8 +53,9 @@ until an owner splits them.
 | `REVIEW_INCOMPLETE` | specific | Review coverage does not support acceptance. |
 | `IN_LANE` | specific | A lane cannot register or save a chair session. |
 | `SESSION_PROJECT` | specific | The workflow session is registered under a different project. |
-| `OWNER_LOCAL_ONLY` | specific | The inbox owner must run this operation on the owner host or from the owning chair session. |
-| `UNSUPPORTED_OWNER` | specific | The peer does not support inbox operations. |
-| `CONSOLE_APP_UNAVAILABLE` | specific | The console app cannot be opened. |
-| `RECONCILE_INCOMPLETE` | specific | Reconcile could not settle everything it found. |
-| `CLI_FAILED` | umbrella | A delegated Provenant command failed without a code of its own. |
+| `launch_unknown` | legacy_spelling | The launch handoff was not confirmed (same meaning as LAUNCH_UNKNOWN). |
+| `owner_local_only` | legacy_spelling | The inbox owner must run this operation on the owner host or from the owning chair session. |
+| `unsupported_owner` | legacy_spelling | The peer does not support inbox operations. |
+| `console_app_unavailable` | legacy_spelling | The console app cannot be opened. |
+| `reconcile_incomplete` | legacy_spelling | Reconcile could not settle everything it found. |
+| `cli_failed` | legacy_spelling | A delegated Provenant command failed without a code of its own. |
