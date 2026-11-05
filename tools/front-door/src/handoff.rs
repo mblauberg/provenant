@@ -11,7 +11,7 @@ use provenant_cli::{
     workflow::Handoff,
 };
 use provenant_confinement::worktrees::{
-    self, WorkerObserver, WorktreeCondition, WorktreeCreate, WriterState,
+    self, Occupancy, WorkerObserver, WorktreeCondition, WorktreeCreate,
 };
 use provenant_core::{CancelToken, Clock, HostId, OperationId, WaitBudget};
 use provenant_fabric_runtime::{
@@ -181,15 +181,16 @@ fn inspect_context(
     cancel: &CancelToken,
 ) -> Result<Vec<Tree>, crate::worktrees::Error> {
     let context = &worktrees::WorktreeContext { facts, ..*context };
-    let infos = worktrees::list_with_facts(context, facts, cancel)?;
+    let observations = worktrees::list_with_observation_and_facts(context, facts, cancel)?;
     let common = context.repo.common_git_dir();
     let primary = common
         .file_name()
         .is_some_and(|name| name == ".git")
         .then(|| common.parent())
         .flatten();
-    let mut trees = Vec::with_capacity(infos.len());
-    for info in infos {
+    let mut trees = Vec::with_capacity(observations.len());
+    for observation in observations {
+        let info = observation.info;
         let branch = info.branch.as_deref().map(short_branch);
         let (upstream, pushed) = match branch.as_deref() {
             Some(branch) => {
@@ -209,7 +210,7 @@ fn inspect_context(
             None => (None, false),
         };
         let path = fs::canonicalize(&info.path).unwrap_or(info.path);
-        let (live_writer, writer_unknown) = handoff_writer_state(info.writer);
+        let (live_writer, writer_unknown) = handoff_writer_state(&observation.occupancy);
         trees.push(Tree {
             primary: primary == Some(path.as_path()),
             path,
@@ -229,10 +230,10 @@ fn inspect_context(
     Ok(trees)
 }
 
-fn handoff_writer_state(writer: WriterState) -> (bool, bool) {
+fn handoff_writer_state(occupancy: &Occupancy) -> (bool, bool) {
     (
-        matches!(writer, WriterState::Busy | WriterState::Live),
-        writer == WriterState::Unknown,
+        matches!(occupancy, Occupancy::Held | Occupancy::Observed { .. }),
+        matches!(occupancy, Occupancy::Unknown { .. }),
     )
 }
 
@@ -1280,6 +1281,7 @@ pub(crate) fn receive(
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
+    use provenant_confinement::worktrees::WriterState;
 
     #[test]
     fn git_text_refuses_stdout_past_its_bound() {
@@ -1314,11 +1316,19 @@ mod tests {
             upstream: None,
             pushed: false,
         };
-        for state in [WriterState::Busy, WriterState::Live, WriterState::Unknown] {
-            (tree.live_writer, tree.writer_unknown) = handoff_writer_state(state);
+        for state in [
+            Occupancy::Held,
+            Occupancy::Observed { process: None },
+            Occupancy::Unknown {
+                scope: tree.path.clone(),
+                evidence: "fixture".into(),
+                source: worktrees::OccupancyUnknownSource::Custody,
+            },
+        ] {
+            (tree.live_writer, tree.writer_unknown) = handoff_writer_state(&state);
             assert!(unsafe_wip(&tree), "{state:?} must not permit Git writes");
         }
-        (tree.live_writer, tree.writer_unknown) = handoff_writer_state(WriterState::Free);
+        (tree.live_writer, tree.writer_unknown) = handoff_writer_state(&Occupancy::Available);
         assert!(!unsafe_wip(&tree));
         tree.writer_unknown = true;
         tree.dirty = false;

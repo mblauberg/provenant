@@ -126,18 +126,6 @@ pub fn list_streaming(
     list_impl(context, cancel, report, true, context.facts)
 }
 
-/// Read a complete worktree inventory through the command's facts session.
-pub fn list_with_facts(
-    context: &WorktreeContext<'_>,
-    facts: &RepoFacts,
-    cancel: &CancelToken,
-) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    Ok(list_with_observation_and_facts(context, facts, cancel)?
-        .into_iter()
-        .map(|observation| observation.info)
-        .collect())
-}
-
 /// Read occupancy and inventory through the command's facts session.
 pub fn list_with_observation_and_facts(
     context: &WorktreeContext<'_>,
