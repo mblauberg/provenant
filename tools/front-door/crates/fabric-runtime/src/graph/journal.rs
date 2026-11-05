@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! { pub(super) static CHECKPOINT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 #[derive(Debug, Error)]
 pub enum JournalError {
     #[error("invalid graph id for checkpoint path")]
@@ -717,6 +720,8 @@ pub(super) fn read_checkpoint_bytes(
     directory: &Directory,
     graph_id: &str,
 ) -> Result<Option<Vec<u8>>, JournalError> {
+    #[cfg(test)]
+    CHECKPOINT_READS.with(|reads| reads.set(reads.get() + 1));
     let file = match directory.open_read(OsStr::new(&format!("graph-{graph_id}.json"))) {
         Ok(file) => file,
         Err(error) if error.is_not_found() => return Ok(None),

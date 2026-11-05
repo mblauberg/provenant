@@ -5,6 +5,64 @@ use std::{convert::Infallible, os::unix::fs::PermissionsExt};
 struct Owner;
 
 #[test]
+fn pending_index_reads_only_pending_checkpoints_after_rebuild() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    drop(FileJournal::open(&root, project, "initial", budget, &cancel, &clock).unwrap());
+    let directory = base.join("fabric/graphs").join(project.to_string());
+    let mut stored: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    for number in 0..5020 {
+        let id = format!("graph-{number:04}");
+        stored.checkpoint.graph_id = id.clone();
+        stored.execution.document.graph_id = id.clone();
+        stored.checkpoint.nodes[0].state = if number < 5000 {
+            NodeState::Succeeded
+        } else {
+            NodeState::Running
+        };
+        stored.digest = CanonicalV1::record_digest(
+            "fabric-graph-checkpoint",
+            2,
+            &(&stored.checkpoint, &stored.execution),
+        )
+        .unwrap()
+        .to_string();
+        let bytes = CanonicalV1::bytes(&stored).unwrap();
+        std::fs::write(directory.join(format!("graph-{id}.json")), bytes.as_bytes()).unwrap();
+    }
+    let ids = FileJournal::pending_graph_ids(&root, project).unwrap();
+    assert_eq!(ids.len(), 20);
+    assert_eq!(
+        ids,
+        (5000..5020)
+            .map(|number| format!("graph-{number:04}"))
+            .collect::<Vec<_>>()
+    );
+    super::journal::CHECKPOINT_READS.with(|reads| reads.set(0));
+    let ids = FileJournal::pending_graph_ids(&root, project).unwrap();
+    for id in ids {
+        assert!(
+            FileJournal::read_checkpoint_for_tick(&root, project, &id)
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert_eq!(
+        super::journal::CHECKPOINT_READS.with(|reads| reads.get()),
+        20
+    );
+}
+
+#[test]
 fn checkpoint_collection_keeps_pending_and_recent_graphs() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
