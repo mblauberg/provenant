@@ -628,7 +628,7 @@ fn checkpoint(
         Moment::Compact | Moment::Restart if !in_lane => {
             let baseline = current.as_ref().map(session::baseline);
             let want = crate::hook_state::Want {
-                worktrees: false,
+                worktrees: true,
                 settled_after_unix: baseline
                     .as_ref()
                     .map_or(wall - NO_CHECKPOINT_WINDOW, |b| b.chair_saved_unix),

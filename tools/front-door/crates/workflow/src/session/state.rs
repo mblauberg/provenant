@@ -376,17 +376,23 @@ impl SessionState {
 
     /// Bounded text for a SessionStart hook. Read-only; nothing is saved.
     pub fn digest(&self, limit: usize) -> String {
-        let sections = self.sections(false);
+        let sections = self.sections(!self.worktrees.is_empty());
         if sections.is_empty() {
             return String::new();
         }
-        let how = match (
+        let mut how = match (
             self.commands.runnable("lanes"),
             self.commands.runnable("pr status"),
         ) {
             (Some(lanes), Some(pr)) => format!("`{lanes}` and `{pr}`"),
             _ => "provenant lanes and provenant pr status with this hook's --state-dir".into(),
         };
+        if !self.worktrees.is_empty() {
+            match self.commands.runnable("worktree list") {
+                Some(command) => how.push_str(&format!(", and `{command}`")),
+                None => how.push_str(", and provenant worktree list with this hook's --state-dir"),
+            }
+        }
         render(
             &format!("Provenant state for this project (read-only; re-derive with {how})"),
             &sections,
@@ -739,6 +745,23 @@ mod tests {
             assert!(text.contains("--cursor 7"), "{text}");
             assert!(text.contains("too long or unsafe"), "{text}");
         }
+    }
+
+    #[test]
+    fn session_digest_includes_collected_worktrees() {
+        let state = SessionState {
+            worktrees: vec![WorktreeLine {
+                path: "/work/tree".into(),
+                branch: "topic".into(),
+                dirty: "clean".into(),
+                writer: "free".into(),
+            }],
+            ..Default::default()
+        };
+        let digest = state.digest(DIGEST_LIMIT);
+        assert!(digest.contains("Worktrees (1)"), "{digest}");
+        assert!(digest.contains("/work/tree"), "{digest}");
+        assert!(digest.contains("provenant worktree list"), "{digest}");
     }
 
     #[test]
