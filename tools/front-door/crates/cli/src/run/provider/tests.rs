@@ -2391,9 +2391,9 @@ fn prepare_policy_writer_successor(
     store.stage_policy_retry(
         &old,
         &run::PolicyRetry {
-            schema_version: 1,
-            cause: Some(run::PolicyCause::Quota),
-            action: Some(run::PolicyAction::Retry),
+            schema_version: 2,
+            cause: run::PolicyCause::Quota,
+            action: run::PolicyAction::Retry,
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,

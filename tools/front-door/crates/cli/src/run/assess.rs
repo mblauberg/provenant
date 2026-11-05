@@ -37,8 +37,8 @@ pub(super) fn assess_model_result(
                     })
             });
             fallback.filter(|fallback| task.account.is_none() || fallback.provider.as_deref() == record.applied_route.as_ref().and_then(|route| route.provider.as_deref())).and_then(|fallback| fallback.model.map(|model| run::PolicyRetry {
-                schema_version: 1,
-                cause: Some(run::PolicyCause::ResultCheck), action: Some(run::PolicyAction::Retry),
+                schema_version: 2,
+                cause: run::PolicyCause::ResultCheck, action: run::PolicyAction::Retry,
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: fallback.provider.unwrap_or_default(), model, effort: fallback.effort },
                 resume: false, max_attempts: 2,
                 instruction: "The previous read-only route failed its result check. Complete the original task and include concrete evidence in your final answer.".into(),
@@ -85,8 +85,8 @@ pub(super) fn assess_model_result(
             cause: Some(run::PolicyCause::Unfinished),
             refusal: Some("model reported unfinished work".into()),
             retry: (policy_attempt <= u64::from(policy.lane.max_continuations.unwrap_or(0))).then(|| run::PolicyRetry {
-                schema_version: 1,
-                cause: Some(run::PolicyCause::Unfinished), action: Some(if resume { run::PolicyAction::Resume } else { run::PolicyAction::Retry }),
+                schema_version: 2,
+                cause: run::PolicyCause::Unfinished, action: if resume { run::PolicyAction::Resume } else { run::PolicyAction::Retry },
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: route.provider.clone().unwrap_or_default(), model, effort: route.effort.clone() },
                 resume, max_attempts: u64::from(policy.lane.max_continuations.unwrap_or(0)) + 1,
                 instruction: "Continue the unfinished task using the handoff and existing worktree. Carry out the remaining work and verification, keep handoff.json current, and end with the updated schema v2 handoff fence.".into(),
@@ -296,13 +296,13 @@ pub(super) fn assess_settlement_retry(
         refusal: None,
         note: Some(format!("{action}{wait} (attempt {next} of {max_attempts})")),
         retry: Some(run::PolicyRetry {
-            schema_version: 1,
-            cause: Some(typed_cause),
-            action: Some(if resume {
+            schema_version: 2,
+            cause: typed_cause,
+            action: if resume {
                 run::PolicyAction::Resume
             } else {
                 run::PolicyAction::Retry
-            }),
+            },
             route: route_choice,
             resume,
             max_attempts,
@@ -439,10 +439,7 @@ mod tests {
             false,
         );
         assert_eq!(decision.cause, Some(run::PolicyCause::Capacity));
-        assert_eq!(
-            decision.retry.unwrap().cause,
-            Some(run::PolicyCause::Capacity)
-        );
+        assert_eq!(decision.retry.unwrap().cause, run::PolicyCause::Capacity);
         Ok(())
     }
 }

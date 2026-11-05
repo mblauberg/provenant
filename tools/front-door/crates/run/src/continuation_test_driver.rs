@@ -347,9 +347,9 @@ fn launches() -> TestResult {
     store.stage_policy_retry(
         &old,
         &PolicyRetry {
-            schema_version: 1,
-            cause: Some(PolicyCause::Quota),
-            action: Some(PolicyAction::Retry),
+            schema_version: 2,
+            cause: PolicyCause::Quota,
+            action: PolicyAction::Retry,
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,

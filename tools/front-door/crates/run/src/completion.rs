@@ -283,9 +283,9 @@ mod tests {
             }
             Ok(ResultAssessment {
                 retry: Some(PolicyRetry {
-                    schema_version: 1,
-                    cause: Some(crate::PolicyCause::Capacity),
-                    action: Some(crate::PolicyAction::Retry),
+                    schema_version: 2,
+                    cause: crate::PolicyCause::Capacity,
+                    action: crate::PolicyAction::Retry,
                     route: record.requested_route.clone(),
                     resume: false,
                     max_attempts: 2,
@@ -447,7 +447,7 @@ mod tests {
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, String> {
+        ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
             Err("holder-only fixture does not launch".into())
         }
         fn decode(
@@ -534,7 +534,7 @@ mod tests {
                         .ok_or("missing stop")?;
                     assert_eq!(
                         (decision.cause, decision.action),
-                        (Some(cause), Some(PolicyAction::Stop))
+                        (cause, PolicyAction::Stop)
                     );
                     assert_eq!(store.policy_tail(id, &call)?.attempt_id, id);
                 }
@@ -624,9 +624,9 @@ mod tests {
         result.result = Handoff::from_json(&snapshot("stopped_early"))?.fenced();
         store.capture_handoff(&attempt, &old, &result)?;
         let retry = PolicyRetry {
-            schema_version: 1,
-            cause: Some(crate::PolicyCause::Capacity),
-            action: Some(crate::PolicyAction::Retry),
+            schema_version: 2,
+            cause: crate::PolicyCause::Capacity,
+            action: crate::PolicyAction::Retry,
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,

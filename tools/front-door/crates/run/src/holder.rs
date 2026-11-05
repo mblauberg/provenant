@@ -1574,11 +1574,11 @@ impl RunStore {
         let frozen_policy = self.staged_policy_retry(&record)?;
         let frozen_policy_retry = frozen_policy
             .as_ref()
-            .is_some_and(|decision| decision.action != Some(crate::PolicyAction::Stop));
+            .is_some_and(|decision| decision.action != crate::PolicyAction::Stop);
         let frozen_refusal = frozen_policy_retry
             || frozen_policy.as_ref().is_some_and(|decision| {
-                decision.cause == Some(crate::PolicyCause::Unfinished)
-                    || (decision.cause == Some(crate::PolicyCause::ResultCheck)
+                decision.cause == crate::PolicyCause::Unfinished
+                    || (decision.cause == crate::PolicyCause::ResultCheck
                         && decoded.outcome == Outcome::Succeeded)
             });
         if frozen_refusal && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {

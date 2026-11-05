@@ -3358,9 +3358,9 @@ pub(crate) mod peer_tests {
 
         // Attempt 1 hits provider quota: stages a policy retry and settles QuotaLimited.
         let retry = provenant_run::PolicyRetry {
-            schema_version: 1,
-            cause: Some(provenant_run::PolicyCause::Quota),
-            action: Some(provenant_run::PolicyAction::Retry),
+            schema_version: 2,
+            cause: provenant_run::PolicyCause::Quota,
+            action: provenant_run::PolicyAction::Retry,
             route: attempt_1_record.requested_route.clone(),
             resume: false,
             max_attempts: 2,
