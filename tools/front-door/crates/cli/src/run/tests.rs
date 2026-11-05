@@ -5828,6 +5828,10 @@ fn quota_reason_uses_safe_fact_without_provider_message() {
             )
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+        assert_eq!(
+            decoded.terminal_cause,
+            Some(run::TerminalCause::FreePoolQuota)
+        );
         let reason = decoded.reason.as_deref().unwrap();
         assert!(reason.contains("free tier exhausted"));
         assert!(reason.contains("wait"));

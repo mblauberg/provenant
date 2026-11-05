@@ -1646,6 +1646,9 @@ pub(super) fn prepare_candidates(
                     } else {
                         reason.clone()
                     });
+                    if *kind == SkipKind::AuthRequired {
+                        skipped.detail = provenant_records::diagnostic::safe_text(detail);
+                    }
                     reasons.push(skipped);
                     continue;
                 }
@@ -1690,7 +1693,7 @@ pub(super) fn prepare_candidates(
                 skipped.set_cause(reason.clone());
                 // This detail is assembled from registered account facts, not
                 // provider output. Remote projections still use typed facts.
-                skipped.detail = detail;
+                skipped.detail = provenant_records::diagnostic::safe_text(&detail);
                 reasons.push(skipped);
                 continue;
             }
@@ -1703,7 +1706,7 @@ pub(super) fn prepare_candidates(
                 previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                 let mut skipped = skip(&label, SkipKind::AuthRequired, &detail);
                 skipped.set_cause(provenant_records::RouteExclusionReason::AuthRequired);
-                skipped.detail = detail;
+                skipped.detail = provenant_records::diagnostic::safe_text(&detail);
                 reasons.push(skipped);
                 continue;
             }
