@@ -220,7 +220,7 @@ impl PartialEq for TopologyPresence {
 }
 impl Eq for TopologyPresence {}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewSpec>,
@@ -322,6 +322,18 @@ pub struct GraphNode {
 }
 
 impl GraphNode {
+    /// Construct a composite boundary with the same defaults as a decoded node.
+    pub fn composite(id: String, depends_on: Vec<String>, spec: CompositeSpec) -> Self {
+        Self {
+            id,
+            kind: Some(NodeKind::Composite),
+            access: AccessMode::ReadOnly,
+            depends_on,
+            composite: Some(spec),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn dependencies(&self) -> impl Iterator<Item = &String> {
         self.depends_on.iter().chain(
             self.after_expansion

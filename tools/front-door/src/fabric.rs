@@ -4548,7 +4548,8 @@ impl BoundGraphOwner<'_> {
         provenant_fabric_runtime::graph::ReviewResolveError,
     > {
         use provenant_fabric_runtime::graph::{
-            Expansion, GraphNode, ReviewResolution, ReviewResolveError,
+            CompositeSpec, Expansion, GraphInput, GraphNode, OutputKind, ReviewResolution,
+            ReviewResolveError,
         };
         let failed = |message: String| ReviewResolveError::Failed(message);
         let spec = node
@@ -4656,13 +4657,10 @@ impl BoundGraphOwner<'_> {
             .iter()
             .enumerate()
             .map(|(index, member)| {
-                let mut outputs = vec![
-                    provenant_fabric_runtime::graph::OutputKind::Result,
-                    provenant_fabric_runtime::graph::OutputKind::Findings,
-                ];
+                let mut outputs = vec![OutputKind::Result, OutputKind::Findings];
                 if index == 0 {
                     if panel.synthesis == provenant_routing::ReviewSynthesis::Reduce {
-                        outputs.push(provenant_fabric_runtime::graph::OutputKind::Commit);
+                        outputs.push(OutputKind::Commit);
                     }
                     for output in &spec.export_first {
                         if !outputs.contains(output) {
@@ -4670,7 +4668,12 @@ impl BoundGraphOwner<'_> {
                         }
                     }
                 }
-                serde_json::json!({"node": member.id, "outputs": outputs})
+                GraphInput {
+                    extra: Default::default(),
+                    node: member.id.clone(),
+                    outputs,
+                    required_outputs: Vec::new(),
+                }
             })
             .collect();
         let reduction = panel.synthesis == provenant_routing::ReviewSynthesis::Reduce;
@@ -4679,11 +4682,22 @@ impl BoundGraphOwner<'_> {
         } else {
             node.depends_on.clone()
         };
-        let lens_group: GraphNode = serde_json::from_value(serde_json::json!({
-            "id": lens_id, "kind":"composite", "access":"read_only", "depends_on":lens_deps,
-            "composite": {"min_successful": spec.min_successful.map(|n| if n == 0 { members.len().saturating_sub(1).max(1) } else { n }),
-                "reduce_verdict": reduction, "nodes":[], "exports":exports},
-        })).map_err(|error| failed(format!("review lenses do not lower: {error}")))?;
+        let lens_group = GraphNode::composite(
+            lens_id.clone(),
+            lens_deps,
+            CompositeSpec {
+                min_successful: spec.min_successful.map(|n| {
+                    if n == 0 {
+                        members.len().saturating_sub(1).max(1)
+                    } else {
+                        n
+                    }
+                }),
+                reduce_verdict: reduction,
+                nodes: Vec::new(),
+                exports,
+            },
+        );
         let pinned = serde_json::json!({"type":"commit","commit":subject});
         let template = |key: &str,
                         id: &str,
@@ -4742,17 +4756,35 @@ impl BoundGraphOwner<'_> {
             children.push(template("synthesis", &id, deps, serde_json::json!(inputs))?);
             id
         };
-        let mut root_exports = vec![
-            serde_json::json!({"node":output,"outputs":["result","findings","verdict","commit"]}),
-        ];
+        let mut root_exports = vec![GraphInput {
+            extra: Default::default(),
+            node: output,
+            outputs: vec![
+                OutputKind::Result,
+                OutputKind::Findings,
+                OutputKind::Verdict,
+                OutputKind::Commit,
+            ],
+            required_outputs: Vec::new(),
+        }];
         if let Some(verifier) = verifier_output {
-            root_exports.push(serde_json::json!({"node":verifier,"outputs":["result","findings"]}));
+            root_exports.push(GraphInput {
+                extra: Default::default(),
+                node: verifier,
+                outputs: vec![OutputKind::Result, OutputKind::Findings],
+                required_outputs: Vec::new(),
+            });
         }
-        let root: GraphNode = serde_json::from_value(serde_json::json!({
-            "id":root_id, "kind":"composite", "access":"read_only", "depends_on":node.depends_on,
-            "composite":{"nodes":[],"exports":root_exports}
-        }))
-        .map_err(|error| failed(format!("review composite does not lower: {error}")))?;
+        let root = GraphNode::composite(
+            root_id,
+            node.depends_on.clone(),
+            CompositeSpec {
+                min_successful: None,
+                reduce_verdict: false,
+                nodes: Vec::new(),
+                exports: root_exports,
+            },
+        );
         let mut nodes = vec![root];
         nodes.extend(children);
         Ok(Expansion {

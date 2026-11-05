@@ -4017,6 +4017,36 @@ fn composite_running_status_does_not_consume_an_attempt_slot() {
 }
 
 #[test]
+fn typed_composite_constructor_matches_decoded_graph_node() {
+    let typed = GraphNode::composite(
+        "panel".into(),
+        vec!["source".into()],
+        CompositeSpec {
+            min_successful: Some(1),
+            reduce_verdict: true,
+            nodes: Vec::new(),
+            exports: vec![GraphInput {
+                extra: Default::default(),
+                node: "member".into(),
+                outputs: vec![OutputKind::Result, OutputKind::Findings],
+                required_outputs: Vec::new(),
+            }],
+        },
+    );
+    let decoded: GraphNode = serde_json::from_value(serde_json::json!({
+        "id": "panel", "kind": "composite", "access": "read_only", "depends_on": ["source"],
+        "composite": {"min_successful": 1, "reduce_verdict": true, "nodes": [],
+            "exports": [{"node": "member", "outputs": ["result", "findings"]}]}
+    }))
+    .unwrap();
+    assert_eq!(typed, decoded);
+    assert_eq!(
+        serde_json::to_value(&typed).unwrap(),
+        serde_json::to_value(decoded).unwrap()
+    );
+}
+
+#[test]
 fn composite_expansion_reports_the_bound_and_owner() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "composite-bound", "nodes": [{
