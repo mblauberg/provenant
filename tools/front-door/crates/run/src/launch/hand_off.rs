@@ -67,6 +67,9 @@ impl RunStore {
         {
             return Err(local("writer confinement", &"does not match the task"));
         }
+        let writer_path = writer
+            .as_ref()
+            .map(|writer| writer.worktree.path().to_path_buf());
         let mut lease = match writer {
             Some(writer) => {
                 let (directory, binding) = writer
@@ -87,6 +90,13 @@ impl RunStore {
             crate::writer::WriterCustodyError::Admission(
                 custody::CustodyError::ReservationRetained(error),
             ) => HandOff::Protected(format!("custody reservation: {error}")),
+            crate::writer::WriterCustodyError::Admission(
+                custody::CustodyError::ImportRetained { run, attempt },
+            ) => HandOff::RetainedImport {
+                run,
+                attempt,
+                worktree: writer_path.clone().unwrap_or_default(),
+            },
             crate::writer::WriterCustodyError::Admission(error) => local("custody", &error),
             crate::writer::WriterCustodyError::Withdrawal { admission, release } => {
                 HandOff::Protected(format!(
@@ -183,12 +193,33 @@ impl RunStore {
         // Keep the shared config lock until custody confirms the child launch.
         let mut _git_setup_lock = None;
         if let Some(confinement) = &mut plan.confinement {
-            _git_setup_lock = local_or_withdraw!(
-                confinement
-                    .prepare_git()
-                    .map_err(|error| local("Git setup", &error))
-            );
             let writer_attempt = local_or_withdraw!(directory());
+            _git_setup_lock = match retry_setup_lock(
+                record.retry_of.is_some(),
+                |budget| {
+                    confinement.prepare_git(
+                        &writer_attempt,
+                        call.cancel,
+                        record.retry_of.map(|_| budget),
+                    )
+                },
+                || call.check(),
+            ) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    lease.withdraw_unlaunched().map_err(|release| {
+                        HandOff::Protected(format!(
+                            "Git setup: {error}; custody withdrawal: {release}"
+                        ))
+                    })?;
+                    return Err(match error {
+                        RunError::SetupLockTimeout { seconds } => {
+                            HandOff::SetupLockTimeout(seconds)
+                        }
+                        error => local("Git setup", &error),
+                    });
+                }
+            };
             if let Some(writer) = &confinement.writer
                 && let Err(error) = crate::objects::prepare_bound(
                     &local_or_withdraw!(
@@ -346,6 +377,9 @@ mod tests {
         match result {
             Err(HandOff::Local(reason)) => assert!(reason.contains("lane priority"), "{reason}"),
             Err(HandOff::Busy) => panic!("custody busy"),
+            Err(HandOff::SetupLockTimeout(_) | HandOff::RetainedImport { .. }) => {
+                panic!("unexpected refusal")
+            }
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Protected(reason)) => panic!("protected: {reason}"),
             Ok(()) => panic!("unexpected launch"),
@@ -379,6 +413,9 @@ mod tests {
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
             Err(HandOff::Busy) => panic!("busy"),
+            Err(HandOff::SetupLockTimeout(_) | HandOff::RetainedImport { .. }) => {
+                panic!("unexpected refusal")
+            }
             Ok(()) => panic!("unexpected launch"),
         }
         store
@@ -409,6 +446,9 @@ mod tests {
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
             Err(HandOff::Busy) => panic!("busy"),
+            Err(HandOff::SetupLockTimeout(_) | HandOff::RetainedImport { .. }) => {
+                panic!("unexpected refusal")
+            }
             Ok(()) => panic!("unexpected launch"),
         }
         assert!(custody::reservation_present(
@@ -563,5 +603,66 @@ mod tests {
             assert_eq!(acquisitions.get(), 1);
         }
         Ok(())
+    }
+}
+
+// A setup lock timeout occurs before Git preparation and before any guardian
+// launch. Keep the same attempt and custody while waiting for another turn.
+const SETUP_RETRY_SECONDS: u64 = 240;
+fn retry_setup_lock<T>(
+    continuation: bool,
+    mut prepare: impl FnMut(provenant_core::WaitBudget) -> Result<T>,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<T> {
+    use provenant_core::Clock;
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), SETUP_RETRY_SECONDS)
+        .map_err(|_| RunError::Validation("setup retry deadline"))?;
+    loop {
+        match prepare(budget) {
+            Err(RunError::LaneSetupLockTimeout)
+                if continuation && budget.remaining(clock.mono_now()).as_micros() > 0 =>
+            {
+                check()?
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn continuation_retries_only_setup_lock_timeouts() {
+        let mut calls = 0;
+        let result = retry_setup_lock(
+            true,
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    Err(RunError::LaneSetupLockTimeout)
+                } else {
+                    Ok(42)
+                }
+            },
+            || Ok(()),
+        );
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls, 2);
+        let mut calls = 0;
+        let result: Result<()> = retry_setup_lock(
+            false,
+            |_| {
+                calls += 1;
+                Err(RunError::LaneSetupLockTimeout)
+            },
+            || Ok(()),
+        );
+        assert!(matches!(result, Err(RunError::LaneSetupLockTimeout)));
+        assert_eq!(calls, 1);
+        let result: Result<()> = retry_setup_lock(true, |_| Err(RunError::Conflict), || Ok(()));
+        assert!(matches!(result, Err(RunError::Conflict)));
     }
 }

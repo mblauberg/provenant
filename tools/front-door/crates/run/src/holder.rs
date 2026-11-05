@@ -1614,8 +1614,19 @@ impl RunStore {
             } else {
                 Outcome::Failed
             };
-            decoded.reason =
-                Some("result-policy recovery decision retained from interrupted settlement".into());
+            decoded.reason = Some(
+                frozen_policy
+                    .as_ref()
+                    .filter(|decision| {
+                        decision.action == crate::PolicyAction::Stop
+                            && !decision.instruction.is_empty()
+                    })
+                    .map(|decision| decision.instruction.clone())
+                    .unwrap_or_else(|| {
+                        "result-policy recovery decision retained from interrupted settlement"
+                            .into()
+                    }),
+            );
         }
         if frozen_policy.is_none()
             && !cancelled
@@ -1650,7 +1661,7 @@ impl RunStore {
                     });
                 }
             } else if let Some(cause) = assessment.cause {
-                self.stage_policy_stop(&record, cause)?;
+                self.stage_policy_stop(&record, cause, decoded.reason.as_deref())?;
             }
         }
         // Assess a complete, verified successful response before rejecting an
@@ -2700,13 +2711,13 @@ mod writer_recovery_tests {
     #[test]
     fn settlement_import_fault_seals_retains_fence_and_resumes_without_provider()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        settlement_fault_modes(&[
-            "normal",
-            "orphan",
-            "release_boundary",
-            "manifest_conflict",
-            "archived_fault",
-        ])
+        settlement_fault_modes(&["normal", "orphan", "manifest_conflict", "archived_fault"])
+    }
+
+    #[test]
+    fn retained_import_excludes_writer_after_lock_release()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_fault_modes(&["release_boundary"])
     }
 
     #[test]
@@ -3093,6 +3104,43 @@ mod writer_recovery_tests {
                 assert!(finished.release_permitted);
                 assert!(store.retained_import_fence(scope)?);
                 drop(recovery);
+                // The kernel lock is now free, but the retained import still
+                // protects this worktree until reconciliation completes.
+                let mut competing = crate::prepare_writer(
+                    &fixture.writer,
+                    execution.state_root.as_path(),
+                    execution.project_id,
+                )?;
+                let (directory, binding) = competing.custody.take().ok_or("competing custody")?;
+                let other = custody::Scope {
+                    attempt: provenant_core::AttemptId::from_bytes([99; 16]),
+                    ..scope
+                };
+                let refusal = match store.acquire_writer_fenced(
+                    directory,
+                    other,
+                    binding,
+                    &|directory, scope, binding| {
+                        provenant_supervisor::fixture::acquire_writer_with_binding(
+                            directory,
+                            scope,
+                            binding,
+                            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+                            &cancel,
+                            &clock,
+                        )
+                    },
+                    &call,
+                ) {
+                    Err(error) => error,
+                    Ok(_) => panic!("retained import must exclude a competing writer"),
+                };
+                assert!(matches!(
+                    refusal,
+                    crate::writer::WriterCustodyError::Admission(
+                        custody::CustodyError::ImportRetained { run, attempt }
+                    ) if run == scope.run && attempt == scope.attempt
+                ));
                 let found = store.reconcile_with_observer(
                     run.run_id,
                     &providers,

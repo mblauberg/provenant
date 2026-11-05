@@ -109,6 +109,38 @@ pub fn list_with_observation(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeObservation>, WorktreeError> {
+    list_streaming(context, cancel, |_, _| {})
+}
+
+/// Report the inventory size before the census and each completed row after
+/// its normal checks. A caller can retain these advisory rows if its deadline
+/// expires; the complete inventory still follows the ordinary safety path.
+pub fn list_streaming(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+    report: impl FnMut(usize, Option<&WorktreeInfo>),
+) -> Result<Vec<WorktreeObservation>, WorktreeError> {
+    list_impl(context, cancel, report, true)
+}
+
+/// Inventory for GC. Cleanliness is checked only for candidates after the
+/// policy and custody checks, rather than running Git in every checkout.
+pub fn list_for_gc(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    Ok(list_impl(context, cancel, |_, _| {}, false)?
+        .into_iter()
+        .map(|observation| observation.info)
+        .collect())
+}
+
+fn list_impl(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+    mut report: impl FnMut(usize, Option<&WorktreeInfo>),
+    eager_git: bool,
+) -> Result<Vec<WorktreeObservation>, WorktreeError> {
     validate_binding(context)?;
     let entries = {
         let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
@@ -121,6 +153,8 @@ pub fn list_with_observation(
         .filter(|entry| !entry.bare)
         .filter_map(|entry| canonicalize(&entry.path).ok().map(|path| (path, entry)))
         .collect();
+    let total = candidates.len();
+    report(total, None);
     let roots: Vec<_> = candidates.iter().map(|(path, _)| path.clone()).collect();
     let worker_states = context.workers.observe_roots(&roots);
     let primary = canonicalize(context.repo.root_path())?;
@@ -138,13 +172,25 @@ pub fn list_with_observation(
         let (dirty, writer, registration_unknown) = if path == primary {
             owner = OwnerStatus::Primary;
             (
-                worktree_dirty_at(context, context.repo, cancel)
-                    .unwrap_or(WorktreeCondition::Unknown),
+                if eager_git {
+                    worktree_dirty_at(context, context.repo, cancel)
+                        .unwrap_or(WorktreeCondition::Unknown)
+                } else {
+                    WorktreeCondition::Unknown
+                },
                 combine_worker_state(WorkerState::Unknown, observed),
                 true,
             )
         } else {
-            match verify_probed_worktree(context, &path, cancel) {
+            // GC only reads registration and custody here. Its candidate paths
+            // probe their own Git configuration before running Git or
+            // mutating anything; probing every unrelated tree is costly.
+            let verified = if eager_git {
+                verify_probed_worktree(context, &path, cancel)
+            } else {
+                verify_worktree(context.repo, &path).map_err(WorktreeError::from)
+            };
+            match verified {
                 Ok(worktree) => {
                     owner = match load_owner(&worktree) {
                         Ok(Some(_)) => OwnerStatus::Registered,
@@ -157,8 +203,12 @@ pub fn list_with_observation(
                         disk_writer_state(context.project_state, &path)
                     };
                     (
-                        worktree_dirty_at(context, worktree.repo(), cancel)
-                            .unwrap_or(WorktreeCondition::Unknown),
+                        if eager_git {
+                            worktree_dirty_at(context, worktree.repo(), cancel)
+                                .unwrap_or(WorktreeCondition::Unknown)
+                        } else {
+                            WorktreeCondition::Unknown
+                        },
                         if entry.locked || entry.prunable {
                             WriterState::Unknown
                         } else {
@@ -170,7 +220,7 @@ pub fn list_with_observation(
                 Err(_) => (WorktreeCondition::Unknown, WriterState::Unknown, true),
             }
         };
-        result.push(WorktreeObservation {
+        let observation = WorktreeObservation {
             info: WorktreeInfo {
                 path,
                 branch: branch_text,
@@ -181,7 +231,9 @@ pub fn list_with_observation(
             },
             observed,
             registration_unknown,
-        });
+        };
+        report(total, Some(&observation.info));
+        result.push(observation);
     }
     Ok(result)
 }
@@ -319,12 +371,10 @@ pub fn create(
             return Err(WorktreeError::UnknownWriter);
         }
     }
-    let state = writer_directory(context.project_state, &target)?;
-    let _writer = state
-        .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
-        .map_err(|error| match error {
-            FsError::LockTimeout { .. } => WorktreeError::LockBusy,
-            other => other.into(),
+    let _writer =
+        cache_writer_guard(context.project_state, &target).map_err(|state| match state {
+            WorkerState::Busy => WorktreeError::LockBusy,
+            _ => WorktreeError::UnknownWriter,
         })?;
     let named_root = context
         .repo

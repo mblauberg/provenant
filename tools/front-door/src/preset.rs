@@ -40,6 +40,10 @@ pub struct Layers {
     /// Launch directory, used to resolve relative worktree bindings.
     pub launch_dir: Option<PathBuf>,
     pub default_worktree: Option<PathBuf>,
+    /// One inventory captured for this preset command, shared by its planner,
+    /// spec lookup and read-root selection. Library callers without a command
+    /// snapshot retain the ordinary fresh lookup.
+    command_worktrees: Option<Vec<PathBuf>>,
     used_shapes: std::cell::RefCell<BTreeSet<String>>,
     /// Bases of the deferred reviews this expansion emitted; a graph has one.
     review_bases: std::cell::RefCell<BTreeSet<String>>,
@@ -1368,7 +1372,15 @@ fn spec_candidates(layers: &Layers, parameters: &Value, spec: &str) -> Option<Ve
         .map(|w| launch.join(w).join(path))
         .chain(std::iter::once(project.join(path)))
         .collect();
-    if let Some(main) = project_worktrees(&project).first() {
+    let discovered;
+    let worktrees = match layers.command_worktrees.as_deref() {
+        Some(worktrees) => worktrees,
+        None => {
+            discovered = project_worktrees(&project);
+            &discovered
+        }
+    };
+    if let Some(main) = worktrees.first() {
         let candidate = main.join(path);
         if !candidates.contains(&candidate) {
             candidates.push(candidate);
@@ -2749,15 +2761,15 @@ pub(crate) fn project_worktrees(directory: &Path) -> Vec<PathBuf> {
         .unwrap_or_else(|_| vec![directory.to_path_buf()])
 }
 
-fn discover_read_roots(directory: &Path, allowed: &[String], extra: &[PathBuf]) -> ReadRoots {
-    let mut project = project_worktrees(directory);
+fn discover_read_roots(worktrees: &[PathBuf], allowed: &[String], extra: &[PathBuf]) -> ReadRoots {
+    let mut project = worktrees.to_vec();
     project.extend(extra.iter().cloned());
     ReadRoots::new(project, allowed)
 }
 
 /// The linked worktrees, not the main checkout, which can host a writer lane.
-pub(crate) fn linked_worktrees(directory: &Path) -> Vec<String> {
-    project_worktrees(directory)
+pub(crate) fn linked_worktrees_from(worktrees: &[PathBuf]) -> Vec<String> {
+    worktrees
         .iter()
         .skip(1)
         .map(|path| path.display().to_string())
@@ -3781,6 +3793,8 @@ pub fn run(
             .unwrap_or_else(|_| directory.clone()),
         );
         layers.default_worktree = request.access.worktree.clone();
+        let worktrees = project_worktrees(&directory);
+        layers.command_worktrees = Some(worktrees.clone());
         let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
         layers.known_routes = Some(config.domains.routing.route_names(&catalogue));
         {
@@ -3804,7 +3818,7 @@ pub fn run(
             layers.plan = Some(planner::PlanContext {
                 mode,
                 from_cli: request.preset_plan.is_some(),
-                worktrees: linked_worktrees(&directory),
+                worktrees: linked_worktrees_from(&worktrees),
                 route: settings.route.clone(),
                 lane_deadline_seconds: config.domains.fabric.limits.graph_timeout_seconds,
                 max_nodes: settings.max_nodes,
@@ -3994,7 +4008,7 @@ pub fn run(
             )?;
         }
         let policy = discover_read_roots(
-            &directory,
+            &worktrees,
             &config.domains.fabric.graph.allowed_read_roots,
             &policy_roots,
         );

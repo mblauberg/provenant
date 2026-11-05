@@ -43,6 +43,17 @@ pub(crate) fn prepare_refs(
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
+    // A continuation gets the same merge metadata as the host index.
+    for name in ["MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"] {
+        match repo
+            .private_dir()
+            .read_stable(OsStr::new(name), 1024 * 1024)
+        {
+            Ok(bytes) => write(&common, name, &bytes)?,
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     let refs = command(
         git,
         repo.common_git_dir(),
@@ -80,6 +91,107 @@ pub(crate) fn prepare_refs(
 pub(crate) struct ObjectSource {
     pub objects: Directory,
     refs: Directory,
+}
+
+pub(crate) fn merge_head(source: &ObjectSource) -> Result<Vec<u8>> {
+    Ok(source
+        .refs
+        .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)?)
+}
+
+/// Objects needed by an in-progress merge, including staged blobs that may
+/// never have appeared in a commit. Git parses the index; paths stay opaque.
+struct MergeState {
+    parents: Vec<GitOid>,
+    blobs: Vec<GitOid>,
+    stage_zero_paths: Vec<u8>,
+}
+
+fn merge_state(source: &ObjectSource, repo: &VerifiedRepo) -> Result<Option<MergeState>> {
+    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+    let directory = source.refs.current_path()?;
+    let unmerged = execute(
+        &git,
+        &directory,
+        repo.root_path(),
+        &args(&["ls-files", "--unmerged", "-z"]),
+        None,
+    )?;
+    let raw = match source
+        .refs
+        .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)
+    {
+        Ok(raw) => raw,
+        Err(error) if error.is_not_found() && unmerged.is_empty() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut parents = Vec::new();
+    for line in std::str::from_utf8(&raw).map_err(|_| invalid())?.lines() {
+        if line.bytes().all(|byte| byte == b'0') {
+            return Err(invalid());
+        }
+        parents.push(GitOid::parse(line).map_err(|_| invalid())?);
+    }
+    if parents.is_empty() {
+        return Err(invalid());
+    }
+    let mut blobs = Vec::new();
+    let mut stage_zero_paths = Vec::new();
+    let stages = execute(
+        &git,
+        &directory,
+        repo.root_path(),
+        &args(&["ls-files", "--stage", "-z"]),
+        None,
+    )?;
+    for entry in stages
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let tab = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(invalid)?;
+        let header = &entry[..tab];
+        let header = std::str::from_utf8(header).map_err(|_| invalid())?;
+        let mut fields = header.split(' ');
+        let mode = fields.next().ok_or_else(invalid)?;
+        let oid = fields.next().ok_or_else(invalid)?;
+        if oid.bytes().all(|byte| byte == b'0') {
+            return Err(invalid());
+        }
+        let stage = fields.next().ok_or_else(invalid)?;
+        if fields.next().is_some() || !matches!(stage, "0" | "1" | "2" | "3") {
+            return Err(invalid());
+        }
+        match mode {
+            "100644" | "100755" | "120000" => {
+                blobs.push(GitOid::parse(oid).map_err(|_| invalid())?)
+            }
+            "160000" => {} // Submodule objects belong to the submodule.
+            _ => return Err(invalid()),
+        }
+        if stage == "0" {
+            stage_zero_paths.extend_from_slice(&entry[tab + 1..]);
+            stage_zero_paths.push(0);
+        }
+    }
+    Ok(Some(MergeState {
+        parents,
+        blobs,
+        stage_zero_paths,
+    }))
+}
+
+pub(crate) fn merge_objects(source: &ObjectSource, repo: &VerifiedRepo) -> Result<Vec<GitOid>> {
+    let Some(state) = merge_state(source, repo)? else {
+        return Ok(Vec::new());
+    };
+    let mut objects = state.parents;
+    objects.extend(state.blobs);
+    objects.sort_by_key(ToString::to_string);
+    objects.dedup();
+    Ok(objects)
 }
 
 pub(crate) fn private_tip(source: &ObjectSource, branch: &str) -> Result<GitOid> {
@@ -274,6 +386,105 @@ pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> 
 }
 
 pub(crate) fn restore_index(source: &ObjectSource, repo: &VerifiedRepo) -> Result<()> {
+    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+    let merge = merge_state(source, repo)?;
+    if let Some(state) = &merge {
+        let input = state
+            .parents
+            .iter()
+            .chain(&state.blobs)
+            .map(|oid| format!("{oid}\n"))
+            .collect::<String>();
+        let types = execute_bounded(
+            &git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &args(&["cat-file", "--batch-check=%(objecttype)"]),
+            None,
+            Execution {
+                input: Some(input.as_bytes()),
+                ..Execution::default()
+            },
+        )?;
+        let mut types = types.split(|byte| *byte == b'\n');
+        for expected in std::iter::repeat_n(b"commit".as_slice(), state.parents.len())
+            .chain(std::iter::repeat_n(b"blob".as_slice(), state.blobs.len()))
+        {
+            if types.next() != Some(expected) {
+                return Err(RunError::Validation(
+                    "merge index object is unavailable or has the wrong type",
+                ));
+            }
+        }
+        let merge_head = source
+            .refs
+            .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)?;
+        match repo
+            .private_dir()
+            .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)
+        {
+            Ok(existing) if existing != merge_head => {
+                return Err(RunError::Validation(
+                    "host merge state changed before import",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+        for name in ["MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"] {
+            match source.refs.read_stable(OsStr::new(name), 1024 * 1024) {
+                Ok(bytes) => repo
+                    .private_dir()
+                    .atomic_write(
+                        OsStr::new(name),
+                        ".lane-merge-",
+                        &bytes,
+                        PublishMode::Replace,
+                    )?
+                    .require_durable()?,
+                Err(error) if error.is_not_found() && name != "MERGE_HEAD" => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    } else {
+        // A continuation may have committed the merge in its private view.
+        // Clear host merge state only when the published branch contains every
+        // recorded parent; an abort or unrelated host change stays fenced.
+        match repo
+            .private_dir()
+            .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)
+        {
+            Ok(raw) => {
+                let text = std::str::from_utf8(&raw).map_err(|_| invalid())?;
+                let mut count = 0;
+                for line in text.lines() {
+                    let parent = GitOid::parse(line).map_err(|_| invalid())?;
+                    execute(
+                        &git,
+                        repo.private_git_dir(),
+                        repo.root_path(),
+                        &args(&["merge-base", "--is-ancestor", &parent.to_string(), "HEAD"]),
+                        None,
+                    )?;
+                    count += 1;
+                }
+                if count == 0 {
+                    return Err(invalid());
+                }
+                for name in ["MERGE_HEAD", "MERGE_MODE", "MERGE_MSG"] {
+                    match repo.private_dir().unlink(OsStr::new(name)) {
+                        Ok(()) => {}
+                        Err(error) if error.is_not_found() => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                repo.private_dir().sync()?;
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     match source
         .refs
         .read_stable(OsStr::new("index"), 64 * 1024 * 1024)
@@ -290,14 +501,17 @@ pub(crate) fn restore_index(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
-    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-    let paths = execute(
-        &git,
-        repo.private_git_dir(),
-        repo.root_path(),
-        &args(&["ls-files", "-z"]),
-        None,
-    )?;
+    let paths = if let Some(state) = merge {
+        state.stage_zero_paths
+    } else {
+        execute(
+            &git,
+            repo.private_git_dir(),
+            repo.root_path(),
+            &args(&["ls-files", "-z"]),
+            None,
+        )?
+    };
     // Git applies these modes separately. Combining them leaves skip-worktree
     // set on entries which also carry assume-unchanged.
     for flag in ["--no-skip-worktree", "--no-assume-unchanged"] {

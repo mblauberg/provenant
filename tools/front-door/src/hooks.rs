@@ -31,6 +31,15 @@ fn answer_budget() -> Duration {
 }
 /// Cap for hooks that read lane and PR state through this binary's own commands.
 const SESSION_BUDGET: Duration = Duration::from_secs(4);
+// Leave time for child termination, assembling the digest and writing the hook
+// response after an inventory reaches its own deadline.
+const SESSION_FINISH_RESERVE: Duration = Duration::from_secs(1);
+
+pub(crate) fn session_collection_deadline(deadline: Instant) -> Instant {
+    deadline
+        .checked_sub(SESSION_FINISH_RESERVE)
+        .unwrap_or(deadline)
+}
 type Error = Box<dyn std::error::Error>;
 
 #[derive(Deserialize)]
@@ -511,11 +520,19 @@ fn advisory(
     // process exit mid-way leaves complete. No stdin reader or child custody is
     // transferred to this thread, and its children carry their own timeouts.
     let (tx, rx) = mpsc::sync_channel(1);
+    let collection_deadline = session_collection_deadline(deadline);
     let spawned = std::thread::Builder::new()
         .name("checkpoint-hook".into())
         .spawn(move || {
-            let result =
-                checkpoint(moment, &selected, &host.cwd, &input, deadline, client).map_err(|_| ());
+            let result = checkpoint(
+                moment,
+                &selected,
+                &host.cwd,
+                &input,
+                collection_deadline,
+                client,
+            )
+            .map_err(|_| ());
             let _ = tx.send(result);
         });
     if spawned.is_err() {
@@ -602,6 +619,7 @@ fn project_id(
     })?;
     Ok((roots, resolved.home, id))
 }
+#[allow(clippy::disallowed_methods)] // The hook must reserve wall time for its response.
 fn checkpoint(
     moment: Moment,
     globals: &Globals,
@@ -628,7 +646,7 @@ fn checkpoint(
         Moment::Compact | Moment::Restart if !in_lane => {
             let baseline = current.as_ref().map(session::baseline);
             let want = crate::hook_state::Want {
-                worktrees: false,
+                worktrees: true,
                 settled_after_unix: baseline
                     .as_ref()
                     .map_or(wall - NO_CHECKPOINT_WINDOW, |b| b.chair_saved_unix),
@@ -675,7 +693,9 @@ fn checkpoint(
         _ => {}
     }
     append_session_warning(&mut digest, moment, in_lane, || {
-        crate::disk_guard::session_warning(roots.state.as_path(), &home, cwd)
+        (Instant::now() < deadline)
+            .then(|| crate::disk_guard::session_warning(roots.state.as_path(), &home, cwd))
+            .flatten()
     });
     if moment == Moment::Stop {
         return Ok(session::HookContext {

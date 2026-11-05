@@ -2464,6 +2464,34 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
     {
         return Ok(());
     }
+    if let Some(seconds) = started.iter().find_map(|started| match started {
+        run::Started::Refused {
+            kind: run::RefusalKind::SetupLockTimeout { seconds },
+            ..
+        } => Some(*seconds),
+        _ => None,
+    }) {
+        return Err(run::RunError::SetupLockTimeout { seconds }.into());
+    }
+    if let Some((run, attempt, worktree)) = started.iter().find_map(|started| match started {
+        run::Started::Refused {
+            kind:
+                run::RefusalKind::RetainedImport {
+                    run,
+                    attempt,
+                    worktree,
+                },
+            ..
+        } => Some((*run, *attempt, worktree.clone())),
+        _ => None,
+    }) {
+        return Err(run::RunError::RetainedWriterImport {
+            run,
+            attempt,
+            worktree,
+        }
+        .into());
+    }
     // Candidate preparation reports route exclusions as `route: detail` entries.
     // Promote pacing specifically; other preparation refusals remain in the receipt.
     if let Some((attempt, reason)) = started.iter().find_map(|started| match started {

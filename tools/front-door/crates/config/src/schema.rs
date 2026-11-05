@@ -46,6 +46,7 @@ pub struct Schema {
 const GC_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("schedule", "bool"),
     FieldMetadata::int("idle_days", 1, 3650),
+    FieldMetadata::int("graph_checkpoint_days", 1, 3650),
     FieldMetadata::new("free_floor", "string"),
     FieldMetadata::new("alert_below", "string"),
     FieldMetadata::enumeration(

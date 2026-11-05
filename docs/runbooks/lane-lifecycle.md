@@ -133,6 +133,13 @@ After an unlaunched writer is rejected, reconciliation removes its retained
 Git pin. Status and wait queue recovery. To retry directly, run
 `provenant reconcile --id <run>` after resolving any reported cause.
 
+Writers queue in arrival order for the repository Git setup lock, waiting up to
+four hours by default. A dead waiter or holder releases its place. Set
+`domains.fabric.lanes.setup_lock_wait_seconds` to a value from 1 to 14400 to
+change this bound; the lock continues to serialise setup for the repository.
+While a writer waits, `lanes` and `status` name `provenant-lane-setup.lock` as
+the waiting reason. If the launcher exits, its wait indication clears.
+
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be
@@ -288,6 +295,13 @@ reservation still prevents another writer from editing that worktree. A terminal
 import refusal releases the reservation and retains private Git for host
 recovery. A lane wait returns a terminal outcome only after custody is released,
 so host pickup does not need a second reconcile after a successful wait.
+For a stopped merge, settlement imports the merge parents and staged objects
+through the verified Git import, then restores the unmerged index and merge
+metadata in the worktree. A continuation writer receives that merge state and
+can resolve and commit it. If import remains fenced, the refusal identifies
+the retained attempt and provides the explicit abandonment command. Abandonment
+keeps the private Git evidence but stops automatic import; recover that work
+manually before relying on a later writer.
 See [publication order](../specs/run.md#publication-order) and
 [lane Git and import](../specs/run.md#lane-git-and-import).
 

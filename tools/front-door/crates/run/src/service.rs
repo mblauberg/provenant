@@ -449,6 +449,31 @@ impl<'a> Service<'a> {
         if matches!(record.state, AttemptState::Terminal { .. }) {
             record.custody_pending =
                 Some(!self.store.custody_released(&record, call).unwrap_or(false));
+            let restored = self
+                .store
+                .attempt_dir(record.run_id, record.attempt_id, false)
+                .ok()
+                .and_then(|attempt| {
+                    crate::artifacts::read_sealed_observed(
+                        &attempt,
+                        "merge-restored.json",
+                        crate::RECORD_LIMIT,
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .and_then(|raw| crate::db::decode::<crate::writer::MergeRestored>(&raw).ok())
+                .is_some_and(|marker| {
+                    marker.schema_version == 1 && marker.scope == crate::RunStore::scope(&record)
+                });
+            if restored && let AttemptState::Terminal { reason, .. } = &mut record.state {
+                let note = "merge index, parents and working files were retained in the worktree";
+                *reason = Some(
+                    reason
+                        .take()
+                        .map_or_else(|| note.to_owned(), |old| format!("{old}; {note}")),
+                );
+            }
         }
         Ok(record)
     }
@@ -625,6 +650,8 @@ error_kinds! {
     GuardianIdentity => "GUARDIAN_IDENTITY", "The guardian process identity could not be observed.";
     HostClock => "HOST_CLOCK", "Startup spacing cannot be judged: the monotonic clock or boot identity is unreadable.";
     WriterRefLocked => "WRITER_REF_LOCKED", "A writer Git ref lock already exists.";
+    SetupLockTimeout => "SETUP_LOCK_TIMEOUT", "The writer Git setup lock wait expired.";
+    RetainedWriterImport => "WRITER_IMPORT_RETAINED", "A predecessor writer import remains unresolved.";
     ObjectImportLimit => "OBJECT_IMPORT_LIMIT", "A lane's Git object import exceeded its limits.";
 }
 impl ErrorKind {
@@ -640,6 +667,8 @@ impl ErrorKind {
             | Self::WriterBusy
             | Self::WriterLockBusy
             | Self::WriterUnknown
+            | Self::SetupLockTimeout
+            | Self::RetainedWriterImport
             | Self::CredentialRoot
             | Self::WriterProjectMismatch
             | Self::Confinement
@@ -666,7 +695,9 @@ impl ErrorKind {
         match self {
             Self::CredentialRoot => B::Credentials,
             Self::ObjectImportLimit | Self::StateCorrupt => B::Integrity,
-            Self::WriterRefLocked => B::LaneGit,
+            Self::WriterRefLocked | Self::SetupLockTimeout | Self::RetainedWriterImport => {
+                B::LaneGit
+            }
             Self::WriterScope
             | Self::WriterBusy
             | Self::WriterLockBusy
@@ -715,6 +746,8 @@ impl From<&RunError> for ErrorKind {
             RunError::Admission(AdmissionError::GuardianIdentity) => Self::GuardianIdentity,
             RunError::Admission(AdmissionError::Clock) => Self::HostClock,
             RunError::WriterRefLocked(_) => Self::WriterRefLocked,
+            RunError::SetupLockTimeout { .. } => Self::SetupLockTimeout,
+            RunError::RetainedWriterImport { .. } => Self::RetainedWriterImport,
             RunError::GitUnavailable => Self::Git,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
             RunError::Validation(_)

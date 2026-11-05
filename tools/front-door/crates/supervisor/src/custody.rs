@@ -28,6 +28,8 @@ pub enum CustodyError {
     Busy,
     #[error("writer reservation requires recovery")]
     Fenced,
+    #[error("writer import retained for run {run}, attempt {attempt}")]
+    ImportRetained { run: RunId, attempt: AttemptId },
     #[error("custody identity is unknown")]
     UnknownIdentity,
     #[error("record is invalid or belongs to another generation")]

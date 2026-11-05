@@ -767,6 +767,8 @@ scan. The host snapshot survives provider-state and temporary cleanup.
 Recovery and fresh manual continuation carry this bounded snapshot with the
 original brief and worktree state, rather than a result transcript. Policy
 continuations use `stopped_early`; `blocked` needs a decision or external change.
+The bundled policy for `codex/gpt-6.1-terra` permits eight continuations after
+an unfinished result; the initial attempt is separate.
 The `Status:` line protocol is removed.
 - Why: a lane that did part of its brief must not read as one that did all of it.
 - Test: `crates/run/src/dispatch_tests.rs::a_declared_stop_settles_review_required`;
@@ -1216,6 +1218,12 @@ atomic `WorktreeOwner`: optional attempt and operation IDs, short branch,
 pinned base OID, host, creation time, origin (`lane` or `adopted`) and optional
 owner label. `load_owner` and `save_owner` require a verified linked worktree.
 
+A continuation may reuse a saved lane-owned worktree only when its recorded
+owner attempt is terminal. Records predating the saved `owner` field retain
+their refusal; use `provenant run --branch B --base SHA` to proceed. Setup
+waits for the shared Git configuration lock with a 240-second retry deadline and
+observes lane cancellation while waiting.
+
 Git's inventory and verified common-directory/backlink membership admit
 existing linked checkouts without an adoption step. Canonical paths locate
 persistent exclusion slots; neither old `identity.json` nor registry reservation
@@ -1230,6 +1238,10 @@ pushes and open PRs retain local branches. Settlement rechecks ownership, termin
 registration, writer custody, Git sequencer state and head under the existing
 removal locks. Resumed attempts may settle a worktree whose owner is in their
 recorded continuation lineage, using the same bounded ancestry proof as resume.
+For an explicitly selected worktree, launch seals its owner under writer custody.
+A continuation accepts that unchanged owner even when it names an earlier lane;
+a changed owner is refused. Existing snapshots without an owner retain the
+conservative lineage check. Custody still excludes live writers.
 Ignored output uses GC's existing declared-regenerable walker
 and keep paths. Only the project's declared regenerable output may be removed;
 other ignored files retain the tree. Other worktrees keep the existing

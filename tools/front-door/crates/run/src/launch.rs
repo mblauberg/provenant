@@ -456,6 +456,12 @@ enum HandOff {
     Busy,
     /// No guardian was contacted, but custody remains protected.
     Protected(String),
+    SetupLockTimeout(u64),
+    RetainedImport {
+        run: RunId,
+        attempt: AttemptId,
+        worktree: std::path::PathBuf,
+    },
     /// The guardian may have received the launch.
     Uncertain(String),
 }
@@ -481,7 +487,7 @@ pub enum Started {
         error: String,
     },
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefusalKind {
     Policy,
     Preparation,
@@ -491,6 +497,14 @@ pub enum RefusalKind {
     InvalidWriteGrantPath,
     WriteGrantsLimit,
     Handoff,
+    SetupLockTimeout {
+        seconds: u64,
+    },
+    RetainedImport {
+        run: RunId,
+        attempt: AttemptId,
+        worktree: std::path::PathBuf,
+    },
 }
 
 /// Check a canonical root against state, allowing installed releases for reads.
@@ -1726,12 +1740,38 @@ impl RunStore {
                 ) {
                     Ok(()) => Started::Launched(id),
                     // Nothing reached a guardian: the attempt ends here.
-                    Err(error @ (HandOff::Local(_) | HandOff::Busy)) => {
+                    Err(
+                        error @ (HandOff::Local(_)
+                        | HandOff::Busy
+                        | HandOff::SetupLockTimeout(_)
+                        | HandOff::RetainedImport { .. }),
+                    ) => {
                         let (reason, kind) = match error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
                             HandOff::Local(error) => (
                                 format!("launch preparation failed: {error}"),
                                 RefusalKind::Handoff,
+                            ),
+                            HandOff::SetupLockTimeout(seconds) => (
+                                RunError::SetupLockTimeout { seconds }.to_string(),
+                                RefusalKind::SetupLockTimeout { seconds },
+                            ),
+                            HandOff::RetainedImport {
+                                run,
+                                attempt,
+                                worktree,
+                            } => (
+                                RunError::RetainedWriterImport {
+                                    run,
+                                    attempt,
+                                    worktree: worktree.clone(),
+                                }
+                                .to_string(),
+                                RefusalKind::RetainedImport {
+                                    run,
+                                    attempt,
+                                    worktree,
+                                },
                             ),
                             _ => unreachable!(),
                         };

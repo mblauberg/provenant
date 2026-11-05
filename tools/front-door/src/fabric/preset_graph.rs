@@ -95,6 +95,20 @@ pub(crate) fn publish_preset_graph(
     Ok(scratch.join("graphs").join(filename))
 }
 
+fn retry_collected_document<T, E: std::error::Error + 'static>(
+    path: &std::path::Path,
+    mut run: impl FnMut() -> Result<T, E>,
+    republish: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    match run() {
+        Err(_) if !path.exists() => {
+            republish()?;
+            Ok(run()?)
+        }
+        result => Ok(result?),
+    }
+}
+
 /// `None` when the graph directory is owned by `current` and private (mode 0700
 /// after any repair). A foreign owner is told to remove or take over the
 /// directory; an owned one is told the observed mode and `chmod 700`.
@@ -199,22 +213,28 @@ pub(crate) fn run_preset_graph(
                     path
                 }
             };
-            let result = factory.graph_with_scratch(
-                GraphInput::Run {
-                    extra: Default::default(),
-                    document: document_path.clone(),
-                },
-                budget,
-                &cancel,
-                Some(scratch),
-            );
-            let run = match result {
-                Ok(run) => {
-                    scratch_error = None;
-                    run
-                }
-                Err(error) => return Err(error.into()),
+            let run_document = || {
+                factory.graph_with_scratch(
+                    GraphInput::Run {
+                        extra: Default::default(),
+                        document: document_path.clone(),
+                    },
+                    budget,
+                    &cancel,
+                    Some(scratch),
+                )
             };
+            // Collection may retire an old graph after publication but before
+            // the graph reads the content-addressed document.
+            let run = retry_collected_document(&document_path, run_document, || {
+                publish_preset_graph(scratch, &document).map(|_| ())
+            })?;
+            // Collection may also have removed the file after it was opened.
+            // A pending checkpoint now prevents another collection of this graph.
+            if run.status == GraphStatus::Pending && !document_path.exists() {
+                publish_preset_graph(scratch, &document)?;
+            }
+            scratch_error = None;
             admitted_graph_id = Some(run.checkpoint.graph_id.clone());
             last_run = Some(run.clone());
             if run.status != GraphStatus::Pending
@@ -351,8 +371,35 @@ pub(super) fn shell_path(path: &std::path::Path) -> String {
 #[cfg(test)]
 #[allow(dead_code, unused_imports)] // The worktree driver includes this module without libtest functions.
 mod tests {
-    use super::private_graph_directory_refusal;
+    use super::{private_graph_directory_refusal, retry_collected_document};
     use std::path::Path;
+
+    #[test]
+    fn collected_preset_document_is_republished_before_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("graph.json");
+        std::fs::write(&path, b"document")?;
+        let mut calls = 0;
+        let result = retry_collected_document(
+            &path,
+            || {
+                calls += 1;
+                if calls == 1 {
+                    std::fs::remove_file(&path)?;
+                    return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+                }
+                std::fs::read(&path)
+            },
+            || {
+                std::fs::write(&path, b"document")?;
+                Ok(())
+            },
+        )?;
+        assert_eq!(calls, 2);
+        assert_eq!(result, b"document");
+        Ok(())
+    }
 
     #[test]
     fn registry_lock_timeout_retries_only_after_admission() {

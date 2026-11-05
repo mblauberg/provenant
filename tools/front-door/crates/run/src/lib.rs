@@ -363,6 +363,8 @@ pub enum RunError {
     },
     #[error("Git executable unavailable")]
     GitUnavailable,
+    #[error("lane Git setup lock acquisition timed out")]
+    LaneSetupLockTimeout,
     #[error("provider evidence could not be committed: {0}")]
     ProviderEvidence(String),
     #[error("confinement refused: {0}")]
@@ -386,6 +388,16 @@ pub enum RunError {
     WorktreeUnregistered(std::path::PathBuf),
     #[error("writer Git ref lock {} already exists; check for a running Git process, then remove the stale lock before retrying", .0.display())]
     WriterRefLocked(std::path::PathBuf),
+    #[error(
+        "Git setup lock provenant-lane-setup.lock timed out after {seconds}s; increase domains.fabric.lanes.setup_lock_wait_seconds"
+    )]
+    SetupLockTimeout { seconds: u64 },
+    #[error("writer import retained for worktree {}, run {run}, attempt {attempt}", worktree.display())]
+    RetainedWriterImport {
+        worktree: std::path::PathBuf,
+        run: provenant_core::RunId,
+        attempt: provenant_core::AttemptId,
+    },
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: attempt reservation retained")]
@@ -565,6 +577,20 @@ impl RunError {
                         ));
                     }
                 }
+                // Census evidence can name processes and host paths. The local
+                // operator needs it to understand the uncertainty, but it is
+                // not an approved fact for remote peers.
+                if let WorktreeError::CensusUnknown { path, detail } = error
+                    && matches!(
+                        destination,
+                        provenant_records::diagnostic::Destination::Local
+                    )
+                {
+                    let scope = safe_path(path, destination)
+                        .unwrap_or_else(|| "the requested worktree".into());
+                    diagnostic = diagnostic
+                        .detail(format!("writer occupancy is unknown for {scope}: {detail}"));
+                }
                 if let WorktreeError::BranchCollision { existing } = error {
                     diagnostic = diagnostic
                         .detail(format!("branch name collides with existing ref {existing}"));
@@ -665,6 +691,27 @@ impl RunError {
             Self::Admission(AdmissionError::LaneCap { .. }) => {
                 diagnostic =
                     diagnostic.next("wait for an active lane to finish or adjust the lane limit")
+            }
+            Self::SetupLockTimeout { seconds } => {
+                diagnostic = diagnostic
+                    .detail(format!("provenant-lane-setup.lock was held for the {seconds}s wait"))
+                    .next("retry after the current Git setup finishes, or increase domains.fabric.lanes.setup_lock_wait_seconds");
+            }
+            Self::RetainedWriterImport {
+                run,
+                attempt,
+                worktree,
+            } => {
+                diagnostic = diagnostic
+                    .detail(match safe_path(worktree, destination) {
+                        Some(path) => {
+                            format!("worktree {path}; retained run {run}, attempt {attempt}")
+                        }
+                        None => format!("retained run {run}, attempt {attempt}"),
+                    })
+                    .next(format!(
+                        "to release the fence and recover the preserved private Git manually, run `provenant reconcile --abandon {run}/{attempt} --reason 'recover retained work manually'`; this stops automatic import"
+                    ));
             }
             _ => {}
         }
@@ -853,5 +900,26 @@ mod diagnostic_projection_tests {
                 .unwrap()
                 .contains("/checkout")
         );
+    }
+
+    #[test]
+    fn unknown_census_diagnostic_names_local_scope_and_evidence() {
+        let error = RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::CensusUnknown {
+                path: PathBuf::from("/checkout/tree"),
+                detail: "process 123: cwd unreadable at /private/other".into(),
+            },
+        );
+        let local = error.diagnostic(Destination::Local);
+        let detail = local.detail.unwrap();
+        assert!(detail.contains("/checkout/tree"));
+        assert!(detail.contains("process 123: cwd unreadable at /private/other"));
+        let remote = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        let rendered = serde_json::to_string(&remote).unwrap();
+        assert!(!rendered.contains("/private/other"));
+        assert!(!rendered.contains("/checkout/tree"));
     }
 }
