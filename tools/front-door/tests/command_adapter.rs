@@ -442,21 +442,32 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
 
 #[test]
 fn command_dispatch_launches_when_the_store_fails_fast() -> Result {
-    if !available()? {
-        return Ok(());
-    }
     let rig = rig(json!({"pass":{"argv":["/bin/sh","-c","printf 'hello\\n'"]}}))?;
     let _cleanup = rig.process_cleanup();
     let original = fs::read_to_string(rig.state.join("config.toml"))?;
     let mut config: toml_edit::DocumentMut = original.parse()?;
     config["domains"]["fabric"]["limits"]["store_busy_timeout_ms"] = toml_edit::value(0);
     fs::write(rig.state.join("config.toml"), config.to_string())?;
+    let loaded = rig.command(&["config", "show", "--json"])?;
+    assert_eq!(code(&loaded), 0, "{loaded:?}");
+    let loaded: Value = serde_json::from_slice(&loaded.stdout.bytes)?;
+    assert_eq!(
+        loaded["data"]["domains"]["fabric"]["limits"]["store_busy_timeout_ms"], 0,
+        "{loaded}"
+    );
+    if !available()? {
+        return Ok(());
+    }
     let submitted = dispatch(&rig, "pass", 10)?;
     // With no busy timeout, the polling reads below fail whenever the lane's
     // supervisor holds the store. Only the dispatch needs the fail-fast store.
     fs::write(rig.state.join("config.toml"), original)?;
     let lane = settled(&rig, attempt_id(&submitted)?)?;
-    assert_eq!(lane["state"], "succeeded", "{lane}");
+    assert_eq!(
+        lane["state"], "succeeded",
+        "settlement reason: {}; lane: {lane}",
+        lane["settlement"]["reason"]
+    );
     Ok(())
 }
 
