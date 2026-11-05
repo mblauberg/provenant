@@ -3513,6 +3513,66 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         }
     };
     let calibrated = apply(&raw);
+    // Selection and launch admission must interpret the same fresh scoped
+    // observation and opt-in identically, including calibration expiry.
+    let mut expired_for_table = duplicate(&calibrated);
+    expired_for_table
+        .snapshot
+        .details
+        .as_mut()
+        .unwrap()
+        .calibration_expires_unix_seconds = Some(100);
+    let mut exhausted_for_table = duplicate(&raw);
+    exhausted_for_table.snapshot.windows[0].used_basis_points = 10_000;
+    let policy = [provenant_quota::QuotaPolicy {
+        adapter: "opencode",
+        timer_seconds: 300,
+        panel_seconds: 120,
+        probe_seconds: 14,
+        low_power: true,
+        solo: false,
+    }];
+    for (name, observation, opt_in, expected) in [
+        ("partial default", duplicate(&raw), false, false),
+        ("partial opted in", duplicate(&raw), true, true),
+        ("exhausted opted in", exhausted_for_table, true, false),
+        ("calibrated", duplicate(&calibrated), false, true),
+        ("calibration expired", expired_for_table, false, false),
+    ] {
+        let mut row_config = config.clone();
+        row_config.allow_unknown_partial_headroom = opt_in;
+        let observations = [observation];
+        let mut ctx = context(&catalogue, &row_config, now()?);
+        ctx.availability = &availability;
+        ctx.access = &access;
+        ctx.quota = &observations;
+        let selected = resolve(&explicit, &ctx)?;
+        let ready = matches!(selected.readiness, RouteReadiness::Ready { .. });
+        let mut admitted_route = selected.clone();
+        // Check the independent admission policy with a fresh readiness grant,
+        // so an earlier selection refusal cannot mask a headroom disagreement.
+        admitted_route.readiness = RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 120,
+        };
+        let mut record = AccountRecord::empty(observations[0].snapshot.account.clone());
+        record.revision = observations[0].snapshot.revision;
+        record.snapshot = Some(observations[0].snapshot.clone());
+        let records = [record];
+        let admission = provenant_quota::Admission {
+            policies: &policy,
+            now_unix_seconds: 100,
+            records: &records,
+            pools: &[],
+        }
+        .check_with_partial_headroom(&admitted_route, opt_in);
+        assert_eq!(
+            (ready, admission.is_ok()),
+            (expected, expected),
+            "{name}: {admission:?}"
+        );
+    }
     for (key, five_hour, seven_day, expected) in [
         ("go", None, None, "five_hour, seven_day"),
         (
