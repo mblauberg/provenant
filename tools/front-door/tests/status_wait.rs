@@ -276,3 +276,179 @@ fn mixed_status_wait_uses_configured_timeout_and_per_call_override() -> Result {
     }
     Ok(())
 }
+
+#[test]
+fn run_wait_returns_the_registry_lock_refusal_at_deadline() -> Result {
+    use provenant_os::fs::{Directory, LockMode};
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+    assert_eq!(support::code(&commit), 0);
+    let create = rig.command(&[
+        "worktree",
+        "create",
+        "wait-lock",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(
+        support::code(&create),
+        0,
+        "{}",
+        String::from_utf8_lossy(&create.stderr.bytes)
+    );
+    let registry = fs::read_dir(rig.state.join("worktrees"))?
+        .next()
+        .ok_or("registry")??
+        .path();
+    let directory = Directory::open_anchor(&registry)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let _lock = directory.lock(
+        std::ffi::OsStr::new("worktrees.lock"),
+        LockMode::Exclusive,
+        provenant_core::WaitBudget::cli(clock.mono_now(), 10)?,
+        &cancel,
+        &clock,
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "Reply OK")?;
+    let result = rig.command(&[
+        "run",
+        "--operation-id",
+        "wait-lock-timeout",
+        "--model",
+        "codex/gpt-6-luna",
+        "--mode",
+        "worktree-write",
+        "--worktree",
+        ".worktrees/wait-lock",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait",
+        "1s",
+        "--json",
+    ])?;
+    assert_ne!(support::code(&result), 0);
+    let response: Value = serde_json::from_slice(&result.stdout.bytes)?;
+    assert_eq!(response["error"]["code"], "WRITER_LOCK_BUSY", "{response}");
+    assert!(
+        response["error"]["next"]
+            .as_str()
+            .is_some_and(|next| !next.is_empty()),
+        "{response}"
+    );
+    Ok(())
+}
+
+#[test]
+fn run_wait_retries_until_the_registry_lock_is_released() -> Result {
+    use provenant_os::fs::{Directory, LockMode};
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+    assert_eq!(support::code(&commit), 0);
+    let create = rig.command(&[
+        "worktree",
+        "create",
+        "wait-release",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(
+        support::code(&create),
+        0,
+        "{}",
+        String::from_utf8_lossy(&create.stderr.bytes)
+    );
+    let registry = fs::read_dir(rig.state.join("worktrees"))?
+        .next()
+        .ok_or("registry")??
+        .path();
+    let directory = Directory::open_anchor(&registry)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let lock = directory.lock(
+        std::ffi::OsStr::new("worktrees.lock"),
+        LockMode::Exclusive,
+        provenant_core::WaitBudget::cli(clock.mono_now(), 10)?,
+        &cancel,
+        &clock,
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "Reply OK")?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .args([
+            "--state-dir",
+            rig.state.to_str().ok_or("state")?,
+            "run",
+            "--operation-id",
+            "wait-lock-release",
+            "--model",
+            "codex/gpt-6-luna",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            ".worktrees/wait-release",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "60s",
+            "--json",
+        ])
+        .env_clear()
+        .envs(rig.env.iter().cloned())
+        .current_dir(&rig.project)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started = Instant::now();
+    let observed = provenant_test_support::wait_for(
+        "registry lock held for seven seconds",
+        Duration::from_secs(10),
+        || (started.elapsed(), child.try_wait()),
+        |(elapsed, result)| *elapsed >= Duration::from_secs(7) || !matches!(result, Ok(None)),
+    )?;
+    if let Ok(Some(_)) = observed.1 {
+        let output = child.wait_with_output()?;
+        return Err(format!(
+            "run exited before lock release: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    observed.1?;
+    drop(lock);
+    let completed = provenant_test_support::wait_for(
+        "run after registry lock release",
+        Duration::from_secs(65),
+        || child.try_wait(),
+        |result| !matches!(result, Ok(None)),
+    );
+    if completed.is_err() {
+        child.kill()?;
+    }
+    let _ = completed??;
+    let output = child.wait_with_output()?;
+    let response: Value = serde_json::from_slice(&output.stdout)?;
+    let run = response["data"]["run_id"]
+        .as_str()
+        .ok_or_else(|| format!("missing admitted run: {response}"))?;
+    let lanes = rig.command(&["lanes", "--id", run, "--all", "--json"])?;
+    assert_eq!(
+        support::code(&lanes),
+        0,
+        "{}",
+        String::from_utf8_lossy(&lanes.stderr.bytes)
+    );
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    assert_eq!(
+        lanes["data"]["lanes"].as_array().map(Vec::len),
+        Some(1),
+        "{lanes}"
+    );
+    Ok(())
+}
