@@ -3178,8 +3178,6 @@ pub(crate) fn bind_run_context(
     // adds graph and node identity to each submitted task.
     expansion.document["context"]["preset"] = expansion.document["provenance"]["preset"].clone();
     expansion.document["context"]["selection_source"] = json!(selection_source);
-    // The CLI rejects --preset with --task-id and automatic selection refused
-    // --task-id before this change, so no existing graph carries a work item.
     if let Some(work_item) = request.task_id.as_ref() {
         expansion.document["context"]["work_item"] = json!(work_item.to_string());
     }
