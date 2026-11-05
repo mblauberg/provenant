@@ -1118,21 +1118,10 @@ fn preview_foreign(
     // A missing slot means no writer has ever held this tree.
     let writer = {
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
-        match context
-            .project_state
-            .open_verified_directory(&state_dir_name(&lane.path))
-        {
-            Ok(state) => {
-                match state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
-                    Ok(guard) => Some(guard),
-                    Err(error) if error.is_not_found() => None,
-                    Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LockBusy),
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            Err(error) if error.is_not_found() => None,
-            Err(error) => return Err(error.into()),
-        }
+        cache_writer_probe(context.project_state, &lane.path).map_err(|state| match state {
+            WorkerState::Busy => WorktreeError::LockBusy,
+            _ => WorktreeError::UnknownWriter,
+        })?
     };
     let recheck = || -> Result<(), WorktreeError> {
         verified.repo().revalidate()?;

@@ -334,12 +334,10 @@ pub fn create(
             return Err(WorktreeError::UnknownWriter);
         }
     }
-    let state = writer_directory(context.project_state, &target)?;
-    let _writer = state
-        .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
-        .map_err(|error| match error {
-            FsError::LockTimeout { .. } => WorktreeError::LockBusy,
-            other => other.into(),
+    let _writer =
+        cache_writer_guard(context.project_state, &target).map_err(|state| match state {
+            WorkerState::Busy => WorktreeError::LockBusy,
+            _ => WorktreeError::UnknownWriter,
         })?;
     let named_root = context
         .repo

@@ -326,6 +326,76 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let path = fixture.root.join(".worktrees/native");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "native",
+        path.to_str().ok_or("path")?,
+    ])?;
+    let slot = writer_directory(context.project_state, &path)?;
+    let guard = slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
+    let attempt = slot.current_path()?.join("retained-attempt");
+    fs::create_dir(&attempt)?;
+    fs::write(attempt.join("reservation.json"), "reservation")?;
+    fs::write(attempt.join("import-retained.json"), "retained")?;
+    drop(guard);
+
+    assert!(matches!(
+        cache_writer_probe(context.project_state, &path),
+        Err(WorkerState::Busy)
+    ));
+    assert!(matches!(
+        cache_writer_guard(context.project_state, &path),
+        Err(WorkerState::Busy)
+    ));
+    let lane = list(&context, &cancel())?
+        .into_iter()
+        .find(|lane| lane.path == path)
+        .ok_or("lane")?;
+    assert_eq!(lane.writer, WriterState::Busy);
+    let entries = read_worktrees(&context, &cancel())?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == path)
+        .ok_or("entry")?;
+    assert!(matches!(
+        lock_worktree(&context, entry, &cancel(), false),
+        Err(WorktreeError::LockBusy)
+    ));
+    assert!(matches!(
+        lock_worktree(&context, entry, &cancel(), true),
+        Err(WorktreeError::LockBusy)
+    ));
+    fs::create_dir(path.join("target"))?;
+    fs::write(path.join("target/artifact"), "retained")?;
+    let lanes = list(&context, &cancel())?;
+    let regenerable = ["target".into()];
+    let policy = WorktreeGcPolicy {
+        upstream: None,
+        terminal: &|_| true,
+        no_live_lanes: &|_| true,
+        regenerable: &regenerable,
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: false,
+        foreign_merged_clean: false,
+    };
+    collect(&context, &lanes, &policy, &cancel())?;
+    assert!(path.join("target/artifact").is_file());
+
+    // Settlement can retain historical evidence after clearing the reservation.
+    fs::remove_file(attempt.join("reservation.json"))?;
+    assert!(cache_writer_guard(context.project_state, &path).is_ok());
+    Ok(())
+}
+
+#[test]
 fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;

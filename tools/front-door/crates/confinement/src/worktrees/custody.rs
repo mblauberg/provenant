@@ -271,6 +271,11 @@ pub(super) fn lock_worktree(
             Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
             Err(_) => return Err(WorktreeError::UnknownWriter),
         };
+        match retained_import(&state) {
+            Ok(true) => return Err(WorktreeError::LockBusy),
+            Ok(false) => {}
+            Err(_) => return Err(WorktreeError::UnknownWriter),
+        }
         Some(writer)
     };
     let canonical = canonicalize(verified.path())?;
@@ -361,12 +366,55 @@ pub fn cache_writer_probe(
         Err(error) if error.is_not_found() => return Ok(None),
         Err(_) => return Err(WorkerState::Unknown),
     };
-    match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
-        Ok(guard) => Ok(Some(guard)),
-        Err(error) if error.is_not_found() => Ok(None),
-        Err(FsError::LockTimeout { .. }) => Err(WorkerState::Busy),
-        Err(_) => Err(WorkerState::Unknown),
+    let guard = match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
+        Ok(guard) => Some(guard),
+        Err(error) if error.is_not_found() => None,
+        Err(FsError::LockTimeout { .. }) => return Err(WorkerState::Busy),
+        Err(_) => return Err(WorkerState::Unknown),
+    };
+    if retained_import(&directory)? {
+        return Err(WorkerState::Busy);
     }
+    Ok(guard)
+}
+
+// An interrupted import retains both its reservation and marker after the
+// process releases writer.lock. A resolved import may leave the marker as
+// historical evidence, so only the pair fences the slot.
+fn retained_import(slot: &Directory) -> Result<bool, WorkerState> {
+    fn exists(dir: &Directory, name: &str) -> Result<bool, WorkerState> {
+        match dir.metadata_at(OsStr::new(name), false) {
+            Ok(_) => Ok(true),
+            Err(error) if error.is_not_found() => Ok(false),
+            Err(_) => Err(WorkerState::Unknown),
+        }
+    }
+    if exists(slot, "reservation.json")? && exists(slot, "import-retained.json")? {
+        return Ok(true);
+    }
+    for (index, name) in slot
+        .entries()
+        .map_err(|_| WorkerState::Unknown)?
+        .enumerate()
+    {
+        if index >= 10_000 {
+            return Err(WorkerState::Unknown);
+        }
+        let name = name.map_err(|_| WorkerState::Unknown)?;
+        let metadata = slot
+            .metadata_at(&name, false)
+            .map_err(|_| WorkerState::Unknown)?;
+        if metadata.kind != provenant_os::fs::FileKind::Directory {
+            continue;
+        }
+        let attempt = slot
+            .open_verified_directory(&name)
+            .map_err(|_| WorkerState::Unknown)?;
+        if exists(&attempt, "reservation.json")? && exists(&attempt, "import-retained.json")? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Hold writer exclusion for cache mutation. Membership comes from the
@@ -376,12 +424,16 @@ pub fn cache_writer_guard(
     path: &Path,
 ) -> Result<LockGuard, WorkerState> {
     let directory = writer_directory(project_state, path).map_err(|_| WorkerState::Unknown)?;
-    directory
+    let guard = directory
         .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
         .map_err(|error| match error {
             FsError::LockTimeout { .. } => WorkerState::Busy,
             _ => WorkerState::Unknown,
-        })
+        })?;
+    if retained_import(&directory)? {
+        return Err(WorkerState::Busy);
+    }
+    Ok(guard)
 }
 
 #[cfg(test)]
