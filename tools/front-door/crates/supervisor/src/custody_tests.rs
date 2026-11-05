@@ -140,6 +140,42 @@ fn slot_reservation_cutover_replays_only_identical_published_evidence() -> TestR
 }
 
 #[test]
+fn malformed_attempt_reservation_cannot_hide_an_exclusive_fence() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("writer");
+    std::fs::create_dir(&path)?;
+    let slot = Directory::open_anchor(&path)?;
+    publish_reservation(&slot, &legacy_reservation(scope(), &slot.metadata()?))?;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let recovery = acquire_recovery(
+        slot.try_clone()?,
+        scope(),
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    drop(recovery);
+    let child = attempt_evidence(&slot, scope())?;
+    let mut record: serde_json::Value = read_record(&child, "reservation.json", RECORD_LIMIT)?;
+    record["slot_exclusive"] = "invalid".into();
+    write_record(&child, "reservation.json", &record, PublishMode::Replace)?.require_durable()?;
+    let mut successor = scope();
+    successor.attempt = AttemptId::from_bytes([9; 16]);
+    assert!(matches!(
+        crate::fixture::acquire_writer(
+            slot.try_clone()?,
+            successor,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock
+        ),
+        Err(CustodyError::Fenced)
+    ));
+    Ok(())
+}
+
+#[test]
 fn slot_reservation_cutover_keeps_reboot_device_proof() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");

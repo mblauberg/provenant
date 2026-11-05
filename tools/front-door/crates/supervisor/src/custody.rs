@@ -583,7 +583,12 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
             return Err(CustodyError::Fenced);
         }
         let name = name?;
-        if directory.metadata_at(&name, false)?.kind != provenant_os::fs::FileKind::Directory {
+        if name
+            .to_str()
+            .and_then(|name| AttemptId::parse(name).ok())
+            .is_none()
+            || directory.metadata_at(&name, false)?.kind != provenant_os::fs::FileKind::Directory
+        {
             continue;
         }
         let child = directory.open_verified_directory(&name)?;
@@ -592,12 +597,15 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
             Err(CustodyError::Filesystem(error)) if error.is_not_found() => continue,
             Err(_) => return Err(CustodyError::Fenced),
         };
-        if value
-            .get("slot_exclusive")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-        {
+        let reservation: Reservation =
+            serde_json::from_value(value.clone()).map_err(|_| CustodyError::Fenced)?;
+        validate_anchor(&child, &reservation).map_err(|_| CustodyError::Fenced)?;
+        if name != OsStr::new(&reservation.scope.attempt.to_string()) {
             return Err(CustodyError::Fenced);
+        }
+        match value.get("slot_exclusive") {
+            None | Some(serde_json::Value::Bool(false)) => {}
+            _ => return Err(CustodyError::Fenced),
         }
     }
     Ok(())
