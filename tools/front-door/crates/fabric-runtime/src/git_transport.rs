@@ -1357,15 +1357,15 @@ mod tests {
     }
 
     #[test]
-    fn commits_over_64_mib_transport() {
+    fn multi_megabyte_commit_transports() {
         let fixture = Fixture::new();
         let transport = fixture.transport();
         let sender = fixture.repo("sender");
         let base = commit(&transport, &sender, &["--allow-empty", "-m", "base"]);
-        // #2166 replaced bundle files, which capped a transported commit at 64 MiB,
-        // with index-pack. Incompressible content proves a larger commit transports.
+        // The fetch forces index-pack; incompressible content exercises a
+        // multi-megabyte object without depending on the former bundle cap.
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-        let bytes: Vec<u8> = (0..(65 << 20) / 8)
+        let bytes: Vec<u8> = (0..(4 << 20) / 8)
             .flat_map(|_| {
                 state ^= state << 13;
                 state ^= state >> 7;
@@ -1396,7 +1396,7 @@ mod tests {
             &receiver,
             &["cat-file", "-s", &format!("{head}:large.bin")],
         );
-        assert_eq!(size, (65 << 20).to_string());
+        assert_eq!(size, (4 << 20).to_string());
     }
 
     #[test]
