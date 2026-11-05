@@ -77,6 +77,71 @@ fn legacy_slot_root_recovery_keeps_scope_anchor_and_writer_exclusion() -> TestRe
     assert!(path.join("reservation.json").is_file());
     Ok(())
 }
+/// The v1 wire shape is pinned independently of the current serializer; only
+/// physical directory identities vary between installations.
+#[test]
+fn current_release_fence_fixture_preserves_uncommitted_work() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("writer");
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir(&path)?;
+    std::fs::create_dir(&worktree)?;
+    provenant_os::fixture::run_git(&worktree, &["init", "-q"])?;
+    provenant_os::fixture::run_git(&worktree, &["checkout", "-qb", "lane"])?;
+    std::fs::write(worktree.join("uncommitted.txt"), b"original")?;
+    provenant_os::fixture::run_git(&worktree, &["add", "uncommitted.txt"])?;
+    provenant_os::fixture::run_git(&worktree, &["commit", "-qm", "base"])?;
+    let base = String::from_utf8(provenant_os::fixture::run_git(
+        &worktree,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    std::fs::write(worktree.join("uncommitted.txt"), b"uncommitted work")?;
+    let scope = scope();
+    let evidence_path = path.join(scope.attempt.to_string());
+    std::fs::create_dir(&evidence_path)?;
+    let slot = Directory::open_anchor(&path)?;
+    let evidence = Directory::open_anchor(&evidence_path)?;
+    let tree = Directory::open_anchor(&worktree)?;
+    let git = Directory::open_anchor(&worktree.join(".git"))?;
+    let slot_identity = evidence.metadata()?;
+    let tree_identity = tree.metadata()?;
+    let git_identity = git.metadata()?;
+    let fixture = r#"{"schema_version":1,"scope":{"run":"@RUN@","attempt":"@ATTEMPT@","generation":1},"launch_state":"prepared","attempt_device":null,"attempt_inode":null,"reservation_device":@SLOT_DEVICE@,"reservation_inode":@SLOT_INODE@,"binding":{"kind":"worktree","worktree_device":@TREE_DEVICE@,"worktree_inode":@TREE_INODE@,"git_device":@GIT_DEVICE@,"git_inode":@GIT_INODE@,"branch":"refs/heads/lane","base":"@BASE@"},"boot":"linux:00000000-0000-0000-0000-000000000001","guardian":null,"provider":null,"unresolved_cleanup":true,"descendants":[],"census_incomplete":true,"omitted_descendants":0}"#
+        .replace("@RUN@", &scope.run.to_string())
+        .replace("@ATTEMPT@", &scope.attempt.to_string())
+        .replace("@SLOT_DEVICE@", &slot_identity.device.to_string())
+        .replace("@SLOT_INODE@", &slot_identity.inode.to_string())
+        .replace("@TREE_DEVICE@", &tree_identity.device.to_string())
+        .replace("@TREE_INODE@", &tree_identity.inode.to_string())
+        .replace("@GIT_DEVICE@", &git_identity.device.to_string())
+        .replace("@GIT_INODE@", &git_identity.inode.to_string())
+        .replace("@BASE@", base.trim());
+    let reservation_path = evidence_path.join("reservation.json");
+    let marker_path = evidence_path.join("import-retained.json");
+    std::fs::write(&reservation_path, fixture.as_bytes())?;
+    std::fs::write(&marker_path, b"retained import evidence")?;
+    let decoded: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
+    validate_anchor(&evidence, &decoded)?;
+    assert_eq!(decoded.scope, scope);
+    assert!(matches!(
+        decoded.binding,
+        StoredWriterBinding::Worktree { .. }
+    ));
+    assert!(reservation_present(&slot, scope)?);
+    assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
+    assert_eq!(std::fs::read(&reservation_path)?, fixture.as_bytes());
+    assert_eq!(std::fs::read(&marker_path)?, b"retained import evidence");
+    assert_eq!(
+        std::fs::read(worktree.join("uncommitted.txt"))?,
+        b"uncommitted work"
+    );
+    assert_eq!(
+        provenant_os::fixture::run_git(&worktree, &["status", "--porcelain"])?,
+        b" M uncommitted.txt\n"
+    );
+    Ok(())
+}
+
 #[test]
 fn reservation_listing_isolates_an_inaccessible_slot() -> TestResult {
     let root = tempfile::tempdir()?;
