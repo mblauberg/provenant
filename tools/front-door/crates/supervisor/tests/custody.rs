@@ -96,6 +96,29 @@ impl ProcessObserver for CensusGateObserver {
         fixture::RecordedBootObserver.observe(pid)
     }
 
+    fn live_census(
+        &self,
+        root: &ProcessIdentity,
+        known: &[ProcessIdentity],
+        limit: usize,
+    ) -> std::result::Result<Option<Census>, CensusError> {
+        let state = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from);
+        if !state
+            .as_ref()
+            .is_some_and(|path| path.join("s2-live-tree").is_file())
+        {
+            return Ok(None);
+        }
+        let result = fixture::RecordedBootObserver.live_census(root, known, limit)?;
+        if result.is_some()
+            && let Some(state) = state
+        {
+            std::fs::write(state.join("s2-live-tree-seen"), b"observed")
+                .map_err(CensusError::ProcessList)?;
+        }
+        Ok(result)
+    }
+
     fn census(&self, max_entries: usize) -> std::result::Result<Census, CensusError> {
         if let Some(root) = std::env::var_os("PROVENANT_STATE_DIR") {
             let counter = PathBuf::from(root).join("s2-census-errors-left");
@@ -332,7 +355,37 @@ fn start(
     extra: &[OsString],
     plan: CapturePlan,
 ) -> Result<(CustodyLease, CustodyHandle)> {
-    let (writer, handle, _) = start_with_custody_identity(root, name, scenario, extra, plan)?;
+    // Run the existing escape scenarios with the provider held before it
+    // forks, until a scoped observation has actually succeeded. The escape
+    // itself still happens and detaches before its parent can be observed.
+    let state = root.join("PROVENANT_STATE_DIR");
+    let scoped_escape = state.join("s2-live-tree").is_file()
+        && matches!(
+            scenario,
+            "s2-detach-provider" | "s2-registered-detach-provider"
+        );
+    let mut args = extra.to_vec();
+    let warm = if scoped_escape {
+        let seen = state.join("s2-live-tree-seen");
+        match std::fs::remove_file(&seen) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let socket = root.join(format!("{name}-scoped-warm.sock"));
+        let listener = UnixListener::bind(&socket)?;
+        args.push(socket.into_os_string());
+        Some((listener, seen))
+    } else {
+        None
+    };
+    let (writer, handle, _) = start_with_custody_identity(root, name, scenario, &args, plan)?;
+    if let Some((listener, seen)) = warm {
+        let mut stream = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+        byte(&mut stream, b'R')?;
+        wait_for_file(&seen)?;
+        stream.write_all(b"S")?;
+    }
     Ok((writer, handle))
 }
 fn start_with_custody_identity(
@@ -541,6 +594,71 @@ fn cleanup_retries_a_transient_census_failure(root: &Path) -> Result<()> {
         "{exit:?}"
     );
     assert_eq!(exit.omitted_warnings, 0);
+    Ok(())
+}
+fn live_census_failure_warns_once(root: &Path) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    let counter = state.join("s2-census-errors-left");
+    std::fs::write(&counter, b"3")?;
+    let socket = root.join("live-census.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "live-census",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::fs::read(&counter).map_or(true, |value| value != b"0") {
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("live census failures were not observed").into());
+        }
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
+    drop(held);
+    let exit = exited(&handle)?;
+    assert_eq!(
+        exit.warnings
+            .iter()
+            .filter(|warning| *warning == "live process census incomplete")
+            .count(),
+        1,
+        "{exit:?}"
+    );
+    Ok(())
+}
+fn process_watch_failure_records_one_fallback(root: &Path) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    std::fs::write(state.join("s2-fail-process-watch"), b"fail")?;
+    std::fs::write(state.join("s2-live-tree"), b"enabled")?;
+    let socket = root.join("watch-failure.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "watch-failure",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    wait_for_file(&state.join("s2-process-watch-failed"))?;
+    drop(held);
+    let exit = exited(&handle)?;
+    assert_eq!(
+        exit.warnings
+            .iter()
+            .filter(|warning| *warning
+                == "process events or scoped census unavailable; using full scan")
+            .count(),
+        1,
+        "{exit:?}"
+    );
     Ok(())
 }
 fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
@@ -1088,6 +1206,31 @@ fn owner_process(root: &Path) -> Result<()> {
     drop(writer);
     Ok(())
 }
+fn owner_with_descendant(root: &Path) -> Result<()> {
+    // This caller is detached without the separate fixture-owner cancellation
+    // hook: the guardian must follow its ordinary production cleanup path.
+    assert!(std::env::var_os(provenant_supervisor::FIXTURE_OWNER_PID_ENV).is_none());
+    let (writer, _handle) = start(
+        root,
+        "orphan-tree",
+        "s2-setsid-provider",
+        &[
+            root.join("orphan-descendant.sock").into_os_string(),
+            root.join("orphan-provider.sock").into_os_string(),
+        ],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut peer = UnixStream::connect(root.join("owner-ready.sock"))?;
+    peer.write_all(b"R")?;
+    let mut bytes = [0];
+    let _ = peer.read(&mut bytes)?;
+    drop(writer);
+    Ok(())
+}
 fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &Path) -> Result<()> {
     let ready_path = root.join("setsid-ready.sock");
     let gate_path = root.join("setsid-gate.sock");
@@ -1125,6 +1268,90 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
         exit.unresolved_cleanup,
         "a live setsid descendant still holds custody"
     );
+    drop(descendant_stream);
+    wait_for_identity_absence(&descendant)?;
+    Ok(())
+}
+fn descendant_stays_attributed_after_parent_exit_and_session_change(root: &Path) -> Result<()> {
+    descendant_session_after_parent(root, false)
+}
+
+fn descendant_of_100ms_parent_stays_attributed(root: &Path) -> Result<()> {
+    descendant_session_after_parent(root, true)
+}
+
+fn descendant_session_after_parent(root: &Path, timed: bool) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    std::fs::write(state.join("s2-live-tree"), b"enabled")?;
+    let descendant_listener = UnixListener::bind(root.join("short-descendant.sock"))?;
+    let parent_listener = UnixListener::bind(root.join("short-parent.sock"))?;
+    let provider_listener = UnixListener::bind(root.join("short-provider.sock"))?;
+    let warm_listener = if timed {
+        Some(UnixListener::bind(root.join("short-warm.sock"))?)
+    } else {
+        None
+    };
+    let mut paths = vec![
+        root.join("short-descendant.sock").into_os_string(),
+        root.join("short-parent.sock").into_os_string(),
+        root.join("short-provider.sock").into_os_string(),
+    ];
+    if timed {
+        paths.push(root.join("short-warm.sock").into_os_string());
+    }
+    let (_writer, handle) = start(
+        root,
+        "short",
+        "s2-short-parent-provider",
+        &paths,
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    if let Some(listener) = warm_listener {
+        let mut warm = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+        byte(&mut warm, b'R')?;
+        wait_for_file(&state.join("s2-live-tree-seen"))?;
+        warm.write_all(b"S")?;
+    }
+    let mut descendant_stream =
+        fixture::fixture_accept(&descendant_listener, Duration::from_secs(5))?;
+    byte(&mut descendant_stream, b'R')?;
+    let descendant = process_identity(read_pid_line(&mut descendant_stream)?)?;
+    let mut parent_stream = fixture::fixture_accept(&parent_listener, Duration::from_secs(5))?;
+    byte(&mut parent_stream, b'R')?;
+    let parent = process_identity(read_pid_line(&mut parent_stream)?)?;
+    let parent_deadline = Instant::now() + Duration::from_millis(100);
+    let mut provider_stream = fixture::fixture_accept(&provider_listener, Duration::from_secs(5))?;
+    byte(&mut provider_stream, b'R')?;
+    let reservation = root
+        .join("short-writer")
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    if timed {
+        while Instant::now() < parent_deadline {
+            std::thread::park_timeout(parent_deadline.saturating_duration_since(Instant::now()));
+        }
+    } else {
+        wait_for_descendant(&reservation, &parent)?;
+        wait_for_descendant(&reservation, &descendant)?;
+        wait_for_file(&state.join("s2-live-tree-seen"))?;
+    }
+    drop(parent_stream);
+    wait_for_zombie(&parent)?;
+    descendant_stream.write_all(b"S")?;
+    byte(&mut descendant_stream, b'S')?;
+    let escaped = process_identity(descendant.pid)?;
+    assert_eq!(escaped, descendant);
+    assert_eq!(escaped.session_id, descendant.pid);
+    assert_eq!(escaped.group_id, descendant.pid);
+    drop(provider_stream);
+    let exit = exited(&handle)?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    assert!(exit.unresolved_pids.contains(&descendant.pid), "{exit:?}");
     drop(descendant_stream);
     wait_for_identity_absence(&descendant)?;
     Ok(())
@@ -2098,6 +2325,127 @@ fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
     ));
     Ok(())
 }
+fn guardian_exits_after_owner_and_tracked_descendant_are_gone(root: &Path) -> Result<()> {
+    let ready_listener = UnixListener::bind(root.join("orphan-descendant.sock"))?;
+    let gate_listener = UnixListener::bind(root.join("orphan-provider.sock"))?;
+    let owner_listener = UnixListener::bind(root.join("owner-ready.sock"))?;
+    let mut owner = fixture::ChildGuard::new(fixture::command("s2-owner-tree", root)?.spawn()?);
+    let mut descendant_stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut descendant_stream, b'R')?;
+    let descendant = process_identity(read_pid_line(&mut descendant_stream)?)?;
+    let mut provider_stream = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
+    byte(&mut provider_stream, b'R')?;
+    let mut owner_stream = fixture::fixture_accept(&owner_listener, Duration::from_secs(5))?;
+    byte(&mut owner_stream, b'R')?;
+    let writer = root.join("orphan-tree-writer");
+    wait_for_descendant(
+        &writer
+            .join(scope().attempt.to_string())
+            .join("reservation.json"),
+        &descendant,
+    )?;
+    let guardian = reservation_identity(&writer, "guardian")?;
+    owner.kill()?;
+    bounded_reap(&mut owner)?;
+    drop(owner_stream);
+    drop(provider_stream);
+    let handle = reattach(
+        Directory::open_anchor(&root.join("orphan-tree-attempt"))?,
+        scope(),
+    )?;
+    let exit = exited(&handle)?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    drop(descendant_stream);
+    wait_for_identity_absence(&descendant)?;
+    wait_for_identity_absence(&guardian)?;
+    let settled = exited(&handle)?;
+    assert!(!settled.unresolved_cleanup, "{settled:?}");
+    Ok(())
+}
+fn guardian_retires_after_owner_and_evidence_are_removed(root: &Path) -> Result<()> {
+    orphan_with_removed_writer_state(root, true, false, false)
+}
+fn guardian_retires_after_owner_and_lock_are_removed(root: &Path) -> Result<()> {
+    orphan_with_removed_writer_state(root, false, true, false)
+}
+fn guardian_retires_after_owner_and_writer_state_are_removed(root: &Path) -> Result<()> {
+    orphan_with_removed_writer_state(root, true, true, false)
+}
+fn guardian_retires_after_owner_and_lock_directory_are_removed(root: &Path) -> Result<()> {
+    orphan_with_removed_writer_state(root, true, true, true)
+}
+fn orphan_with_removed_writer_state(
+    root: &Path,
+    remove_evidence: bool,
+    remove_lock: bool,
+    remove_directory: bool,
+) -> Result<()> {
+    let descendant_listener = UnixListener::bind(root.join("orphan-descendant.sock"))?;
+    let provider_listener = UnixListener::bind(root.join("orphan-provider.sock"))?;
+    let owner_listener = UnixListener::bind(root.join("owner-ready.sock"))?;
+    let mut owner = fixture::ChildGuard::new(fixture::command("s2-owner-tree", root)?.spawn()?);
+    let mut descendant_stream =
+        fixture::fixture_accept(&descendant_listener, Duration::from_secs(5))?;
+    byte(&mut descendant_stream, b'R')?;
+    let descendant = process_identity(read_pid_line(&mut descendant_stream)?)?;
+    let mut provider_stream = fixture::fixture_accept(&provider_listener, Duration::from_secs(5))?;
+    byte(&mut provider_stream, b'R')?;
+    let mut owner_stream = fixture::fixture_accept(&owner_listener, Duration::from_secs(5))?;
+    byte(&mut owner_stream, b'R')?;
+    let writer = root.join("orphan-tree-writer");
+    let evidence = writer.join(scope().attempt.to_string());
+    wait_for_descendant(&evidence.join("reservation.json"), &descendant)?;
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let provider = reservation_identity(&writer, "provider")?;
+    // Preserve only a fixture cleanup record if a later assertion fails.
+    let cleanup_record = root.join("cleanup-record");
+    std::fs::create_dir(&cleanup_record)?;
+    std::fs::copy(
+        evidence.join("reservation.json"),
+        cleanup_record.join("reservation.json"),
+    )?;
+    if remove_evidence {
+        std::fs::remove_dir_all(&evidence)?;
+    }
+    if remove_directory {
+        std::fs::remove_dir_all(&writer)?;
+    } else if remove_lock {
+        std::fs::remove_file(writer.join("writer.lock"))?;
+    }
+    owner.kill()?;
+    bounded_reap(&mut owner)?;
+    drop(owner_stream);
+    drop(provider_stream);
+    wait_for_identity_absence(&provider)?;
+    assert!(
+        matches!(fixture::RecordedBootObserver.observe(guardian.pid),
+        ProcessObservation::Present(fact) if fact.identity == guardian)
+    );
+    if !remove_lock {
+        assert!(
+            Directory::open_anchor(&writer)?
+                .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
+                .is_err()
+        );
+    }
+    drop(descendant_stream);
+    wait_for_identity_absence(&descendant)?;
+    wait_for_identity_absence(&guardian)?;
+    if remove_evidence {
+        assert!(!root.join("orphan-tree-attempt/process-exit.json").exists());
+    } else {
+        let handle = reattach(
+            Directory::open_anchor(&root.join("orphan-tree-attempt"))?,
+            scope(),
+        )?;
+        assert!(
+            exited(&handle)?.unresolved_cleanup,
+            "the missing lock must keep the fence unresolved"
+        );
+        assert!(evidence.join("reservation.json").exists());
+    }
+    Ok(())
+}
 fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -> Result<()> {
     let descendant_socket = root.join("descendant.sock");
     let provider_socket = root.join("provider.sock");
@@ -2307,6 +2655,14 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
 type Case = (&'static str, fn(&Path) -> Result<()>);
 const CASES: &[Case] = &[
     (
+        "live_census_failure_warns_once",
+        live_census_failure_warns_once,
+    ),
+    (
+        "process_watch_failure_records_one_fallback",
+        process_watch_failure_records_one_fallback,
+    ),
+    (
         "guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost",
         guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost,
     ),
@@ -2375,6 +2731,26 @@ const CASES: &[Case] = &[
         owner_death_keeps_guardian_and_writer_live,
     ),
     (
+        "guardian_exits_after_owner_and_tracked_descendant_are_gone",
+        guardian_exits_after_owner_and_tracked_descendant_are_gone,
+    ),
+    (
+        "guardian_retires_after_owner_and_evidence_are_removed",
+        guardian_retires_after_owner_and_evidence_are_removed,
+    ),
+    (
+        "guardian_retires_after_owner_and_lock_are_removed",
+        guardian_retires_after_owner_and_lock_are_removed,
+    ),
+    (
+        "guardian_retires_after_owner_and_writer_state_are_removed",
+        guardian_retires_after_owner_and_writer_state_are_removed,
+    ),
+    (
+        "guardian_retires_after_owner_and_lock_directory_are_removed",
+        guardian_retires_after_owner_and_lock_directory_are_removed,
+    ),
+    (
         "retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive",
         retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive,
     ),
@@ -2393,6 +2769,14 @@ const CASES: &[Case] = &[
     (
         "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative",
         setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative,
+    ),
+    (
+        "descendant_stays_attributed_after_parent_exit_and_session_change",
+        descendant_stays_attributed_after_parent_exit_and_session_change,
+    ),
+    (
+        "descendant_of_100ms_parent_stays_attributed",
+        descendant_of_100ms_parent_stays_attributed,
     ),
     #[cfg(target_os = "macos")]
     (
@@ -2491,20 +2875,31 @@ fn settle_writers(root: &Path) -> Result<()> {
 }
 
 fn run_case(name: &str) -> Result<()> {
-    let root = provenant_os::fixture::short_tempdir("terminal-checkpoint.sock", |root| {
-        tempfile::Builder::new().prefix("s").tempdir_in(root)
-    })?;
-    let cleanup = fixture::ProcessCleanupGuard::new(root.path());
     let case = CASES
         .iter()
         .find(|(label, _)| *label == name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown custody test"))?;
-    let result = (case.1)(root.path());
-    if result.is_ok() {
+    let escape = matches!(
+        name,
+        "escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures"
+            | "escapee_is_ended_only_when_the_host_reports_no_nested_runs"
+            | "detached_descendant_in_the_attempt_sandbox_is_found_and_ended"
+    );
+    for scoped in [false, true].into_iter().take(if escape { 2 } else { 1 }) {
+        let root = provenant_os::fixture::short_tempdir("terminal-checkpoint.sock", |root| {
+            tempfile::Builder::new().prefix("s").tempdir_in(root)
+        })?;
+        let cleanup = fixture::ProcessCleanupGuard::new(root.path());
+        if scoped {
+            let state = root.path().join("PROVENANT_STATE_DIR");
+            std::fs::create_dir(&state)?;
+            std::fs::write(state.join("s2-live-tree"), b"enabled")?;
+        }
+        (case.1)(root.path())?;
         settle_writers(root.path())?;
         cleanup.disarm();
     }
-    result
+    Ok(())
 }
 
 /// The system clock, with wall time jumped forward once the marker appears,
@@ -2601,6 +2996,11 @@ fn main() -> Result<()> {
         && args.get(1).is_some_and(|a| a == "s2-owner")
     {
         return owner_process(&std::env::current_dir()?);
+    }
+    if args.first().is_some_and(|a| a == "--fixture")
+        && args.get(1).is_some_and(|a| a == "s2-owner-tree")
+    {
+        return owner_with_descendant(&std::env::current_dir()?);
     }
     if fixture::dispatch()? {
         return Ok(());

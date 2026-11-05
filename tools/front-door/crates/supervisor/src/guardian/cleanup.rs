@@ -1,6 +1,27 @@
 //! Census, signalling receipts and quiescence under retained custody.
 use super::*;
 
+fn live_or_full(
+    observer: &dyn ProcessObserver,
+    root: &ProcessIdentity,
+    known: &[ProcessIdentity],
+) -> (
+    std::result::Result<crate::census::Census, crate::census::CensusError>,
+    bool,
+) {
+    match observer.live_census(root, known, crate::census::MAX_CENSUS_ENTRIES) {
+        Ok(Some(census))
+            if census.completeness() == crate::census::CensusCompleteness::Partial
+                && census.unknown_pids().is_empty() =>
+        {
+            (Ok(census), false)
+        }
+        Ok(Some(_)) | Ok(None) | Err(_) => {
+            (observer.census(crate::census::MAX_CENSUS_ENTRIES), true)
+        }
+    }
+}
+
 impl Driver<'_> {
     pub(super) fn persist_tracking(&mut self, warnings: &mut Vec<String>, omitted: &mut u64) {
         self.reservation.descendants = self.tracked.iter().take(128).cloned().collect();
@@ -183,7 +204,7 @@ impl Driver<'_> {
         &mut self,
         child: &mut crate::process_os::provider::ProviderGroup,
     ) -> Option<crate::census::Census> {
-        let mut census = match self.observer.census(crate::census::MAX_CENSUS_ENTRIES) {
+        let census = match self.observer.census(crate::census::MAX_CENSUS_ENTRIES) {
             Ok(census) => census,
             Err(_) => {
                 self.descendant_stop_allowed = false;
@@ -192,6 +213,45 @@ impl Driver<'_> {
                 return None;
             }
         };
+        self.apply_census(child, census, true)
+    }
+
+    /// The scoped walk records history only. It never supplies the complete
+    /// host observation required by cleanup or changes the last full result.
+    pub(super) fn refresh_live_census(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+    ) -> (Option<crate::census::Census>, bool) {
+        let Some(root) = self.reservation.provider.as_ref() else {
+            return (self.refresh_census(child), true);
+        };
+        let known = self
+            .history
+            .iter()
+            .chain(self.tracked.iter())
+            .chain(self.protected.iter())
+            .chain(self.spared.spared_identities())
+            .chain(self.reservation.descendants.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let (census, full) = live_or_full(self.observer, root, &known);
+        match census {
+            Ok(census) => (self.apply_census(child, census, full), full),
+            Err(_) => {
+                self.descendant_stop_allowed = false;
+                self.escapee_stop_allowed = false;
+                self.reservation.census_incomplete = true;
+                (None, full)
+            }
+        }
+    }
+
+    fn apply_census(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+        mut census: crate::census::Census,
+        full: bool,
+    ) -> Option<crate::census::Census> {
         let Some(root) = self.reservation.provider.as_ref() else {
             self.descendant_stop_allowed = false;
             self.escapee_stop_allowed = false;
@@ -306,7 +366,9 @@ impl Driver<'_> {
                 && self
                     .nested_children
                     .is_some_and(|store| store.has_no_nested_runs(&self.holder_context)));
-        self.reservation.census_incomplete = !census.is_complete();
+        if full {
+            self.reservation.census_incomplete = !census.is_complete();
+        }
         Some(census)
     }
     /// Live processes outside the provider and any spared owner that are still
@@ -383,6 +445,70 @@ impl Driver<'_> {
             }
             Err(_) => Ok(false),
         }
+    }
+
+    /// Retire without settlement when the original lock inode has been
+    /// unlinked. This never clears the fence or replaces an unresolved exit.
+    /// The independent pre-opened descriptor proves that no inheritor still
+    /// holds the old lock description; a replacement pathname proves nothing.
+    #[cfg(target_os = "macos")]
+    pub(super) fn retire_unlinked_writer(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+    ) -> bool {
+        let Some(probe) = self.writer_retirement_probe.as_ref() else {
+            return false;
+        };
+        if !unlinked_original(probe, self.writer_identity) {
+            return false;
+        }
+        let Some(first) = self.refresh_census(child) else {
+            return false;
+        };
+        if !self.retirement_census_clear(child, &first)
+            || child.cleanup(true).is_err()
+            || !child.quiescent_children().unwrap_or(false)
+        {
+            return false;
+        }
+        provenant_os::sys::wait_pause(Duration::from_millis(20));
+        let Some(second) = self.refresh_census(child) else {
+            return false;
+        };
+        if !self.retirement_census_clear(child, &second) {
+            return false;
+        }
+        let Some(probe) = self.writer_retirement_probe.as_ref() else {
+            return false;
+        };
+        try_unlinked_writer_lease(probe, self.writer_identity, &mut self.writer)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn retirement_census_clear(
+        &mut self,
+        child: &crate::process_os::provider::ProviderGroup,
+        census: &crate::census::Census,
+    ) -> bool {
+        let Some(provider) = self.reservation.provider.as_ref() else {
+            return false;
+        };
+        if !self.history_complete
+            || !darwin_census_clear(census, provider, &self.guardian, &self.history)
+            || self
+                .tracked
+                .iter()
+                .chain(self.protected.iter())
+                .chain(self.spared.spared_identities())
+                .chain(self.reservation.descendants.iter())
+                .any(|identity| identity_still_possible(census, identity))
+        {
+            return false;
+        }
+        let mut spared: std::collections::BTreeSet<_> =
+            self.spared.spared_identities().cloned().collect();
+        spared.extend(self.protected.iter().cloned());
+        self.marked_escapees(census, child.id(), &spared).is_empty()
     }
 
     // Process cleanup uses a real-time cap independent of provider progress.
@@ -516,6 +642,34 @@ impl Driver<'_> {
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn unlinked_original(
+    probe: &provenant_os::fs::FileHandle,
+    expected: provenant_os::fs::Metadata,
+) -> bool {
+    probe
+        .metadata()
+        .is_ok_and(|actual| actual.links == 0 && actual.same_identity(&expected))
+}
+
+/// The probe was opened independently while the inode was linked. Closing our
+/// inherited description and acquiring this one excludes every remaining
+/// inheritor, even though no directory entry can be opened any longer.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn try_unlinked_writer_lease(
+    probe: &provenant_os::fs::FileHandle,
+    expected: provenant_os::fs::Metadata,
+    writer: &mut Option<provenant_os::fs::LockGuard>,
+) -> bool {
+    if !unlinked_original(probe, expected) {
+        return false;
+    }
+    drop(writer.take());
+    provenant_os::sys::fs::try_flock(probe.handoff_file(), provenant_os::fs::LockMode::Exclusive)
+        .is_ok()
+        && unlinked_original(probe, expected)
+}
+
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn try_writer_lease(
     directory: &Directory,
     expected: provenant_os::fs::Metadata,
@@ -574,4 +728,75 @@ pub(super) fn darwin_census_clear(
             census.ancestry(&fact.identity, ancestor) != crate::census::Ancestry::No
         })
     })
+}
+
+#[cfg(test)]
+mod live_census_tests {
+    use super::*;
+    use crate::census::{Census, CensusError, ObservationIssue, ProcessObservation};
+    use std::cell::Cell;
+
+    struct Observer {
+        mode: u8,
+        full_calls: Cell<usize>,
+    }
+    impl ProcessObserver for Observer {
+        fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+            Ok("boot".into())
+        }
+        fn observe(&self, _: i64) -> ProcessObservation {
+            ProcessObservation::Unknown(ObservationIssue::Io)
+        }
+        fn census(&self, _: usize) -> std::result::Result<Census, CensusError> {
+            self.full_calls.set(self.full_calls.get() + 1);
+            Census::from_observations([], [], [], true, false, 10)
+        }
+        fn live_census(
+            &self,
+            _: &ProcessIdentity,
+            _: &[ProcessIdentity],
+            _: usize,
+        ) -> std::result::Result<Option<Census>, CensusError> {
+            match self.mode {
+                0 => Ok(None),
+                1 => Err(CensusError::InvalidBound),
+                2 => Ok(Some(Census::from_observations(
+                    [],
+                    [(4, ObservationIssue::Io)],
+                    [],
+                    false,
+                    false,
+                    10,
+                )?)),
+                _ => Ok(Some(Census::from_observations(
+                    [],
+                    [],
+                    [],
+                    false,
+                    false,
+                    10,
+                )?)),
+            }
+        }
+    }
+    #[test]
+    fn live_census_falls_back_to_full_on_unavailable_overflow_or_partial_failure() {
+        let root = ProcessIdentity {
+            boot: "boot".into(),
+            pid: 10,
+            native_start: 1,
+            group_id: 10,
+            session_id: 1,
+        };
+        for mode in 0..=3 {
+            let observer = Observer {
+                mode,
+                full_calls: Cell::new(0),
+            };
+            let (result, fallback) = live_or_full(&observer, &root, &[]);
+            assert_eq!(fallback, mode < 3);
+            assert_eq!(observer.full_calls.get(), usize::from(mode < 3));
+            assert_eq!(result.unwrap().is_complete(), mode < 3);
+        }
+    }
 }

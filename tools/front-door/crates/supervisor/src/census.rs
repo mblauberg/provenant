@@ -555,6 +555,16 @@ pub trait ProcessObserver {
     fn boot_identity(&self) -> Result<String, CensusError>;
     fn observe(&self, pid: i64) -> ProcessObservation;
     fn census(&self, max_entries: usize) -> Result<Census, CensusError>;
+    /// A scoped live-history observation. `None` requests the full census.
+    /// This is never evidence that the host census is complete.
+    fn live_census(
+        &self,
+        _root: &ProcessIdentity,
+        _known: &[ProcessIdentity],
+        _max_entries: usize,
+    ) -> Result<Option<Census>, CensusError> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

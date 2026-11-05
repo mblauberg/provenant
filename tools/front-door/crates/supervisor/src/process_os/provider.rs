@@ -56,6 +56,8 @@ impl<'a> Watch<'a> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReactorEvent {
     pub(crate) supervisor_signal: bool,
+    pub(crate) process_changed: bool,
+    pub(crate) process_overflow: bool,
 }
 
 /// Guardian-only signal/event source. Install before spawning a provider.
@@ -64,6 +66,9 @@ pub(crate) struct ReactorEvent {
 pub(crate) struct GuardianReactor {
     queue: std::fs::File,
     _mask: SignalMask,
+    processes: BTreeSet<i64>,
+    #[cfg(feature = "fixture")]
+    injected_watch_failures: usize,
 }
 impl GuardianReactor {
     pub(crate) fn install() -> io::Result<Self> {
@@ -101,7 +106,66 @@ impl GuardianReactor {
                 return Err(io::Error::last_os_error());
             }
         }
-        Ok(Self { queue, _mask: mask })
+        Ok(Self {
+            queue,
+            _mask: mask,
+            processes: BTreeSet::new(),
+            #[cfg(feature = "fixture")]
+            injected_watch_failures: 0,
+        })
+    }
+
+    /// Watch known processes for fork and exit. A failure requires a full
+    /// scan; kqueue does not expose the new PID in a fork event.
+    pub(crate) fn watch_processes(&mut self, pids: &BTreeSet<i64>) -> io::Result<(bool, usize)> {
+        let queue = self.queue.as_raw_fd();
+        let (added, failures) = register_process_watches(
+            &mut self.processes,
+            pids,
+            |pid| {
+                let ident = usize::try_from(pid).map_err(|_| io::ErrorKind::InvalidInput)?;
+                // SAFETY: zero is a valid empty kevent; fields below describe one
+                // process filter and no pointers are retained.
+                let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+                change.ident = ident;
+                change.filter = libc::EVFILT_PROC;
+                change.flags = libc::EV_ADD | libc::EV_CLEAR;
+                change.fflags = libc::NOTE_FORK | libc::NOTE_EXIT;
+                // SAFETY: the queue and single change record are live; the kernel
+                // borrows the record only for this call.
+                let result = unsafe {
+                    libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null())
+                };
+                if result < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            },
+            |pid| {
+                matches!(
+                    crate::census::SystemProcessObserver.observe(pid),
+                    ProcessObservation::Absent
+                        | ProcessObservation::Present(crate::census::ProcessFact {
+                            zombie: true,
+                            ..
+                        })
+                )
+            },
+        )?;
+        #[cfg(feature = "fixture")]
+        let mut failures = failures;
+        #[cfg(feature = "fixture")]
+        if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(std::path::PathBuf::from)
+            && state.join("s2-fail-process-watch").exists()
+        {
+            failures += 1;
+            self.injected_watch_failures += 1;
+            if self.injected_watch_failures >= 2 {
+                let _ = std::fs::write(state.join("s2-process-watch-failed"), b"failed");
+            }
+        }
+        Ok((added, failures))
     }
 
     /// Waits for at most the requested duration, capped to one second per
@@ -166,7 +230,7 @@ impl GuardianReactor {
         }
     }
 
-    fn read_kqueue(&self, event: &mut ReactorEvent) -> io::Result<()> {
+    fn read_kqueue(&mut self, event: &mut ReactorEvent) -> io::Result<()> {
         let timeout = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
@@ -198,6 +262,19 @@ impl GuardianReactor {
                 return Ok(());
             }
             for item in events.iter().take(result as usize) {
+                if item.filter == libc::EVFILT_PROC {
+                    event.process_changed = true;
+                    if item.flags & libc::EV_ERROR != 0 {
+                        event.process_overflow = true;
+                        self.processes.clear();
+                    }
+                    if item.fflags & libc::NOTE_EXIT != 0
+                        && let Ok(pid) = i64::try_from(item.ident)
+                    {
+                        self.processes.remove(&pid);
+                    }
+                    continue;
+                }
                 if item.filter != libc::EVFILT_SIGNAL {
                     continue;
                 }
@@ -211,8 +288,40 @@ impl GuardianReactor {
                 return Ok(());
             }
         }
+        // More events may remain; do not assume the bounded drain kept up.
+        event.process_overflow = true;
+        // The bounded drain may have left exit notifications behind.
+        self.processes.clear();
         Ok(())
     }
+}
+
+fn register_process_watches(
+    processes: &mut BTreeSet<i64>,
+    pids: &BTreeSet<i64>,
+    mut register: impl FnMut(i64) -> io::Result<()>,
+    mut gone: impl FnMut(i64) -> bool,
+) -> io::Result<(bool, usize)> {
+    if pids.len() > MAX_CENSUS_ENTRIES {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    processes.retain(|pid| pids.contains(pid));
+    let mut added = false;
+    let mut failures = 0;
+    for &pid in pids {
+        if processes.contains(&pid) {
+            continue;
+        }
+        match register(pid) {
+            Ok(()) => {
+                processes.insert(pid);
+                added = true;
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) || gone(pid) => {}
+            Err(_) => failures += 1,
+        }
+    }
+    Ok((added, failures))
 }
 
 fn guardian_signals() -> [i32; 4] {
@@ -1110,6 +1219,31 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn process_watch_failures_do_not_hide_later_pids() {
+        let mut watched = BTreeSet::new();
+        let pids = BTreeSet::from([1, 2, 3, 4, 5]);
+        let mut attempted = Vec::new();
+        let result = register_process_watches(
+            &mut watched,
+            &pids,
+            |pid| {
+                attempted.push(pid);
+                match pid {
+                    1 | 3 => Err(io::Error::from_raw_os_error(libc::EPERM)),
+                    2 => Err(io::Error::from_raw_os_error(libc::ESRCH)),
+                    5 => Err(io::Error::from_raw_os_error(libc::EACCES)),
+                    _ => Ok(()),
+                }
+            },
+            |pid| pid == 3,
+        )
+        .unwrap();
+        assert_eq!(attempted, vec![1, 2, 3, 4, 5]);
+        assert_eq!(result, (true, 2));
+        assert!(watched.contains(&4));
+    }
 
     #[test]
     fn provider_lease_descriptors_contain_only_writer_and_ports()

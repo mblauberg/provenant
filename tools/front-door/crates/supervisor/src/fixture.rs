@@ -884,11 +884,73 @@ pub fn dispatch() -> io::Result<bool> {
             wait_for_eof(&mut gate)?;
             descendant.detach();
         }
+        "s2-short-parent-provider" => {
+            let root = std::env::current_dir()?;
+            if let Ok(path) = fixture_path(&args, 6) {
+                let mut ready = std::os::unix::net::UnixStream::connect(path)?;
+                ready.write_all(b"R")?;
+                let mut command = [0_u8; 1];
+                ready.read_exact(&mut command)?;
+                if command != *b"S" {
+                    return Err(io::Error::other("unexpected fixture command"));
+                }
+            }
+            let extra = [
+                fixture_path(&args, 3)?.into_os_string(),
+                fixture_path(&args, 4)?.into_os_string(),
+            ];
+            let mut parent = ChildGuard::new(
+                command_with_args("s2-short-parent", &extra, &root, false)?.spawn()?,
+            );
+            let mut gate = std::os::unix::net::UnixStream::connect(fixture_path(&args, 5)?)?;
+            gate.write_all(b"R")?;
+            wait_for_eof(&mut gate)?;
+            parent.detach();
+        }
+        "s2-short-parent" => {
+            let root = std::env::current_dir()?;
+            let extra = [fixture_path(&args, 3)?.into_os_string()];
+            let mut descendant = ChildGuard::new(
+                command_with_args("s2-late-session", &extra, &root, false)?.spawn()?,
+            );
+            let mut gate = std::os::unix::net::UnixStream::connect(fixture_path(&args, 4)?)?;
+            gate.write_all(b"R")?;
+            writeln!(gate, "{}", std::process::id())?;
+            wait_for_eof(&mut gate)?;
+            descendant.detach();
+        }
+        "s2-late-session" => {
+            let mut ready = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
+            ready.write_all(b"R")?;
+            writeln!(ready, "{}", std::process::id())?;
+            let mut command = [0_u8; 1];
+            ready.read_exact(&mut command)?;
+            if command != *b"S" {
+                return Err(io::Error::other("unexpected fixture command"));
+            }
+            provenant_os::sys::fixture_create_session()?;
+            ready.write_all(b"S")?;
+            wait_for_eof(&mut ready)?;
+        }
         "s2-detach-provider" | "s2-registered-detach-provider" => {
             // Start a session-leading descendant in the attempt's sandbox, then
             // exit at once so no census can follow the parent edge. The
             // registered variant also leaves a nested owner whose custody the
             // macOS census cannot prove, which forbids stops by descent.
+            let warm_index = if scenario == "s2-detach-provider" {
+                5
+            } else {
+                6
+            };
+            if let Ok(path) = fixture_path(&args, warm_index) {
+                let mut warm = std::os::unix::net::UnixStream::connect(path)?;
+                warm.write_all(b"R")?;
+                let mut command = [0_u8; 1];
+                warm.read_exact(&mut command)?;
+                if command != *b"S" {
+                    return Err(io::Error::other("unexpected fixture command"));
+                }
+            }
             let root = std::env::current_dir()?;
             let extra = [
                 fixture_path(&args, 3)?.into_os_string(),
@@ -1070,6 +1132,15 @@ impl crate::census::ProcessObserver for RecordedBootObserver {
     fn census(&self, limit: usize) -> Result<crate::census::Census, crate::census::CensusError> {
         crate::process_os::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1")?
             .census(limit)
+    }
+    #[cfg(target_os = "macos")]
+    fn live_census(
+        &self,
+        root: &crate::census::ProcessIdentity,
+        known: &[crate::census::ProcessIdentity],
+        limit: usize,
+    ) -> Result<Option<crate::census::Census>, crate::census::CensusError> {
+        crate::process_os::live_census::observe(self, root, known, limit)
     }
 }
 
