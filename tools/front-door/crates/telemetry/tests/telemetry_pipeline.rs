@@ -214,6 +214,34 @@ fn ranking_rows(
 }
 
 #[test]
+fn pattern_and_lens_suggestions_remain_advisory() -> Result {
+    let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
+    let mut rows = ranking_rows(20, "efficient", 10, 0, 1_000_000, false);
+    rows.extend(ranking_rows(20, "noisy", 20, 80, 100_000_000, true));
+    for row in &mut rows {
+        row.evidence.lens = row.evidence.pattern.clone();
+    }
+    let report = Outcomes {
+        ci_coverage_from: None,
+        skipped_ci_runs: 0,
+        window_days: 14,
+        ci: "measured",
+        unattributed_rows: 0,
+        rows,
+    };
+    let ranking = suggest::rank(&report, 20, 14, now)?;
+    for dimension in ["pattern", "lens"] {
+        let suggestion = ranking
+            .suggestions
+            .iter()
+            .find(|s| s.dimension == dimension)
+            .ok_or("missing suggestion")?;
+        assert!(suggestion.accept.is_none());
+    }
+    Ok(())
+}
+
+#[test]
 fn ranking_uses_verified_value_strata_minimum_and_expiry() -> Result {
     let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
     let mut rows = ranking_rows(20, "efficient", 10, 0, 1_000_000, false);
