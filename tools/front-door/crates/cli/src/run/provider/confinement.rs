@@ -214,6 +214,10 @@ pub(super) fn confinement_request(
                         .flat_map(project_scratch_reads),
                 )
                 .chain(access.read_roots.iter().map(|path| grant(path)))
+                .chain(access.attachments.iter().map(|path| PathGrant {
+                    path: path.clone(),
+                    scope: PathScope::Exact,
+                }))
                 .chain(access.inputs_root.iter().map(|path| grant(path)))
                 .chain(roots.prompt_file.map(|path| PathGrant {
                     path: path.to_owned(),

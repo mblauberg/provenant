@@ -1734,6 +1734,7 @@ fn lower_leaf(
             "depends_on",
             "routes",
             "read_roots",
+            "attachments",
             "capabilities",
             "source",
             "prompt_file",
@@ -3146,6 +3147,7 @@ impl StageBuilder<'_> {
                         "prompt",
                         "source",
                         "read_roots",
+                        "attachments",
                         "inputs",
                         "depends_on",
                         "advisory",
@@ -3162,7 +3164,7 @@ impl StageBuilder<'_> {
                     node["title"] =
                         interpolate(title, &self.parameters, self.prompt, index as usize)?;
                 }
-                for key in ["source", "read_roots", "inputs", "advisory"] {
+                for key in ["source", "read_roots", "attachments", "inputs", "advisory"] {
                     if let Some(value) = object.get(key) {
                         node[key] =
                             interpolate(value, &self.parameters, self.prompt, index as usize)?;
@@ -3737,6 +3739,26 @@ pub(crate) fn bind_run_context(
                     directory.join(worktree)
                 });
             }
+            if !request.access.attach.is_empty() {
+                let attachments = node
+                    .as_object_mut()
+                    .ok_or("node must be a table")?
+                    .entry("attachments")
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                    .ok_or("attachments must be an array")?;
+                for path in &request.access.attach {
+                    let path = if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        directory.join(path)
+                    };
+                    let value = json!(path);
+                    if !attachments.contains(&value) {
+                        attachments.push(value);
+                    }
+                }
+            }
             let mut roots = node
                 .get("read_roots")
                 .and_then(Value::as_array)
@@ -4192,6 +4214,7 @@ pub(super) fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
         for key in [
             "write_scope",
             "read_roots",
+            "attachments",
             "capability_sources",
             "source",
             "inputs",
@@ -4533,6 +4556,7 @@ fn scan_preset_graph(document: &Value) -> Result<(), PresetInputError> {
             if let Some(object) = node.as_object_mut() {
                 object.remove("worktree");
                 object.remove("read_roots");
+                object.remove("attachments");
                 if let Some(review) = object.get_mut("review").and_then(Value::as_object_mut) {
                     review.remove("worktree");
                 }

@@ -470,6 +470,14 @@ pub(super) fn validate_flat_plan(
         {
             return Err("invalid read roots");
         }
+        if node.attachments.len() > 32
+            || node
+                .attachments
+                .iter()
+                .any(|path| path.is_empty() || path.len() > 4096 || path.contains('\0'))
+        {
+            return Err("invalid attachments");
+        }
         match &node.source {
             Some(SourceBinding::Commit { commit })
                 if commit.parse::<provenant_core::GitOid>().is_err() =>
@@ -485,7 +493,9 @@ pub(super) fn validate_flat_plan(
             _ => {}
         }
         if (is_gate || is_loop || is_composite || is_decide || is_land)
-            && (node.source.is_some() || !node.read_roots.is_empty())
+            && (node.source.is_some()
+                || !node.read_roots.is_empty()
+                || !node.attachments.is_empty())
         {
             return Err("execution bindings require an agent node");
         }
@@ -639,6 +649,7 @@ pub(super) fn validate_flat_plan(
             distinct_strength: node.distinct_strength,
             dispositions: node.dispositions.clone(),
             read_roots: node.read_roots.clone(),
+            attachments: node.attachments.clone(),
             capabilities: node.capabilities.clone(),
             source: node.source.clone(),
             after_expansion: node.after_expansion.clone(),

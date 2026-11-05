@@ -203,6 +203,12 @@ pub(super) fn prepare_command(
     if let Some(alias) = &paths.temporary_alias {
         alias_temporary_env(&mut spec.env, &scratch, &alias.join("command"));
     }
+    if let Some(warning) =
+        super::preparation::image_input_warning(provider, &task.access.attachments)
+    {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "{warning}");
+    }
     apply_lane_capabilities(&mut spec.profile.spec, &task.access);
     let common_git_path = repository
         .as_ref()

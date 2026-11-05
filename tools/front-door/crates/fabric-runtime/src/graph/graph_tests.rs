@@ -74,6 +74,7 @@ struct FakeOwner {
     equal_range: bool,
     no_review_base: bool,
     read_roots: Vec<Vec<String>>,
+    attachments: Vec<Vec<String>>,
     capabilities: Vec<Option<Vec<String>>>,
     distinct_from: Vec<Vec<String>>,
     family_peers: Vec<Vec<String>>,
@@ -347,6 +348,7 @@ impl AttemptOwner for FakeOwner {
         self.observed_review_bases
             .push(node.review_base.map(str::to_owned));
         self.read_roots.push(node.read_roots.to_vec());
+        self.attachments.push(node.attachments.to_vec());
         self.capabilities
             .push(node.capabilities.map(<[String]>::to_vec));
         self.distinct_from
@@ -415,6 +417,7 @@ fn route(adapter: &str) -> GraphRoute {
 
 fn node(id: &str, route: GraphRoute) -> GraphNode {
     GraphNode {
+        attachments: Vec::new(),
         review: None,
         family_group: None,
         context: None,
@@ -3381,6 +3384,7 @@ fn source_and_read_roots_survive_retry_and_replay() {
     let mut leaf = node("review", route("first"));
     leaf.source = Some(SourceBinding::Integration);
     leaf.read_roots = vec!["/authorised/other-worktree".into()];
+    leaf.attachments = vec!["/authorised/shot.png".into()];
     leaf.route = None;
     leaf.routes = Some(vec![route("first"), route("fallback")]);
     let mut document = graph(vec![leaf]);
@@ -3410,6 +3414,10 @@ fn source_and_read_roots_survive_retry_and_replay() {
     assert_eq!(
         owner.read_roots,
         vec![vec!["/authorised/other-worktree".to_owned()]; 3]
+    );
+    assert_eq!(
+        owner.attachments,
+        vec![vec!["/authorised/shot.png".to_owned()]; 3]
     );
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(replay.checkpoint.nodes[0].source_commit, Some(commit));
@@ -6968,6 +6976,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         route("fourth"),
     ];
     let document = graph(vec![GraphNode {
+        attachments: Vec::new(),
         review: None,
         family_group: None,
         context: None,
@@ -7244,6 +7253,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
     ] {
         let routes = vec![route("first"), route("second")];
         let document = graph(vec![GraphNode {
+            attachments: Vec::new(),
             review: None,
             family_group: None,
             context: None,
@@ -7869,6 +7879,7 @@ fn resume_after_a_crash_before_the_reference_save_replays_under_the_launch_actor
 #[test]
 fn terminal_task_failure_does_not_try_a_fallback_route() {
     let document = graph(vec![GraphNode {
+        attachments: Vec::new(),
         review: None,
         family_group: None,
         context: None,

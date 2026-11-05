@@ -597,7 +597,7 @@ fn prepare(
         // added directories, even where the seatbelt profile would allow them.
         // A root that holds the working directory still reaches beyond it.
         for root in &plan.read_roots {
-            if !root.path.starts_with(input.cwd) {
+            if !root.path.starts_with(input.cwd) && !input.images.contains(&root.path) {
                 argv.extend(["--add-dir".into(), root.path.as_os_str().to_owned()]);
             }
         }

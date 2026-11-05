@@ -2449,11 +2449,12 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         home.join(".codex"),
     )?;
     let codex_prompt = provenant_providers::Prompt::new("grants".into());
+    let images = vec![PathBuf::from("/outside/shot.png")];
     let codex_runtime = assets.join("provenant");
     let mut codex = provenant_providers::Adapter::prepare(
         &provenant_providers::codex::Codex,
         provenant_providers::PrepareInput {
-            images: &[],
+            images: &images,
             command: None,
             route: &codex_route,
             confined: &confinement.plan,
@@ -2482,6 +2483,12 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             },
         },
     )?;
+    assert!(
+        codex
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--image", "/outside/shot.png"])
+    );
     assert!(
         codex.env.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"),
         "the lane builds into its own target"
@@ -4476,6 +4483,43 @@ fn explicit_write_root_keeps_read_only_git_authority() -> Result<(), Box<dyn std
     )?;
     assert!(matches!(request.permissions.mode, AccessMode::ReadOnly));
     assert_eq!(request.permissions.write_roots[0].path, write);
+    Ok(())
+}
+
+#[test]
+fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
+    let image = PathBuf::from("/outside/image.png");
+    let access = run::LaneAccess {
+        attachments: vec![image.clone()],
+        ..Default::default()
+    };
+    let request = confinement_request(
+        ProjectId::parse("0123456789abcdef0123456789abcdef")?,
+        ConfinementRoots {
+            cwd: Path::new("/project"),
+            home: Path::new("/home/user"),
+            scratch: Path::new("/tmp/scratch"),
+            private_state: Path::new("/state/private"),
+            assets: Path::new("/release"),
+            prompt_file: None,
+        },
+        None,
+        &access,
+        &Default::default(),
+        "cursor",
+        false,
+    )?;
+    assert!(request.permissions.read_roots.contains(&PathGrant {
+        path: image,
+        scope: PathScope::Exact
+    }));
+    assert!(
+        !request
+            .permissions
+            .read_roots
+            .iter()
+            .any(|grant| grant.path == Path::new("/outside"))
+    );
     Ok(())
 }
 

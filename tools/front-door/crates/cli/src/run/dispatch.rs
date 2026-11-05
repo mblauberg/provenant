@@ -1274,6 +1274,7 @@ pub(super) fn dispatch_inner(
             }
             if lane_access.network.is_some()
                 || !lane_access.read_roots.is_empty()
+                || !lane_access.attachments.is_empty()
                 || !lane_access.write_roots.is_empty()
                 || network.is_some()
             {

@@ -966,7 +966,8 @@ pub(crate) mod peer_tests {
             ("default-no-origin-head", None, &head),
         ] {
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"review-pins", "node_id":name, "route_index":0}))?;
-            let observation = graph_owner.observe_or_start(&key, graph::NodeInput { capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: Some(1), prior_attempts: &[], family_peers: &[],
+            let observation = graph_owner.observe_or_start(&key, graph::NodeInput {
+            attachments: &[], capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: Some(1), prior_attempts: &[], family_peers: &[],
                 context: Default::default(), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
                 source_commit: Some(&head), review_base, title: name, prompt: "review",
                 required_verdict: None, deadline_seconds: None, inputs_dir: None,
@@ -1029,7 +1030,8 @@ pub(crate) mod peer_tests {
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"pinned-range","node_id":"review","route_index":0}))?;
         let route = serde_json::from_value(serde_json::json!({"adapter":"fixture","model":"fixture/model"}))?;
         let source_roots = vec![rig.project.to_str().ok_or("source path")?.to_owned()];
-        let node = || graph::NodeInput { capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
+        let node = || graph::NodeInput {
+            attachments: &[], capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
             read_roots: &source_roots, distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             review_base: Some(&pinned), title: "review", prompt: "review", required_verdict: None, deadline_seconds: None, inputs_dir: None };
         let first = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
@@ -1131,6 +1133,7 @@ pub(crate) mod peer_tests {
         let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
         let delivery = provenant_records::run::DeliveryMode::Integrate("batch".into());
         let error = owner.observe_or_start(&key, graph::NodeInput {
+            attachments: &[],
             capabilities: None,
             capability_sources: None,
             require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
@@ -1222,6 +1225,7 @@ pub(crate) mod peer_tests {
                         ..Default::default()
                     },
                     read_roots: &[],
+                    attachments: &[],
                     distinct_from_attempts: &[],
                     require_distinct: false,
                     source_commit: None,
@@ -2518,7 +2522,8 @@ pub(crate) mod peer_tests {
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
                 "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
             }))?;
-            bound.observe_or_start(&key, graph::NodeInput { capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, review_base: None,
+            bound.observe_or_start(&key, graph::NodeInput {
+            attachments: &[], capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, review_base: None,
                 prior_attempts: prior, family_peers: peers, context: Default::default(), read_roots: &[],
                 distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
                 title: "lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -3061,7 +3066,8 @@ pub(crate) mod peer_tests {
             network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
         };
         let actor = bound.actor();
-        bound.observe_or_start(&key, graph::NodeInput { capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, review_base: None,
+        bound.observe_or_start(&key, graph::NodeInput {
+            attachments: &[], capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, review_base: None,
             prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "later lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -3084,7 +3090,8 @@ pub(crate) mod peer_tests {
             "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0
         }))?;
         let actor = bound.actor();
-        bound.observe_or_start(&second, graph::NodeInput { capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, review_base: None,
+        bound.observe_or_start(&second, graph::NodeInput {
+            attachments: &[], capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, review_base: None,
             prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "second lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -3208,7 +3215,8 @@ pub(crate) mod peer_tests {
         let exact_key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
             "graph_id":"pinned-base", "node_id":exact.nodes[2].id, "route_index":0
         }))?;
-        bound.observe_or_start(&exact_key, graph::NodeInput { capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, review_base: None,
+        bound.observe_or_start(&exact_key, graph::NodeInput {
+            attachments: &[], capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, review_base: None,
             prior_attempts: &[], family_peers: &["openai".to_owned()], context: Default::default(), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "exact lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -4017,6 +4025,7 @@ pub(crate) mod peer_tests {
         // A nonexistent read root is refused before any state tree is touched.
         let fail = provenant_cli::run::lane_access(
             &provenant_cli::Access {
+        attach: Vec::new(),
                 mode: None,
                 worktree: None,
                 read_root: vec!["/fixture/missing-root".into()],

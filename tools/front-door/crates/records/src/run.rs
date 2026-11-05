@@ -270,6 +270,9 @@ pub struct LaneAccess {
     pub database_ipc: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_roots: Vec<std::path::PathBuf>,
+    /// Canonical image files explicitly supplied to this lane.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<std::path::PathBuf>,
     /// A graph node's materialised upstream results, read-only. The host

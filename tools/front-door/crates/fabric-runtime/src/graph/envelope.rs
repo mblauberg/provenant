@@ -48,7 +48,12 @@ fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
             .saturating_add(one("synthesis"))
             .saturating_add(one("verifier").saturating_mul(verifiers))
     });
-    let inherited = canonical_len(&(&node.depends_on, &node.inputs, &node.read_roots));
+    let inherited = canonical_len(&(
+        &node.depends_on,
+        &node.inputs,
+        &node.read_roots,
+        &node.attachments,
+    ));
     // A custom lens can have a disposition projection or CI evidence larger
     // than an ordinary review leaf. Reserve those declared additions too.
     let template_extra = node

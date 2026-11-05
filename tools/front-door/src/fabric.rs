@@ -4601,6 +4601,9 @@ impl BoundGraphOwner<'_> {
             if !node.read_roots.is_empty() {
                 map.insert("read_roots".into(), serde_json::json!(node.read_roots));
             }
+            if !node.attachments.is_empty() {
+                map.insert("attachments".into(), serde_json::json!(node.attachments));
+            }
             if node.require_skill_location {
                 map.insert("require_skill_location".into(), serde_json::json!(true));
             }
@@ -4695,6 +4698,7 @@ impl BoundGraphOwner<'_> {
             map.insert("id".into(), serde_json::json!(id));
             map.insert("source".into(), pinned.clone());
             map.insert("read_roots".into(), serde_json::json!(node.read_roots));
+            map.insert("attachments".into(), serde_json::json!(node.attachments));
             map.insert("depends_on".into(), serde_json::json!(deps));
             map.insert("inputs".into(), inputs);
             serde_json::from_value(value)
@@ -6025,6 +6029,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 capabilities.retain(|name| seen.insert(name.clone()));
                 let mut grants = provenant_cli::run::lane_access(
                     &provenant_cli::Access {
+                        attach: node
+                            .attachments
+                            .iter()
+                            .map(|path| {
+                                let path = Path::new(path);
+                                if path.is_absolute() {
+                                    path.to_owned()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
                         mode: Some(provenant_cli::Mode::ReadOnly),
                         worktree: None,
                         read_root: node

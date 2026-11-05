@@ -5405,6 +5405,7 @@ fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn st
     for root in roots {
         for (flag, read) in [("--read-root", true), ("--write-root", false)] {
             let access = crate::Access {
+                attach: Vec::new(),
                 mode: Some(Mode::ReadOnly),
                 worktree: None,
                 read_root: if read { vec![root.clone()] } else { vec![] },
@@ -5426,6 +5427,32 @@ fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn lane_access_canonicalises_attachment_files() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let image = temp.path().join("shot.png");
+    std::fs::write(&image, b"image")?;
+    let access = crate::Access {
+        attach: vec![image.clone()],
+        mode: None,
+        worktree: None,
+        read_root: vec![],
+        write_root: vec![],
+        network: None,
+        capability: vec![],
+        no_capability: vec![],
+    };
+    let granted = lane_access(
+        &access,
+        &temp.path().join("state"),
+        Path::new("/fixture/home"),
+    )
+    .map_err(|fail| fail.message)?;
+    assert_eq!(granted.attachments, vec![std::fs::canonicalize(image)?]);
+    assert!(granted.read_roots.is_empty());
+    Ok(())
+}
+
+#[test]
 fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -5441,6 +5468,7 @@ fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
     let config = std::fs::canonicalize(config)?;
     let state = temp.path().join("state");
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
         worktree: None,
         read_root,
@@ -5513,6 +5541,7 @@ fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::e
     let state = tempfile::tempdir()?;
     let state = std::fs::canonicalize(state.path())?;
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
         worktree: None,
         read_root,
@@ -5598,6 +5627,7 @@ fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::er
     std::fs::create_dir_all(&state)?;
     std::fs::create_dir_all(&project)?;
     let access = |mode, network, capability: &[&str], write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(mode),
         worktree: None,
         read_root: Vec::new(),
@@ -5682,6 +5712,7 @@ fn lane_access_refuses_write_root_overlapping_the_worktree()
     std::fs::create_dir_all(&state)?;
     std::fs::create_dir_all(&inside)?;
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::WorktreeWrite),
         worktree: Some(worktree.clone()),
         read_root,
@@ -5722,6 +5753,7 @@ fn lane_access_reads_installed_release_skills_only() -> Result<(), Box<dyn std::
     std::fs::create_dir_all(&skills)?;
     std::fs::create_dir_all(state.join("projects"))?;
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
         worktree: None,
         read_root,
