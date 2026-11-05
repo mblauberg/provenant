@@ -362,12 +362,30 @@ fn compile_sbpl_impl(
     }
     // Avoid retaining a second mutable representation of the profile.
     profile_bytes.shrink_to_fit();
+    let native_controls = filtered_native_controls(&profile.spec.native_controls);
     Ok(ConfinedLaunch {
         enforcement: Enforcement::MacOsSandboxExec,
         profile: profile_bytes,
         profile_digest,
-        native_controls: profile.spec.native_controls.clone(),
+        native_controls,
     })
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn filtered_native_controls(controls: &[String]) -> Vec<String> {
+    let filtered: Vec<_> = controls
+        .iter()
+        .filter(|control| super::validation::valid_native_control(control))
+        .cloned()
+        .collect();
+    if filtered.len() != controls.len() {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: invalid native control labels were omitted"
+        );
+    }
+    filtered
 }
 
 /// All path grants and inputs used to render one launch profile.

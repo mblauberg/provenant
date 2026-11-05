@@ -775,3 +775,30 @@ fn credential_writes_stay_inside_auth_roots_and_state_stays_outside() {
         Err(PermissionError::CredentialRoot)
     ));
 }
+
+#[test]
+fn invalid_native_control_labels_are_omitted() {
+    use super::super::render::filtered_native_controls;
+    let mut spec = ProviderProfileSpec {
+        process_executables: vec![PathGrant {
+            path: "/fixture/provider".into(),
+            scope: PathScope::Exact,
+        }],
+        native_controls: vec!["valid.control".into(), "bad\nlabel".into(), "".into()],
+        ..ProviderProfileSpec::default()
+    };
+    assert!(
+        super::super::validation::validate_profile_spec_with_home(
+            &spec,
+            Path::new("/fixture/home"),
+            64
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        filtered_native_controls(&spec.native_controls),
+        ["valid.control"]
+    );
+    spec.native_controls = filtered_native_controls(&spec.native_controls);
+    assert_eq!(spec.native_controls, ["valid.control"]);
+}

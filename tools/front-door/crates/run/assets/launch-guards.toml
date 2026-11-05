@@ -323,6 +323,11 @@ boundary = "credentials"
 reason = "Authentication roots and writes must be confined to the selected provider and ordinary reads and writes cannot encompass credential roots."
 
 [[guard]]
+site = "confinement/src/permissions/render.rs#filtered_native_controls"
+boundary = "warning"
+reason = "Malformed native-control labels are omitted from the applied result with a warning; they do not alter the sandbox profile."
+
+[[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
 boundary = "unclassified"
 reason = "Validates profile paths, process policy, fixture observations, endpoints and authentication grants; classify individual refusal branches."

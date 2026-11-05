@@ -345,16 +345,16 @@ fn validate_profile_spec_impl(
     for endpoint in &spec.provider_api {
         validate_endpoint(endpoint)?;
     }
-    if spec.native_controls.iter().any(|control| {
-        control.is_empty()
-            || control.len() > 128
-            || control
-                .bytes()
-                .any(|byte| !(byte.is_ascii_alphanumeric() || b"._-".contains(&byte)))
-    }) {
-        return Err(PermissionError::InvalidFixture);
-    }
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn valid_native_control(control: &str) -> bool {
+    !control.is_empty()
+        && control.len() <= 128
+        && control
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
 pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), PermissionError> {
