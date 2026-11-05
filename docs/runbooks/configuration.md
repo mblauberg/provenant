@@ -646,6 +646,7 @@ The optional `[gc]` section controls daily collection by the host tick:
 [gc]
 schedule = true
 idle_days = 7
+graph_checkpoint_days = 90
 # free_floor = "100G"
 # alert_below = "150G"
 
@@ -659,6 +660,10 @@ foreign_worktrees = "keep" # opt in with "merged-clean"
 `gc.schedule` defaults to true. Setting it to false prevents subsequent
 scheduled collections. The host tick continues to serve graph deadlines.
 `gc.idle_days` accepts 1 to 3650 (default 7).
+`gc.graph_checkpoint_days` retains terminal graph checkpoints for at least the
+configured number of days after their last save (default 90, range 1 to 3650).
+Pending graphs and graphs with open asks or observations remain available.
+Older reports can show a missing checkpoint for a collected graph.
 `gc.free_floor` defaults to 10% of the state volume's capacity, with a minimum
 of 50 GiB. Set it to override that floor. GC requests additional cache
 collection until available disk space reaches the floor, after the usual
@@ -711,15 +716,19 @@ and cache collection.
 
 `gc.projects` is keyed by the registered Fabric project ID. Each project's
 `regenerable` list contains directory names, matched at any depth in its
-registered linked worktrees. The default is an empty list, which prunes
-nothing. `keep` contains optional paths relative to the worktree; those paths,
-their descendants and any matching directory containing them are preserved.
+registered linked worktrees. When the project has no entry, a root
+`Cargo.toml` defaults the list to `["target"]`; other projects default to an
+empty list. An explicit project entry overrides that default. `keep` contains
+optional paths relative to the worktree; those paths, their descendants and
+any matching directory containing them are preserved.
 Tracked paths are also preserved. `.git`, `.worktrees`, absolute names and
 parent traversal are refused. Declared output must be Git-ignored. An idle
 registered linked worktree can qualify without a terminal lane when no lane
 or writer lease is live. The minimum idle age is `--idle-days`, or one day
-below the free-space floor. The primary checkout and unknown writers remain
-protected. JSON reports this class separately as `worktree_cleanup[].idle_output`.
+below the free-space floor. Unknown-writer worktrees may also have ignored
+output reclaimed when the whole worktree is idle, a complete census finds no
+holder, and no lane is live. The primary checkout remains protected. JSON
+reports this class separately as `worktree_cleanup[].idle_output`.
 Failures skip individual entries. Lane caches still use their existing GC path.
 
 `foreign_worktrees = "merged-clean"` opts this project into removing linked

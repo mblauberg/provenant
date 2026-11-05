@@ -958,6 +958,288 @@ fn fresh_gives_a_rerun_a_new_graph_id_and_a_plain_rerun_the_same_one()
 }
 
 #[test]
+fn graph_retention_collects_operator_named_scratch_source() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&project)?;
+    std::fs::create_dir(&home)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n",
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "complete the graph")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let preset = fixture_cli()
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["run", "--preset", "gate-only", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--wait", "1s"])
+        .output()?;
+    assert!(
+        preset.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&preset.stdout),
+        String::from_utf8_lossy(&preset.stderr)
+    );
+    let preset: serde_json::Value = serde_json::from_slice(&preset.stdout)?;
+    let source = PathBuf::from(
+        preset["data"]["document"]
+            .as_str()
+            .ok_or("preset document")?,
+    );
+    let mut document: serde_json::Value = serde_json::from_slice(&std::fs::read(&source)?)?;
+    document["graph_id"] = "operator-scratch".into();
+    let operator = source
+        .parent()
+        .ok_or("scratch directory")?
+        .join("operator.json");
+    std::fs::write(&operator, serde_json::to_vec(&document)?)?;
+    document["graph_id"] = "unrelated".into();
+    let unrelated = source
+        .parent()
+        .ok_or("scratch directory")?
+        .join("unrelated.json");
+    std::fs::write(&unrelated, serde_json::to_vec(&document)?)?;
+    let graph = fixture_cli()
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["fabric", "graph", "run", "--document"])
+        .arg(&operator)
+        .output()?;
+    assert!(
+        graph.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&graph.stdout),
+        String::from_utf8_lossy(&graph.stderr)
+    );
+    let graph: serde_json::Value = serde_json::from_slice(&graph.stdout)?;
+    assert_eq!(graph["data"]["status"], "complete");
+    let graph_dir = std::fs::read_dir(state.join("fabric/graphs"))?
+        .next()
+        .ok_or("graph directory")??
+        .path();
+    let checkpoint = graph_dir.join("graph-operator-scratch.json");
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&checkpoint)?
+        .set_times(std::fs::FileTimes::new().set_modified(old))?;
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[gc]\nschedule=false\ngraph_checkpoint_days=1\n",
+    )?;
+    let gc = fixture_cli()
+        .current_dir(&home)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(&state)
+        .args(["internal", "tick-gc"])
+        .output()?;
+    assert!(
+        gc.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&gc.stdout),
+        String::from_utf8_lossy(&gc.stderr)
+    );
+    assert!(!checkpoint.exists());
+    assert!(!operator.exists());
+    assert!(unrelated.exists());
+    assert!(source.exists());
+    Ok(())
+}
+
+#[test]
+fn tick_reports_a_missing_graph_worktree_once_without_failing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&project)?;
+    std::fs::create_dir(&home)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let graph = serde_json::json!({
+        "schema_version":1,"graph_id":"missing-worktree","decision_session":"chair-session",
+        "nodes":[{"id":"choose","kind":"decide","access":"read_only","decide":{
+            "question":"Ship?","options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
+            "default":"hold","timeout_seconds":3600
+        }}]
+    });
+    let document = project.join("graph.json");
+    std::fs::write(&document, serde_json::to_vec(&graph)?)?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = fixture_cli()
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["fabric", "graph", "run", "--document"])
+        .arg(&document)
+        .output()?;
+    assert!(
+        run.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n",
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "complete the graph")?;
+    let terminal = fixture_cli()
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["run", "--preset", "gate-only", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--wait", "1s"])
+        .output()?;
+    assert!(
+        terminal.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&terminal.stdout),
+        String::from_utf8_lossy(&terminal.stderr)
+    );
+    let terminal: serde_json::Value = serde_json::from_slice(&terminal.stdout)?;
+    assert_eq!(terminal["data"]["graph"]["status"], "complete");
+    let terminal_id = terminal["data"]["graph"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or("terminal graph id")?;
+    let graph_dir = std::fs::read_dir(state.join("fabric/graphs"))?
+        .next()
+        .ok_or("project graph directory")??
+        .path();
+    let terminal_checkpoint = graph_dir.join(format!("graph-{terminal_id}.json"));
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&terminal_checkpoint)?
+        .set_times(std::fs::FileTimes::new().set_modified(old))?;
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[gc]\nschedule=false\n",
+    )?;
+    std::fs::remove_dir_all(&project)?;
+    let tick = || {
+        fixture_cli()
+            .current_dir(&home)
+            .env("HOME", &home)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .arg("tick")
+            .output()
+    };
+    let first = tick()?;
+    assert!(
+        first.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout)?;
+    let warnings = first["data"]["graphs"]["warnings"]
+        .as_array()
+        .ok_or("warnings")?;
+    assert_eq!(warnings.len(), 1);
+    let warning = warnings[0].as_str().ok_or("warning")?;
+    assert!(warning.contains("missing-worktree"));
+    assert!(!warning.contains("upgrade"));
+    let second = tick()?;
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stdout)
+    );
+    let second: serde_json::Value = serde_json::from_slice(&second.stdout)?;
+    assert!(
+        second["data"]["graphs"]["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .is_empty()
+    );
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[gc]\nschedule=true\ngraph_checkpoint_days=1\n",
+    )?;
+    let gc = fixture_cli()
+        .current_dir(&home)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(&state)
+        .args(["internal", "tick-gc"])
+        .output()?;
+    assert!(
+        gc.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&gc.stdout),
+        String::from_utf8_lossy(&gc.stderr)
+    );
+    let result: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state.join("tick/gc-result.json"))?)?;
+    assert_eq!(result["state"], "complete");
+    assert!(!terminal_checkpoint.exists());
+    assert!(graph_dir.join("graph-missing-worktree.json").exists());
+    Ok(())
+}
+
+#[test]
 fn fresh_rerun_after_cancel_starts_a_new_graph() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let project = temp.path().join("project");
@@ -2860,6 +3142,97 @@ fn preset_file_spec_resolves_from_checkout_subdirectory() -> Result<(), Box<dyn 
     );
     let output = String::from_utf8(output.stdout)?;
     assert!(output.contains("root acceptance criteria"), "{output}");
+    Ok(())
+}
+
+#[test]
+fn preset_reuses_one_worktree_inventory_for_planning_and_spec()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    let git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    };
+    git(&["init", "-q"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "initial",
+    ])?;
+    for index in 0..100 {
+        let path = temp.path().join(format!("worktree-{index}"));
+        git(&[
+            "worktree",
+            "add",
+            "--detach",
+            "--no-checkout",
+            "-q",
+            path.to_str().ok_or("path")?,
+        ])?;
+    }
+    std::fs::write(
+        project.join("spec.md"),
+        "acceptance from the primary checkout",
+    )?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "review")?;
+    let counter = temp.path().join("list-count");
+    let wrapper = temp.path().join("git-wrapper");
+    let native = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let quote =
+        |path: &std::path::Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprevious=\nfor arg do\n  if [ \"$previous\" = worktree ] && [ \"$arg\" = list ]; then printf x >> {}; fi\n  previous=$arg\ndone\nexec {} \"$@\"\n",
+            quote(&counter),
+            quote(&native)
+        ),
+    )?;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("PROVENANT_GIT", &wrapper)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args([
+            "--json",
+            "run",
+            "--preset",
+            "review-council",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .args(["--explain", "--set", "parameters.spec='spec.md'"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("acceptance from the primary checkout")
+    );
+    assert_eq!(std::fs::read(&counter)?, b"x");
     Ok(())
 }
 

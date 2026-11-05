@@ -41,11 +41,40 @@ pub fn collect(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
+    collect_impl(context, lanes, policy, cancel, false)
+}
+
+/// Collect against [`list_for_gc`], checking candidate cleanliness under
+/// writer exclusion before using it to authorise cleanup.
+pub fn collect_lazy(
+    context: &WorktreeContext<'_>,
+    lanes: &[WorktreeInfo],
+    policy: &WorktreeGcPolicy<'_>,
+    cancel: &CancelToken,
+) -> Result<WorktreeGcReport, WorktreeError> {
+    collect_impl(context, lanes, policy, cancel, true)
+}
+
+fn collect_impl(
+    context: &WorktreeContext<'_>,
+    lanes: &[WorktreeInfo],
+    policy: &WorktreeGcPolicy<'_>,
+    cancel: &CancelToken,
+    lazy_cleanliness: bool,
+) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
+    // A preview describes one inventory snapshot. Applied cleanup refreshes
+    // the inventory under custody before mutation.
     let entries = {
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
         read_worktrees(context, cancel)?
     };
+    // Preview all candidates against one census snapshot. Applying still
+    // refreshes under custody immediately before each mutation.
+    if policy.dry_run {
+        let roots: Vec<_> = lanes.iter().map(|lane| lane.path.clone()).collect();
+        context.workers.observe_roots(&roots);
+    }
     let primary = canonicalize(context.repo.root_path())?;
     let managed = primary.join(WORKTREE_ROOT);
     let mut report = WorktreeGcReport {
@@ -60,6 +89,33 @@ pub fn collect(
     for lane in lanes {
         if lane.path == primary {
             continue;
+        }
+        // An unknown writer does not make ignored output disposable. Require
+        // a complete free census and writer exclusion before considering it.
+        // This is independent of the policy for removing foreign worktrees.
+        if (lane.writer == WriterState::Unknown
+            || (!lane.path.starts_with(&managed)
+                && lane.owner == OwnerStatus::Unowned
+                && lane.writer == WriterState::Free))
+            && !policy.regenerable.is_empty()
+            && let Some(entry) = entries.iter().find(|entry| entry.path == lane.path)
+        {
+            let result = prune_unknown_output(
+                context,
+                &entries,
+                entry,
+                lane,
+                policy,
+                cancel,
+                &mut report.idle_output,
+            );
+            if let Err(error) = result {
+                report.idle_output.push(OutputEntry {
+                    path: lane.path.clone(),
+                    removed: false,
+                    reason: error.to_string(),
+                });
+            }
         }
         if !lane.path.starts_with(&managed) && !policy.foreign_merged_clean {
             continue;
@@ -109,6 +165,7 @@ pub fn collect(
             }
             match collect_foreign(
                 context,
+                &entries,
                 entry,
                 lane,
                 &branch,
@@ -145,6 +202,25 @@ pub fn collect(
             }
             continue;
         }
+        let checked;
+        let lane = if lazy_cleanliness {
+            let locked = match lock_worktree(context, entry, cancel, policy.dry_run) {
+                Ok(locked) => locked,
+                Err(error) => {
+                    retain_error(&mut report.worktrees, &branch, error);
+                    continue;
+                }
+            };
+            let dirty = worktree_dirty_at(context, locked.verified.repo(), cancel)
+                .unwrap_or(WorktreeCondition::Unknown);
+            checked = WorktreeInfo {
+                dirty,
+                ..lane.clone()
+            };
+            &checked
+        } else {
+            lane
+        };
         if !matches!(
             lane.dirty,
             WorktreeCondition::Clean | WorktreeCondition::Ignored
@@ -237,14 +313,15 @@ pub fn collect(
         if policy.dry_run {
             {
                 let precheck = || -> Result<(), WorktreeError> {
-                    // The census and the ignored-output walk run without the
-                    // repository lock; it covers only the registration reads.
+                    // The census and ignored-output walk run without the
+                    // repository lock; it covers the branch ref check.
                     let locked = lock_worktree(context, entry, cancel, true)?;
                     {
                         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
-                        let fresh = read_worktrees(context, cancel)?;
-                        tree_unchanged(&fresh, entry, lane.head)?;
-                        branch_unchanged(context, &fresh, &branch, &lane.path, lane.head, cancel)?;
+                        tree_unchanged(&entries, entry, lane.head)?;
+                        branch_unchanged(
+                            context, &entries, &branch, &lane.path, lane.head, cancel,
+                        )?;
                     }
                     // Applying needs a fresh Free census; a preview must not
                     // report a removal that applying would refuse.
@@ -302,6 +379,109 @@ pub fn collect(
         }
     }
     Ok(report)
+}
+
+#[allow(clippy::disallowed_methods)] // Bound this filesystem walk in real time.
+fn prune_unknown_output(
+    context: &WorktreeContext<'_>,
+    preview_entries: &[GitWorktree],
+    entry: &GitWorktree,
+    lane: &WorktreeInfo,
+    policy: &WorktreeGcPolicy<'_>,
+    cancel: &CancelToken,
+    output: &mut Vec<OutputEntry>,
+) -> Result<(), WorktreeError> {
+    if !(policy.no_live_lanes)(&lane.path) {
+        return Err(WorktreeError::UnknownWriter);
+    }
+    let locked = lock_worktree(context, entry, cancel, policy.dry_run)?;
+    {
+        let _repository = repository_lock(context, LockMode::Shared, cancel)?;
+        if policy.dry_run {
+            tree_unchanged(preview_entries, entry, lane.head)?;
+        } else {
+            tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
+        }
+    }
+    if policy.dry_run {
+        if let Some(detail) = census_refusal_detail(context, &lane.path) {
+            return Err(WorktreeError::IncompleteCensus { detail });
+        }
+    } else {
+        census_free(context, &lane.path)?;
+    }
+    if !(policy.no_live_lanes)(&lane.path) {
+        return Err(WorktreeError::UnknownWriter);
+    }
+    let repo = locked.verified.repo();
+    if policy.written_before_ns != i128::MAX {
+        let mut newest = newest_worktree(
+            repo.root_dir(),
+            0,
+            &mut 1_000_000,
+            std::time::Instant::now(),
+        )?;
+        // Index-only operations also count as worktree activity.
+        for name in ["index", "HEAD"] {
+            match repo.private_dir().metadata_at(OsStr::new(name), false) {
+                Ok(metadata) => newest = newest.max(metadata.modified_ns),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if newest >= policy.written_before_ns {
+            return Err(FsError::RaceRefused {
+                name: "recent worktree activity".into(),
+            }
+            .into());
+        }
+    }
+    let protected = output_protection(context, repo, policy.keep, cancel)?;
+    walk_output(
+        repo.root_dir(),
+        &lane.path,
+        Path::new(""),
+        policy,
+        &protected,
+        output,
+        0,
+    )?;
+    Ok(())
+}
+
+// Count source and output writes alike; never follow symlinks or traverse the
+// worktree's Git administrative files. An incomplete walk keeps the output.
+#[allow(clippy::disallowed_methods)]
+fn newest_worktree(
+    directory: &Directory,
+    depth: usize,
+    remaining: &mut usize,
+    started: std::time::Instant,
+) -> Result<i128, FsError> {
+    if depth >= 64 {
+        return Err(FsError::EntryLimit { limit: 64 });
+    }
+    let mut newest = directory.metadata()?.modified_ns;
+    for name in entry_names(directory, 100_000)? {
+        if name == ".git" {
+            continue;
+        }
+        if *remaining == 0 || started.elapsed() >= std::time::Duration::from_secs(5) {
+            return Err(FsError::EntryLimit { limit: 1_000_000 });
+        }
+        *remaining -= 1;
+        let metadata = directory.metadata_at(&name, false)?;
+        newest = newest.max(metadata.modified_ns);
+        if metadata.kind == FileKind::Directory {
+            newest = newest.max(newest_worktree(
+                &directory.open_verified_directory(&name)?,
+                depth + 1,
+                remaining,
+                started,
+            )?);
+        }
+    }
+    Ok(newest)
 }
 
 /// Managed trees are kept while they sit at the integration tip or are a
@@ -911,6 +1091,7 @@ fn protect_nonignored(
 #[allow(clippy::too_many_arguments)]
 fn collect_foreign(
     context: &WorktreeContext<'_>,
+    preview_entries: &[GitWorktree],
     entry: &GitWorktree,
     lane: &WorktreeInfo,
     branch: &GitRefName,
@@ -928,8 +1109,20 @@ fn collect_foreign(
     if !is_ancestor(context, lane.head, upstream, cancel)? {
         return Ok(None);
     }
+    let mut info = lane.clone();
     if policy.dry_run {
-        preview_foreign(context, entry, lane, branch, policy, cancel)?;
+        let observed = preview_foreign(
+            context,
+            preview_entries,
+            entry,
+            lane,
+            branch,
+            policy,
+            cancel,
+        )?;
+        if info.dirty == WorktreeCondition::Unknown {
+            info.dirty = observed;
+        }
     } else {
         // remove_tree_when verifies once, under writer custody.
         remove_and_finalise(
@@ -951,42 +1144,32 @@ fn collect_foreign(
             outcome,
         )?;
     }
-    Ok(Some(lane.clone()))
+    Ok(Some(info))
 }
 
-/// The dry-run proof: the same checks removal makes, without creating state.
+/// Preview against the command's inventory snapshot without creating state.
+/// Applied removal refreshes Git and custody facts before mutation.
 fn preview_foreign(
     context: &WorktreeContext<'_>,
+    entries: &[GitWorktree],
     entry: &GitWorktree,
     lane: &WorktreeInfo,
     branch: &GitRefName,
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
-) -> Result<(), WorktreeError> {
+) -> Result<WorktreeCondition, WorktreeError> {
     let verified = verify_probed_worktree(context, &lane.path, cancel)?;
     // A missing slot means no writer has ever held this tree.
     let writer = {
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
-        match context
-            .project_state
-            .open_verified_directory(&state_dir_name(&lane.path))
-        {
-            Ok(state) => {
-                match state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
-                    Ok(guard) => Some(guard),
-                    Err(error) if error.is_not_found() => None,
-                    Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LockBusy),
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            Err(error) if error.is_not_found() => None,
-            Err(error) => return Err(error.into()),
-        }
+        cache_writer_probe(context.project_state, &lane.path).map_err(|state| match state {
+            WorkerState::Busy => WorktreeError::LockBusy,
+            _ => WorktreeError::UnknownWriter,
+        })?
     };
-    let recheck = || -> Result<(), WorktreeError> {
+    let recheck = || -> Result<WorktreeCondition, WorktreeError> {
         verified.repo().revalidate()?;
-        tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
-        context.workers.invalidate();
+        tree_unchanged(entries, entry, lane.head)?;
         if let Some(detail) = census_refusal_detail(context, &lane.path) {
             return Err(WorktreeError::IncompleteCensus { detail });
         }
@@ -994,11 +1177,11 @@ fn preview_foreign(
             return Err(WorktreeError::UnknownWriter);
         }
         match worktree_dirty_at(context, verified.repo(), cancel)? {
-            WorktreeCondition::Clean | WorktreeCondition::Ignored => Ok(()),
+            state @ (WorktreeCondition::Clean | WorktreeCondition::Ignored) => Ok(state),
             _ => Err(WorktreeError::Dirty(String::new())),
         }
     };
-    recheck()?;
+    let observed = recheck()?;
     let protected = output_protection(context, verified.repo(), policy.keep, cancel)?;
     let mut output = Vec::new();
     let preview = WorktreeGcPolicy {
@@ -1019,10 +1202,9 @@ fn preview_foreign(
         return Err(WorktreeError::Dirty(String::new()));
     }
     recheck()?;
-    let fresh = read_worktrees(context, cancel)?;
-    branch_unchanged(context, &fresh, branch, &lane.path, lane.head, cancel)?;
+    branch_unchanged(context, entries, branch, &lane.path, lane.head, cancel)?;
     drop(writer);
-    Ok(())
+    Ok(observed)
 }
 
 #[cfg(test)]

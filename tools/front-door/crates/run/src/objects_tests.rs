@@ -419,7 +419,19 @@ impl Fixture {
     }
 
     fn git_overlay(&self, scratch: &Path, args: &[&str]) -> TestResult<Output> {
-        let output = provenant_os::fixture::git_command_at(&self.git)
+        let output = self.git_overlay_raw(scratch, args)?;
+        if !output.status.success() {
+            return Err(format!(
+                "overlay Git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(output)
+    }
+
+    fn git_overlay_raw(&self, scratch: &Path, args: &[&str]) -> TestResult<Output> {
+        Ok(provenant_os::fixture::git_command_at(&self.git)
             .env_clear()
             .envs(provenant_os::fixture::fixture_git_settings())
             .env("PATH", "/usr/bin:/bin")
@@ -433,15 +445,7 @@ impl Fixture {
             .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
             .args(args)
             .current_dir(&self.lane)
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "overlay Git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        Ok(output)
+            .output()?)
     }
 
     fn import(&self) -> crate::Result<()> {
@@ -1299,6 +1303,229 @@ fn oversized_received_pack_is_refused_with_a_clear_reason() -> TestResult {
         "{report}"
     );
     fixture.assert_not_published();
+    Ok(())
+}
+
+#[test]
+fn unmerged_private_index_does_not_replace_host_index() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (attempt, scratch) = fixture.overlay()?;
+    let input = format!(
+        "0 {}\tfile\n100644 {} 1\tfile\n100644 {} 2\tfile\n100644 {} 3\tfile\n",
+        "0".repeat(40),
+        fixture.base_blob,
+        fixture.base_blob,
+        fixture.blob
+    );
+    super::execute_bounded(
+        &fixture.git,
+        &scratch.join("git-common"),
+        &fixture.lane,
+        &super::args(&["update-index", "--index-info"]),
+        None,
+        super::Execution {
+            input: Some(input.as_bytes()),
+            ..Default::default()
+        },
+    )?;
+    let host_index = fixture.worktree.repo().private_git_dir().join("index");
+    let before = fs::read(&host_index)?;
+    let source = super::bound_source(&attempt)?.ok_or("private source")?;
+    assert!(super::restore_index(&source, fixture.worktree.repo()).is_err());
+    assert_eq!(fs::read(host_index)?, before);
+    assert!(
+        !fixture
+            .git_overlay(&scratch, &["ls-files", "--unmerged"])?
+            .stdout
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    fs::write(fixture.project.join("file"), "conflicting main change\n")?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["add", "file"],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["commit", "-qm", "main change"],
+    )?;
+    let merge_head = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    let (attempt, scratch) = fixture.overlay()?;
+    let merge =
+        fixture.git_overlay_raw(&scratch, &["merge", "--no-edit", &merge_head.to_string()])?;
+    assert!(!merge.status.success(), "fixture merge must conflict");
+    fs::write(fixture.lane.join("staged.txt"), "private staged content\n")?;
+    fixture.git_overlay(&scratch, &["add", "staged.txt"])?;
+    let staged_blob = oid(fixture.git_overlay(&scratch, &["rev-parse", ":staged.txt"])?)?;
+    let metadata = scratch.join("git-common/MERGE_HEAD");
+    let parent = fs::read(&metadata)?;
+    assert_eq!(std::str::from_utf8(&parent)?.trim(), merge_head.to_string());
+    let stages = fixture
+        .git_overlay(&scratch, &["ls-files", "--unmerged", "-z"])?
+        .stdout;
+    assert!(!stages.is_empty());
+    let working = fs::read(fixture.lane.join("file"))?;
+    assert!(working.windows(7).any(|bytes| bytes == b"<<<<<<<"));
+    let host_index = fixture.worktree.repo().private_git_dir().join("index");
+    let source = super::bound_source(&attempt)?.ok_or("private source")?;
+    let objects = super::merge_objects(&source, fixture.worktree.repo())?;
+    let private_blob = object_path(&fixture.source, staged_blob);
+    let original_blob = fs::read(&private_blob)?;
+    fs::set_permissions(&private_blob, fs::Permissions::from_mode(0o600))?;
+    fs::write(&private_blob, b"corrupt object")?;
+    assert!(
+        super::settle_many(
+            &fixture.git,
+            fixture.worktree.repo(),
+            Some(&source.objects),
+            fixture.head,
+            &objects,
+            None,
+            None,
+        )
+        .is_err()
+    );
+    assert!(
+        super::command(
+            &fixture.git,
+            fixture.worktree.repo().common_git_dir(),
+            &fixture.lane,
+            &super::args(&["cat-file", "-e", &format!("{staged_blob}^{{blob}}")]),
+            None,
+        )
+        .is_err()
+    );
+    fs::write(&private_blob, original_blob)?;
+    super::settle_many(
+        &fixture.git,
+        fixture.worktree.repo(),
+        Some(&source.objects),
+        fixture.head,
+        &objects,
+        None,
+        None,
+    )?;
+    super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        fixture.base,
+        fixture.head,
+    )?;
+    super::restore_index(&source, fixture.worktree.repo())?;
+    let import_attempt = provenant_core::AttemptId::from_bytes([0; 16]);
+    super::clear_import_refs(
+        &fixture.git,
+        fixture.worktree.repo(),
+        import_attempt,
+        &objects,
+    )?;
+    assert!(
+        super::command(
+            &fixture.git,
+            fixture.worktree.repo().common_git_dir(),
+            &fixture.lane,
+            &super::args(&[
+                "for-each-ref",
+                &format!("refs/provenant/import-extra/{import_attempt}")
+            ]),
+            None
+        )?
+        .is_empty()
+    );
+    super::command(
+        &fixture.git,
+        fixture.worktree.repo().common_git_dir(),
+        &fixture.lane,
+        &super::args(&["cat-file", "-e", &format!("{staged_blob}^{{blob}}")]),
+        None,
+    )?;
+    assert!(host_index.is_file());
+    assert_eq!(
+        fs::read(fixture.worktree.repo().private_git_dir().join("MERGE_HEAD"))?,
+        parent
+    );
+    assert_eq!(
+        super::command(
+            &fixture.git,
+            fixture.worktree.repo().private_git_dir(),
+            &fixture.lane,
+            &super::args(&["ls-files", "--unmerged", "-z"]),
+            None
+        )?,
+        stages
+    );
+    assert_eq!(fs::read(metadata)?, parent);
+    assert_eq!(
+        fixture
+            .git_overlay(&scratch, &["ls-files", "--unmerged", "-z"])?
+            .stdout,
+        stages
+    );
+    assert_eq!(fs::read(fixture.lane.join("file"))?, working);
+    let next_attempt_path = fixture.root.join("continuation");
+    let next_scratch = next_attempt_path.join("tmp/candidate-0");
+    fs::create_dir_all(&next_scratch)?;
+    let next_attempt = Directory::open_anchor(&next_attempt_path)?;
+    super::prepare_bound(
+        &fixture.git,
+        fixture.worktree.repo(),
+        &next_attempt,
+        &next_scratch,
+        "refs/heads/lane",
+        fixture.head,
+    )?;
+    fixture.source = next_scratch.join("git-objects");
+    assert_eq!(
+        fixture
+            .git_overlay(&next_scratch, &["ls-files", "--unmerged", "-z"])?
+            .stdout,
+        stages
+    );
+    fs::write(fixture.lane.join("file"), "resolved\n")?;
+    fixture.git_overlay(&next_scratch, &["add", "file"])?;
+    fixture.git_overlay(&next_scratch, &["commit", "--no-edit"])?;
+    let next = super::bound_source(&next_attempt)?.ok_or("continuation source")?;
+    let tip = super::private_tip(&next, "refs/heads/lane")?;
+    super::settle(
+        &fixture.git,
+        fixture.worktree.repo(),
+        Some(&next.objects),
+        tip,
+    )?;
+    super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        fixture.head,
+        tip,
+    )?;
+    super::restore_index(&next, fixture.worktree.repo())?;
+    assert!(
+        !fixture
+            .worktree
+            .repo()
+            .private_git_dir()
+            .join("MERGE_HEAD")
+            .exists()
+    );
     Ok(())
 }
 

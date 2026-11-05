@@ -732,17 +732,30 @@ fn resolved_inputs_inner(
     selected
 }
 
+/// The declared marker form is `<input>:<id>`. A propagator that drops the input
+/// prefix still names one finding when that shorter form leads to a single root.
 fn marker_root(marker: &str, upstream: &[ResolvedFinding]) -> Option<FindingOrigin> {
-    let roots: std::collections::BTreeSet<_> = upstream
-        .iter()
-        .filter(|item| {
-            marker == format!("{}:{}", item.source, item.stored_id)
-                || marker == format!("{}:{}", item.source, item.finding.id)
+    let roots = |named: &dyn Fn(&str) -> bool| -> std::collections::BTreeSet<FindingOrigin> {
+        upstream
+            .iter()
+            .filter(|item| {
+                named(&format!("{}:{}", item.source, item.stored_id))
+                    || named(&format!("{}:{}", item.source, item.finding.id))
+            })
+            .map(|item| item.root.clone())
+            .collect()
+    };
+    let exact = roots(&|full| full == marker);
+    let matched = if exact.is_empty() {
+        roots(&|full| {
+            full.strip_suffix(marker)
+                .is_some_and(|prefix| prefix.ends_with(':'))
         })
-        .map(|item| item.root.clone())
-        .collect();
-    (roots.len() == 1)
-        .then(|| roots.into_iter().next())
+    } else {
+        exact
+    };
+    (matched.len() == 1)
+        .then(|| matched.into_iter().next())
         .flatten()
 }
 

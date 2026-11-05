@@ -1,5 +1,37 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! { pub(super) static CHECKPOINT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(feature = "fixture")]
+thread_local! { static READ_GRAPH_IDS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+/// Take the graph IDs read by this thread since the last call.
+#[cfg(feature = "fixture")]
+pub fn take_checkpoint_read_ids() -> Vec<String> {
+    READ_GRAPH_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CrashPoint {
+    PendingMarker,
+    TerminalCheckpoint,
+    SentinelBefore,
+    SentinelAfter,
+}
+#[cfg(test)]
+thread_local! { pub(super) static CRASH_POINT: std::cell::Cell<Option<CrashPoint>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+fn inject_crash(point: CrashPoint) {
+    CRASH_POINT.with(|current| {
+        if current.get() == Some(point) {
+            current.set(None);
+            std::panic::panic_any("injected journal interruption");
+        }
+    });
+}
+
 #[derive(Debug, Error)]
 pub enum JournalError {
     #[error("invalid graph id for checkpoint path")]
@@ -251,6 +283,157 @@ impl FileJournal {
         Ok(ids)
     }
 
+    /// Discover the derived pending set, rebuilding it when its sentinel is absent.
+    pub fn pending_graph_ids(
+        root: &StateRoot,
+        project: ProjectId,
+    ) -> Result<Vec<String>, JournalError> {
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let markers = open_or_create(&directory, OsStr::new("pending"))?;
+        match markers.open_read(OsStr::new("complete")) {
+            Ok(_) => {}
+            Err(error) if error.is_not_found() => {
+                Self::rebuild_pending_in(root, project, &directory, &markers)?
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let mut ids = Vec::new();
+        for entry in markers.entries()? {
+            let name = entry?;
+            if let Some(id) = name.to_str().and_then(|s| s.strip_suffix(".pending"))
+                && valid_identifier(id)
+            {
+                ids.push(id.to_owned());
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Rebuild by adding markers only. Concurrent saves own removals under their graph lock.
+    pub fn rebuild_pending(root: &StateRoot, project: ProjectId) -> Result<(), JournalError> {
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let markers = open_or_create(&directory, OsStr::new("pending"))?;
+        Self::rebuild_pending_in(root, project, &directory, &markers)
+    }
+
+    /// Collect old terminal checkpoints under their individual graph locks.
+    pub fn collect_terminal(
+        root: &StateRoot,
+        project: ProjectId,
+        before_ns: i128,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<usize, JournalError> {
+        let mut removed = 0;
+        for id in Self::graph_ids(root, project)? {
+            let journal = match Self::open(
+                root,
+                project,
+                &id,
+                WaitBudget::nonblocking(clock.mono_now()),
+                cancel,
+                clock,
+            ) {
+                Ok(journal) => journal,
+                Err(JournalError::Filesystem(FsError::LockTimeout { .. })) => continue,
+                Err(error) if error.is_unreadable() => continue,
+                Err(error) => return Err(error),
+            };
+            let Some(stored) = load_checkpoint(&journal.directory, &id)? else {
+                continue;
+            };
+            let checkpoint = &stored.checkpoint;
+            if stored_pending(&stored)
+                || checkpoint.asks.iter().any(|ask| !ask.closed)
+                || checkpoint.wake_at.is_some()
+                || checkpoint.nodes.iter().any(|node| {
+                    node.land
+                        .as_ref()
+                        .is_some_and(|land| land.wake_at.is_some())
+                })
+            {
+                continue;
+            }
+            let name = journal.checkpoint_name();
+            let metadata = journal.directory.metadata_at(&name, false)?;
+            if metadata.modified_ns >= before_ns {
+                continue;
+            }
+            collect_scratch_documents(&stored.execution)?;
+            journal.directory.unlink(&name)?;
+            for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
+                match journal.directory.unlink(&sidecar) {
+                    Ok(()) => {}
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            let markers = open_or_create(&journal.directory, OsStr::new("pending"))?;
+            remove_pending_marker(&markers, &id)?;
+            journal
+                .directory
+                .sync()
+                .map_err(JournalError::DurabilityUnconfirmed)?;
+            // No checkpoint mutation may follow lock retirement.
+            journal
+                .directory
+                .retire_owner_lock(OsStr::new(&format!("graph-{id}.lock")), &journal._lock)?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    fn rebuild_pending_in(
+        root: &StateRoot,
+        project: ProjectId,
+        directory: &Directory,
+        markers: &Directory,
+    ) -> Result<(), JournalError> {
+        for id in Self::graph_ids(root, project)? {
+            match load_checkpoint(directory, &id) {
+                Ok(Some(stored)) if stored_pending(&stored) => write_pending_marker(markers, &id)?,
+                // Leave load failures for the individual graph tick to report.
+                Err(_) => write_pending_marker(markers, &id)?,
+                _ => {}
+            }
+        }
+        #[cfg(test)]
+        inject_crash(CrashPoint::SentinelBefore);
+        markers
+            .atomic_write(
+                OsStr::new("complete"),
+                ".sentinel.",
+                b"1",
+                PublishMode::Replace,
+            )?
+            .require_durable()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        #[cfg(test)]
+        inject_crash(CrashPoint::SentinelAfter);
+        Ok(())
+    }
+
+    /// Remove a stale marker only while holding the graph's writer lock.
+    pub fn clear_stale_pending(&mut self) -> Result<(), JournalError> {
+        if load_checkpoint(&self.directory, &self.graph_id)?
+            .as_ref()
+            .is_none_or(|stored| !stored_pending(stored))
+        {
+            let markers = open_or_create(&self.directory, OsStr::new("pending"))?;
+            remove_pending_marker(&markers, &self.graph_id)?;
+        }
+        Ok(())
+    }
+
     /// The execution bound to a graph in any state, without taking the lock.
     pub fn execution(
         root: &StateRoot,
@@ -278,24 +461,8 @@ impl FileJournal {
             return Err(JournalError::InvalidGraphId);
         }
         let directory = graph_directory(root, project)?;
-        Ok(load_checkpoint(&directory, graph_id)?.and_then(|stored| {
-            (stored
-                .checkpoint
-                .nodes
-                .iter()
-                .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
-                || !stored.checkpoint.cancelled
-                    && !stored.checkpoint.delivered
-                    && stored.execution.document.delivery
-                        == Some(provenant_records::run::DeliveryMode::Pr)
-                    && stored.checkpoint.successful()
-                || stored
-                    .checkpoint
-                    .asks
-                    .iter()
-                    .any(|ask| !ask.closed && (ask.resolved || stored.checkpoint.cancelled)))
-            .then_some(stored.execution)
-        }))
+        Ok(load_checkpoint(&directory, graph_id)?
+            .and_then(|stored| stored_pending(&stored).then_some(stored.execution)))
     }
 
     /// Read an atomic checkpoint snapshot without creating directories or
@@ -527,6 +694,13 @@ impl GraphJournal for FileJournal {
             return Err(JournalError::TooLarge);
         }
         decode_checkpoint(bytes.as_bytes(), &self.graph_id)?;
+        let markers = open_or_create(&self.directory, OsStr::new("pending"))?;
+        let pending = stored_pending(&stored);
+        if pending {
+            write_pending_marker(&markers, &self.graph_id)?;
+            #[cfg(test)]
+            inject_crash(CrashPoint::PendingMarker);
+        }
         self.directory
             .atomic_write(
                 &self.checkpoint_name(),
@@ -535,7 +709,116 @@ impl GraphJournal for FileJournal {
                 PublishMode::Replace,
             )?
             .require_durable()
-            .map_err(JournalError::DurabilityUnconfirmed)
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        if !pending {
+            #[cfg(test)]
+            inject_crash(CrashPoint::TerminalCheckpoint);
+            remove_pending_marker(&markers, &self.graph_id)?;
+        }
+        Ok(())
+    }
+}
+
+fn stored_pending(stored: &StoredCheckpoint) -> bool {
+    let checkpoint = &stored.checkpoint;
+    checkpoint
+        .nodes
+        .iter()
+        .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
+        || !checkpoint.cancelled
+            && !checkpoint.delivered
+            && stored.execution.document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
+            && checkpoint.successful()
+        || checkpoint
+            .asks
+            .iter()
+            .any(|ask| !ask.closed && (ask.resolved || checkpoint.cancelled))
+}
+
+/// Remove scratch documents equal to this graph's retained document. The
+/// execution directory may already have been removed.
+fn collect_scratch_documents(execution: &GraphExecution) -> Result<(), JournalError> {
+    let directory = match Directory::open_anchor(&execution.directory) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut directory = directory;
+    for component in [".provenant", "scratch", "graphs"] {
+        directory = match directory.open_verified_directory(OsStr::new(component)) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+    }
+    let mut metadata = directory.metadata()?;
+    if metadata.uid == provenant_os::fs::effective_uid() && metadata.mode & 0o077 != 0 {
+        directory.make_private()?;
+        metadata = directory.metadata()?;
+    }
+    if metadata.uid != provenant_os::fs::effective_uid() || metadata.mode & 0o077 != 0 {
+        return Ok(());
+    }
+    let mut removed = false;
+    for entry in directory.entries()? {
+        let name = entry?;
+        let Ok(metadata) = directory.metadata_at(&name, false) else {
+            continue;
+        };
+        if metadata.uid != provenant_os::fs::effective_uid() || metadata.links != 1 {
+            continue;
+        }
+        let Ok(bytes) = directory.read_stable(&name, 8_388_608) else {
+            continue;
+        };
+        if serde_json::from_slice::<GraphDocument>(&bytes)
+            .ok()
+            .as_ref()
+            != Some(&execution.document)
+        {
+            continue;
+        }
+        if !directory
+            .metadata_at(&name, false)
+            .is_ok_and(|current| metadata.unchanged(&current))
+        {
+            continue;
+        }
+        match directory.unlink(&name) {
+            Ok(()) => removed = true,
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if removed {
+        directory
+            .sync()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+    }
+    Ok(())
+}
+
+fn pending_marker_name(graph_id: &str) -> OsString {
+    format!("{graph_id}.pending").into()
+}
+
+fn write_pending_marker(markers: &Directory, graph_id: &str) -> Result<(), JournalError> {
+    markers
+        .atomic_write(
+            &pending_marker_name(graph_id),
+            ".pending.",
+            b"1",
+            PublishMode::Replace,
+        )?
+        .require_durable()
+        .map_err(JournalError::DurabilityUnconfirmed)
+}
+
+fn remove_pending_marker(markers: &Directory, graph_id: &str) -> Result<(), JournalError> {
+    match markers.unlink(&pending_marker_name(graph_id)) {
+        Ok(()) => markers.sync().map_err(JournalError::DurabilityUnconfirmed),
+        Err(error) if error.is_not_found() => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -567,6 +850,10 @@ pub(super) fn read_checkpoint_bytes(
     directory: &Directory,
     graph_id: &str,
 ) -> Result<Option<Vec<u8>>, JournalError> {
+    #[cfg(test)]
+    CHECKPOINT_READS.with(|reads| reads.set(reads.get() + 1));
+    #[cfg(feature = "fixture")]
+    READ_GRAPH_IDS.with(|ids| ids.borrow_mut().push(graph_id.to_owned()));
     let file = match directory.open_read(OsStr::new(&format!("graph-{graph_id}.json"))) {
         Ok(file) => file,
         Err(error) if error.is_not_found() => return Ok(None),
