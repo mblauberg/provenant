@@ -603,12 +603,26 @@ selected = {{ type = "string", default = "{selected}" }}
 }
 
 #[test]
-fn invalid_leaf_output_names_the_node_and_field() {
+fn invalid_stage_output_names_the_node_and_field() {
     let mut layers = Layers::empty();
-    layers.insert("test", "invalid-output", "stages=[{id='first',prompt='work'},{id='second',prompt='work',outputs=['not-an-output']}]").unwrap();
-    let error = expand(&layers, "invalid-output", "brief", &[]).unwrap_err();
-    assert!(error.contains("node second"), "{error}");
-    assert!(error.contains("outputs"), "{error}");
+    for (name, second) in [
+        ("invalid-leaf-output", "id='second',prompt='work'"),
+        (
+            "invalid-group-output",
+            "id='second',prompt='work',count=2,min_successful=1",
+        ),
+        (
+            "invalid-loop-output",
+            "id='second',loop={stages=[{id='accept',kind='gate',condition={type='budget'}}],until='accept',max_rounds=2}",
+        ),
+    ] {
+        let source =
+            format!("stages=[{{id='first',prompt='work'}},{{{second},outputs=['not-an-output']}}]");
+        layers.insert("test", name, &source).unwrap();
+        let error = expand(&layers, name, "brief", &[]).unwrap_err();
+        assert!(error.contains("node second"), "{name}: {error}");
+        assert!(error.contains("outputs"), "{name}: {error}");
+    }
 }
 
 #[test]

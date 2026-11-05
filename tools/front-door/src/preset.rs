@@ -1653,6 +1653,13 @@ fn select_graph_inputs(
         .collect()
 }
 
+fn stage_output_kinds(
+    id: &str,
+    outputs: &Value,
+) -> Result<Vec<provenant_fabric_runtime::graph::OutputKind>, String> {
+    serde_json::from_value(outputs.clone()).map_err(|error| format!("node {id}: outputs: {error}"))
+}
+
 fn parse_member_outputs(
     value: Value,
 ) -> Result<Vec<provenant_fabric_runtime::graph::OutputKind>, String> {
@@ -2248,9 +2255,7 @@ fn lower_leaf(
         && (!deps.is_empty() || (map.contains_key("dispositions") && !dependencies.is_empty()))
     {
         if !map.contains_key("inputs") {
-            let kinds: Vec<provenant_fabric_runtime::graph::OutputKind> =
-                serde_json::from_value(outputs.clone())
-                    .map_err(|error| format!("node {id}: outputs: {error}"))?;
+            let kinds = stage_output_kinds(id, &outputs)?;
             let inputs = select_graph_inputs(&input_dependencies, &kinds);
             map.insert(
                 "inputs".into(),
@@ -2941,7 +2946,9 @@ impl StageBuilder<'_> {
                 self.prompt,
                 1,
             )?;
-            let exports = selected_inputs(&ends, &outputs);
+            let kinds = stage_output_kinds(id, &outputs)?;
+            let exports = serde_json::to_value(select_graph_inputs(&ends, &kinds))
+                .map_err(|error| format!("node {id}: exports: {error}"))?;
             let mut boundary_deps = deps.to_vec();
             for child in &children {
                 if let Some(dependencies) = child.get("depends_on").and_then(Value::as_array) {
@@ -3084,7 +3091,9 @@ impl StageBuilder<'_> {
                 spec["body"] = json!(children);
                 let mut node = json!({"id":id,"kind":"loop","access":"read_only","depends_on":deps,"loop":spec});
                 if !deps.is_empty() {
-                    node["inputs"] = selected_inputs(deps, &outputs);
+                    let kinds = stage_output_kinds(&id, &outputs)?;
+                    node["inputs"] = serde_json::to_value(select_graph_inputs(deps, &kinds))
+                        .map_err(|error| format!("node {id}: inputs: {error}"))?;
                 }
                 (node, true)
             } else if let Some(child) = object.remove("preset") {
