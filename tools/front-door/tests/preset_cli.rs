@@ -1588,6 +1588,17 @@ stages = [
             .as_str()
             .ok_or("missing admission reason")?;
         assert!(reason.contains(&format!("limits.{key}")), "{key}: {reason}");
+        if key == "expansion_depth" {
+            let limits = provenant_fabric_runtime::config::GraphLimits {
+                expansion_depth: 1,
+                ..Default::default()
+            };
+            assert_eq!(
+                Some(reason),
+                limits.expansion_depth_bound().refusal(2).as_deref()
+            );
+            assert!(reason.contains("domains.fabric.graph.limits"), "{reason}");
+        }
         assert!(value["data"].get("execution").is_none());
         assert!(value["data"].get("validation_error").is_none());
         let submitted = run(false)?;
@@ -1597,6 +1608,62 @@ stages = [
             .as_str()
             .ok_or("missing submission refusal reason")?;
         assert_eq!(reason, submitted_reason, "{key}: {submitted_value}");
+    }
+    // A group compiles to the same bounded expansion admission checks. Use a
+    // valid graph as the admission input, then vary only the relevant bound or
+    // parent ID for the two CLI calls.
+    let member = "b".repeat(32);
+    std::fs::write(
+        presets.join("limits.toml"),
+        format!(
+            "stages = [{{ id = 'group', stages = [{{ id = 'inner', stages = [{{ id = '{member}', prompt = 'work' }}] }}] }}]\n"
+        ),
+    )?;
+    std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
+    let valid = run(true)?;
+    assert!(valid.status.success());
+    let valid: serde_json::Value = serde_json::from_slice(&valid.stdout)?;
+    let graph = valid["data"]["graph"].clone();
+    for case in ["nodes", "depth", "id"] {
+        let mut candidate = graph.clone();
+        let mut limits = provenant_fabric_runtime::config::GraphLimits::default();
+        if case == "nodes" {
+            limits.nodes = 1;
+            std::fs::write(
+                state.join("config.toml"),
+                "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 1\n",
+            )?;
+        } else if case == "depth" {
+            limits.expansion_depth = 1;
+            std::fs::write(
+                state.join("config.toml"),
+                "schema_version = 1\n[domains.fabric.graph.limits]\nexpansion_depth = 1\n",
+            )?;
+        } else {
+            std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
+            let parent = "a".repeat(32);
+            candidate["nodes"][0]["id"] = serde_json::json!(parent);
+            std::fs::write(
+                presets.join("limits.toml"),
+                format!(
+                    "stages = [{{ id = '{parent}', stages = [{{ id = 'inner', stages = [{{ id = '{member}', prompt = 'work' }}] }}] }}]\n"
+                ),
+            )?;
+        }
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(candidate)?;
+        let reason = document
+            .admit(&limits)
+            .expect_err("admission must reject the composite");
+        for explain in [true, false] {
+            let output = run(explain)?;
+            assert!(!output.status.success(), "{case}, explain={explain}");
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            assert_eq!(
+                result["error"]["message"], reason,
+                "{case}, explain={explain}"
+            );
+        }
     }
     fn has_graph_journal(path: &std::path::Path) -> std::io::Result<bool> {
         if !path.exists() {
@@ -2682,6 +2749,78 @@ impl ExperimentProject {
 }
 
 const WORK_ITEM: &str = "0123456789abcdef0123456789abcdef";
+
+#[test]
+fn experiment_arm_eligibility_receives_declared_request_bindings()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = ExperimentProject::new(
+        "[domains.fabric.pipelines.experiment.trial]\ncontrol = 'gate-only'\narms = { candidate = 'gate-alt' }\nassign = 'epsilon'\nepsilon = 1.0\n",
+    )?;
+    std::fs::write(
+        fixture.project.join(".provenant/presets/gate-alt.toml"),
+        "stages = [{ id = 'task', prompt = 'risk=${priority}; kind=${category}' }]\n[parameters]\npriority = { type = 'string', bind = 'risk_tier' }\ncategory = { type = 'string', bind = 'kind' }\n",
+    )?;
+    let (document, stderr) = fixture.document(&[
+        "--task-id",
+        WORK_ITEM,
+        "--risk-tier",
+        "routine",
+        "--task-kind",
+        "docs",
+    ])?;
+    assert_eq!(
+        document["context"]["experiment_arm"], "candidate",
+        "{stderr}"
+    );
+    assert_eq!(document["nodes"][0]["prompt"], "risk=routine; kind=docs");
+    assert!(!stderr.contains("--risk-tier"), "{stderr}");
+    assert!(!stderr.contains("--task-kind"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn parameter_file_overrides_request_binding() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = ExperimentProject::new("")?;
+    std::fs::write(
+        fixture.project.join(".provenant/presets/gate-alt.toml"),
+        "stages = [{ id = 'task', prompt = 'risk=${priority}; kind=${category}' }]\n[parameters]\npriority = { type = 'string', bind = 'risk_tier' }\ncategory = { type = 'string', bind = 'kind' }\n",
+    )?;
+    std::fs::write(
+        fixture.project.join(".provenant/preset-rules.toml"),
+        "[select]\ndefault = { preset = 'gate-alt', parameters = { priority = 'selected' } }\n",
+    )?;
+    let (selected, _) = fixture.document(&["--risk-tier", "routine", "--task-kind", "docs"])?;
+    assert_eq!(selected["nodes"][0]["prompt"], "risk=routine; kind=docs");
+    let file = fixture.project.join("params.toml");
+    std::fs::write(&file, "priority = 'from-file'\n")?;
+    let file = file.to_str().ok_or("parameter path is not UTF-8")?;
+    let args = [
+        "--preset",
+        "gate-alt",
+        "--risk-tier",
+        "routine",
+        "--task-kind",
+        "docs",
+        "--params-file",
+        file,
+    ];
+    let (document, _) = fixture.document(&args)?;
+    assert_eq!(document["nodes"][0]["prompt"], "risk=from-file; kind=docs");
+    let (document, _) = fixture.document(&[
+        "--preset",
+        "gate-alt",
+        "--risk-tier",
+        "routine",
+        "--task-kind",
+        "docs",
+        "--params-file",
+        file,
+        "--set",
+        "parameters.priority='from-set'",
+    ])?;
+    assert_eq!(document["nodes"][0]["prompt"], "risk=from-set; kind=docs");
+    Ok(())
+}
 
 #[test]
 fn task_id_assigns_the_candidate_arm_and_labels_the_run() -> Result<(), Box<dyn std::error::Error>>

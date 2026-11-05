@@ -3376,14 +3376,25 @@ fn graph_attempt_usage(
 fn decode_graph_document(
     bytes: &[u8],
 ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
-    let value: serde_json::Value =
-        provenant_records::decode(bytes, provenant_records::Limits::default())
-            .map_err(|_| FacadeError::invalid("graph document is not a valid record"))?;
-    match value
-        .get("schema_version")
+    #[derive(serde::Deserialize)]
+    struct Header {
+        schema_version: Option<serde_json::Value>,
+    }
+    // Check the version before decoding the graph, so a future schema can
+    // request an upgrade even when its node fields are unknown to this reader.
+    let limits = provenant_records::Limits {
+        max_bytes: provenant_fabric_runtime::config::GraphLimits::document_bytes_bound()
+            .maximum_u64(),
+        ..Default::default()
+    };
+    let header: Header = provenant_records::decode(bytes, limits)
+        .map_err(|_| FacadeError::invalid("graph document is not a valid record"))?;
+    match header
+        .schema_version
+        .as_ref()
         .and_then(serde_json::Value::as_u64)
     {
-        Some(1 | 2) => serde_json::from_value(value)
+        Some(1 | 2) => provenant_records::decode(bytes, limits)
             .map_err(|error| FacadeError::invalid(format!("graph document: {error}"))),
         Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
             reader_release: env!("CARGO_PKG_VERSION").into(),
@@ -4523,7 +4534,8 @@ impl BoundGraphOwner<'_> {
         provenant_fabric_runtime::graph::ReviewResolveError,
     > {
         use provenant_fabric_runtime::graph::{
-            Expansion, GraphNode, ReviewResolution, ReviewResolveError,
+            CompositeSpec, Expansion, GraphInput, GraphNode, OutputKind, ReviewResolution,
+            ReviewResolveError, SourceBinding,
         };
         let failed = |message: String| ReviewResolveError::Failed(message);
         let spec = node
@@ -4749,19 +4761,16 @@ impl BoundGraphOwner<'_> {
             .iter()
             .enumerate()
             .map(|(index, member)| {
-                let mut outputs = vec![
-                    provenant_fabric_runtime::graph::OutputKind::Result,
-                    provenant_fabric_runtime::graph::OutputKind::Findings,
-                ];
+                let mut outputs = vec![OutputKind::Result, OutputKind::Findings];
                 if node.extra.contains_key("review_planner") {
-                    outputs.push(provenant_fabric_runtime::graph::OutputKind::Verdict);
-                    outputs.push(provenant_fabric_runtime::graph::OutputKind::Commit);
+                    outputs.push(OutputKind::Verdict);
+                    outputs.push(OutputKind::Commit);
                 }
                 if index == 0 {
                     if panel.synthesis == provenant_routing::ReviewSynthesis::Reduce
-                        && !outputs.contains(&provenant_fabric_runtime::graph::OutputKind::Commit)
+                        && !outputs.contains(&OutputKind::Commit)
                     {
-                        outputs.push(provenant_fabric_runtime::graph::OutputKind::Commit);
+                        outputs.push(OutputKind::Commit);
                     }
                     for output in &spec.export_first {
                         if !outputs.contains(output) {
@@ -4769,7 +4778,12 @@ impl BoundGraphOwner<'_> {
                         }
                     }
                 }
-                serde_json::json!({"node": member.id, "outputs": outputs})
+                GraphInput {
+                    extra: Default::default(),
+                    node: member.id.clone(),
+                    outputs,
+                    required_outputs: Vec::new(),
+                }
             })
             .collect();
         let reduction = panel.synthesis == provenant_routing::ReviewSynthesis::Reduce;
@@ -4778,16 +4792,31 @@ impl BoundGraphOwner<'_> {
         } else {
             node.depends_on.clone()
         };
-        let lens_group: GraphNode = serde_json::from_value(serde_json::json!({
-            "id": lens_id, "kind":"composite", "access":"read_only", "depends_on":lens_deps,
-            "composite": {"min_successful": if node.extra.contains_key("review_planner") { Some(1) } else { spec.min_successful.map(|n| if n == 0 { members.len().saturating_sub(1).max(1) } else { n }) },
-                "reduce_verdict": reduction, "nodes":[], "exports":exports},
-        })).map_err(|error| failed(format!("review lenses do not lower: {error}")))?;
-        let pinned = serde_json::json!({"type":"commit","commit":subject});
+        let min_successful = if node.extra.contains_key("review_planner") {
+            Some(1)
+        } else {
+            spec.min_successful.map(|n| {
+                if n == 0 {
+                    members.len().saturating_sub(1).max(1)
+                } else {
+                    n
+                }
+            })
+        };
+        let lens_group = GraphNode::composite(
+            lens_id.clone(),
+            lens_deps,
+            CompositeSpec {
+                min_successful,
+                reduce_verdict: reduction,
+                nodes: Vec::new(),
+                exports,
+            },
+        );
         let template = |key: &str,
                         id: &str,
                         deps: Vec<String>,
-                        inputs: serde_json::Value|
+                        inputs: Vec<GraphInput>|
          -> Result<GraphNode, ReviewResolveError> {
             let mut value = panel_templates
                 .get(key)
@@ -4797,14 +4826,34 @@ impl BoundGraphOwner<'_> {
             let map = value
                 .as_object_mut()
                 .ok_or_else(|| failed(format!("invalid {key} template")))?;
-            map.insert("id".into(), serde_json::json!(id));
-            map.insert("source".into(), pinned.clone());
-            map.insert("read_roots".into(), serde_json::json!(node.read_roots));
-            map.insert("attachments".into(), serde_json::json!(node.attachments));
-            map.insert("depends_on".into(), serde_json::json!(deps));
-            map.insert("inputs".into(), inputs);
-            serde_json::from_value(value)
-                .map_err(|error| failed(format!("review {key} does not lower: {error}")))
+            map.insert("id".into(), serde_json::Value::String(id.into()));
+            // These fields are supplied by the pinned execution, so template
+            // values must not affect decoding or survive the binding.
+            for field in [
+                "source",
+                "read_roots",
+                "attachments",
+                "depends_on",
+                "inputs",
+            ] {
+                map.remove(field);
+            }
+            let mut result: GraphNode = serde_json::from_value(value)
+                .map_err(|error| failed(format!("review {key} does not lower: {error}")))?;
+            result.source = Some(SourceBinding::Commit {
+                commit: subject.clone(),
+            });
+            result.read_roots = node.read_roots.clone();
+            result.attachments = node.attachments.clone();
+            result.depends_on = deps;
+            result.inputs = inputs;
+            Ok(result)
+        };
+        let selected = |id: String, outputs: Vec<OutputKind>| GraphInput {
+            extra: Default::default(),
+            node: id,
+            outputs,
+            required_outputs: Vec::new(),
         };
         let mut children = Vec::new();
         if panel.frame {
@@ -4812,7 +4861,7 @@ impl BoundGraphOwner<'_> {
                 "frame",
                 &frame_id,
                 node.depends_on.clone(),
-                serde_json::json!(node.inputs),
+                node.inputs.clone(),
             )?);
         }
         children.push(lens_group);
@@ -4820,7 +4869,10 @@ impl BoundGraphOwner<'_> {
         let mut previous = lens_id.clone();
         for index in 0..verifiers {
             let id = format!("{root_id}--v-{}", index + 1);
-            let inputs = serde_json::json!([{"node":previous,"outputs":["result","findings"]}]);
+            let inputs = vec![selected(
+                previous.clone(),
+                vec![OutputKind::Result, OutputKind::Findings],
+            )];
             children.push(template("verifier", &id, vec![previous], inputs)?);
             previous = id;
         }
@@ -4829,30 +4881,53 @@ impl BoundGraphOwner<'_> {
             lens_id.clone()
         } else {
             let id = format!("{root_id}--s");
-            let mut inputs =
-                vec![serde_json::json!({"node":lens_id,"outputs":["result","findings"]})];
+            let mut inputs = vec![selected(
+                lens_id.clone(),
+                vec![OutputKind::Result, OutputKind::Findings],
+            )];
             if previous != lens_id {
-                inputs.push(serde_json::json!({"node":previous,"outputs":["result","findings"]}));
+                inputs.push(selected(
+                    previous.clone(),
+                    vec![OutputKind::Result, OutputKind::Findings],
+                ));
             }
             let deps = if previous == lens_id {
                 vec![lens_id.clone()]
             } else {
                 vec![lens_id.clone(), previous]
             };
-            children.push(template("synthesis", &id, deps, serde_json::json!(inputs))?);
+            children.push(template("synthesis", &id, deps, inputs)?);
             id
         };
-        let mut root_exports = vec![
-            serde_json::json!({"node":output,"outputs":["result","findings","verdict","commit"]}),
-        ];
+        let mut root_exports = vec![GraphInput {
+            extra: Default::default(),
+            node: output,
+            outputs: vec![
+                OutputKind::Result,
+                OutputKind::Findings,
+                OutputKind::Verdict,
+                OutputKind::Commit,
+            ],
+            required_outputs: Vec::new(),
+        }];
         if let Some(verifier) = verifier_output {
-            root_exports.push(serde_json::json!({"node":verifier,"outputs":["result","findings"]}));
+            root_exports.push(GraphInput {
+                extra: Default::default(),
+                node: verifier,
+                outputs: vec![OutputKind::Result, OutputKind::Findings],
+                required_outputs: Vec::new(),
+            });
         }
-        let root: GraphNode = serde_json::from_value(serde_json::json!({
-            "id":root_id, "kind":"composite", "access":"read_only", "depends_on":node.depends_on,
-            "composite":{"nodes":[],"exports":root_exports}
-        }))
-        .map_err(|error| failed(format!("review composite does not lower: {error}")))?;
+        let root = GraphNode::composite(
+            root_id,
+            node.depends_on.clone(),
+            CompositeSpec {
+                min_successful: None,
+                reduce_verdict: false,
+                nodes: Vec::new(),
+                exports: root_exports,
+            },
+        );
         let mut nodes = vec![root];
         nodes.extend(children);
         Ok(Expansion {
@@ -6582,8 +6657,23 @@ impl Factory {
             return Err(FacadeError::ConfinementRefused);
         }
         let bytes = provenant_os::fs::FileHandle::open_source(&path)
-            .and_then(|mut file| file.read_bounded(8_388_608))
-            .map_err(|_| FacadeError::io("access graph journal"))?;
+            .and_then(|mut file| {
+                file.read_bounded(
+                    provenant_fabric_runtime::config::GraphLimits::document_bytes_bound()
+                        .maximum_u64(),
+                )
+            })
+            .map_err(|error| match error {
+                provenant_os::fs::FsError::TooLarge { .. } => {
+                    let bound =
+                        provenant_fabric_runtime::config::GraphLimits::document_bytes_bound();
+                    FacadeError::invalid(format!(
+                        "limits.{}={} reached; set by {}",
+                        bound.name, bound.maximum, bound.owner
+                    ))
+                }
+                _ => FacadeError::io("access graph journal"),
+            })?;
         let document = decode_graph_document(&bytes)?;
         Ok((document, path, bytes))
     }
@@ -6680,11 +6770,13 @@ impl Factory {
         let prefix = hash.to_ascii_lowercase();
         let mut found = Vec::new();
         for name in graphs.entries()?.flatten() {
-            if let Ok(bytes) = graphs.read_bounded(&name, 8_388_608)
-                && provenant_records::CanonicalV1::file_digest(&bytes)
-                    .to_string()
-                    .strip_prefix("sha256:")
-                    .is_some_and(|digest| digest.starts_with(&prefix))
+            if let Ok(bytes) = graphs.read_bounded(
+                &name,
+                provenant_fabric_runtime::config::GraphLimits::document_bytes_bound().maximum_u64(),
+            ) && provenant_records::CanonicalV1::file_digest(&bytes)
+                .to_string()
+                .strip_prefix("sha256:")
+                .is_some_and(|digest| digest.starts_with(&prefix))
                 && let Ok(document) = decode_graph_document(&bytes)
             {
                 found.push(document);

@@ -4025,6 +4025,36 @@ fn composite_running_status_does_not_consume_an_attempt_slot() {
 }
 
 #[test]
+fn typed_composite_constructor_matches_decoded_graph_node() {
+    let typed = GraphNode::composite(
+        "panel".into(),
+        vec!["source".into()],
+        CompositeSpec {
+            min_successful: Some(1),
+            reduce_verdict: true,
+            nodes: Vec::new(),
+            exports: vec![GraphInput {
+                extra: Default::default(),
+                node: "member".into(),
+                outputs: vec![OutputKind::Result, OutputKind::Findings],
+                required_outputs: Vec::new(),
+            }],
+        },
+    );
+    let decoded: GraphNode = serde_json::from_value(serde_json::json!({
+        "id": "panel", "kind": "composite", "access": "read_only", "depends_on": ["source"],
+        "composite": {"min_successful": 1, "reduce_verdict": true, "nodes": [],
+            "exports": [{"node": "member", "outputs": ["result", "findings"]}]}
+    }))
+    .unwrap();
+    assert_eq!(typed, decoded);
+    assert_eq!(
+        serde_json::to_value(&typed).unwrap(),
+        serde_json::to_value(decoded).unwrap()
+    );
+}
+
+#[test]
 fn composite_expansion_reports_the_bound_and_owner() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "composite-bound", "nodes": [{
@@ -4043,6 +4073,131 @@ fn composite_expansion_reports_the_bound_and_owner() {
     let reason = composites::expand(&document, &limits).unwrap_err();
     assert!(reason.contains("limits.nodes"), "{reason}");
     assert!(reason.contains("composite expansion"), "{reason}");
+}
+
+#[test]
+fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
+    let body: Vec<_> = (0..17)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("member-{index}"), "access": "read_only",
+                "prompt": "work", "route": {"alias": "fixture"}
+            })
+        })
+        .collect();
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "large-loop", "nodes": [{
+            "id": "repair", "kind": "loop", "access": "read_only",
+            "loop": {"body": body, "until": "member-0", "max_rounds": 1024}
+        }]
+    }))
+    .unwrap();
+    let limits = crate::config::GraphLimits::default();
+    let bound = crate::config::GraphLimits::loop_expansion_nodes_bound();
+    assert!(bound.refusal(bound.maximum).is_none());
+    let reason = bound.refusal(17 * 1024 + 1).unwrap();
+    assert!(
+        reason.contains("loop_expansion_nodes")
+            && reason.contains("internal loop expansion safety")
+    );
+    assert_eq!(document.check_composites(&limits).unwrap_err(), reason);
+    assert_eq!(document.admit(&limits).unwrap_err(), reason);
+    let mut owner = FakeOwner::default();
+    let result = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    );
+    assert!(matches!(result, Err(GraphError::Invalid(ref actual)) if actual == &reason));
+    assert!(owner.calls.is_empty());
+
+    let mut too_many_rounds = document.clone();
+    too_many_rounds.nodes[0]
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .max_rounds = 1025;
+    let reason = crate::config::GraphLimits::loop_expansion_rounds_bound()
+        .refusal(1025)
+        .unwrap();
+    assert_eq!(
+        too_many_rounds.check_composites(&limits).unwrap_err(),
+        reason
+    );
+    assert_eq!(too_many_rounds.admit(&limits).unwrap_err(), reason);
+    let result = advance_with_budget(
+        &too_many_rounds,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    );
+    assert!(matches!(result, Err(GraphError::Invalid(ref actual)) if actual == &reason));
+    assert!(owner.calls.is_empty());
+
+    let mut zero_rounds = document.clone();
+    zero_rounds.nodes[0].loop_body.as_mut().unwrap().max_rounds = 0;
+    let reason = zero_rounds.check_composites(&limits).unwrap_err();
+    assert!(
+        reason.contains("repair") && reason.contains("loop.max_rounds"),
+        "{reason}"
+    );
+    assert_eq!(zero_rounds.admit(&limits).unwrap_err(), reason);
+    let result = advance_with_budget(
+        &zero_rounds,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    );
+    assert!(matches!(result, Err(GraphError::Invalid(ref actual)) if actual == &reason));
+    assert!(owner.calls.is_empty());
+}
+
+#[test]
+fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "composite-depth", "nodes": [{
+            "id": "outer", "kind": "composite", "access": "read_only",
+            "composite": {"nodes": [{
+                "id": "inner", "kind": "composite", "access": "read_only",
+                "composite": {"nodes": [{
+                    "id": "member", "access": "read_only", "prompt": "work",
+                    "route": {"alias": "fixture"}
+                }], "exports": []}
+            }], "exports": []}
+        }]
+    }))
+    .unwrap();
+    let limits = crate::config::GraphLimits {
+        expansion_depth: 1,
+        ..Default::default()
+    };
+    let boundary = crate::config::GraphLimits {
+        expansion_depth: 2,
+        ..limits.clone()
+    };
+    assert!(document.check_composites(&boundary).is_ok());
+    assert!(document.admit(&boundary).is_ok());
+    let reason = limits.expansion_depth_bound().refusal(2).unwrap();
+    assert_eq!(document.check_composites(&limits).unwrap_err(), reason);
+    assert_eq!(document.admit(&limits).unwrap_err(), reason);
+    let mut owner = FakeOwner::default();
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.pause_reason.as_deref(),
+        Some(reason.as_str())
+    );
+    assert!(owner.calls.is_empty());
 }
 
 #[test]
@@ -5905,6 +6060,12 @@ fn structural_limit_pauses_and_host_limit_change_resumes() {
         paused.checkpoint.pause_code.as_deref(),
         Some("structural_limit")
     );
+    let reason = limits.nodes_bound().refusal(2).unwrap();
+    assert_eq!(document.admit(&limits).unwrap_err(), reason);
+    assert_eq!(
+        paused.checkpoint.pause_reason.as_deref(),
+        Some(reason.as_str())
+    );
     assert!(owner.calls.is_empty());
     let raised = crate::config::GraphLimits { nodes: 2, ..limits };
     let resumed = resume_with_budget(
@@ -5953,6 +6114,14 @@ fn fan_out_and_depth_pause_before_launch() {
             run.checkpoint.pause_code.as_deref(),
             Some("structural_limit")
         );
+        if limits.expansion_depth == 1 {
+            let reason = limits.expansion_depth_bound().refusal(2).unwrap();
+            assert_eq!(document.admit(&limits).unwrap_err(), reason);
+            assert_eq!(
+                run.checkpoint.pause_reason.as_deref(),
+                Some(reason.as_str())
+            );
+        }
         assert!(owner.calls.is_empty());
     }
 }
