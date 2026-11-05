@@ -9,15 +9,36 @@ fn detached_receipt_timeout_leaves_worker_running() -> Result<(), Box<dyn std::e
     let argv = [
         OsString::from("/bin/sh"),
         OsString::from("-c"),
-        OsString::from("while [ ! -f release ]; do /bin/sleep 0.02; done; printf done > finished"),
+        OsString::from(
+            "printf ready > started; while [ ! -f release ]; do :; done; printf done > finished",
+        ),
     ];
-    assert!(detached_receipt(&argv, temp.path(), Duration::from_millis(100))?.is_none());
-    std::fs::write(temp.path().join("release"), b"release")?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !temp.path().join("finished").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
+    let cwd = temp.path().to_owned();
+    let (sender, receiver) = mpsc::channel();
+    let caller = std::thread::spawn(move || {
+        let result = detached_receipt(&argv, &cwd, Duration::from_millis(100));
+        let _ = sender.send(result);
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !temp.path().join("started").exists() && Instant::now() < deadline {
+        std::thread::yield_now();
     }
-    assert!(temp.path().join("finished").exists());
+    let started = temp.path().join("started").exists();
+    let result = receiver.recv_timeout(Duration::from_secs(2));
+    // Release even on failure, so a blocking read can finish and the test
+    // reports the deadline failure without stranding the worker or caller.
+    std::fs::write(temp.path().join("release"), b"release")?;
+    caller.join().map_err(|_| "receipt caller panicked")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !temp.path().join("finished").exists() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(started, "worker did not start");
+    assert!(result??.is_none(), "silent worker returned a receipt");
+    assert!(
+        temp.path().join("finished").exists(),
+        "worker did not continue"
+    );
     Ok(())
 }
 

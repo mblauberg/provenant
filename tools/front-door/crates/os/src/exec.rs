@@ -325,6 +325,17 @@ pub fn detached_receipt(
     let mut output = child.stdout.take().ok_or(ExecError::EmptyArgv)?;
     let mut receipt = Vec::new();
     loop {
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        match child.ready(Some(&output), None, None) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => return Ok(None),
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
         let mut buf = [0_u8; 4096];
         match output.read(&mut buf) {
             Ok(0) => return Ok(None),
@@ -343,12 +354,6 @@ pub fn detached_receipt(
                     io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                 ) => {}
             Err(_) => return Ok(None),
-        }
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
-        if child.ready(Some(&output), None, None).is_err() {
-            return Ok(None);
         }
     }
 }
