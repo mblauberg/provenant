@@ -672,8 +672,10 @@ impl Registry<'_> {
                 _ => {}
             }
         }
-        if adapter.id() == provenant_records::Harness::Agy.spec().name {
-            // Agy can repeat the whole answer across its streamed response and
+        if provenant_records::AdapterSpec::get(adapter.id())
+            .is_some_and(|spec| spec.deduplicate_result)
+        {
+            // The provider can repeat the whole answer across its streamed response and
             // result, or within the result itself. Leave distinct text intact.
             let answer = decoded.result.trim();
             let mut middle = answer.len() / 2;
