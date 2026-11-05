@@ -766,6 +766,32 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
+## `provenant fabric graph wait`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Wait limit (seconds or a duration such as 30m)", "name": "wait", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Wait for a task graph to settle without advancing it",
+  "groups": [
+    {
+      "arguments": [
+        "id",
+        "wait"
+      ],
+      "multiple": true,
+      "name": "Wait",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant fabric graph cancel`
 
 | Argument | Contract |

@@ -253,6 +253,57 @@ pub(super) fn warn(number: Option<u64>, error: &dyn std::fmt::Display) {
     );
 }
 
+/// Project retained local contributors; unavailable evidence stays null.
+pub(super) fn projected_lanes(
+    globals: &Globals,
+    numbers: &[u64],
+    repository: &str,
+) -> Option<Vec<provenant_records::wire::LaneRow>> {
+    let resolved = roots::resolve(
+        globals,
+        roots::Workspace::Checkout,
+        roots::Product::Optional,
+    )
+    .ok()?;
+    let project = project_id(&resolved).ok()?;
+    let tracker = Tracker {
+        resolved,
+        project,
+        repository: repository.to_ascii_lowercase(),
+    };
+    let resolved = &tracker.resolved;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let db = Contributions::open_read_only(resolved.roots.state.as_path(), &call).ok()??;
+    let edge = provenant_cli::run::Edge {
+        roots: &resolved.roots,
+        home: &resolved.home,
+        assets: &resolved.assets,
+        cwd: &resolved.project,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut lanes = Vec::new();
+    for number in numbers {
+        for contribution in db.for_pr(&tracker.pr(*number), &call).ok()? {
+            if !seen.insert(contribution.attempt) {
+                continue;
+            }
+            let target = provenant_cli::Target {
+                selection: None,
+                run: contribution.run,
+                task: None,
+                attempt: Some(contribution.attempt),
+            };
+            lanes.push(provenant_cli::run::project_retained_attempt(&target, &edge).ok()?);
+        }
+    }
+    Some(lanes)
+}
+
 pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
     const LEAF: &str = "pr contributions";
     let result = (|| -> Result<_> {

@@ -11,6 +11,9 @@
     "error": {
       "additionalProperties": false,
       "properties": {
+        "category": {
+          "type": "string"
+        },
         "cause": {
           "anyOf": [
             {
@@ -24,7 +27,13 @@
         "code": {
           "type": "string"
         },
+        "detail": {
+          "type": "string"
+        },
         "message": {
+          "type": "string"
+        },
+        "next": {
           "type": "string"
         },
         "repair": {

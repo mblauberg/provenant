@@ -1391,7 +1391,9 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         assert_eq!(row["substitution"], index == 1);
         assert!(row["run_id"].is_string());
         assert_eq!(row["applied_route"]["model"], "codex/gpt-6-luna");
-        let output = fs::read_to_string(row["result_path"].as_str().ok_or("result path")?)?;
+        let path: provenant_records::StructuredPathWire =
+            serde_json::from_value(row["result_path"].clone())?;
+        let output = fs::read_to_string(path.to_path_buf()?)?;
         assert!(output.contains(&format!("Lens: {lens}")), "{output}");
         assert!(output.contains("write denied: true"), "{output}");
     }
@@ -4192,6 +4194,11 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
         data["data"]["provider_error"],
         "provider 500: upstream failed"
     );
+    let schema = provenant_records::wire::data_schema("output").ok_or("output schema")?;
+    provenant_records::wire::schema::validate(&schema, &data["data"])?;
+    let result_path: provenant_records::StructuredPathWire =
+        serde_json::from_value(data["data"]["result_path"].clone())?;
+    assert!(result_path.to_path_buf()?.ends_with("result.md"));
     // A launched attempt has a custody lock, which the wait path inspects.
     fs::write(
         rig.state
@@ -4224,9 +4231,12 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     let data: Value = serde_json::from_slice(&path.stdout.bytes)?;
     assert_eq!(code(&path), 0, "{data}");
     assert!(
-        data["data"]["path"]
-            .as_str()
-            .is_some_and(|path| path.ends_with("stderr.log")),
+        serde_json::from_value::<provenant_records::StructuredPathWire>(
+            data["data"]["path"].clone()
+        )
+        .ok()
+        .and_then(|path| path.to_path_buf().ok())
+        .is_some_and(|path| path.ends_with("stderr.log")),
         "{data}"
     );
     let saved = rig.root.join("saved.txt");

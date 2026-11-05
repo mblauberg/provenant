@@ -36,7 +36,13 @@ pub struct AttemptSummary {
     pub run_id: provenant_core::RunId,
     pub task_id: provenant_core::TaskId,
     pub operation_id: OperationId,
-    pub state: provenant_records::run::AttemptState,
+    pub state: String,
+    pub reason: Option<String>,
+    pub exit_code: Option<i64>,
+    pub finished_at: Option<provenant_core::WallTime>,
+    pub retry_of: Option<provenant_core::AttemptId>,
+    pub superseded_by: Option<provenant_core::AttemptId>,
+    pub cause: Option<provenant_records::run::SettlementReason>,
     pub requested_route: provenant_records::run::RequestedRoute,
     pub applied_route: Option<provenant_records::run::RouteRecord>,
     pub queued_at: provenant_core::WallTime,
@@ -46,13 +52,26 @@ pub struct AttemptSummary {
 
 impl From<AttemptRecord> for AttemptSummary {
     fn from(record: AttemptRecord) -> Self {
+        let projected = provenant_records::wire::LaneRow::project(&record, Default::default());
+        let finished_at = match &record.state {
+            provenant_records::run::AttemptState::Terminal { finished_at, .. } => {
+                Some(*finished_at)
+            }
+            _ => None,
+        };
         Self {
             extra: record.extra,
             attempt_id: record.attempt_id,
             run_id: record.run_id,
             task_id: record.task_id,
             operation_id: record.operation_id,
-            state: record.state,
+            state: projected.state,
+            reason: projected.reason,
+            exit_code: projected.exit_code,
+            finished_at,
+            retry_of: record.retry_of,
+            superseded_by: record.superseded_by,
+            cause: record.settlement_reason,
             requested_route: record.requested_route,
             applied_route: record.applied_route.map(|mut route| {
                 route.account_key = None;

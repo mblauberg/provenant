@@ -141,7 +141,7 @@ fn stored_event() -> Value {
     json!({"seq":1,"record":{"header":{"schema_version":1},"project":ID,"kind":"note","detail":"work","at":AT}})
 }
 fn summary() -> Value {
-    json!({"attempt_id":ID,"run_id":ID,"task_id":ID,"operation_id":"submit","state":{"state":"queued"},"requested_route":{"kind":"named","name":"senior"},"queued_at":AT})
+    json!({"attempt_id":ID,"run_id":ID,"task_id":ID,"operation_id":"submit","state":"queued","retry_of":null,"superseded_by":null,"cause":null,"requested_route":{"kind":"named","name":"senior"},"queued_at":AT})
 }
 fn attempt() -> Value {
     json!({"schema_version":1,"attempt_id":ID,"run_id":ID,"project_id":ID,"task_id":ID,"operation_id":"submit","attempt_number":1,"revision":1,"generation":1,
@@ -177,8 +177,8 @@ fn attempt_summary_conversion_keeps_record_extensions() {
 fn run_reply_shapes_preserve_unknown_fields() {
     cases! {
         SubmissionReceipt => submitted(), ["", "/targets/0", "/worktree"];
-        AttemptSummary => summary(), ["", "/state", "/requested_route"];
-        RunResult => json!({"result":"list","page":{"items":[summary()],"truncated":false}}), ["", "/page", "/page/items/0", "/page/items/0/state", "/page/items/0/requested_route"];
+        AttemptSummary => summary(), ["", "/requested_route"];
+        RunResult => json!({"result":"list","page":{"items":[summary()],"truncated":false}}), ["", "/page", "/page/items/0", "/page/items/0/requested_route"];
         RunResult => json!({"result":"wait","condition":"all","attempts":[attempt()],"satisfied":false,"timed_out":true}), ["", "/attempts/0", "/attempts/0/state", "/attempts/0/usage", "/attempts/0/prompt"];
         OutputResult => output(), ["", "/target"];
         OutputResult => json!({"kind":"artifact","target":target(),"artifact":{"path":{"encoding":"utf8","path":"out"},"digest":null},"digest":digest(),"bytes":{"encoding":"base64","data":""}}), ["", "/target", "/artifact", "/artifact/path"];
