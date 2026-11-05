@@ -64,24 +64,8 @@ pub struct RunConfig {
     /// Maximum path grants in each profile family and in the plan.
     #[serde(default = "default_grant_limit")]
     pub grant_limit: usize,
-    /// Named advisory cloud verification environments.
-    #[serde(default)]
-    pub cloud_targets: BTreeMap<String, CloudTarget>,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
-}
-/// Settings needed to submit a cloud verification job.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CloudTarget {
-    pub provider: String,
-    pub environment: String,
-    pub model: String,
-    #[serde(default)]
-    pub effort: Option<String>,
-    pub repository: String,
-    pub branch: String,
-    pub deadline_seconds: u64,
 }
 fn default_profile_limit_bytes() -> usize {
     512 * 1024
@@ -127,7 +111,6 @@ impl Default for RunConfig {
             admission_seconds: None,
             profile_limit_bytes: default_profile_limit_bytes(),
             grant_limit: default_grant_limit(),
-            cloud_targets: BTreeMap::new(),
             projects: BTreeMap::new(),
         }
     }
@@ -265,34 +248,6 @@ impl DomainConfig for RunConfig {
         }
         valid_patterns("review_exempt", &self.review_exempt, &mut errors);
         valid_writer_writes("writer_writes", &self.writer_writes, &mut errors);
-        for (name, target) in &self.cloud_targets {
-            if !project_key(name) {
-                errors.push(SectionError {
-                    field: format!("cloud_targets.{name}"),
-                    code: "key",
-                });
-            }
-            for (field, value) in [
-                ("provider", &target.provider),
-                ("environment", &target.environment),
-                ("model", &target.model),
-                ("repository", &target.repository),
-                ("branch", &target.branch),
-            ] {
-                if value.trim().is_empty() {
-                    errors.push(SectionError {
-                        field: format!("cloud_targets.{name}.{field}"),
-                        code: "empty",
-                    });
-                }
-            }
-            if target.deadline_seconds == 0 {
-                errors.push(SectionError {
-                    field: format!("cloud_targets.{name}.deadline_seconds"),
-                    code: "range",
-                });
-            }
-        }
         for (project, settings) in &self.projects {
             if !project_key(project) {
                 errors.push(SectionError {
@@ -341,13 +296,6 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("admission_seconds", "integer"),
     FieldMetadata::new("writer_writes", "array"),
     FieldMetadata::new("review_exempt", "array"),
-    FieldMetadata::new("cloud_targets.{target}.provider", "string"),
-    FieldMetadata::new("cloud_targets.{target}.environment", "string"),
-    FieldMetadata::new("cloud_targets.{target}.model", "string"),
-    FieldMetadata::new("cloud_targets.{target}.effort", "string"),
-    FieldMetadata::new("cloud_targets.{target}.repository", "string"),
-    FieldMetadata::new("cloud_targets.{target}.branch", "string"),
-    FieldMetadata::new("cloud_targets.{target}.deadline_seconds", "integer"),
     FieldMetadata::new("projects.{project}.writer_writes", "array"),
     FieldMetadata::new("projects.{project}.review_exempt", "array"),
     FieldMetadata::new("projects.{project}.brief_read_root_warnings", "bool"),
@@ -370,35 +318,6 @@ mod tests {
         .into_iter()
         .map(|error| error.field)
         .collect()
-    }
-    #[test]
-    fn cloud_targets_validate_required_settings() {
-        let mut config = RunConfig::default();
-        config.cloud_targets.insert(
-            "verify".into(),
-            CloudTarget {
-                provider: "claude".into(),
-                environment: "env".into(),
-                model: "model".into(),
-                effort: None,
-                repository: "owner/repo".into(),
-                branch: "main".into(),
-                deadline_seconds: 3600,
-            },
-        );
-        assert!(config.validate().is_empty());
-        config
-            .cloud_targets
-            .get_mut("verify")
-            .unwrap()
-            .environment
-            .clear();
-        assert!(
-            config
-                .validate()
-                .iter()
-                .any(|error| error.field == "cloud_targets.verify.environment")
-        );
     }
     #[test]
     fn launch_resource_defaults_can_be_raised() -> Result<(), Box<dyn std::error::Error>> {

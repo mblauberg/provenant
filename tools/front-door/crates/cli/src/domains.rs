@@ -591,7 +591,7 @@ pub struct LanesSettings {
 }
 
 /// Configuration only; credentials belong to the provider's authentication mechanism.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CloudTarget {
     pub provider: String,
@@ -599,6 +599,21 @@ pub struct CloudTarget {
     pub model: String,
     pub effort: Option<String>,
     pub repository: String,
+    pub branch: String,
+    pub deadline_seconds: u64,
+}
+impl Default for CloudTarget {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            environment: String::new(),
+            model: String::new(),
+            effort: None,
+            repository: String::new(),
+            branch: "main".into(),
+            deadline_seconds: 3600,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -656,6 +671,8 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("cloud_targets.{target}.model", "string"),
     FieldMetadata::new("cloud_targets.{target}.effort", "string"),
     FieldMetadata::new("cloud_targets.{target}.repository", "string"),
+    FieldMetadata::new("cloud_targets.{target}.branch", "string"),
+    FieldMetadata::new("cloud_targets.{target}.deadline_seconds", "integer"),
 ]);
 
 static ENTRIES: [DomainSection; 9] = [

@@ -515,6 +515,7 @@ pub(crate) mod peer_tests {
                     lane_depth: 1,
                     parent_attempt: None,
                     tasks: vec![provenant_run::DispatchTask {
+                        cloud: None,
                         context: None,
                         build_heavy: false,
                         title: None,
@@ -3279,6 +3280,7 @@ pub(crate) mod peer_tests {
                 lane_depth: 1,
                 parent_attempt: None,
                 tasks: vec![provenant_run::DispatchTask {
+                    cloud: None,
                     context: None,
                     build_heavy: false,
                     title: Some("writer".into()),

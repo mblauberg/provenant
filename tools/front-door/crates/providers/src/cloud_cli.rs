@@ -103,9 +103,17 @@ fn result_prompt(request: crate::cloud::CloudSubmission<'_>, claude: bool) -> St
     } else {
         "Include the result file as a new file in your cloud diff."
     };
+    let model = if claude {
+        format!(
+            " Requested model: {:?}; requested effort: {:?}.",
+            job.requested_model, job.requested_effort
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{}\n\nTest commit {}. Record your result in .provenant-cloud-result.json as JSON with job_id {:?}, nonce {:?}, commit (the full tested commit), exit_status (integer), tests_run and tests_failed (arrays of strings), log_location (string), tracked_files_changed (boolean, excluding the result file), and observed_model (string or null). Do not include credentials in the result. {channel}",
-        request.task, job.commit, job.job_id, job.nonce
+        "{}\n\nUse repository source {:?} and branch {:?}, and test commit {}. Record your result in .provenant-cloud-result.json as JSON with job_id {:?}, nonce {:?}, commit (the full tested commit), exit_status (integer), tests_run and tests_failed (arrays of strings), log_location (string), tracked_files_changed (boolean, excluding the result file), and observed_model (string or null). Do not include credentials in the result. {channel}{model}",
+        request.task, job.repository, job.branch, job.commit, job.job_id, job.nonce
     )
 }
 
@@ -152,8 +160,18 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
             {
                 return Err(format!("unrecognised git ls-remote output: {line}"));
             }
-            self.cli
-                .run("git", &["fetch", "--no-tags", "origin", reference], None)?;
+            self.cli.run(
+                "git",
+                &[
+                    "-c",
+                    "fetch.fsckObjects=true",
+                    "fetch",
+                    "--no-tags",
+                    "origin",
+                    reference,
+                ],
+                None,
+            )?;
             let parents = self
                 .cli
                 .run("git", &["rev-list", "--parents", "-n", "1", oid], None)?;
@@ -418,11 +436,60 @@ mod adapter_tests {
             RemoteState::Finished { .. }
         ));
         assert_eq!(adapter.cli.calls.len(), 4);
+        assert!(adapter.cli.calls[1].contains("fetch.fsckObjects=true"));
         assert!(adapter.cli.calls[2].contains(&oid));
         assert!(adapter.cli.calls[3].contains(&oid));
         adapter.after_save(&job);
         assert!(adapter.cli.calls[4].contains("--delete"));
     }
+    #[test]
+    fn cloud_codex_recovers_lost_submit_response_without_retry() {
+        struct LostCli {
+            execs: usize,
+        }
+        impl CloudCli for LostCli {
+            fn run(&mut self, _: &str, args: &[&str], _: Option<&str>) -> Result<String, String> {
+                match args {
+                    ["cloud", "exec", ..] => {
+                        self.execs += 1;
+                        Err("response lost".into())
+                    }
+                    ["cloud", "list", "--json"] => {
+                        Ok(r#"[{"id":"recovered","prompt":"nonce"}]"#.into())
+                    }
+                    ["cloud", "status", "recovered"] => Ok("running".into()),
+                    _ => Err(format!("unexpected command {args:?}")),
+                }
+            }
+        }
+        #[derive(Default)]
+        struct Store(Option<RemoteJob>);
+        impl crate::cloud::CloudJobStore for Store {
+            type Error = ();
+            fn begin(&mut self, job: &RemoteJob) -> Result<(), ()> {
+                self.0 = Some(job.clone());
+                Ok(())
+            }
+            fn save(&mut self, job: &RemoteJob) -> Result<(), ()> {
+                self.0 = Some(job.clone());
+                Ok(())
+            }
+        }
+        let mut adapter = CodexCloud {
+            cli: LostCli { execs: 0 },
+        };
+        let mut store = Store::default();
+        assert!(matches!(
+            crate::cloud::submit(&mut adapter, &mut store, job(), "test"),
+            Err(crate::cloud::CloudJobError::SubmitUnknown(_))
+        ));
+        let mut job = store.0.clone().unwrap();
+        crate::cloud::reconcile(&mut adapter, &mut store, &mut job).unwrap();
+        assert_eq!(job.remote_id, "recovered");
+        assert_eq!(store.0.unwrap().remote_id, "recovered");
+        assert_eq!(adapter.cli.execs, 1);
+    }
+
     #[test]
     fn cloud_codex_finished_result_is_checked_and_reports_changed_files() {
         use std::collections::VecDeque;

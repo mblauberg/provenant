@@ -95,14 +95,21 @@ impl Snapshot {
                 if rows.is_empty() {
                     return Err("named lane selection is empty".into());
                 }
-                let terminal = rows
-                    .iter()
-                    .all(|r| matches!(r.state, provenant_run::AttemptState::Terminal { .. }));
+                let terminal = rows.iter().all(|row| {
+                    row.cloud_observation.0.map_or_else(
+                        || matches!(row.state, provenant_run::AttemptState::Terminal { .. }),
+                        |cloud| cloud.is_terminal(),
+                    )
+                });
                 let notable = terminal;
                 let mut lanes: Vec<_> = rows
                     .iter()
                     .map(|row| {
                         let (state, reason) = provenant_cli::run::state_and_reason(&row.state);
+                        let state = row
+                            .cloud_observation
+                            .0
+                            .map_or(state, |cloud| cloud.state().to_owned());
                         json!({"id": row.attempt_id, "state": state, "reason": reason})
                     })
                     .collect();

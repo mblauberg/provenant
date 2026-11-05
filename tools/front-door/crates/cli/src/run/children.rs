@@ -791,6 +791,7 @@ mod tests {
                 lane_depth: 2,
                 parent_attempt: child.request.parent_attempt,
                 tasks: vec![run::DispatchTask {
+                    cloud: None,
                     context: None,
                     build_heavy: false,
                     title: None,

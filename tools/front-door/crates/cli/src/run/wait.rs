@@ -9,13 +9,30 @@ pub(super) fn settled(state: &run::AttemptState) -> (bool, bool) {
     }
 }
 
+pub(super) fn cloud_observed_at(lane: &run::AttemptRecord) -> Option<WallTime> {
+    lane.cloud_observation
+        .0
+        .filter(|state| state.is_terminal())?;
+    lane.extra
+        .get("cloud_observed_at")?
+        .as_str()
+        .and_then(|time| WallTime::parse_rfc3339(time).ok())
+}
+
+pub(super) fn lane_settled(lane: &run::AttemptRecord) -> (bool, bool) {
+    lane.cloud_observation.0.map_or_else(
+        || settled(&lane.state),
+        |state| (state.is_terminal(), false),
+    )
+}
+
 /// Whether a lane selection satisfies a wait condition. Input required ends
 /// an all-lanes wait because it cannot progress unattended.
 pub(super) fn condition_met(lanes: &[run::AttemptRecord], condition: Condition) -> bool {
     let states: Vec<(bool, bool)> = lanes
         .iter()
         .filter(|l| l.superseded_by.is_none())
-        .map(|l| settled(&l.state))
+        .map(lane_settled)
         .collect();
     lanes.is_empty()
         || (!states.is_empty()
@@ -111,7 +128,7 @@ impl Backlog {
         self.newest.push(lane);
         self.newest.sort_by_key(|lane| match lane.state {
             run::AttemptState::Terminal { finished_at, .. } => std::cmp::Reverse(finished_at),
-            _ => unreachable!("backlog contains only settled lanes"),
+            _ => std::cmp::Reverse(cloud_observed_at(lane).unwrap_or(lane.queued_at)),
         });
         self.newest.truncate(BACKLOG_SAMPLE);
         Ok(())
@@ -136,12 +153,23 @@ fn select_unseen(
         query.owner = Some(owner);
         query.unseen_after = Some(seen);
         let page = session.service().lanes(&query, call)?;
-        for lane in page.lanes {
-            if !settled(&lane.state).0 {
+        for mut lane in page.lanes {
+            cloud_owner::hydrate(&session.store, std::slice::from_mut(&mut lane), call)
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+            if lane
+                .cloud_observation
+                .0
+                .is_some_and(|state| state.is_terminal())
+                && !tracked.contains(&lane.attempt_id)
+                && session.store.last_event_sequence(lane.attempt_id, call)? <= seen
+            {
+                continue;
+            }
+            if !lane_settled(&lane).0 {
                 tracked.insert(lane.attempt_id);
             }
             if let Some(summary) = backlog.as_mut() {
-                if settled(&lane.state).0 && !tracked.contains(&lane.attempt_id) {
+                if lane_settled(&lane).0 && !tracked.contains(&lane.attempt_id) {
                     Backlog::add(summary, session, lane, call)?;
                 } else {
                     pending.push(lane);
@@ -152,7 +180,7 @@ fn select_unseen(
                     let mut summary = Backlog::default();
                     let mut open = Vec::new();
                     for lane in pending.drain(..) {
-                        if settled(&lane.state).0 && !tracked.contains(&lane.attempt_id) {
+                        if lane_settled(&lane).0 && !tracked.contains(&lane.attempt_id) {
                             summary.add(session, lane, call)?;
                         } else {
                             open.push(lane);
@@ -307,6 +335,8 @@ fn candidates_with_backlog<'a>(
                 |id| Ok(session.store.policy_tail(id, &call)?.attempt_id),
             )?;
         }
+        cloud_owner::hydrate(&session.store, &mut lanes, &call)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
         for lane in &mut lanes {
             let tail = session.store.policy_tail(lane.attempt_id, &call)?;
             lane.superseded_by = (tail.attempt_id != lane.attempt_id).then_some(tail.attempt_id);
@@ -385,6 +415,7 @@ pub(super) fn render_settled(
     );
     append_provider_errors(session, lanes, &mut data, &mut human);
     attach_handoffs(session, lanes, &mut data);
+    status::attach_cloud_jobs(&session.store, lanes, &mut data, &mut human, &call)?;
     Ok((data, human))
 }
 
@@ -565,7 +596,7 @@ pub(super) fn wait_command(
                 .borrow()
                 .as_ref()
                 .map_or(0, |summary| summary.latest_event);
-            for lane in waited.lanes.iter().filter(|l| settled(&l.state).0) {
+            for lane in waited.lanes.iter().filter(|lane| lane_settled(lane).0) {
                 latest = latest.max(session.store.last_event_sequence(lane.attempt_id, &entry)?);
             }
             if latest > 0 {

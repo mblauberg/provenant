@@ -2365,6 +2365,14 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--placement` | `{"conflicts": ["preset"], "description": "Placement: local or named cloud target in cloud:NAME form", "name": "placement"}` |
+| `--cloud-provider` | `{"description": "Override the cloud provider", "name": "cloud_provider"}` |
+| `--cloud-environment` | `{"description": "Override the provider environment ID", "name": "cloud_environment"}` |
+| `--cloud-model` | `{"description": "Override the requested cloud model", "name": "cloud_model"}` |
+| `--cloud-effort` | `{"description": "Override the requested cloud effort", "name": "cloud_effort"}` |
+| `--cloud-repository` | `{"description": "Override the cloud repository source", "name": "cloud_repository"}` |
+| `--cloud-branch` | `{"description": "Override the repository branch made available to the cloud job", "name": "cloud_branch"}` |
+| `--cloud-deadline` | `{"description": "Override the cloud job deadline in seconds", "name": "cloud_deadline"}` |
 | `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
 | `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
 | `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
@@ -2613,6 +2621,14 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--placement` | `{"conflicts": ["preset"], "description": "Placement: local or named cloud target in cloud:NAME form", "name": "placement"}` |
+| `--cloud-provider` | `{"description": "Override the cloud provider", "name": "cloud_provider"}` |
+| `--cloud-environment` | `{"description": "Override the provider environment ID", "name": "cloud_environment"}` |
+| `--cloud-model` | `{"description": "Override the requested cloud model", "name": "cloud_model"}` |
+| `--cloud-effort` | `{"description": "Override the requested cloud effort", "name": "cloud_effort"}` |
+| `--cloud-repository` | `{"description": "Override the cloud repository source", "name": "cloud_repository"}` |
+| `--cloud-branch` | `{"description": "Override the repository branch made available to the cloud job", "name": "cloud_branch"}` |
+| `--cloud-deadline` | `{"description": "Override the cloud job deadline in seconds", "name": "cloud_deadline"}` |
 | `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
 | `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
 | `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
@@ -2741,7 +2757,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "description": "Wait for settlement (seconds, or a duration such as 30m). An oversized unseen default backlog is summarised with its count and newest 100 lanes", "name": "wait"}` |
 | `--condition` | `{"conflicts": ["watch"], "defaults": ["any"], "description": "Wait for any or all lanes to settle", "name": "condition", "requires": ["wait"], "values": ["any", "all"]}` |
 | `--watch` | `{"bounds": [1, 14400], "conflicts": ["all", "states", "cursor"], "description": "Print one line per lane state change until every selected lane has settled or this many seconds pass (default 14400)", "name": "watch"}` |
-| `--state` | `{"conflicts": ["wait", "watch"], "description": "Keep lanes in any of these states", "name": "states", "repeatable": true, "values": ["queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
+| `--state` | `{"conflicts": ["wait", "watch"], "description": "Keep lanes in any of these states", "name": "states", "repeatable": true, "values": ["cloud_submitting", "cloud_running", "cloud_passed", "cloud_failed", "cloud_setup_failed", "cloud_cancelled", "cloud_cancellation_unconfirmed", "cloud_unknown", "queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
 | `--since` | `{"description": "Keep lanes queued within this many seconds, or since an RFC3339 time. With --wait or --watch, count lanes that settled since then", "name": "since"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |

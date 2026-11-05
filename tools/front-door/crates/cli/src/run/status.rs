@@ -96,6 +96,8 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 }
                 rows.sort_by_key(|lane| std::cmp::Reverse(lane.queued_at));
             }
+            cloud_owner::hydrate(&session.store, &mut rows, &call)
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
             let waits = session.store.lane_waits(&rows, &call);
             let now = now(&clock)?;
             let human = if command.all {
@@ -131,7 +133,8 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let lines: Vec<LaneLine> = rows
                 .iter()
                 .map(|lane| {
-                    let (state, reason) = state_and_reason(&lane.state);
+                    let (_, reason) = state_and_reason(&lane.state);
+                    let state = lane_display_state(lane);
                     let reason = reason.or_else(|| {
                         waits
                             .iter()
@@ -156,11 +159,13 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             // The compact view keeps the paths a writer may change unreviewed.
             compact.lines.push(exempt_line.trim_end().to_owned());
             summary = Some(compact);
-            let human = format!("{human}{exempt_line}");
-            Ok((
-                json!({"lanes": rows, "next_cursor": next, "review_exempt": exempt}),
-                human,
-            ))
+            let mut human = format!("{human}{exempt_line}");
+            let mut data = json!({"lanes": rows, "next_cursor": next, "review_exempt": exempt});
+            attach_cloud_jobs(&session.store, &rows, &mut data, &mut human, &call)?;
+            if data.get("cloud_jobs").is_some() {
+                summary = None;
+            }
+            Ok((data, human))
         })(),
     );
     out.summary = summary;
@@ -442,7 +447,8 @@ pub(super) fn compact_status(
     rows.iter()
         .map(|lane| {
             let id = lane.attempt_id.to_string();
-            let (state, reason) = state_and_reason(&lane.state);
+            let (_, reason) = state_and_reason(&lane.state);
+            let state = lane_display_state(lane);
             let model = lane
                 .applied_route
                 .as_ref()
@@ -575,6 +581,12 @@ pub(super) fn artifact(root: &Path, record: &run::AttemptRecord, name: &str) -> 
     ))
 }
 
+pub(super) fn lane_display_state(lane: &run::AttemptRecord) -> String {
+    lane.cloud_observation
+        .0
+        .map_or_else(|| state_name(&lane.state), |state| state.state().to_owned())
+}
+
 pub(super) fn state_name(state: &run::AttemptState) -> String {
     match state {
         run::AttemptState::Terminal { outcome, .. } => serde_json::to_value(outcome)
@@ -635,7 +647,7 @@ pub(super) fn render_lanes_with_lineage(
     let rows: Vec<Value> = lanes
         .iter()
         .map(|lane| {
-            let state = state_name(&lane.state);
+            let state = lane_display_state(lane);
             let route = lane
                 .applied_route
                 .as_ref()
@@ -1148,18 +1160,20 @@ pub(super) fn lanes_inner(
         |lane: &run::AttemptRecord| command.session.is_none() || lane.verified_owner == Some(owner);
     let filtered = !command.states.is_empty() || command.since.is_some();
     query.newest_first = filtered || command.all;
-    let (lanes, next) = if filtered {
+    let (mut lanes, next) = if filtered {
         query.limit = 100;
         let mut matches = Vec::new();
         let mut next = None;
         loop {
             let page = session.service().lanes(&query, &call)?;
-            for lane in page.lanes {
+            for mut lane in page.lanes {
+                cloud_owner::hydrate(&session.store, std::slice::from_mut(&mut lane), &call)
+                    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
                 let state_matches = command.states.is_empty()
                     || command
                         .states
                         .iter()
-                        .any(|state| state.as_str() == state_name(&lane.state));
+                        .any(|state| state.as_str() == lane_display_state(&lane));
                 let since_matches = since.is_none_or(|since| lane.queued_at >= since);
                 if state_matches && since_matches && by_session(&lane) {
                     matches.push(lane);
@@ -1187,6 +1201,8 @@ pub(super) fn lanes_inner(
         let lanes: Vec<_> = page.lanes.into_iter().filter(by_session).collect();
         (lanes, page.next)
     };
+    cloud_owner::hydrate(&session.store, &mut lanes, &call)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
     let successors = policy_successors(&session, &lanes, &call)?;
@@ -1200,7 +1216,71 @@ pub(super) fn lanes_inner(
     );
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
+    attach_cloud_jobs(&session.store, &lanes, &mut data, &mut human, &call)?;
     Ok((data, human, false))
+}
+
+pub(super) fn attach_cloud_jobs(
+    store: &run::RunStore,
+    lanes: &[run::AttemptRecord],
+    data: &mut Value,
+    human: &mut String,
+    call: &run::Request<'_>,
+) -> Result<(), Fail> {
+    let mut jobs = Vec::new();
+    for lane in lanes {
+        let Some(placement) = cloud_owner::placement(store, lane, call)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
+        else {
+            continue;
+        };
+        let mut value = match cloud_owner::load(store, lane.attempt_id, call)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
+        {
+            Some(job) => cloud_owner::view(&job),
+            None => json!({"target": placement.target, "state": {"state": "submitting"}}),
+        };
+        value["attempt_id"] = json!(lane.attempt_id);
+        if let Some(rows) = data.get_mut("lanes").and_then(Value::as_array_mut)
+            && let Some(row) = rows
+                .iter_mut()
+                .find(|row| row["attempt_id"] == lane.attempt_id.to_string())
+        {
+            row["cloud"] = value.clone();
+            if let Some(state) = lane.cloud_observation.0 {
+                row["cloud_state"] = json!(state.state());
+            }
+        }
+        let state = value["state"]["state"].as_str().unwrap_or("unknown");
+        human.push_str(&format!(
+            "{} cloud {}: {}",
+            lane.attempt_id,
+            plain_text(&placement.target, usize::MAX),
+            state
+        ));
+        if let Some(passed) = value["passed"].as_bool() {
+            human.push_str(if passed {
+                " (advisory pass)"
+            } else {
+                " (advisory failure)"
+            });
+        }
+        if let Some(model) = value["observed_model_status"].as_str() {
+            human.push_str(&format!(", observed model {model}"));
+        }
+        if let Some(detail) = value["state"]["detail"].as_str() {
+            human.push_str(&format!(": {}", plain_text(detail, usize::MAX)));
+        }
+        if let Some(remedy) = value["remedy"].as_str() {
+            human.push_str(&format!("; {}", plain_text(remedy, usize::MAX)));
+        }
+        human.push('\n');
+        jobs.push(value);
+    }
+    if !jobs.is_empty() {
+        data["cloud_jobs"] = Value::Array(jobs);
+    }
+    Ok(())
 }
 
 /// What a pull request body needs from one local attempt's own record.

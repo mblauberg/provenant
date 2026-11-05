@@ -5,7 +5,10 @@
 //! ID always counts, whenever it settled. A wholly settled named selection
 //! returns its terminal rows immediately. Both modes poll a `fetch` of the
 //! candidate lanes, so the local store and peers share one rule.
-use super::{Condition, ErrorKind, Fail, Status, condition_met, settled, silent_lane, state_name};
+use super::{
+    Condition, ErrorKind, Fail, Status, cloud_observed_at, condition_met, lane_display_state,
+    lane_settled, silent_lane,
+};
 use provenant_core::retry::{RetryCause, is_transient};
 use provenant_core::{AttemptId, Clock, HostId, WallTime};
 use provenant_os::clock::SystemClock;
@@ -34,6 +37,9 @@ pub(super) struct Scope {
 }
 
 fn finished(lane: &run::AttemptRecord) -> Option<WallTime> {
+    if lane.cloud_observation.0.is_some() {
+        return cloud_observed_at(lane);
+    }
     match lane.state {
         run::AttemptState::Terminal { finished_at, .. } => Some(finished_at),
         _ => None,
@@ -108,7 +114,7 @@ impl Tracked {
                 .map(|(_, lane)| lane.clone()),
         );
         for lane in &page {
-            if !settled(&lane.state).0 {
+            if !lane_settled(lane).0 {
                 self.open.insert(lane.attempt_id);
             } else if self.open.remove(&lane.attempt_id) && !on_page.contains(&lane.attempt_id) {
                 self.closed.insert(lane.attempt_id, lane.clone());
@@ -258,8 +264,7 @@ fn arm(
         }
     };
     let mut armed = Armed::arm(scope, &first);
-    if armed.scope.explicit && !first.is_empty() && first.iter().all(|lane| settled(&lane.state).0)
-    {
+    if armed.scope.explicit && !first.is_empty() && first.iter().all(|lane| lane_settled(lane).0) {
         armed.baseline.clear();
         // A wholly settled named selection is an explicit result lookup,
         // including when --since would otherwise exclude its terminal rows.
@@ -376,7 +381,7 @@ pub(super) fn watch(
     let mut stale = None;
     loop {
         for lane in &lanes {
-            let state = state_name(&lane.state);
+            let state = lane_display_state(lane);
             if seen.get(&lane.attempt_id) != Some(&state) {
                 emit(lane)?;
                 seen.insert(lane.attempt_id, state);
@@ -387,7 +392,7 @@ pub(super) fn watch(
             .filter(|lane| lane.superseded_by.is_none())
             .collect();
         let all_settled = lanes.is_empty()
-            || (!current.is_empty() && current.iter().all(|lane| settled(&lane.state).0));
+            || (!current.is_empty() && current.iter().all(|lane| lane_settled(lane).0));
         let silent = silent_lane(&lanes);
         if silent.is_some() || all_settled || Instant::now() >= deadline {
             if let Some(fail) = stale.filter(|fail: &Fail| fail.kind != ErrorKind::Contention) {
@@ -415,7 +420,7 @@ pub(super) fn line_with_successor(
     host: Option<HostId>,
     successor: Option<AttemptId>,
 ) -> String {
-    let mut state = state_name(&lane.state);
+    let mut state = lane_display_state(lane);
     if let Some(id) = successor {
         state.push_str(&format!(" → retrying ({id})"));
     }
@@ -444,7 +449,7 @@ pub(super) fn json_line_with_successor(
 ) -> String {
     json!({
         "event": "lane",
-        "state": state_name(&lane.state),
+        "state": lane_display_state(lane),
         "run_id": lane.run_id,
         "task_id": lane.task_id,
         "attempt_id": lane.attempt_id,
@@ -459,7 +464,7 @@ pub(super) fn end_line(watched: &Watched) -> String {
     let pending = watched
         .lanes
         .iter()
-        .filter(|lane| !settled(&lane.state).0)
+        .filter(|lane| !lane_settled(lane).0)
         .count();
     if let Some(id) = watched.silent_lane {
         format!(

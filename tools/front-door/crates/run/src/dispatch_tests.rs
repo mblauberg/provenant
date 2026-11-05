@@ -19,7 +19,7 @@ fn cloud_attempt_never_enters_local_supervisor() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let mut input = input();
+    let mut input = two_tasks(2);
     input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
         target: "target".into(),
         provider: "fake".into(),
@@ -31,7 +31,10 @@ fn cloud_attempt_never_enters_local_supervisor() -> TestResult {
         deadline_seconds: 3600,
     });
     store.create(&input, &call)?;
-    let fake = Fake::default();
+    let fake = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
     let started = store.start_checked(
         input.run_id,
         &input.request,
@@ -39,8 +42,14 @@ fn cloud_attempt_never_enters_local_supervisor() -> TestResult {
         &|_, _| unreachable!(),
         &call,
     )?;
-    assert!(started.is_empty());
-    assert_eq!(fake.prepared.get(), 0);
+    assert!(
+        matches!(started.as_slice(), [Started::Refused { attempt, .. }] if *attempt == input.attempts[1].attempt_id)
+    );
+    assert_eq!(fake.prepared.get(), 1);
+    assert!(matches!(
+        store.cancel(input.attempts[0].attempt_id, "stop", &call)?,
+        CancelReceipt::Unobservable { .. }
+    ));
     assert!(matches!(
         store.record(input.attempts[0].attempt_id, &call)?.state,
         AttemptState::Queued { .. }
