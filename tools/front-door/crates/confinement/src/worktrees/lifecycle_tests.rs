@@ -244,6 +244,12 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
             stream: "stdout"
         }))
     ));
+    assert!(matches!(
+        limited.checkout_head(&context, &fixture.repo, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
     let limited_inventory = RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
     assert!(matches!(
         limited_inventory.read_inventory(&context, &cancel()),

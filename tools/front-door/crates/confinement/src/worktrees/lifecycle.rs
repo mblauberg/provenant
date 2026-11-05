@@ -56,9 +56,11 @@ pub fn fast_forward(
         });
     }
     repo.revalidate()?;
-    let actual = run_git(context, repo, GitRead::RevParseHead, cancel)?;
-    if exit_code(&actual)? != 0 || parse_oid(trim_ascii(&actual.stdout.bytes))? != current.head {
-        return Err(WorktreeError::IdentityChanged);
+    let actual = context.facts.checkout_head(context, repo, cancel);
+    match actual {
+        Ok(actual) if actual == current.head => {}
+        Ok(_) | Err(WorktreeError::NotFound) => return Err(WorktreeError::IdentityChanged),
+        Err(error) => return Err(error),
     }
     if current.head != head {
         context.workers.invalidate();
@@ -76,9 +78,11 @@ pub fn fast_forward(
     }
     repo.revalidate()?;
     check_writer_terminal(repo)?;
-    let actual = run_git(context, repo, GitRead::RevParseHead, cancel)?;
-    if exit_code(&actual)? != 0 || parse_oid(trim_ascii(&actual.stdout.bytes))? != head {
-        return Err(WorktreeError::IdentityChanged);
+    let actual = context.facts.checkout_head(context, repo, cancel);
+    match actual {
+        Ok(actual) if actual == head => {}
+        Ok(_) | Err(WorktreeError::NotFound) => return Err(WorktreeError::IdentityChanged),
+        Err(error) => return Err(error),
     }
     Ok(())
 }

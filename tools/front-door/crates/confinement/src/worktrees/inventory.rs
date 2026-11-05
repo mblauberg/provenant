@@ -87,6 +87,34 @@ impl RepoFacts {
         parse_oid(trim_ascii(&outcome.stdout.bytes))
     }
 
+    /// Read the current commit of a verified checkout in this repository.
+    pub(super) fn checkout_head(
+        &self,
+        context: &WorktreeContext<'_>,
+        repo: &VerifiedRepo,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        validate_binding(context)?;
+        context.repo.revalidate()?;
+        repo.revalidate()?;
+        if repo.common_git_dir() != context.repo.common_git_dir() {
+            return Err(WorktreeError::IdentityChanged);
+        }
+        let budget = context.utility_budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = run_utility(
+            context.executor,
+            GitRead::RevParseHead,
+            repo,
+            context.utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
     /// Resolve the full symbolic name of a revision, if Git can identify one.
     pub fn symbolic_revision(
         &self,
