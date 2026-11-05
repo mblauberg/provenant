@@ -243,8 +243,8 @@ pub(super) fn submit_installed(
         cwd: cwd.to_owned(),
         timeout: std::time::Duration::from_secs(120),
     };
-    match provenant_records::AdapterSpec::get(&job.provider).map(|spec| spec.id) {
-        Some(provenant_records::Harness::Claude) => submit(
+    match provenant_records::AdapterSpec::get(&job.provider).and_then(|spec| spec.cloud_transport) {
+        Some(provenant_records::CloudTransport::Claude) => submit(
             &mut ClaudeCloud {
                 cli,
                 pending_cleanup: None,
@@ -255,7 +255,7 @@ pub(super) fn submit_installed(
             task,
             call,
         ),
-        Some(provenant_records::Harness::Codex) => {
+        Some(provenant_records::CloudTransport::Codex) => {
             submit(&mut CodexCloud { cli }, store, id, job, task, call)
         }
         _ => Err(format!(
@@ -332,12 +332,12 @@ pub(super) fn observe_installed(
             }
         }};
     }
-    match provenant_records::AdapterSpec::get(&job.provider).map(|spec| spec.id) {
-        Some(provenant_records::Harness::Claude) => observe!(ClaudeCloud {
+    match provenant_records::AdapterSpec::get(&job.provider).and_then(|spec| spec.cloud_transport) {
+        Some(provenant_records::CloudTransport::Claude) => observe!(ClaudeCloud {
             cli,
             pending_cleanup: None
         }),
-        Some(provenant_records::Harness::Codex) => observe!(CodexCloud { cli }),
+        Some(provenant_records::CloudTransport::Codex) => observe!(CodexCloud { cli }),
         _ => Err(format!(
             "cloud target {} has unsupported provider {}",
             job.target, job.provider
@@ -408,15 +408,15 @@ fn observe_for_view(
         },
         deadline: budget_end.min(std::time::Instant::now() + timeout),
     };
-    match provenant_records::AdapterSpec::get(&job.provider).map(|spec| spec.id) {
-        Some(provenant_records::Harness::Claude) => observe(
+    match provenant_records::AdapterSpec::get(&job.provider).and_then(|spec| spec.cloud_transport) {
+        Some(provenant_records::CloudTransport::Claude) => observe(
             &mut ClaudeCloud {
                 cli,
                 pending_cleanup: None,
             },
             job,
         ),
-        Some(provenant_records::Harness::Codex) => observe(&mut CodexCloud { cli }, job),
+        Some(provenant_records::CloudTransport::Codex) => observe(&mut CodexCloud { cli }, job),
         _ => Err(format!("unsupported cloud provider {}", job.provider)),
     }
 }

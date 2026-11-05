@@ -1334,6 +1334,23 @@ fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
 #[test]
 fn registry_only_provider_resolves_prepares_and_reports_quota()
 -> Result<(), Box<dyn std::error::Error>> {
+    let spec = provenant_records::AdapterSpec::get("fixture-provider")
+        .ok_or("fixture AdapterSpec is missing")?;
+    assert!(spec.local_login);
+    assert_eq!(spec.local_account, ("fixture", "work"));
+    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work")
+}
+
+#[test]
+fn registry_spec_drives_local_provider_preparation_and_quota()
+-> Result<(), Box<dyn std::error::Error>> {
+    registry_provider_resolves_prepares_and_reports_quota("cursor", "local")
+}
+
+fn registry_provider_resolves_prepares_and_reports_quota(
+    adapter_name: &'static str,
+    account_key: &'static str,
+) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Digest, OperationId, RunId, TaskId};
     use provenant_os::exec::SystemExecutor;
     use provenant_providers::{
@@ -1342,10 +1359,10 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
     };
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
-    struct Fixture;
+    struct Fixture(&'static str);
     impl Adapter for Fixture {
         fn id(&self) -> &'static str {
-            "fixture-provider"
+            self.0
         }
         fn account(
             &self,
@@ -1354,8 +1371,14 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
             Ok(provenant_providers::AccountDetection::Unknown)
         }
         fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError> {
-            let account = input.account.ok_or(ProviderError::UnknownIdentity)?;
-            account.validate_route(input.route)?;
+            if self.0 == "cursor" {
+                assert!(
+                    input.account.is_none(),
+                    "local login must not pin an account"
+                );
+                return provenant_providers::cursor::Cursor.prepare(input);
+            }
+            assert!(input.account.is_none(), "fixture uses its local login");
             let mut command_route = input.route.clone();
             command_route.adapter = "command".into();
             command_route.model.clear();
@@ -1410,7 +1433,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
     }
     impl provenant_quota::QuotaSource for Fixture {
         fn adapter_id(&self) -> &'static str {
-            "fixture-provider"
+            self.0
         }
         fn probe(
             &self,
@@ -1441,15 +1464,15 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
             })
         }
     }
-    struct Effects(std::cell::Cell<u32>);
+    struct Effects(std::cell::Cell<u32>, &'static str, &'static str);
     impl provenant_quota::QuotaEffects for Effects {
         fn accounts(
             &self,
         ) -> Result<Vec<provenant_quota::AccountScope>, provenant_quota::QuotaError> {
             Ok(vec![provenant_quota::AccountScope {
-                adapter: "fixture-provider".into(),
-                account_key: "work".into(),
-                label: "work".into(),
+                adapter: self.1.into(),
+                account_key: self.2.into(),
+                label: self.2.into(),
             }])
         }
         fn capture(
@@ -1466,12 +1489,18 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
             })
         }
     }
-    static ADAPTER: Fixture = Fixture;
+    static FIXTURE: Fixture = Fixture("fixture-provider");
+    static LOCAL: Fixture = Fixture("cursor");
+    let adapter = if adapter_name == LOCAL.0 {
+        &LOCAL
+    } else {
+        &FIXTURE
+    };
     let providers = [provenant_providers::Registration {
-        adapter: &ADAPTER,
-        quota_source: Some(&ADAPTER),
+        adapter,
+        quota_source: Some(adapter),
         quota: provenant_quota::QuotaPolicy {
-            adapter: "fixture-provider",
+            adapter: adapter_name,
             timer_seconds: 300,
             panel_seconds: 120,
             probe_seconds: 10,
@@ -1490,15 +1519,6 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
     for path in [&home, &state, &project, &assets, &git_home] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
     }
-    let account_dir = home.join("fixture-account");
-    std::fs::create_dir(&account_dir)?;
-    std::fs::write(
-        state.join("config.toml"),
-        format!(
-            "schema_version=1\n[domains.accounts.entries.work]\nadapter='fixture-provider'\nlabel='work'\nkey='work'\ndirectory={:?}\n",
-            account_dir.to_str().ok_or("account path")?
-        ),
-    )?;
     let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     let roots = provenant_core::RootInputs {
@@ -1506,11 +1526,11 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let effects = Effects(std::cell::Cell::new(0));
+    let effects = Effects(std::cell::Cell::new(0), adapter_name, account_key);
     let report = crate::quota::execute(
         &crate::quota::Quota::Tick {
             adapter: crate::quota::Filter {
-                adapter: Some("fixture-provider".into()),
+                adapter: Some(adapter_name.into()),
             },
             trigger: crate::quota::Trigger::Manual,
             power: crate::quota::Power::Ac,
@@ -1524,7 +1544,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         report
             .accounts
             .iter()
-            .any(|row| row.account.adapter == "fixture-provider"
+            .any(|row| row.account.adapter == adapter_name
                 && row.status == provenant_quota::QuotaStatus::Available)
     );
     let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
@@ -1539,7 +1559,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         &roots,
         provenant_config::ProjectLocation::new(repo.common_git_dir())?,
     )?;
-    let executable = assets.join("fixture-provider");
+    let executable = assets.join(adapter_name);
     std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture 1.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let run_id = RunId::from_bytes([2; 16]);
@@ -1564,7 +1584,12 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
             .create(path)?;
     }
     let prompt = "fixture prompt";
-    assert!(super::super::catalogued("fixture-provider/test", None).is_ok());
+    let model = if adapter_name == "cursor" {
+        "cursor/grok-4.7".to_owned()
+    } else {
+        format!("{adapter_name}/test")
+    };
+    assert!(super::super::catalogued(&model, None).is_ok());
     let task = run::TaskRequest {
         cloud: None,
         context: None,
@@ -1580,11 +1605,11 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model {
             extra: Default::default(),
-            provider: "fixture-provider".into(),
-            model: "fixture-provider/test".into(),
+            provider: adapter_name.into(),
+            model,
             effort: None,
         },
-        account: Some("work".into()),
+        account: Some(account_key.into()),
         fallback: vec![],
         authority_digest: Digest::from_bytes([4; 32]),
         writer: None,
@@ -1611,7 +1636,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         &paths,
         None,
         &|name| {
-            if name == "fixture-provider" {
+            if name == adapter_name {
                 Ok(executable.clone())
             } else {
                 Err("unavailable".into())
@@ -1621,8 +1646,8 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         false,
         None,
     )?;
-    assert_eq!(prepared.route.provider.as_deref(), Some("fixture-provider"));
-    assert_eq!(prepared.route.account_key.as_deref(), Some("work"));
+    assert_eq!(prepared.route.provider.as_deref(), Some(adapter_name));
+    assert_eq!(prepared.route.account_key.as_deref(), Some(account_key));
     assert!(!prepared.argv.is_empty());
     Ok(())
 }
