@@ -1294,7 +1294,6 @@ pub fn expand_with(
         "",
         &origins,
     )?;
-    let mut graph_fields = serde_json::Map::new();
     for key in [
         "limits",
         "integration_branch",
@@ -1307,24 +1306,23 @@ pub fn expand_with(
             // An empty knob, such as an unset decision session, means unset.
             if value != "" {
                 match key {
-                    "limits" => typed.limits = Some(value.clone()),
+                    "limits" => typed.limits = Some(value),
                     "integration_branch" => {
-                        typed.integration_branch = serde_json::from_value(value.clone())
+                        typed.integration_branch = serde_json::from_value(value)
                             .map_err(|error| format!("{key}: {error}"))?
                     }
                     "delivery" => {
-                        typed.delivery = serde_json::from_value(value.clone())
+                        typed.delivery = serde_json::from_value(value)
                             .map_err(|error| format!("{key}: {error}"))?
                     }
                     "decision_session" => {
-                        typed.decision_session = serde_json::from_value(value.clone())
+                        typed.decision_session = serde_json::from_value(value)
                             .map_err(|error| format!("{key}: {error}"))?
                     }
                     _ => {
-                        typed.extra.insert(key.into(), value.clone());
+                        typed.extra.insert(key.into(), value);
                     }
                 }
-                graph_fields.insert(key.into(), value);
             }
         }
     }
@@ -1332,12 +1330,6 @@ pub fn expand_with(
     typed.schema_version = u64::from(provenant_fabric_runtime::graph::minimum_schema_version(
         &typed,
     ));
-    let mut document = serde_json::to_value(&typed).map_err(|error| error.to_string())?;
-    let map = document.as_object_mut().ok_or("graph must be a table")?;
-    // Retain explicit empty fields until node lowering itself is typed. The
-    // graph's schema and document fields come from the typed value above.
-    map.insert("nodes".into(), Value::Array(nodes));
-    map.extend(graph_fields);
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
     let substitutions = layers.substitutions.take();
     let mut warnings = layers.warnings.take();
@@ -1361,7 +1353,7 @@ pub fn expand_with(
     // Provenance rides in the graph document so it is hashed into the graph
     // identity and retained with the run: where each value came from, which
     // roles (with digests) were used and any route substituted.
-    document["provenance"] = json!({
+    let mut provenance = json!({
         "preset": name,
         "origins": origins,
         "roles": roles,
@@ -1369,8 +1361,14 @@ pub fn expand_with(
         "warnings": warnings,
     });
     if let Some(decision) = &plan {
-        document["provenance"]["plan"] = decision.to_json();
+        provenance["plan"] = decision.to_json();
     }
+    typed.extra.insert("provenance".into(), provenance);
+    let mut document = serde_json::to_value(&typed).map_err(|error| error.to_string())?;
+    let map = document.as_object_mut().ok_or("graph must be a table")?;
+    // Retain explicit empty fields until node lowering itself is typed. The
+    // graph's schema and document fields come from the typed value above.
+    map.insert("nodes".into(), Value::Array(nodes));
     if serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
         .len()

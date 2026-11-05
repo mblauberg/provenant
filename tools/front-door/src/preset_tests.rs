@@ -2857,6 +2857,32 @@ fn embedded_graph_nodes_reject_unknown_fields() {
 }
 
 #[test]
+fn graph_settings_and_provenance_survive_typed_assembly() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "graph-settings",
+            r#"
+integration_branch = "batch/work"
+delivery = "integrate:batch/work"
+decision_session = "session"
+limits = { nodes = 10 }
+retry = { attempts = 2 }
+stages = [{ id = "task" }]
+"#,
+        )
+        .unwrap();
+    let expansion = expand(&layers, "graph-settings", "brief", &[]).unwrap();
+    assert_eq!(expansion.document["integration_branch"], "batch/work");
+    assert_eq!(expansion.document["delivery"], "integrate:batch/work");
+    assert_eq!(expansion.document["decision_session"], "session");
+    assert_eq!(expansion.document["limits"], json!({"nodes": 10}));
+    assert_eq!(expansion.document["retry"], json!({"attempts": 2}));
+    assert_eq!(expansion.document["provenance"]["preset"], "graph-settings");
+}
+
+#[test]
 fn malformed_graph_settings_name_the_field() {
     for key in ["integration_branch", "delivery", "decision_session"] {
         let mut layers = Layers::empty();
