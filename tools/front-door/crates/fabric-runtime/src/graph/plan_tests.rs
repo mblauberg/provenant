@@ -1755,6 +1755,24 @@ fn planned_scout_swarm_expands_scouts_with_a_question_and_a_route() {
 }
 
 #[test]
+fn single_planned_review_records_rationale_before_lens() {
+    let doc = planned_fixture("review");
+    let fragment = pattern_result(json!({"id":"correctness", "pattern":"lens-correctness-spec", "parameters":{"tier":"senior"}}));
+    let output = format!("The change needs a correctness review.\n{fragment}");
+    let mut results = vec!["framed", output.as_str()];
+    results.extend(std::iter::repeat_n("done\nVERDICT: PASS", 12));
+    let mut owner = fixture_owner(&results);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let planner = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    assert!(planner.outputs.as_ref().unwrap().result.as_ref().unwrap().excerpt.contains("The change needs a correctness review."));
+    let planner_call = owner.calls.iter().position(|(key, _)| key.node_id == "plan").unwrap();
+    let lens_call = owner.calls.iter().position(|(key, _)| key.node_id == "plan--correctness--lens").unwrap();
+    assert!(planner_call < lens_call);
+    assert_eq!(run.checkpoint.expansions[0].patterns.len(), 1);
+}
+
+#[test]
 fn planned_review_expands_only_the_lens_legs_the_catalogue_lists() {
     let doc = planned_fixture("review");
     let leg = |lens: &str, tier: &str| {
