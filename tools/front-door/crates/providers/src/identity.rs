@@ -121,7 +121,7 @@ impl RegisteredAccount {
             directory,
         })
     }
-    pub(crate) fn adapter(&self) -> &str {
+    pub fn adapter(&self) -> &str {
         &self.adapter
     }
     pub fn key(&self) -> &str {
