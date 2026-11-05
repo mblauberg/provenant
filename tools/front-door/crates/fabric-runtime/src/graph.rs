@@ -38,6 +38,7 @@ mod outputs;
 mod pattern_plan;
 mod plans;
 mod validation;
+mod wait_view;
 #[doc(hidden)]
 pub use plans::prompt as rendered_prompt;
 pub use validation::minimum_schema_version;
@@ -49,6 +50,7 @@ pub use model::*;
 pub use observation::*;
 use outputs::*;
 pub(crate) use validation::*;
+pub use wait_view::{GraphNodeWait, graph_waits};
 #[cfg(test)]
 #[path = "graph/journal_tests.rs"]
 mod file_tests;

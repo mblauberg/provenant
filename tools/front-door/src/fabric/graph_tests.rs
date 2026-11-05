@@ -819,6 +819,21 @@ mod result_tests {
     }
 
     #[test]
+    fn graph_status_waits_match_json_and_human() {
+        let run = graph_status_fixture();
+        let wire = serde_json::to_value(&run).unwrap();
+        let waits = wire["waits"].as_array().unwrap();
+        let ci = waits.iter().find(|wait| wait["node"] == "member").unwrap();
+        assert_eq!(ci["wait"], "ci");
+        assert_eq!(ci["disposition"], "running");
+        let human = super::graph_human(&run);
+        let row = human.lines().find(|line| line.starts_with("  member:")).unwrap();
+        for part in ["wait=ci", "disposition=running", "code=unavailable", "current_attempt=unavailable", "failures=\"unavailable\"", "wake_at=unavailable", "next=unavailable"] {
+            assert!(row.contains(part), "{row}: missing {part}");
+        }
+    }
+
+    #[test]
     fn graph_status_names_blocking_upstream() {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[1];
@@ -921,10 +936,10 @@ mod result_tests {
             ordinary
         );
         assert!(ordinary.contains("  ordinary: Failed outcome=TaskFailed\n"));
-        assert!(ordinary.contains("  composite: Running (1 members)\n"));
+        assert!(ordinary.contains("  composite: Running (1 members) wait=none disposition=running"));
         assert!(ordinary.contains("  member: Running CI waiting"));
         assert!(!ordinary.contains("loop-member"));
-        assert!(!ordinary.contains("attempt="));
+        assert!(!ordinary.contains(" attempt=new"));
         let result = provenant_records::CommandResult::new(
             "fabric graph status",
             provenant_records::Outcome::Ok,

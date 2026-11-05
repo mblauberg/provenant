@@ -988,13 +988,27 @@ pub enum GraphStatus {
     Paused,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphRun {
     pub status: GraphStatus,
     pub checkpoint: GraphCheckpoint,
     /// Why the last automatic advance failed, as recorded for `status`.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub advance_error: Option<String>,
+}
+
+impl Serialize for GraphRun {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer
+            .serialize_struct("GraphRun", if self.advance_error.is_some() { 4 } else { 3 })?;
+        state.serialize_field("status", &self.status)?;
+        state.serialize_field("checkpoint", &self.checkpoint)?;
+        if let Some(error) = &self.advance_error {
+            state.serialize_field("advance_error", error)?;
+        }
+        state.serialize_field("waits", &super::graph_waits(&self.checkpoint))?;
+        state.end()
+    }
 }
 
 /// What the checkpoint already knows about an attempt.

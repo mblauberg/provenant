@@ -1354,6 +1354,21 @@ fn pending_ci_graph_status_is_a_snapshot() -> Result {
         result["structuredContent"]["advance_error"],
         "journal lock timed out"
     );
+    assert_eq!(
+        result["structuredContent"]["waits"],
+        status["data"]["waits"]
+    );
+    let ci_wait = status["data"]["waits"]
+        .as_array()
+        .ok_or("waits")?
+        .iter()
+        .find(|wait| wait["node"] == "ci")
+        .ok_or("CI wait")?;
+    assert_eq!(ci_wait["wait"], "ci");
+    let human = rig.command(&["fabric", "graph", "status", "pending-ci"])?;
+    assert_eq!(code(&human), 0);
+    let human = String::from_utf8(human.stdout.bytes)?;
+    assert!(human.contains("wait=ci disposition=running"), "{human}");
     assert_eq!(std::fs::read(&calls)?, observed_calls);
     assert_eq!(std::fs::read_to_string(marker)?, "journal lock timed out");
     cleanup.disarm();

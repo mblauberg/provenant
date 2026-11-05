@@ -7,6 +7,7 @@ pub(super) fn graph_human_full(run: &provenant_fabric_runtime::graph::GraphRun) 
 }
 
 fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool) -> String {
+    let waits = provenant_fabric_runtime::graph::graph_waits(&run.checkpoint);
     let members: std::collections::BTreeSet<_> = run
         .checkpoint
         .nodes
@@ -35,7 +36,12 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         if !full
             && (members.contains(&node.id) || node.round.is_some())
             && waiting_ci.is_none()
-            && node.state != provenant_fabric_runtime::graph::NodeState::Failed
+            && !matches!(
+                node.state,
+                provenant_fabric_runtime::graph::NodeState::Running
+                    | provenant_fabric_runtime::graph::NodeState::Blocked
+                    | provenant_fabric_runtime::graph::NodeState::Failed
+            )
         {
             continue;
         }
@@ -106,6 +112,14 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         }
         if let Some(head) = &node.source_commit {
             human.push_str(&format!(" source={head}"));
+        }
+        if let Some(wait) = waits.iter().find(|wait| wait.node == node.id) {
+            human.push_str(&format!(
+                " wait={} disposition={} code={} current_attempt={} route={} failures={} limit={} limit_source={} wake_at={} next={}",
+                wait.wait, wait.disposition, bounded_reason(&wait.code), bounded_reason(&wait.attempt),
+                wait.route, wait.failures, wait.limit, bounded_reason(&wait.limit_source),
+                bounded_reason(&wait.wake_at), bounded_reason(&wait.next)
+            ));
         }
         human.push('\n');
         if full && let Some(outputs) = &node.outputs {

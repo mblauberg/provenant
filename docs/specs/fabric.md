@@ -1191,7 +1191,13 @@ Human `graph status GRAPH --full` lists every saved checkpoint node in order,
 including composite and loop members, with its state and latest recorded route
 and attempt reference (or `none` when absent). It also shows node errors and
 pending CI details. Status reads the checkpoint without advancing the graph;
-JSON retains the complete checkpoint representation.
+JSON retains the complete checkpoint representation. JSON and MCP status also
+expose a read-only `waits` projection for running and blocked nodes and terminal
+quota stops. Human status shows the same recorded disposition, wait, attempt,
+route, retry count and policy, wake time, code and next action on the node row.
+Fields that the checkpoint does not retain are marked `unavailable`; a quota
+stop has no scheduled wake. Reading this view does not advance the graph or
+change its checkpoint.
 
 Settled nodes record version 2 outputs in the checkpoint, exposed by graph
 status JSON. A result's `digest` is `sha256:` followed by the lowercase
