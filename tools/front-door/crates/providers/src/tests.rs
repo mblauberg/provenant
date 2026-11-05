@@ -495,6 +495,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
             let output = provenant_os::fixture::git_command_at("/usr/bin/git")
                 .current_dir(cwd)
                 .env_clear()
+                .envs(provenant_os::fixture::fixture_git_settings())
                 .env(
                     "PATH",
                     "/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin",
@@ -503,12 +504,6 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .envs(std::env::var_os("DEVELOPER_DIR").map(|value| ("DEVELOPER_DIR", value)))
-                .args([
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.test",
-                ])
                 .args(args)
                 .output()
                 .unwrap();

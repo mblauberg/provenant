@@ -260,19 +260,7 @@ mod tests {
             let fixture = Path::new(&root).join("fixture");
             fs::create_dir(&fixture)?;
             run_git(&fixture, &["init", "-q"])?;
-            run_git(
-                &fixture,
-                &[
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.invalid",
-                    "commit",
-                    "--allow-empty",
-                    "-qm",
-                    "fixture",
-                ],
-            )?;
+            run_git(&fixture, &["commit", "--allow-empty", "-qm", "fixture"])?;
             assert!(fixture.join(".git/HEAD").is_file());
             fs::write(Path::new(&root).join("child-ran"), b"")?;
             return Ok(());
