@@ -1284,26 +1284,27 @@ fn review_resolves_identity_only_dispositions() -> Result {
     );
     let brief = rig.root.join("council-brief.txt");
     fs::write(&brief, "fixture council findings").map_err(|e| format!("brief: {e}"))?;
-    let started = rig
-        .command(&[
-            "run",
-            "--preset",
-            "review",
-            "--prompt-file",
-            brief.to_str().ok_or("brief")?,
-            "--set",
-            "parameters.review_shape=\"standard\"",
-            "--set",
-            &format!("parameters.subject.commit=\"{head}\""),
-            "--set",
-            &format!("parameters.base=\"{head}\""),
-            "--plan",
-            "off",
-            "--wait",
-            "1s",
-            "--json",
-        ])
-        .map_err(|e| format!("start: {e}"))?;
+    let subject = format!("parameters.subject.commit=\"{head}\"");
+    let base = format!("parameters.base=\"{head}\"");
+    let run = [
+        "run",
+        "--preset",
+        "review",
+        "--prompt-file",
+        brief.to_str().ok_or("brief")?,
+        "--set",
+        "parameters.review_shape=\"standard\"",
+        "--set",
+        &subject,
+        "--set",
+        &base,
+        "--plan",
+        "off",
+        "--wait",
+        "1s",
+        "--json",
+    ];
+    let started = rig.command(&run).map_err(|e| format!("start: {e}"))?;
     let started: Value = serde_json::from_slice(&started.stdout.bytes)?;
     let id = started["data"]["graph"]["checkpoint"]["graph_id"]
         .as_str()
@@ -1381,6 +1382,14 @@ fn review_resolves_identity_only_dispositions() -> Result {
             assert_eq!(
                 synthesis["outputs"]["findings"][0]["summary"], "fixture finding",
                 "{status}"
+            );
+            // The run reply reports the same empty range as graph status.
+            let reply = rig.command(&run).map_err(|e| format!("reply: {e}"))?;
+            let reply = String::from_utf8_lossy(&reply.stdout.bytes);
+            assert!(reply.contains("VERDICT: INCONCLUSIVE"), "{reply}");
+            assert!(
+                reply.contains(&format!("base {head}, head {head}")),
+                "{reply}"
             );
             break;
         }
