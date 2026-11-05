@@ -1433,10 +1433,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "sandbox socket paths exceed the platform SUN_LEN bound"]
     fn excess_unix_socket_connection_is_closed_and_slots_reopen() {
         use super::*;
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("p")
+            .tempdir_in(std::env::temp_dir())
+            .unwrap();
         let state = root.path().to_path_buf();
         let program = state.join("echo-peer");
         fs::write(&program, "#!/bin/sh\nexec cat\n").unwrap();
