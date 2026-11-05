@@ -437,6 +437,21 @@ mod tests {
                 .windows(b"branch refs/heads/linked\0".len())
                 .any(|field| field == b"branch refs/heads/linked\0")
         );
+        // A linked checkout may write its own config.worktree. It cannot make
+        // the common bare repository appear to be a primary checkout.
+        provenant_os::fixture::run_git(&bare, &["config", "extensions.worktreeConfig", "true"])?;
+        provenant_os::fixture::run_git(&linked, &["config", "--worktree", "core.bare", "false"])?;
+        git.invalidate_repositories();
+        let listing = git.worktrees(&linked)?;
+        assert!(
+            listing
+                .windows(b"bare\0".len())
+                .any(|field| field == b"bare\0")
+        );
+        assert_eq!(
+            base_commit(&git, &project, "origin", "main")?,
+            Some(expected.trim().to_owned())
+        );
         std::fs::rename(&project, temp.path().join("moved-project"))?;
         std::fs::create_dir(&project)?;
         assert!(git.repository_paths(&project).is_err());
