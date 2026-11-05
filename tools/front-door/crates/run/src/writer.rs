@@ -570,41 +570,9 @@ impl LaunchConfinement {
         )
         .map(Some)
     }
-    pub(crate) fn command(
-        &self,
-        argv: &[OsString],
-        environment: &[(OsString, OsString)],
-        attempt: &provenant_core::AttemptId,
-        cancel: &CancelToken,
-        attempt_dir: &Directory,
-    ) -> Result<Vec<OsString>> {
-        let executor =
-            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let config = provenant_confinement::run_config::RunConfig::read(&self.state_root)
-            .map_err(error("read launch resource limits", None))?;
-        let limits = ProfileLimits {
-            grant_limit: config.grant_limit,
-            profile_limit_bytes: config.profile_limit_bytes,
-        };
-        let backend = system_backend_with_limits(
-            &BackendContext {
-                executor: &executor,
-                cancel,
-                #[cfg(target_os = "macos")]
-                env: &[],
-            },
-            limits,
-        )
-        .map_err(RunError::Confinement)?;
+    /// Prepare the private Cargo caches while writer custody is held.
+    pub(crate) fn seed_cargo(&self, environment: &[(OsString, OsString)], attempt_dir: &Directory) {
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
-        // Run holds writer custody here: create the derived ref parents and the
-        // private lane cache before they are anchored.
-        if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
-            (writer, &self.plan.permissions().mode)
-        {
-            prepare_writer_directories(worktree, branch, authority, &self.home)
-                .map_err(RunError::Confinement)?;
-        }
         let outcome = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_registry(
                 self.cargo_registry_seed,
@@ -681,6 +649,40 @@ impl LaunchConfinement {
                 std::io::stderr().lock(),
                 "warning: could not record Cargo target setup: {error}"
             );
+        }
+    }
+    pub(crate) fn command(
+        &self,
+        argv: &[OsString],
+        attempt: &provenant_core::AttemptId,
+        cancel: &CancelToken,
+    ) -> Result<Vec<OsString>> {
+        let executor =
+            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
+        let config = provenant_confinement::run_config::RunConfig::read(&self.state_root)
+            .map_err(error("read launch resource limits", None))?;
+        let limits = ProfileLimits {
+            grant_limit: config.grant_limit,
+            profile_limit_bytes: config.profile_limit_bytes,
+        };
+        let backend = system_backend_with_limits(
+            &BackendContext {
+                executor: &executor,
+                cancel,
+                #[cfg(target_os = "macos")]
+                env: &[],
+            },
+            limits,
+        )
+        .map_err(RunError::Confinement)?;
+        let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
+        // Run holds writer custody here: create the derived ref parents and the
+        // private lane cache before they are anchored.
+        if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
+            (writer, &self.plan.permissions().mode)
+        {
+            prepare_writer_directories(worktree, branch, authority, &self.home)
+                .map_err(RunError::Confinement)?;
         }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()

@@ -176,6 +176,35 @@ impl RunStore {
                     });
                 }
             };
+            // Cache seeding can walk and sync a large registry. Release the
+            // repository lock during that work, then revalidate Git under a
+            // fresh lock before constructing the confined command and launch.
+            drop(_git_setup_lock.take());
+            confinement.seed_cargo(&plan.environment, &directory()?);
+            _git_setup_lock = match retry_setup_lock(
+                record.retry_of.is_some(),
+                |budget| {
+                    confinement.prepare_git(
+                        &writer_attempt,
+                        call.cancel,
+                        record.retry_of.map(|_| budget),
+                    )
+                },
+                || call.check(),
+            ) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    lease
+                        .withdraw_unlaunched()
+                        .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                    return Err(match error {
+                        RunError::SetupLockTimeout { seconds } => {
+                            HandOff::SetupLockTimeout(seconds)
+                        }
+                        error => local("Git setup", &error),
+                    });
+                }
+            };
             let writer_attempt = directory()?;
             if let Some(writer) = &confinement.writer
                 && let Err(error) = crate::objects::prepare_bound(
@@ -196,13 +225,7 @@ impl RunStore {
                     .map_err(|e| HandOff::Uncertain(e.to_string()))?;
                 return Err(local("lane Git objects", &error));
             }
-            match confinement.command(
-                &plan.argv,
-                &plan.environment,
-                &id,
-                call.cancel,
-                &directory()?,
-            ) {
+            match confinement.command(&plan.argv, &id, call.cancel) {
                 Ok(argv) => plan.argv = argv,
                 Err(error) => {
                     lease

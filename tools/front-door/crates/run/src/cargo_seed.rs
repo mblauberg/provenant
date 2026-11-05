@@ -363,19 +363,6 @@ fn seed_store_with(
     let Ok(_lock) = cargo_dir.try_lock(OsStr::new(&lock_name), LockMode::Exclusive) else {
         return Outcome::fallback("seed_lock_unavailable");
     };
-    let Ok(entries) = cargo_dir.entries() else {
-        return Outcome::fallback("staging_cleanup_failed");
-    };
-    for entry in entries {
-        let Ok(name) = entry else {
-            return Outcome::fallback("staging_cleanup_failed");
-        };
-        if name.to_string_lossy().starts_with(&stage_prefix)
-            && crate::artifacts::remove_entry_tree(&cargo_dir, &name).is_err()
-        {
-            return Outcome::fallback("staging_cleanup_failed");
-        }
-    }
     let destination = OsStr::new(store);
     match cargo_dir.metadata_at(destination, false) {
         Ok(_) => {
@@ -392,6 +379,19 @@ fn seed_store_with(
             } else {
                 "git_unavailable"
             });
+        }
+    }
+    let Ok(entries) = cargo_dir.entries() else {
+        return Outcome::fallback("staging_cleanup_failed");
+    };
+    for entry in entries {
+        let Ok(name) = entry else {
+            return Outcome::fallback("staging_cleanup_failed");
+        };
+        if name.to_string_lossy().starts_with(&stage_prefix)
+            && crate::artifacts::remove_entry_tree(&cargo_dir, &name).is_err()
+        {
+            return Outcome::fallback("staging_cleanup_failed");
         }
     }
     let mut stage = None;
@@ -789,6 +789,21 @@ mod tests {
             std::fs::read(tmp.path().join("cargo-home/registry/keep")).unwrap(),
             b"keep"
         );
+    }
+
+    #[test]
+    fn existing_registry_does_not_walk_stale_staging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cargo = tmp.path().join("cargo-home");
+        std::fs::create_dir_all(cargo.join("registry")).unwrap();
+        let stale = cargo.join(".registry-seed-stale");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("keep"), b"untouched").unwrap();
+        assert_eq!(
+            seed_with(tmp.path(), tmp.path(), |_, _| panic!("clone")),
+            Outcome::skipped("existing_registry")
+        );
+        assert_eq!(std::fs::read(stale.join("keep")).unwrap(), b"untouched");
     }
 
     #[test]
