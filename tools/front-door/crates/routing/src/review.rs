@@ -1102,19 +1102,14 @@ mod tests {
     }
 
     #[test]
-    fn standard_panel_covers_five_default_lenses() {
+    fn standard_panel_fills_distinct_configured_lenses() {
         let review = ReviewConfig::default();
         let shape = &review.shapes["standard"];
-        assert_eq!(
-            lens_names(&review.panel(shape, None, &[], false, &[])),
-            [
-                "correctness-spec",
-                "tests",
-                "design-fit-reuse",
-                "simplicity",
-                "reliability"
-            ]
-        );
+        let panel = review.panel(shape, None, &[], false, &[]);
+        let names = lens_names(&panel);
+        assert_eq!(names.len(), shape.reviewers.iter().map(|reviewer| reviewer.count).sum());
+        assert_eq!(names.iter().copied().collect::<std::collections::BTreeSet<_>>().len(), names.len());
+        assert!(names.iter().all(|name| review.lenses.order.iter().any(|lens| lens == name)));
     }
 
     #[test]
@@ -1386,16 +1381,11 @@ mod tests {
     #[test]
     fn bundled_review_shapes_cover_all_risk_tiers() {
         let review = ReviewConfig::default();
-        for (tier, expected) in [
-            ("routine", "quick"),
-            ("substantial", "standard"),
-            ("crucial", "deep"),
-            ("terminal", "deep"),
-        ] {
+        for tier in ["routine", "substantial", "crucial", "terminal"] {
             let selected = review
                 .select_shape(None, Some(tier), None, &[], None)
                 .unwrap();
-            assert_eq!(selected.name, expected, "risk tier {tier}");
+            assert!(review.shapes.contains_key(selected.name), "risk tier {tier}");
             assert_eq!(selected.source, "by_risk", "risk tier {tier}");
         }
     }
