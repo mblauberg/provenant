@@ -1159,7 +1159,7 @@ fn graph_quality_rows(
     let mut rows = Vec::new();
     for graph_id in graph_ids {
         let checkpoint =
-            match FileJournal::read_materialized_checkpoint(state_root, project, &graph_id) {
+            match FileJournal::read_materialised_checkpoint(state_root, project, &graph_id) {
                 Ok(Some(checkpoint)) => checkpoint,
                 Ok(None) => {
                     rows.push(json!({"graph_id": graph_id, "checkpoint": "missing"}));

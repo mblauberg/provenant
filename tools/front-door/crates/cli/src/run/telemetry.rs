@@ -512,7 +512,7 @@ pub(super) fn pipeline_report(
         if let Some(graph) = fact.context.as_ref().and_then(|c| c.graph_id.as_ref())
             && !checkpoints.contains_key(graph)
         {
-            let checkpoint = match FileJournal::read_materialized_checkpoint(
+            let checkpoint = match FileJournal::read_materialised_checkpoint(
                 &edge.roots.state,
                 project,
                 graph,

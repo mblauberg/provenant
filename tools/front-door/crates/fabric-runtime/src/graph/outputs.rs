@@ -509,7 +509,7 @@ pub(super) fn valid_compacted_findings(
 
 /// Expand a compacted synthesis projection using the same selected inputs as
 /// settlement. Legacy checkpoints have no block and use their stored list.
-pub(super) fn materialized_findings(
+pub(super) fn materialised_findings(
     index: usize,
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
@@ -540,9 +540,9 @@ pub(super) fn materialized_findings(
         .unwrap_or_default()
 }
 
-/// Materialize compacted findings in a read-only checkpoint projection.
+/// Materialise compacted findings in a read-only checkpoint projection.
 /// The stored checkpoint remains unchanged.
-pub(super) fn materialize_checkpoint_findings(
+pub(super) fn materialise_checkpoint_findings(
     document: &GraphDocument,
     checkpoint: &mut GraphCheckpoint,
 ) -> Result<(), String> {
@@ -578,7 +578,7 @@ pub(super) fn materialize_checkpoint_findings(
         return Err("checkpoint nodes do not match the plan".into());
     }
     for index in 0..checkpoint.nodes.len() {
-        let findings = materialized_findings(index, &plan, checkpoint, &positions);
+        let findings = materialised_findings(index, &plan, checkpoint, &positions);
         if let Some(outputs) = checkpoint.nodes[index].outputs.as_mut() {
             outputs.findings = findings;
         }
@@ -679,7 +679,7 @@ fn resolved_inputs_inner(
             cache.insert(index, resolved.clone());
             resolved
         };
-        for finding in &materialized_findings(index, plan, checkpoint, positions) {
+        for finding in &materialised_findings(index, plan, checkpoint, positions) {
             let default = (input.node.clone(), finding.id.clone());
             let root = finding
                 .extra
@@ -834,7 +834,7 @@ pub(super) fn truncated_finding_ids(
             }
         } else if progress.outputs.is_some() {
             found.extend(
-                materialized_findings(index, plan, checkpoint, positions)
+                materialised_findings(index, plan, checkpoint, positions)
                     .iter()
                     .enumerate()
                     .map(|(index, finding)| {
@@ -1107,7 +1107,7 @@ pub(super) fn upstream_results(
             return;
         };
         let inline_findings = (include_findings && outputs.result.is_none())
-            .then(|| materialized_findings(index, plan, checkpoint, positions))
+            .then(|| materialised_findings(index, plan, checkpoint, positions))
             .filter(|findings| !findings.is_empty());
         if outputs.result.is_none() && inline_findings.is_none() {
             return;

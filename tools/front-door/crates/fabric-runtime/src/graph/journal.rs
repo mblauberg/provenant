@@ -293,7 +293,7 @@ impl FileJournal {
     }
 
     /// Read a checkpoint with compacted findings expanded for reporting.
-    pub fn read_materialized_checkpoint(
+    pub fn read_materialised_checkpoint(
         root: &StateRoot,
         project: ProjectId,
         graph_id: &str,
@@ -309,7 +309,7 @@ impl FileJournal {
         let Some(mut stored) = load_checkpoint(&directory, graph_id)? else {
             return Ok(None);
         };
-        materialize_checkpoint_findings(&stored.execution.document, &mut stored.checkpoint)
+        materialise_checkpoint_findings(&stored.execution.document, &mut stored.checkpoint)
             .map_err(|_| JournalError::BadEnvelope)?;
         Ok(Some(stored.checkpoint))
     }

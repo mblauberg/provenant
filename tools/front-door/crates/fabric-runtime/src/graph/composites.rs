@@ -392,7 +392,7 @@ fn outputs(
                         inherited_notices.push(notice.to_owned());
                     }
                     let findings =
-                        materialized_findings(positions[&export.node], plan, checkpoint, positions);
+                        materialised_findings(positions[&export.node], plan, checkpoint, positions);
                     if !findings.is_empty() {
                         finding_members.push((
                             export.node.clone(),

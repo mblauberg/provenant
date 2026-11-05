@@ -1848,11 +1848,11 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
     let (plan, positions) =
         validate_flat_plan(&expanded, &crate::config::GraphLimits::default()).unwrap();
     let reconstructed =
-        materialized_findings(positions["synthesis"], &plan, &run.checkpoint, &positions);
+        materialised_findings(positions["synthesis"], &plan, &run.checkpoint, &positions);
     let bound = graph_envelope_bound(&document, &[], &[], &plan);
     assert!(canonical_len(&run.checkpoint) <= bound);
     let mut reporting = run.checkpoint.clone();
-    materialize_checkpoint_findings(&document, &mut reporting).unwrap();
+    materialise_checkpoint_findings(&document, &mut reporting).unwrap();
     assert_eq!(
         reporting.nodes[positions["synthesis"]]
             .outputs
@@ -1992,7 +1992,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     let expanded = loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
     let (plan, positions) =
         validate_flat_plan(&expanded, &crate::config::GraphLimits::default()).unwrap();
-    let reconstructed = materialized_findings(
+    let reconstructed = materialised_findings(
         positions["outer--synthesis"],
         &plan,
         &run.checkpoint,
