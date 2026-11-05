@@ -1150,7 +1150,7 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
     if !graph_fixture_available().map_err(|e| format!("sandbox: {e}"))? {
         return Ok(());
     }
-    let rig = policy_codex_fixture().map_err(|e| format!("fixture: {e}"))?;
+    let mut rig = policy_codex_fixture().map_err(|e| format!("fixture: {e}"))?;
     let cleanup = rig.process_cleanup();
     writeln!(
         OpenOptions::new()
@@ -1181,8 +1181,21 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
     let head = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
     assert_eq!(code(&head), 0);
     let head = String::from_utf8(head.stdout.bytes)?.trim().to_owned();
-    let detached = rig.execute(&git, &["checkout", "--quiet", "--detach", &head], None)?;
+    let worktree = rig.root.join("detached-worktree");
+    let detached = rig.execute(
+        &git,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            worktree.to_str().ok_or("worktree")?,
+            &head,
+        ],
+        None,
+    )?;
     assert_eq!(code(&detached), 0);
+    rig.project = worktree;
     assert_ne!(
         code(&rig.execute(&git, &["symbolic-ref", "--quiet", "HEAD"], None)?),
         0
@@ -1200,6 +1213,8 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
             "parameters.review_shape=\"quick\"",
             "--set",
             &format!("parameters.subject.commit=\"{head}\""),
+            "--set",
+            &format!("parameters.base=\"{head}\""),
             "--plan",
             "off",
             "--wait",
@@ -1231,6 +1246,20 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
                 .ok_or("lens")?;
             assert_eq!(lens["state"], "succeeded", "{status}");
             assert_eq!(lens["source_commit"], head, "{status}");
+            assert_eq!(
+                lens["outputs"]["verdict"], "VERDICT: INCONCLUSIVE",
+                "{status}"
+            );
+            assert!(
+                lens["outputs"]["warnings"]
+                    .as_array()
+                    .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                        .as_str()
+                        .is_some_and(
+                            |warning| warning.contains(&format!("base {head}, head {head}"))
+                        ))),
+                "{status}"
+            );
             assert!(lens["outputs"]["branch"].is_null(), "{status}");
             assert!(
                 lens["attempts"]
@@ -1243,7 +1272,20 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
                 .find(|node| node["id"] == "synthesis")
                 .ok_or("synthesis")?;
             assert_eq!(synthesis["state"], "succeeded", "{status}");
-            assert_eq!(synthesis["outputs"]["verdict"], "VERDICT: PASS", "{status}");
+            assert_eq!(
+                synthesis["outputs"]["verdict"], "VERDICT: INCONCLUSIVE",
+                "{status}"
+            );
+            assert!(
+                synthesis["outputs"]["warnings"]
+                    .as_array()
+                    .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                        .as_str()
+                        .is_some_and(
+                            |warning| warning.contains(&format!("base {head}, head {head}"))
+                        ))),
+                "{status}"
+            );
             assert_eq!(
                 synthesis["outputs"]["findings"][0]["summary"], "fixture finding",
                 "{status}"
