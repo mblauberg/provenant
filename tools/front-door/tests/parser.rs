@@ -111,6 +111,15 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
             .as_str()
             .is_some_and(|id| id.starts_with("cli-"))
     );
+    let first_id = value["data"]["lanes"][0]["attempt_id"]
+        .as_str()
+        .ok_or("attempt")?;
+    assert!(
+        value["data"]["result_tails"][first_id]["bytes"]["data"]
+            .as_str()
+            .is_some(),
+        "{value}"
+    );
     attempts.push(
         value["data"]["lanes"][0]["attempt_id"]
             .as_str()
@@ -160,7 +169,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert_eq!(lanes.len(), 20);
     assert_eq!(lanes[0]["attempt_id"], attempts[20]);
     assert_eq!(lanes[19]["attempt_id"], attempts[1]);
-    assert!(lanes[0]["state"].is_object(), "full record: {value}");
+    assert_eq!(lanes[0]["state"], "rejected", "{value}");
     assert_eq!(
         value["data"]["review_exempt"],
         serde_json::json!([
@@ -203,7 +212,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     let page: serde_json::Value = serde_json::from_slice(&page.stdout.bytes)?;
     assert_eq!(page["data"]["lanes"].as_array().ok_or("page")?.len(), 1);
     let cursor = page["data"]["next_cursor"]
-        .as_u64()
+        .as_str()
         .ok_or("next cursor")?
         .to_string();
     let next = rig.command(&[
@@ -715,7 +724,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
     let lane = &value["data"]["lanes"][0];
     assert_eq!(lane["state"], "rejected");
-    assert_eq!(lane["account"], "unknown");
+    assert!(lane["account"].is_null(), "{lane}");
     let manifest = rig.root.join("accounts.json");
     std::fs::write(&manifest, br#"{"schema_version":1,"tasks":[{"prompt":"fixture","route":{"kind":"model","provider":"codex","model":"gpt-6-luna"},"account":"fixture-account"}]}"#)?;
     let placed = rig.command(&[

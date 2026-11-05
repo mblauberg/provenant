@@ -611,11 +611,6 @@ fn output_read_part(
         )
     {
         data["provider_error"] = json!(provider_error_line(session, id, call));
-        data["result_path"] = json!(record.result.as_ref().map(|_| {
-            artifact(session.context.state_root.as_path(), &record, "result.md")
-                .display()
-                .to_string()
-        }));
     }
     if let Some(selected) = selected {
         data["selected"] = selected;

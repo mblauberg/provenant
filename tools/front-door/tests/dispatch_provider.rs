@@ -4198,6 +4198,11 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
         data["data"]["provider_error"],
         "provider 500: upstream failed"
     );
+    let schema = provenant_records::wire::data_schema("output").ok_or("output schema")?;
+    provenant_records::wire::schema::validate(&schema, &data["data"])?;
+    let result_path: provenant_records::StructuredPathWire =
+        serde_json::from_value(data["data"]["result_path"].clone())?;
+    assert!(result_path.to_path_buf()?.ends_with("result.md"));
     // A launched attempt has a custody lock, which the wait path inspects.
     fs::write(
         rig.state
@@ -4230,9 +4235,12 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     let data: Value = serde_json::from_slice(&path.stdout.bytes)?;
     assert_eq!(code(&path), 0, "{data}");
     assert!(
-        data["data"]["path"]
-            .as_str()
-            .is_some_and(|path| path.ends_with("stderr.log")),
+        serde_json::from_value::<provenant_records::StructuredPathWire>(
+            data["data"]["path"].clone()
+        )
+        .ok()
+        .and_then(|path| path.to_path_buf().ok())
+        .is_some_and(|path| path.ends_with("stderr.log")),
         "{data}"
     );
     let saved = rig.root.join("saved.txt");
