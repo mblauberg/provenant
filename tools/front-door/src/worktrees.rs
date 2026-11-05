@@ -484,7 +484,16 @@ fn gc_data_summary(data: &GcData) -> String {
     let outputs: usize = data
         .worktree_cleanup
         .iter()
-        .map(|p| p.output.len() + p.idle_output.len())
+        .map(|p| {
+            p.output
+                .iter()
+                .chain(&p.idle_output)
+                .filter(|entry| {
+                    entry.reason != "no eligible ignored output"
+                        && entry.reason != "no regenerable directories configured"
+                })
+                .count()
+        })
         .sum();
     human.push_str(&format!("{trees} merged worktree(s), {outputs} output directory(s), {} attempt tmp directory(s), {} capture(s)\n",
         data.provider_state.attempt_tmp.len(), data.provider_state.attempt_logs.len()));
@@ -590,7 +599,7 @@ fn gc_data_summary(data: &GcData) -> String {
             .filter(|entry| entry.reason == "would_remove")
         {
             human.push_str(&format!(
-                "would reclaim idle output {}\n",
+                "would reclaim idle output {} (idle output and custody checks passed)\n",
                 output.path.display()
             ));
         }
@@ -1579,7 +1588,9 @@ mod gc_preview_tests {
             reason: "would_remove".into(),
         });
         data.worktree_cleanup.push(project);
-        assert!(gc_data_summary(&data).contains("would reclaim idle output /checkout/target"));
+        let summary = gc_data_summary(&data);
+        assert!(summary.contains("would reclaim idle output /checkout/target"));
+        assert!(summary.contains("idle output and custody checks passed"));
         let json = serde_json::to_value(&data).unwrap();
         assert_eq!(
             json["worktree_cleanup"][0]["idle_output"][0]["reason"],

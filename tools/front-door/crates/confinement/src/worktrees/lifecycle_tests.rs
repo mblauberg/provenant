@@ -398,7 +398,16 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
 #[allow(clippy::disallowed_methods)] // Compare fixture mtimes to the filesystem clock.
 fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Error>> {
     for scenario in [
-        "preview", "idle", "aged", "unowned", "recent", "index", "live", "unknown",
+        "preview",
+        "idle",
+        "aged",
+        "unowned",
+        "recent",
+        "index",
+        "live",
+        "unknown",
+        "no-output",
+        "unconfigured",
     ] {
         let fixture = Fixture::new()?;
         fs::write(fixture.root.join(".gitignore"), "target/\n")?;
@@ -417,6 +426,9 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         fs::create_dir(path.join("target"))?;
         fs::write(path.join("target/artifact"), "output")?;
         fs::write(path.join("untracked"), "source")?;
+        if scenario == "no-output" {
+            fs::remove_dir_all(path.join("target"))?;
+        }
         if matches!(scenario, "index" | "aged") {
             let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
             let tree = verify_worktree(context.repo, &path)?;
@@ -453,6 +465,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         if scenario == "unknown" {
             context.workers = &unknown;
         }
+        let regenerable = ["target".into()];
         let report = collect(
             &context,
             &[lane],
@@ -460,7 +473,11 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                 upstream: None,
                 terminal: &|_| false,
                 no_live_lanes: &|_| true,
-                regenerable: &["target".into()],
+                regenerable: if scenario == "unconfigured" {
+                    &[]
+                } else {
+                    &regenerable
+                },
                 keep: &[],
                 written_before_ns: match scenario {
                     "recent" => 0,
@@ -470,7 +487,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                     .as_nanos() as i128,
                     _ => i128::MAX,
                 },
-                dry_run: scenario == "preview",
+                dry_run: matches!(scenario, "preview" | "no-output" | "unconfigured"),
                 foreign_merged_clean: false,
             },
             &cancel(),
@@ -479,9 +496,19 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         assert_eq!(fs::read_to_string(path.join("untracked"))?, "source");
         assert_eq!(
             path.join("target/artifact").exists(),
-            !matches!(scenario, "idle" | "aged" | "unowned"),
+            !matches!(scenario, "idle" | "aged" | "unowned" | "no-output"),
             "{scenario}"
         );
+        if scenario == "unconfigured" {
+            assert!(report.idle_output.iter().any(|entry| {
+                entry.path == path && entry.reason == "no regenerable directories configured"
+            }));
+        }
+        if scenario == "no-output" {
+            assert!(report.idle_output.iter().any(|entry| {
+                entry.path == path && entry.reason == "no eligible ignored output"
+            }));
+        }
         if scenario == "preview" {
             assert!(
                 report.idle_output.iter().any(

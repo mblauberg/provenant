@@ -281,7 +281,7 @@ pub enum FacadeError {
         "writer base is not reachable from the peer's remotes after a fetch; push it, or check the peer's Git access"
     )]
     BaseUnreachable,
-    #[error("writer branch already exists on the peer; choose another --branch")]
+    #[error("writer branch already exists on the peer and was kept; choose another --branch")]
     BranchExists,
     #[error("artifact exceeds max_bytes; page it with an output read")]
     OutputTooLarge,

@@ -20,6 +20,8 @@ pub(super) fn prepare_command(
     provider: &str,
     name: &str,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    #[cfg(feature = "fixture")]
+    hold_command_preparation_for_fixture();
     if !AdapterSpec::get(provider)
         .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)
     {
@@ -292,6 +294,25 @@ pub(super) fn prepare_command(
             state_root: roots.state.as_path().to_owned(),
         }),
     })
+}
+
+#[cfg(feature = "fixture")]
+#[allow(clippy::disallowed_methods)]
+fn hold_command_preparation_for_fixture() {
+    let Some(path) = std::env::var_os("PROVENANT_FIXTURE_HOLD_COMMAND_PREPARATION") else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    if std::fs::write(path.join("entered"), b"entered").is_err() {
+        return;
+    }
+    let _ = provenant_test_support::wait_for(
+        "command preparation release",
+        std::time::Duration::from_secs(30),
+        || !path.join("hold").exists(),
+        |released| *released,
+    );
+    let _ = std::fs::write(path.join("released"), b"released");
 }
 
 pub(super) fn nested_policy_fallback(

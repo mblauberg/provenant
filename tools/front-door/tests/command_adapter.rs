@@ -289,6 +289,62 @@ fn review_preset_launches_read_only_from_detached_head() -> Result {
     Ok(())
 }
 
+#[test]
+fn local_wait_returns_while_command_preparation_is_held() -> Result {
+    let mut rig = rig(json!({"probe":{"argv":["/bin/true"]}}))?;
+    let _cleanup = rig.process_cleanup();
+    let gate = rig.root.join("prepare-gate");
+    fs::create_dir(&gate)?;
+    fs::write(gate.join("hold"), b"hold")?;
+    rig.env.push((
+        "PROVENANT_FIXTURE_HOLD_COMMAND_PREPARATION".into(),
+        gate.clone().into_os_string(),
+    ));
+    let prompt = rig.root.join("prompt");
+    fs::write(&prompt, "fixture")?;
+    let start = std::time::Instant::now();
+    let output = rig.command(&[
+        "run",
+        "--mode",
+        "read-only",
+        "--route",
+        "command/probe",
+        "--operation-id",
+        "held-command",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait",
+        "1s",
+        "--json",
+    ])?;
+    let elapsed = start.elapsed();
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let entered = provenant_test_support::wait_for(
+        "command preparation entered",
+        Duration::from_secs(20),
+        || gate.join("entered").exists(),
+        |ready| *ready,
+    );
+    fs::remove_file(gate.join("hold"))?;
+    entered.map_err(|error| format!("{error}: {result}"))?;
+    assert!(elapsed < Duration::from_secs(15), "{elapsed:?}: {result}");
+    assert!(result["error"].is_null(), "{result}");
+    assert!(
+        result["data"]["lanes"][0]["waiting_for"]
+            .as_str()
+            .is_some_and(|phase| phase.contains("launch")),
+        "{result}"
+    );
+    assert_eq!(result["data"]["operation_id"], "held-command", "{result}");
+    provenant_test_support::wait_for(
+        "preparation resumed after caller exit",
+        Duration::from_secs(20),
+        || gate.join("released").exists(),
+        |ready| *ready,
+    )?;
+    Ok(())
+}
+
 /// How a test names the command lane: a manifest task or `--route command/NAME`.
 #[derive(Clone, Copy)]
 enum Via {

@@ -206,8 +206,8 @@ impl HarnessTarget {
         let instruction = match harness {
             Harness::Claude => Some("CLAUDE.md"),
             Harness::Codex | Harness::Opencode => Some("AGENTS.md"),
-            Harness::Cursor | Harness::Command | Harness::HostNative => None,
             Harness::Agy => Some("GEMINI.md"),
+            _ => None,
         };
         Self {
             harness,
@@ -235,7 +235,7 @@ impl Targets {
                     Harness::Cursor => ".cursor",
                     Harness::Agy => ".gemini",
                     Harness::Opencode => ".config/opencode",
-                    Harness::Command | Harness::HostNative => "",
+                    _ => "",
                 };
                 HarnessTarget::at(*h, home, &home.join(base))
             })

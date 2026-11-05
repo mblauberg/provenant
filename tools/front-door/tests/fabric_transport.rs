@@ -4761,6 +4761,58 @@ fn peer_writer_reports_delivery_prepare_failure() -> Result {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Exercise the real wait deadline.
+fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
+    let mut rig = TestRig::new()?;
+    let _peer = loopback_peer(&mut rig)?;
+    std::fs::write(
+        rig.root.join("ssh"),
+        "#!/bin/sh\nexec /usr/bin/tail -f /dev/null\n",
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "fixture")?;
+    let start = std::time::Instant::now();
+    let (status, result) = json_command(
+        &rig,
+        &[
+            "dispatch",
+            "--host",
+            "workshop",
+            "--mode",
+            "read-only",
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            "held-submit",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "1s",
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0, "{result}");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(6),
+        "{result}"
+    );
+    assert_eq!(result["error"]["code"], "LAUNCH_UNKNOWN", "{result}");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .is_some_and(|s| s.contains("launch preparation")),
+        "{result}"
+    );
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .is_some_and(|s| s.contains("held-submit")),
+        "{result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
@@ -4821,6 +4873,28 @@ fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
             ],
         )
     };
+    // A disk-floor refusal happens after the peer creates the worktree but
+    // before the run starts. A new operation can reuse the same branch.
+    let peer_config = rig.root.join("peer-state/config.toml");
+    let config = std::fs::read_to_string(&peer_config)?;
+    std::fs::write(
+        &peer_config,
+        config.replace("free_floor='1B'", "free_floor='18446744073709551615B'"),
+    )?;
+    let (status, refused) = dispatch("peer-floor-refused", "floor-retry", "origin/main")?;
+    assert_ne!(status, 0, "{refused}");
+    assert_eq!(refused["error"]["code"], "REFUSED", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("insufficient disk space")),
+        "{refused}"
+    );
+    std::fs::write(&peer_config, &config)?;
+    let (status, retry) = dispatch("peer-floor-retry", "floor-retry", "origin/main")?;
+    assert_eq!(status, 0, "{retry}");
+    assert_eq!(retry["data"]["worktree"]["branch"], "floor-retry");
+
     let (status, placed) = dispatch("peer-writer", "peer/writer", "origin/main")?;
     assert_eq!(
         status,
@@ -4869,9 +4943,12 @@ fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
     assert_ne!(adopted["data"]["run_id"], run.as_str());
     assert_eq!(adopted["data"]["worktree"], *worktree);
     git(&rig, path, &["commit", "-q", "--allow-empty", "-m", "work"])?;
+    let committed = git(&rig, path, &["rev-parse", "HEAD"])?;
     let (status, taken) = dispatch("peer-writer-again", "peer/writer", "origin/main")?;
     assert_ne!(status, 0);
     assert_eq!(taken["error"]["code"], "BRANCH_EXISTS", "{taken}");
+    assert!(taken.to_string().contains("was kept"), "{taken}");
+    assert_eq!(git(&rig, path, &["rev-parse", "HEAD"])?, committed);
     let (status, unreachable) = dispatch("peer-writer-local", "peer/local", &unpushed)?;
     assert_ne!(status, 0);
     assert_eq!(

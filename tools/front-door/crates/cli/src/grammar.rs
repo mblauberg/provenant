@@ -1419,6 +1419,13 @@ pub enum GitHook {
 }
 #[derive(Debug, Subcommand)]
 pub enum Internal {
+    /// Resume preparation of an admitted local run in a separate process.
+    Launch {
+        run: RunId,
+        /// Seconds to wait when every candidate provider is updating.
+        #[arg(long)]
+        provider_lease_wait: Option<u64>,
+    },
     Settle {
         /// Private durable-settlement resume request from the host.
         request: String,
