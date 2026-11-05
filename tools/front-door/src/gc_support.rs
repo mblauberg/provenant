@@ -170,7 +170,6 @@ fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<
 /// stale origin/HEAD. Only this branch's remote-tracking ref is updated.
 pub(crate) fn fetch_default(
     context: &WorktreeContext<'_>,
-    facts: &provenant_confinement::worktrees::RepoFacts,
     cancel: &CancelToken,
 ) -> Result<Option<(String, GitOid)>, Error> {
     let run = |args: &[&str], timeout: Duration| {
@@ -225,7 +224,7 @@ pub(crate) fn fetch_default(
     }
     let name = provenant_confinement::repo::GitRefName::remote_tracking(format!("origin/{branch}"))
         .map_err(|_| Error::GcObservation("invalid fetched upstream ref"))?;
-    let oid = facts.resolve_commit(context, name, cancel)?;
+    let oid = context.facts.resolve_commit(context, name, cancel)?;
     Ok(Some((reference, oid)))
 }
 
@@ -646,14 +645,13 @@ mod tests {
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
-        let facts = provenant_confinement::worktrees::RepoFacts::default();
         let result = provenant_confinement::worktrees::with_context(
             &roots,
             &home,
             &repo,
             &clock,
             &cancel,
-            |context| Ok(fetch_default(context, &facts, &cancel)),
+            |context| Ok(fetch_default(context, &cancel)),
         )??
         .ok_or("missing upstream")?;
         assert_eq!(result.0, "refs/remotes/origin/main");

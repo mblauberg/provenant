@@ -231,6 +231,10 @@ fn execute(
         MUTATION_TIMEOUT,
         workers,
         |context, cancel| {
+            let context = &WorktreeContext {
+                facts: &facts,
+                ..*context
+            };
             Ok(match command {
                 Worktree::SeedBuild => unreachable!(),
                 Worktree::Create { branch, base } => Data::Created(worktrees::create(
@@ -244,7 +248,7 @@ fn execute(
                     let upstream = if args.discard {
                         None
                     } else {
-                        match crate::gc_support::fetch_default(context, &facts, cancel) {
+                        match crate::gc_support::fetch_default(context, cancel) {
                             Ok(upstream) => upstream,
                             Err(error) => {
                                 warn_fetch(&error);
@@ -1094,7 +1098,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 let (upstream, upstream_error) = if command.pressure {
                     (None, None)
                 } else {
-                    match crate::gc_support::fetch_default(context, &facts, cancel) {
+                    match crate::gc_support::fetch_default(context, cancel) {
                         Ok(upstream) => (upstream, None),
                         Err(error) => (None, Some(error.to_string())),
                     }
