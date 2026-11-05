@@ -526,6 +526,7 @@ impl GraphJournal for FileJournal {
         if bytes.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
             return Err(JournalError::TooLarge);
         }
+        decode_checkpoint(bytes.as_bytes(), &self.graph_id)?;
         self.directory
             .atomic_write(
                 &self.checkpoint_name(),

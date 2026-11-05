@@ -417,6 +417,16 @@ fn retired_checkpoint_cleanup_is_verified_and_failure_keeps_record() {
     )
     .unwrap()
     .to_string();
+    {
+        let mut journal =
+            FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+        journal.bind(stored.execution.clone()).unwrap();
+        assert!(matches!(
+            journal.save(&stored.checkpoint),
+            Err(JournalError::RetiredLoopCheckpoint)
+        ));
+        assert!(!path.exists());
+    }
     std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
     let failed = FileJournal::retire_unreadable(
         &root,
