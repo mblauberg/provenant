@@ -1394,6 +1394,13 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         return Ok(());
     }
     let mut rig = TestRig::new()?;
+    // A pinned reader refuses an asset grant over its source, and the rig's
+    // product root defaults to the project.
+    let assets = rig.root.join("product");
+    fs::create_dir_all(&assets)?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
+    rig.env
+        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
     let cleanup = rig.process_cleanup();
     for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
         fs::create_dir_all(rig.home.join(path))?;

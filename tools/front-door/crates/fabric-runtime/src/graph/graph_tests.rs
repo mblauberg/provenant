@@ -11275,6 +11275,7 @@ fn equal_review_range_warns_on_review_nodes() {
         extra: Default::default(),
         node: "synthesis".into(),
         outputs: vec![OutputKind::Verdict],
+        required_outputs: Vec::new(),
     }];
     let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
     let mut owner = FakeOwner {

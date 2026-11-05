@@ -1374,9 +1374,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
 
     fn land(
         &mut self,
-        _: provenant_fabric_runtime::graph::LandRequest<'_>,
+        request: provenant_fabric_runtime::graph::LandRequest<'_>,
     ) -> Result<provenant_fabric_runtime::graph::LandObservation, Self::Error> {
         if self.allow_land {
+            if request.pull_request.is_none() {
+                return Ok(
+                    provenant_fabric_runtime::graph::LandObservation::Identified {
+                        pull_request: 1,
+                    },
+                );
+            }
             self.lands += 1;
             Ok(provenant_fabric_runtime::graph::LandObservation::Merged {
                 pull_request: Some(1),
