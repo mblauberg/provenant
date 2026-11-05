@@ -21,7 +21,8 @@ council.
   states the types make impossible, or scope growth.
 - If you cannot read required context, say `inconclusive` and name the path and
   the coverage gap. "No findings" is a valid result when coverage is complete.
-- End with a fenced `findings` block before one exact `VERDICT: PASS` or
-  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`
+- End with a fenced `findings` block before the final non-empty line:
+  `VERDICT: PASS`, `VERDICT: FAIL` or `VERDICT: INCONCLUSIVE`. A closed
+  handoff fence may follow. The block uses schema version 1 and a JSON `findings`
   array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,
   `line`, `summary` and `status`; use an empty array when there are no findings.

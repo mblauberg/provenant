@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: "Use for independent read-only review of PRs, diffs, commits and refactors against the spec, through review-council or provenant review. Not for root cause (diagnose), fixes (implement) or rendered UI (ui-ux-design)."
+description: "Use for independent read-only review of PRs, diffs, commits and refactors against the spec, through review or provenant review. Not for root cause (diagnose), fixes (implement) or rendered UI (ui-ux-design)."
 ---
 
 # Code review
@@ -15,22 +15,23 @@ Conventions and the review ladder come from the repo's own `AGENTS.md`,
 ## How it runs
 
 ```sh
-provenant run --preset review-council --prompt-file BRIEF.md \
+provenant run --preset review --prompt-file BRIEF.md \
   --set 'parameters.subject.commit="SHA"' --set 'parameters.base="origin/main"' \
   --set 'parameters.spec="#N"' --set 'parameters.risk_tags=["security"]' --plan on --explain
 ```
 
 Lens coverage comes first: cover every question the change needs, and record
 family separation as a bonus when available. The default is a planner-led panel
-under the HARNESS review floors. The chair checks its recorded plan and supplies missing reviewers or lenses; today's
-planner can only narrow the runtime-selected catalogue. The base lenses are
+under the HARNESS review floors. Configured path floors raise the shape and add
+required lenses when a plan omits them; the chair checks the recorded plan for
+additional coverage the change needs. The base lenses are
 `correctness-spec`,
 `design-fit-reuse`, `simplicity`, `conventions-readability`, `tests`,
 `refactor-cleanup`, `reliability`, and `flexibility`; risk tags add
 `security-privacy`, `concurrency-data-errors` and `adversarial`. Integration
 heads get the full panel; the runtime may select `conventions-readability` alone
-for docs, so add the policy-required coverage. A verifier tries to falsify
-each finding and a senior synthesis gives each a disposition. For a quick fan-out without a graph:
+for docs, so add the policy-required coverage. Standard and deep include a
+verifier and synthesis; quick reduces the lens verdicts. To choose a shape directly, run
 `provenant review TARGET --brief-file B --shape quick|standard|deep`.
 `deliver` already runs this council on the newest head.
 

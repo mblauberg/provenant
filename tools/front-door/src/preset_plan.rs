@@ -192,7 +192,12 @@ pub fn write_crates(brief: &str, ctx: &PlanContext, parameters: &Value) -> usize
     found.len()
 }
 
-fn explicit(origins: &BTreeMap<String, String>, parameter: &str) -> bool {
+fn explicit(
+    layers: &Layers,
+    name: &str,
+    origins: &BTreeMap<String, String>,
+    parameter: &str,
+) -> bool {
     let path = format!("parameters.{parameter}");
     origins
         .get(&path)
@@ -202,12 +207,18 @@ fn explicit(origins: &BTreeMap<String, String>, parameter: &str) -> bool {
                 .find(|(origin, _)| origin.starts_with(&format!("{path}.")))
                 .map(|(_, origin)| origin)
         })
-        .is_some_and(|origin| origin != "bundled")
+        .is_some_and(|origin| !layers.is_initial_origin(name, parameter, origin))
 }
 
 /// The `auto` rule. Explicit shape wins; then any large or underspecified
 /// signal turns planning on; otherwise the work is small and specified.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "planner selection needs the preset's layered inputs"
+)]
 fn auto_rule(
+    layers: &Layers,
+    name: &str,
     ctx: &PlanContext,
     catalogue: &Value,
     origins: &BTreeMap<String, String>,
@@ -222,7 +233,10 @@ fn auto_rule(
         .flatten()
         .filter_map(Value::as_str)
         .collect();
-    if let Some(parameter) = shaped.iter().find(|name| explicit(origins, name)) {
+    if let Some(parameter) = shaped
+        .iter()
+        .find(|parameter| explicit(layers, name, origins, parameter))
+    {
         return (false, format!("{parameter} given explicitly"));
     }
     // A review panel is scaled by the subject's size: only a large one plans,
@@ -317,7 +331,16 @@ pub fn decide(
             } else {
                 None
             };
-            auto_rule(ctx, catalogue, origins, brief, &parameters, size.as_deref())
+            auto_rule(
+                layers,
+                name,
+                ctx,
+                catalogue,
+                origins,
+                brief,
+                &parameters,
+                size.as_deref(),
+            )
         }
     };
     let mut decision = Decision {
@@ -386,7 +409,7 @@ pub fn decide(
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .filter(|parameter| explicit(origins, parameter))
+            .filter(|parameter| explicit(layers, name, origins, parameter))
             .collect();
         if !given.is_empty() {
             decision.warnings.push(format!(
@@ -417,7 +440,7 @@ pub fn apply(
         .to_owned();
     // Unless the chair listed worktrees, the project's own linked ones are the
     // set a planner may assign.
-    if !explicit(origins, "worktrees")
+    if !explicit(layers, name, origins, "worktrees")
         && !ctx.worktrees.is_empty()
         && let Some(slot) = config.pointer_mut("/parameters/worktrees")
     {
@@ -492,6 +515,29 @@ pub fn apply(
         .get("read_roots")
         .filter(|roots| roots.as_array().is_some_and(|roots| !roots.is_empty()))
         .cloned();
+    let (floor_lenses, floor_classes, floor_min_reviewers) = if catalogue
+        .get("patterns")
+        .and_then(Value::as_array)
+        .is_some_and(|patterns| {
+            patterns
+                .iter()
+                .any(|p| p.get("for_each").and_then(Value::as_str) == Some("lenses"))
+        }) {
+        with_builder(layers, name, config, origins, brief, |builder| {
+            Ok(builder
+                .shape_hint(false)?
+                .map(|hint| {
+                    (
+                        hint.required_floor_lenses,
+                        hint.floor_classes,
+                        hint.floor_min_reviewers,
+                    )
+                })
+                .unwrap_or_default())
+        })?
+    } else {
+        (Vec::new(), Vec::new(), 0)
+    };
     let stages = config
         .get_mut("stages")
         .and_then(Value::as_array_mut)
@@ -504,6 +550,13 @@ pub fn apply(
             format!("preset {name}: plan.replaces names no top-level stage: {replaces}")
         })?;
     let mut fallback_stage = stages[position].clone();
+    let reduced = fallback_stage
+        .get("reduce_verdict")
+        .and_then(Value::as_bool)
+        == Some(true);
+    if reduced {
+        fallback_stage["outputs"] = json!(["result", "findings", "verdict", "commit"]);
+    }
     // Planned workers and their deterministic fallback require all members.
     if (fallback_stage.get("count").is_some() || fallback_stage.get("for_each").is_some())
         && let Some(stage) = fallback_stage.as_object_mut()
@@ -523,19 +576,27 @@ pub fn apply(
     if let Some(roots) = extra_roots {
         planner["read_roots"] = roots;
     }
-    stages[position] = planner;
+    if reduced {
+        planner["source"] = json!("${subject}");
+        stages[position] = json!({"id":replaces, "parallel":[planner], "reduce_verdict":true,
+            "min_successful":fallback_stage.get("min_successful").cloned().unwrap_or(json!(1)),
+            "exports":[{"node":"plan","outputs":["result","findings","verdict","commit"]}]});
+    } else {
+        stages[position] = planner;
+    }
     // Explicit references to the replaced stage must follow its planner too.
     for stage in stages.iter_mut().skip(position + 1) {
         if let Some(deps) = stage.get_mut("depends_on").and_then(Value::as_array_mut) {
             for dep in deps {
-                if dep.as_str() == Some(replaces.as_str()) {
+                if !reduced && dep.as_str() == Some(replaces.as_str()) {
                     *dep = json!("plan");
                 }
             }
         }
         if let Some(inputs) = stage.get_mut("inputs").and_then(Value::as_array_mut) {
             for input in inputs {
-                if input.get("node").and_then(Value::as_str) == Some(replaces.as_str()) {
+                if !reduced && input.get("node").and_then(Value::as_str) == Some(replaces.as_str())
+                {
                     input["node"] = json!("plan");
                 }
             }
@@ -608,14 +669,37 @@ pub fn apply(
         .iter()
         .map(|pattern| lower_pattern(layers, config.get("roles"), &plan_values, brief, pattern))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(json!({
+    let required_patterns: Vec<String> = floor_lenses
+        .iter()
+        .map(|lens| format!("lens-{lens}"))
+        .collect();
+    let mut plan = json!({
         "kinds": ["task", "synthesise"],
         "max_nodes": ctx.max_nodes,
         "patterns": lowered,
         "patterns_only": true,
         "disjoint_waves": true,
         "wire_exports": true,
-    }))
+    });
+    if !required_patterns.is_empty() || floor_min_reviewers > 0 {
+        let candidates: Vec<String> = plan["patterns"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|pattern| pattern["name"].as_str())
+            .filter(|name| name.starts_with("lens-"))
+            .map(str::to_owned)
+            .collect();
+        let reserve = required_patterns.len().max(floor_min_reviewers);
+        let model_limit = ctx.max_nodes.min(512_usize.saturating_sub(reserve)).max(1);
+        plan["max_nodes"] = json!(model_limit.saturating_add(reserve));
+        plan["floor_candidate_patterns"] = json!(candidates);
+        plan["floor_min_reviewers"] = json!(floor_min_reviewers);
+        plan["model_max_nodes"] = json!(model_limit);
+        plan["required_floor_patterns"] = json!(required_patterns);
+        plan["floor_classes"] = json!(floor_classes);
+    }
+    Ok(plan)
 }
 
 /// Run `f` with a stage builder over the preset's final parameters, for the
@@ -791,6 +875,39 @@ fn lower_pattern(
             .and_then(Value::as_str)
             .ok_or("pattern nodes need an id")?
             .to_owned();
+        if entry.contains_key("preset") {
+            let mut parameters = bound.clone();
+            if let Some(limit) = values.get("spec_max_bytes") {
+                parameters["spec_max_bytes"] = limit.clone();
+            }
+            // Pattern worktrees are not available until launch. Bind the shared
+            // batch spec once, as for the other catalogue leaves.
+            let key = json!([
+                parameters.get("spec"),
+                parameters.get("worktree"),
+                parameters.get("spec_max_bytes")
+            ])
+            .to_string();
+            layers
+                .spec_contexts
+                .borrow_mut()
+                .insert(key, context.as_ref().map(|text| text.replace("${", "$ {")));
+            let (mut stack, mut origins, mut repo_files) =
+                (Vec::new(), BTreeMap::new(), Vec::new());
+            let mut builder = StageBuilder {
+                layers,
+                name,
+                prompt: &brief,
+                parameters,
+                roles,
+                stack: &mut stack,
+                origins: &mut origins,
+                repo_files: &mut repo_files,
+                scope: "",
+            };
+            builder.entry(&Value::Object(entry), &id, &[], &mut nodes, 0)?;
+            continue;
+        }
         // The runtime appends the write scope and acceptance checks itself.
         let mut kept = Vec::new();
         for key in ["write_scope", "acceptance_checks"] {
@@ -860,10 +977,22 @@ fn lower_pattern(
 
 /// Attach the lowered catalogue to the built planner node.
 pub fn attach(nodes: &mut [Value], plan: Value) -> Result<(), String> {
-    let node = nodes
-        .iter_mut()
-        .find(|node| node["id"] == "plan")
-        .ok_or("the planner node was not built")?;
+    fn find(nodes: &mut [Value]) -> Option<&mut Value> {
+        for node in nodes {
+            if node["id"] == "plan" {
+                return Some(node);
+            }
+            if let Some(children) = node
+                .pointer_mut("/composite/nodes")
+                .and_then(Value::as_array_mut)
+                && let Some(found) = find(children)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let node = find(nodes).ok_or("the planner node was not built")?;
     let mut plan = plan;
     if let Some(fallback) = node
         .as_object_mut()
@@ -888,4 +1017,26 @@ pub fn attach(nodes: &mut [Value], plan: Value) -> Result<(), String> {
     }
     node["plan"] = plan;
     Ok(())
+}
+
+#[cfg(test)]
+mod declaration_tests {
+    #[test]
+    fn initial_custom_parameter_is_not_an_explicit_override() {
+        let mut layers = super::Layers::empty();
+        layers
+            .insert(
+                "custom.toml",
+                "custom",
+                "stages=[]\n[parameters]\nwidth=2\n",
+            )
+            .unwrap();
+        let (_, origins) = layers.resolve("custom").unwrap();
+        assert!(!super::explicit(&layers, "custom", &origins, "width"));
+        layers
+            .insert("override.toml", "custom", "[parameters]\nwidth=3\n")
+            .unwrap();
+        let (_, origins) = layers.resolve("custom").unwrap();
+        assert!(super::explicit(&layers, "custom", &origins, "width"));
+    }
 }

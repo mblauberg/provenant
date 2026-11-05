@@ -295,6 +295,28 @@ fn reviewed_head(
     let index = *positions.get(reviewer)?;
     let node = &plan.nodes[index];
     if let Some(spec) = &node.composite {
+        if spec.reduce_verdict {
+            let mut head = None;
+            let mut seen = std::collections::BTreeSet::new();
+            for export in &spec.exports {
+                if !seen.insert(&export.node) {
+                    continue;
+                }
+                let member = *positions.get(&export.node)?;
+                if checkpoint.nodes[member].state != NodeState::Succeeded {
+                    continue;
+                }
+                if plan.nodes[member].access != AccessMode::ReadOnly {
+                    return None;
+                }
+                let reviewed = reviewed_head(plan, checkpoint, positions, &export.node, writer)?;
+                if head.as_ref().is_some_and(|prior| prior != &reviewed) {
+                    return None;
+                }
+                head = Some(reviewed);
+            }
+            return head;
+        }
         let producer = spec
             .exports
             .iter()

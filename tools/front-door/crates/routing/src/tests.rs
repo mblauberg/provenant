@@ -1810,6 +1810,12 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         layered.domains.routing.review.shapes["quick"].reviewers[0].pool,
         "senior"
     );
+    assert!(!layered.domains.routing.review.shapes["quick"].frame);
+    assert_eq!(layered.domains.routing.review.shapes["quick"].verifiers, 0);
+    assert_eq!(
+        layered.domains.routing.review.shapes["quick"].synthesis,
+        crate::ReviewSynthesis::Reduce
+    );
     assert_eq!(
         layered.domains.routing.review.shapes["standard"].reviewers[0].count,
         5
@@ -1822,12 +1828,44 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         layered.domains.routing.review.select.by_risk["medium"],
         "deep"
     );
+    let customised = provenant_config::load_with_domains(
+        &roots,
+        Some(
+            "schema_version=1\n[domains.routing.review.shapes.quick]\nsynthesis='model'\n[domains.routing.review.floors.security]\ntier='substantial'\n"
+                .as_bytes(),
+        ),
+        &sections,
+    )?;
+    let schema = provenant_config::schema(&customised, &sections, String::new())?;
+    let synthesis = schema
+        .fields
+        .iter()
+        .find(|field| field.path == "domains.routing.review.shapes.quick.synthesis")
+        .unwrap();
+    assert_eq!(synthesis.default, "reduce");
+    assert_eq!(synthesis.value, "model");
+    assert_eq!(synthesis.source, provenant_config::Layer::User);
+    assert_eq!(synthesis.values, ["model", "reduce"]);
+    let floor = schema
+        .fields
+        .iter()
+        .find(|field| field.path == "domains.routing.review.floors.security.tier")
+        .unwrap();
+    assert_eq!(floor.default, "crucial");
+    assert_eq!(floor.value, "substantial");
+    assert_eq!(floor.source, provenant_config::Layer::User);
     let layered = provenant_config::load_with_domains(
         &roots,
         Some("schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='senior',count=1}]\n[domains.routing.review.select]\nby_risk={medium='custom'}\n".as_bytes()),
         &sections,
     )?;
     assert!(layered.domains.routing.review.shapes.contains_key("custom"));
+    assert!(layered.domains.routing.review.shapes["custom"].frame);
+    assert_eq!(layered.domains.routing.review.shapes["custom"].verifiers, 1);
+    assert_eq!(
+        layered.domains.routing.review.shapes["custom"].synthesis,
+        crate::ReviewSynthesis::Model
+    );
     assert!(layered.domains.routing.review.shapes.contains_key("quick"));
     assert_eq!(
         layered.domains.routing.review.select.by_risk["routine"],
@@ -5069,12 +5107,16 @@ fn review_project_overrides_order_and_shape_slots_through_loader()
         "schema_version=1\n[domains.routing.review.lenses]\norder=['flexibility','tests','reliability']\n[domains.routing.review.shapes.standard]\nreviewers=[{pool='junior',count=2}]\n",
     )??;
     let review = &config.domains.routing.review;
-    let panel = review.panel(&review.shapes["standard"], None, &[], false, &[]);
-    let lenses: Vec<_> = panel
-        .reviewers
-        .iter()
-        .flat_map(|r| r.lenses.iter().map(String::as_str))
-        .collect();
+    let panel = review.resolve_panel(
+        &crate::ReviewRequest {
+            shape: Some("standard".into()),
+            ..Default::default()
+        },
+        None,
+        &[],
+        false,
+    )?;
+    let lenses: Vec<_> = panel.slots.iter().map(|slot| slot.lens.as_str()).collect();
     assert_eq!(lenses, ["flexibility", "tests"]);
     Ok(())
 }
@@ -5103,6 +5145,20 @@ fn review_path_lens_rules_load_replace_or_clear_the_bundled_table_through_the_lo
         assert_eq!(plan.matched_paths, expected, "{text}");
         assert_eq!(plan.add.is_empty(), expected.is_empty(), "{text}");
     }
+    Ok(())
+}
+
+#[test]
+fn review_floor_policy_can_be_overridden_and_extended() -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_routing(
+        "schema_version=1\n[domains.routing.review.floors.security]\ntier='routine'\nlenses=[]\n[domains.routing.review.floors.custom]\npaths=['**/special/**']\ntier='crucial'\nlenses=['reliability']\n",
+    )??;
+    let review = &config.domains.routing.review;
+    let security = review.path_floors(&["src/credentials.rs".into()]);
+    assert_eq!(security.tier, None);
+    let custom = review.path_floors(&["src/special/a.rs".into()]);
+    assert_eq!(custom.tier.as_deref(), Some("crucial"));
+    assert!(custom.lenses.contains(&"reliability".to_owned()));
     Ok(())
 }
 

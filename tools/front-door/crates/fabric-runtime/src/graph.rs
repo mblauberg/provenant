@@ -71,6 +71,14 @@ pub use plans::{
     RemainingBudgets,
 };
 
+/// Review range resolved for an immutable attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReviewRange {
+    Unknown,
+    NoBase,
+    Resolved { base: String, head: String },
+}
+
 fn recover_minima(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) -> bool {
     let mut recovered = false;
     for (progress, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
@@ -430,9 +438,13 @@ pub trait AttemptOwner {
         Ok(false)
     }
 
-    /// Whether the immutable task reviewed an empty commit range.
-    fn equal_review_range(&mut self, _attempt_ref: &str) -> Result<bool, Self::Error> {
-        Ok(false)
+    /// Resolve the range of an immutable review attempt, without launching it.
+    fn review_range(
+        &mut self,
+        _attempt_ref: &str,
+        _explicit_base: bool,
+    ) -> Result<ReviewRange, Self::Error> {
+        Ok(ReviewRange::Unknown)
     }
 
     fn observe_or_start(
@@ -942,10 +954,10 @@ fn apply_launch_disposition(
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
     {
         format!(
-            "; after correcting the cause, cancel with `provenant fabric graph cancel {graph_id}` and rerun with a new graph_id"
+            "; after correcting the cause, cancel with `provenant fabric graph cancel {graph_id}` and rerun with a new graph_id (for a preset, use `provenant run --preset <name> --fresh`)"
         )
     } else {
-        "; inspect and cancel the graph before rerunning with a new graph_id".into()
+        "; inspect and cancel the graph before rerunning with a new graph_id (for a preset, use `provenant run --preset <name> --fresh`)".into()
     };
     progress.advance_error = Some(bounded(
         &format!(
@@ -2991,6 +3003,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .take(SEPARATION_FAMILIES)
                                     .map(|family| bounded(family, FAMILY_BYTES))
                                     .collect();
+                                if record
+                                    .applied
+                                    .as_ref()
+                                    .is_some_and(|family| family_peers.contains(family))
+                                {
+                                    record.outcome = SeparationOutcome::Unavailable;
+                                }
                             }
                             Some(record)
                         }
@@ -3108,13 +3127,30 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         || role.starts_with("review.")
                                 })
                                 && let Some(reference) = attempt.attempt_ref.as_deref()
-                                && owner
-                                    .equal_review_range(reference)
-                                    .map_err(GraphError::Run)?
                             {
-                                outputs
-                                    .warnings
-                                    .push("equal_base_and_head: review range is empty".into());
+                                let explicit_base = node
+                                    .extra
+                                    .get("review_base")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|base| !base.is_empty());
+                                match owner
+                                    .review_range(reference, explicit_base)
+                                    .map_err(GraphError::Run)?
+                                {
+                                    ReviewRange::NoBase => {
+                                        outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
+                                        outputs.warnings.push(
+                                            "review_base_unresolved: no base was resolved".into(),
+                                        );
+                                    }
+                                    ReviewRange::Resolved { base, head } if base == head => {
+                                        outputs.verdict = Some("VERDICT: INCONCLUSIVE".into());
+                                        outputs.verdict_error = None;
+                                        outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
+                                        outputs.warnings.push(format!("equal_base_and_head: review range is empty (base {base}, head {head})"));
+                                    }
+                                    _ => {}
+                                }
                             }
                             outputs.warnings.truncate(MAX_WARNINGS);
                             if outcome == AttemptOutcome::UsageLimited {

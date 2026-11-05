@@ -148,7 +148,7 @@ which independent review legs count. The bundled pools include `utility`,
 weighted choice, not an ordered model list. Explicit route lists and
 zero-weight fallbacks have their own ordering semantics.
 
-Use `provenant run --preset review-council --prompt-file brief.md --explain`
+Use `provenant run --preset review --prompt-file brief.md --explain`
 to inspect roles and sources before dispatch. Inspect the recorded separation
 and substitutions after dispatch. Different model names or requested families
 alone do not establish independent answering families. Bind the resolved
@@ -248,7 +248,7 @@ A refactor runs its shape's base lenses plus `refactor-cleanup` and
 risk tier implies `terminal`) add `security-privacy`, `concurrency-data-errors`
 and `adversarial`. A risk tier alone does not add `security-privacy` or
 `concurrency-data-errors`; pass `--risk-tag` (or the `risk_tags` parameter) for
-those. A caller-supplied `lenses` list in `review-council` keeps the caller's
+those. A caller-supplied `lenses` list in `review` keeps the caller's
 order.
 
 The bundled `review.lenses.by_paths` rules add `tests` outside the slot cap for
@@ -326,10 +326,6 @@ declaration using the [review wire grammar](../specs/fabric.md#typed-node-output
 The prompt offers approval, change request or inconclusive; it does not offer
 approval with nits. The collector uses the complete verified result stream;
 duplicate declarations, an unrecognised token or an unreadable result is `unknown`.
-For one release, retained first-line legacy outputs remain readable when there
-is no captured final verdict, exactly one declaration in the complete stream,
-and the first non-empty excerpt line is a legacy approval, change request or
-inconclusive verdict. Legacy case and Markdown emphasis remain accepted.
 JSON includes verdict counts, with planned
 but `not_submitted` reviewers counted separately. The command
 exits successfully only when every reviewer succeeds and approves; a failed,

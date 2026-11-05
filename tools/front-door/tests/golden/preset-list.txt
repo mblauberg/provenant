@@ -1,0 +1,12 @@
+NAME                 LAYER    LEVEL        COST                                                                                 ERRORS
+big-batch            bundled  recommended  scouts + lanes x (1 writer + lenses) + council + refactor + up to 2 repair rounds
+chain                bundled  recommended  2 attempts
+deliver              bundled  recommended  1 writer + up to max_iterations repairs + review; no model runs while CI is pending
+fan-out              bundled  recommended  width attempts
+fan-out-synthesise   bundled  recommended  width + 1 attempts
+generator-evaluator  bundled  default      1 writer attempt + one attempt per lens + 1 evaluator
+review               bundled  default      1 framing attempt + one attempt per selected lens + verifiers + 1 synthesis
+scope                bundled  recommended  1 senior attempt
+scope-then-run       bundled  recommended  scouts + 1 scoping attempt + generator-evaluator
+scout-swarm          bundled  recommended  width junior attempts + 1 senior synthesis
+single               bundled  default      1 attempt

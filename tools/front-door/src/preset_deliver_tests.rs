@@ -74,6 +74,7 @@ struct Host {
     integration: Option<String>,
     /// Read-only nodes whose id contains one of these fail their verdict.
     failing: Vec<String>,
+    empty_review_range: bool,
     /// Delivery mode and fast-forward restriction each launch was given.
     deliveries: Vec<(String, Option<provenant_records::run::DeliveryMode>, bool)>,
 }
@@ -116,6 +117,24 @@ impl CiStatus for Host {
 
 impl provenant_fabric_runtime::graph::AttemptOwner for Host {
     type Error = std::convert::Infallible;
+    fn review_range(
+        &mut self,
+        _: &str,
+        _: bool,
+    ) -> Result<provenant_fabric_runtime::graph::ReviewRange, Self::Error> {
+        Ok(if self.empty_review_range {
+            let head = self
+                .head
+                .clone()
+                .expect("writer has produced the review head");
+            provenant_fabric_runtime::graph::ReviewRange::Resolved {
+                base: head.clone(),
+                head,
+            }
+        } else {
+            provenant_fabric_runtime::graph::ReviewRange::Unknown
+        })
+    }
     fn actor(&self) -> String {
         "deliver-test".into()
     }
@@ -582,6 +601,32 @@ fn green_ci_skips_the_repairs_and_lands_the_reviewed_writer_head() {
             .iter()
             .all(|(_, source)| source.as_deref() == Some(commit(1).as_str()))
     );
+}
+
+#[test]
+fn empty_review_range_cannot_pass_the_deliver_accept_gate() {
+    let document = deliver(&[]);
+    let mut host = Host {
+        empty_review_range: true,
+        ..Default::default()
+    };
+    let run = drive(&document, &mut host, &mut Journal::default());
+    let synthesis = progress(&run.checkpoint, "review--synthesis");
+    assert_eq!(
+        synthesis
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.verdict.as_deref()),
+        Some("VERDICT: INCONCLUSIVE")
+    );
+    assert!(
+        !progress(&run.checkpoint, "accept")
+            .gate
+            .as_ref()
+            .unwrap()
+            .passed
+    );
+    assert!(host.lands.is_empty());
 }
 
 #[test]

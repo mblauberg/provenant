@@ -1954,16 +1954,11 @@ pub(crate) fn seal_manifest(
 /// The cause shown for a lane that ended without a final handoff.
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
 
-/// A lane that reports a verdict has reported its result even without a
-/// handoff, so a reviewer's verdict alone still passes (#2707). It counts the
-/// shared final-line grammar, or the single legacy first-line declaration that
-/// review still reads (#2371): settlement and review accept the same shapes, so
-/// a reviewer the reader accepts is never settled as having reported nothing.
+/// A final verdict reports a result even without a handoff.
 fn reports_verdict(result: &str) -> bool {
     let mut capture = provenant_records::result_capture::ResultCapture::new(None);
     capture.push(result.as_bytes());
-    let captured = capture.finish();
-    captured.verdict.is_some()
+    capture.finish().verdict.is_some()
 }
 /// Stored instead of the provider's answer when settlement cannot filter it.
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
@@ -2045,7 +2040,11 @@ mod host_clock_tests {
         assert!(reports_verdict(
             "Reviewed the change.\nVERDICT: APPROVE\n```handoff\n{\"schema_version\":2,\"status\":\"done\"}\n```"
         ));
-        // A verdict followed by prose is ambiguous: the
+        // A first-line verdict followed by prose is not a completed report.
+        assert!(!reports_verdict(
+            "Verdict: approve\nLens: correctness\nwrite denied: true"
+        ));
+        // A verdict that is not the first or last thing said is ambiguous: the
         // reader refuses it, and so does settlement.
         assert!(!reports_verdict(
             "Reviewed the change.\nVERDICT: APPROVE\nOne more note."

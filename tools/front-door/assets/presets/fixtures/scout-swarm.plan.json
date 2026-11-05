@@ -3,7 +3,7 @@
     "pattern": "scout-swarm",
     "preset": "scout-swarm"
   },
-  "graph_id": "preset-780ea8d25ccef36fe4342d7a3da28d1c",
+  "graph_id": "preset-e8e33a5b7aba80870f7e7eef41c55062",
   "nodes": [
     {
       "access": "read_only",
@@ -187,10 +187,10 @@
                     "role_digest": "sha256:6a06d9ece1c9bb403d70e93ee5fcbfd439f2cbfbb9517f5b8cfc8164f87859bc",
                     "routes": [
                       {
-                        "alias": "web"
+                        "alias": "junior"
                       },
                       {
-                        "alias": "web"
+                        "alias": "junior"
                       }
                     ],
                     "title": "external"
@@ -300,10 +300,10 @@
                 "role_digest": "sha256:6a06d9ece1c9bb403d70e93ee5fcbfd439f2cbfbb9517f5b8cfc8164f87859bc",
                 "routes": [
                   {
-                    "alias": "web"
+                    "alias": "junior"
                   },
                   {
-                    "alias": "web"
+                    "alias": "junior"
                   }
                 ],
                 "title": "scout"
@@ -320,7 +320,7 @@
         "patterns_only": true,
         "wire_exports": true
       },
-      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nChoose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and, when the catalogue offers one, an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
+      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, principal, senior). Registered writer\nworktrees you may assign: none registered.\nChoose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and, when the catalogue offers one, an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
       "read_roots": [
         "/repo/extra"
       ],
@@ -457,7 +457,20 @@
         ]
       }
     },
-    "substitutions": [],
+    "substitutions": [
+      {
+        "node": "scout",
+        "reason": "route web is not defined in the routing configuration",
+        "requested": "web",
+        "used": "junior"
+      },
+      {
+        "node": "external",
+        "reason": "route web is not defined in the routing configuration",
+        "requested": "web",
+        "used": "junior"
+      }
+    ],
     "warnings": []
   },
   "schema_version": 1

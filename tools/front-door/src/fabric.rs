@@ -4385,7 +4385,64 @@ struct ReviewMeasure {
     directory: PathBuf,
     subject: provenant_core::GitOid,
     base: provenant_core::GitOid,
+    base_known: bool,
     measured: provenant_routing::Measured,
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the worktree driver includes test helpers without libtest functions"
+)]
+pub(crate) fn fixture_review_expansion(
+    node: &provenant_fabric_runtime::graph::GraphNode,
+    subject: &str,
+    shape: &str,
+) -> Result<
+    provenant_fabric_runtime::graph::Expansion,
+    provenant_fabric_runtime::graph::ReviewResolveError,
+> {
+    fixture_review_expansion_with_paths(node, subject, shape, &[])
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_review_expansion_with_paths(
+    node: &provenant_fabric_runtime::graph::GraphNode,
+    subject: &str,
+    shape: &str,
+    paths: &[String],
+) -> Result<
+    provenant_fabric_runtime::graph::Expansion,
+    provenant_fabric_runtime::graph::ReviewResolveError,
+> {
+    use provenant_fabric_runtime::graph::ReviewResolveError;
+    let routing = provenant_routing::RoutingConfig::default();
+    let panel = routing
+        .review
+        .resolve_panel(
+            &provenant_routing::ReviewRequest {
+                shape: Some(shape.into()),
+                ..Default::default()
+            },
+            None,
+            paths,
+            false,
+        )
+        .map_err(ReviewResolveError::Failed)?;
+    let subject = provenant_core::GitOid::parse(subject)
+        .map_err(|error| ReviewResolveError::Failed(error.to_string()))?;
+    let measure = ReviewMeasure {
+        routing,
+        directory: PathBuf::new(),
+        subject,
+        base: subject,
+        base_known: true,
+        measured: provenant_routing::Measured {
+            size: Some("small"),
+            warning: None,
+        },
+    };
+    BoundGraphOwner::review_expansion(node, &measure, &panel, "fixture".into())
 }
 
 impl BoundGraphOwner<'_> {
@@ -4427,7 +4484,7 @@ impl BoundGraphOwner<'_> {
         let subject = provenant_core::GitOid::parse(subject).map_err(|error| {
             ReviewResolveError::Failed(format!("invalid pinned review subject: {error}"))
         })?;
-        let base = node
+        let resolved_base = node
             .extra
             .get("review_base")
             .and_then(serde_json::Value::as_str)
@@ -4435,8 +4492,10 @@ impl BoundGraphOwner<'_> {
             .or_else(|| {
                 self.integration_base
                     .and_then(|bases| bases.review.or(bases.integration))
-            })
-            .unwrap_or(subject);
+            });
+        // The checkpoint's review resolution requires a commit, but the
+        // fallback must not pretend an unresolved base describes an empty diff.
+        let base = resolved_base.unwrap_or(subject);
         let directory = spec.worktree.as_deref().map_or_else(
             || self.factory.cwd.clone(),
             |path| self.factory.cwd.join(path),
@@ -4446,17 +4505,25 @@ impl BoundGraphOwner<'_> {
                 .map_err(|error| {
                     ReviewResolveError::Failed(format!("read review configuration: {error}"))
                 })?;
-        let measured = routing.review.size.measure(
-            spec.kind.as_deref(),
-            &base.to_string(),
-            &subject.to_string(),
-            &mut |args| self.review_git(&directory, args),
-        );
+        let measured = if resolved_base.is_some() {
+            routing.review.size.measure(
+                spec.kind.as_deref(),
+                &base.to_string(),
+                &subject.to_string(),
+                &mut |args| self.review_git(&directory, args),
+            )
+        } else {
+            provenant_routing::Measured {
+                size: None,
+                warning: Some("no review base was resolved; size unknown".into()),
+            }
+        };
         Ok(ReviewMeasure {
             routing,
             directory,
             subject,
             base,
+            base_known: resolved_base.is_some(),
             measured,
         })
     }
@@ -4487,7 +4554,11 @@ impl BoundGraphOwner<'_> {
             .get("lens_templates")
             .and_then(serde_json::Value::as_object)
             .ok_or_else(|| failed("deferred review carries no lens templates".into()))?;
-        let root_id = format!("{}--review", node.id);
+        let root_id = format!("{}--r", node.id);
+        let panel_templates = node.extra.get("panel_templates").and_then(serde_json::Value::as_object)
+            .ok_or_else(|| failed("deferred review carries no panel templates; finish old reviews before upgrading".into()))?;
+        let lens_id = format!("{root_id}--p");
+        let frame_id = format!("{root_id}--f");
         let subject = measure.subject.to_string();
         let mut members: Vec<GraphNode> = Vec::new();
         for slot in &panel.slots {
@@ -4511,10 +4582,20 @@ impl BoundGraphOwner<'_> {
             map.insert(key.into(), route);
             map.insert(
                 "id".into(),
-                serde_json::json!(format!("{root_id}--{local}")),
+                serde_json::json!(format!("{lens_id}--{local}")),
             );
-            map.insert("depends_on".into(), serde_json::json!(node.depends_on));
-            if !node.inputs.is_empty() {
+            let lens_deps = if panel.frame {
+                vec![frame_id.clone()]
+            } else {
+                node.depends_on.clone()
+            };
+            map.insert("depends_on".into(), serde_json::json!(lens_deps));
+            if panel.frame {
+                map.insert(
+                    "inputs".into(),
+                    serde_json::json!([{"node":frame_id,"outputs":["result"]}]),
+                );
+            } else if !node.inputs.is_empty() {
                 map.insert("inputs".into(), serde_json::json!(node.inputs));
             }
             if !node.read_roots.is_empty() {
@@ -4543,7 +4624,22 @@ impl BoundGraphOwner<'_> {
         if members.is_empty() {
             return Err(failed("the review panel selected no lenses".into()));
         }
-        if members.len() + 1 > spec.max_nodes {
+        let verifiers = node
+            .extra
+            .get("panel_verifiers")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(panel.verifiers, |count| {
+                usize::try_from(count).unwrap_or(usize::MAX)
+            });
+        if verifiers > 32 {
+            return Err(failed("review verifier count exceeds 32".into()));
+        }
+        let total = members.len()
+            + 2
+            + usize::from(panel.frame)
+            + verifiers
+            + usize::from(panel.synthesis == provenant_routing::ReviewSynthesis::Model);
+        if total > spec.max_nodes {
             return Err(failed(format!(
                 "the review panel selected {} lenses; the review allows {}",
                 members.len(),
@@ -4552,22 +4648,107 @@ impl BoundGraphOwner<'_> {
         }
         let exports: Vec<_> = members
             .iter()
-            .map(|member| serde_json::json!({"node": member.id, "outputs": ["result", "findings"]}))
+            .enumerate()
+            .map(|(index, member)| {
+                let mut outputs = vec![
+                    provenant_fabric_runtime::graph::OutputKind::Result,
+                    provenant_fabric_runtime::graph::OutputKind::Findings,
+                ];
+                if index == 0 {
+                    if panel.synthesis == provenant_routing::ReviewSynthesis::Reduce {
+                        outputs.push(provenant_fabric_runtime::graph::OutputKind::Commit);
+                    }
+                    for output in &spec.export_first {
+                        if !outputs.contains(output) {
+                            outputs.push(*output);
+                        }
+                    }
+                }
+                serde_json::json!({"node": member.id, "outputs": outputs})
+            })
             .collect();
+        let reduction = panel.synthesis == provenant_routing::ReviewSynthesis::Reduce;
+        let lens_deps = if panel.frame {
+            vec![frame_id.clone()]
+        } else {
+            node.depends_on.clone()
+        };
+        let lens_group: GraphNode = serde_json::from_value(serde_json::json!({
+            "id": lens_id, "kind":"composite", "access":"read_only", "depends_on":lens_deps,
+            "composite": {"min_successful": spec.min_successful.map(|n| if n == 0 { members.len().saturating_sub(1).max(1) } else { n }),
+                "reduce_verdict": reduction, "nodes":[], "exports":exports},
+        })).map_err(|error| failed(format!("review lenses do not lower: {error}")))?;
+        let pinned = serde_json::json!({"type":"commit","commit":subject});
+        let template = |key: &str,
+                        id: &str,
+                        deps: Vec<String>,
+                        inputs: serde_json::Value|
+         -> Result<GraphNode, ReviewResolveError> {
+            let mut value = panel_templates
+                .get(key)
+                .cloned()
+                .filter(|value| !value.is_null())
+                .ok_or_else(|| failed(format!("deferred review lacks {key} template")))?;
+            let map = value
+                .as_object_mut()
+                .ok_or_else(|| failed(format!("invalid {key} template")))?;
+            map.insert("id".into(), serde_json::json!(id));
+            map.insert("source".into(), pinned.clone());
+            map.insert("read_roots".into(), serde_json::json!(node.read_roots));
+            map.insert("depends_on".into(), serde_json::json!(deps));
+            map.insert("inputs".into(), inputs);
+            serde_json::from_value(value)
+                .map_err(|error| failed(format!("review {key} does not lower: {error}")))
+        };
+        let mut children = Vec::new();
+        if panel.frame {
+            children.push(template(
+                "frame",
+                &frame_id,
+                node.depends_on.clone(),
+                serde_json::json!(node.inputs),
+            )?);
+        }
+        children.push(lens_group);
+        children.extend(members);
+        let mut previous = lens_id.clone();
+        for index in 0..verifiers {
+            let id = format!("{root_id}--v-{}", index + 1);
+            let inputs = serde_json::json!([{"node":previous,"outputs":["result","findings"]}]);
+            children.push(template("verifier", &id, vec![previous], inputs)?);
+            previous = id;
+        }
+        let verifier_output = (reduction && previous != lens_id).then(|| previous.clone());
+        let output = if reduction {
+            lens_id.clone()
+        } else {
+            let id = format!("{root_id}--s");
+            let mut inputs =
+                vec![serde_json::json!({"node":lens_id,"outputs":["result","findings"]})];
+            if previous != lens_id {
+                inputs.push(serde_json::json!({"node":previous,"outputs":["result","findings"]}));
+            }
+            let deps = if previous == lens_id {
+                vec![lens_id.clone()]
+            } else {
+                vec![lens_id.clone(), previous]
+            };
+            children.push(template("synthesis", &id, deps, serde_json::json!(inputs))?);
+            id
+        };
+        let mut root_exports = vec![
+            serde_json::json!({"node":output,"outputs":["result","findings","verdict","commit"]}),
+        ];
+        if let Some(verifier) = verifier_output {
+            root_exports.push(serde_json::json!({"node":verifier,"outputs":["result","findings"]}));
+        }
         let root: GraphNode = serde_json::from_value(serde_json::json!({
-            "id": root_id,
-            "kind": "composite",
-            "access": "read_only",
-            "depends_on": node.depends_on,
-            "composite": {
-                "min_successful": spec.min_successful.map(|n| if n == 0 { members.len().saturating_sub(1).max(1) } else { n }),
-                "nodes": [],
-                "exports": exports,
-            },
+            "id":root_id, "kind":"composite", "access":"read_only", "depends_on":node.depends_on,
+            "composite":{"nodes":[],"exports":root_exports}
         }))
         .map_err(|error| failed(format!("review composite does not lower: {error}")))?;
         let mut nodes = vec![root];
-        nodes.extend(members);
+        nodes.extend(children);
         Ok(Expansion {
             review: Some(ReviewResolution {
                 subject: measure.subject,
@@ -4782,10 +4963,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .review
             .as_ref()
             .ok_or_else(|| ReviewResolveError::Failed("missing review specification".into()))?;
-        // Changed paths and test markers add lenses; a failed read only costs
-        // those additions, and the reason is recorded with the resolution.
+        // An unreadable path list must retain every potentially applicable floor.
         let mut warnings: Vec<String> = measure.measured.warning.iter().cloned().collect();
         let (mut paths, mut marker) = (Vec::new(), false);
+        let mut paths_unreadable = !measure.base_known;
+        if paths_unreadable {
+            warnings.push("cannot resolve review base; applying highest configured floor and all required floor lenses".into());
+        }
         let range = format!("{}...{}", measure.base, measure.subject);
         if measure.base != measure.subject {
             match self.review_git(
@@ -4799,7 +4983,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         .map(str::to_owned)
                         .collect();
                 }
-                Err(error) => warnings.push(format!("cannot read changed paths: {error}")),
+                Err(error) => {
+                    paths_unreadable = true;
+                    warnings.push(format!("cannot read changed paths: {error}; applying highest configured floor and all required floor lenses"));
+                }
             }
             match self.review_git(
                 &measure.directory,
@@ -4825,11 +5012,52 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 })
                 .collect(),
         };
-        let panel = measure
-            .routing
-            .review
+        let fallback;
+        let review = if paths_unreadable {
+            let (config, unknown_paths) = measure.routing.review.unreadable_paths();
+            paths = unknown_paths;
+            fallback = config;
+            &fallback
+        } else {
+            &measure.routing.review
+        };
+        let mut panel = review
             .resolve_panel(&request, measure.measured.size, &paths, marker)
             .map_err(ReviewResolveError::Failed)?;
+        // A graph retains the stage configuration it was lowered with. The
+        // launch still chooses the shape from the pinned subject.
+        if let Some(shape) = node
+            .extra
+            .get("panel_shapes")
+            .and_then(|shapes| shapes.get(&panel.shape))
+        {
+            panel.frame = shape
+                .get("frame")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| {
+                    ReviewResolveError::Failed("invalid deferred review frame".into())
+                })?;
+            panel.verifiers = shape
+                .get("verifiers")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| {
+                    ReviewResolveError::Failed("invalid deferred verifier count".into())
+                })?;
+            panel.synthesis =
+                serde_json::from_value(shape.get("synthesis").cloned().unwrap_or_default())
+                    .map_err(|error| {
+                        ReviewResolveError::Failed(format!("invalid deferred synthesis: {error}"))
+                    })?;
+        }
+        let floors = review.path_floors(&paths);
+        if !floors.classes.is_empty() {
+            warnings.push(format!(
+                "review path floors applied: {}; required lenses: {}",
+                floors.classes.join(", "),
+                floors.lenses.join(", ")
+            ));
+        }
         let mut source = format!(
             "{}; size={}; kind={}; risk={}",
             panel.source,
@@ -4943,10 +5171,15 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }))
     }
 
-    fn equal_review_range(&mut self, reference: &str) -> Result<bool, Self::Error> {
+    fn review_range(
+        &mut self,
+        reference: &str,
+        explicit_base: bool,
+    ) -> Result<provenant_fabric_runtime::graph::ReviewRange, Self::Error> {
+        use provenant_fabric_runtime::graph::ReviewRange;
         let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
         if host != self.factory.context.identity.host.to_string() {
-            return Ok(false);
+            return Ok(ReviewRange::Unknown);
         }
         let owner = BinaryRunOwner {
             factory: self.factory,
@@ -4968,11 +5201,20 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(FacadeError::StateCorrupt)?;
-        Ok(task
-            .base
-            .as_ref()
-            .zip(task.head.as_ref())
-            .is_some_and(|(base, head)| base == head))
+        if !explicit_base
+            && self
+                .integration_base
+                .is_none_or(|bases| bases.review.is_none() && bases.integration.is_none())
+        {
+            return Ok(ReviewRange::NoBase);
+        }
+        Ok(match task.base.as_ref().zip(task.head.as_ref()) {
+            Some((base, head)) => ReviewRange::Resolved {
+                base: base.clone(),
+                head: head.clone(),
+            },
+            None => ReviewRange::Unknown,
+        })
     }
     fn respect_ci_wake(&self) -> bool {
         self.tick
