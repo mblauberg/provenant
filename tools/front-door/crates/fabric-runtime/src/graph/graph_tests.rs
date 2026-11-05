@@ -7131,6 +7131,7 @@ fn deferred_lens_substitution_keeps_panel_topology() {
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
+            required_outputs: Vec::new(),
         }],
     });
     let expansion = Expansion {
