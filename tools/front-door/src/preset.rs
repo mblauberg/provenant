@@ -1176,15 +1176,15 @@ pub fn expand_with(
                     "limits" => typed.limits = Some(value.clone()),
                     "integration_branch" => {
                         typed.integration_branch = serde_json::from_value(value.clone())
-                            .map_err(|error| error.to_string())?
+                            .map_err(|error| format!("{key}: {error}"))?
                     }
                     "delivery" => {
                         typed.delivery = serde_json::from_value(value.clone())
-                            .map_err(|error| error.to_string())?
+                            .map_err(|error| format!("{key}: {error}"))?
                     }
                     "decision_session" => {
                         typed.decision_session = serde_json::from_value(value.clone())
-                            .map_err(|error| error.to_string())?
+                            .map_err(|error| format!("{key}: {error}"))?
                     }
                     _ => {
                         typed.extra.insert(key.into(), value.clone());
@@ -3687,13 +3687,13 @@ pub(crate) fn bind_run_context(
                             .collect()
                     },
                 );
-                sources.retain(|(name, origin)| {
-                    if name == "postgres" {
+                sources.retain(|(capability, origin)| {
+                    if capability == "postgres" {
                         true
                     } else {
                         capability_warnings.push(format!(
                             "ignored unknown {origin} capability {}",
-                            provenant_fabric_runtime::hosts::plain_text(name, 128)
+                            provenant_fabric_runtime::hosts::plain_text(capability, 128)
                         ));
                         false
                     }

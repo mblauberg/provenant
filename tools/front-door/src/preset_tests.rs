@@ -2805,6 +2805,22 @@ fn leaf_fields_follow_graph_node_type_and_report_unknown_fields() {
 }
 
 #[test]
+fn malformed_graph_settings_name_the_field() {
+    for key in ["integration_branch", "delivery", "decision_session"] {
+        let mut layers = Layers::empty();
+        layers
+            .insert(
+                "test",
+                "bad-setting",
+                &format!("{key} = 5\nstages = [{{ id = 'task' }}]\n"),
+            )
+            .unwrap();
+        let error = expand(&layers, "bad-setting", "brief", &[]).unwrap_err();
+        assert!(error.contains(key), "{key}: {error}");
+    }
+}
+
+#[test]
 fn composite_exports_are_checked_when_a_preset_is_compiled() {
     let mut layers = Layers::empty();
     layers.insert("test", "invalid-export", "stages = [{ id = 'group', stages = [{ id = 'member', prompt = 'work' }], exports = [{ node = 'missing', outputs = ['result'] }] }]\n").unwrap();
