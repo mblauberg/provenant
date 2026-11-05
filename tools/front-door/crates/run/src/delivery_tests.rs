@@ -3229,11 +3229,18 @@ impl PrepareFixture {
                 Duration::from_secs(5),
                 || {
                     let result = crate::settlement::Guard::claim(&attempt, scope, &clock);
-                    let ready = !matches!(result, Ok(None));
+                    let observation = match &result {
+                        Ok(None) => format!(
+                            "claim refused: {:?}",
+                            crate::settlement::refusal(&attempt, scope, &clock)
+                        ),
+                        Ok(Some(_)) => "claimed".to_owned(),
+                        Err(error) => format!("claim error: {error}"),
+                    };
                     resumed = Some(result);
-                    ready
+                    observation
                 },
-                |ready| *ready,
+                |observation| !observation.starts_with("claim refused:"),
             )?;
             settlement = resumed
                 .ok_or("no claim attempted")??
