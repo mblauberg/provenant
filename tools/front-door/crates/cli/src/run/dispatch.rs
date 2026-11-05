@@ -647,6 +647,10 @@ pub(super) fn check_flag_capabilities_with_writes(
     Ok(())
 }
 
+/// The shortest admission window a caller's `--wait` can impose.
+/// `--admission-timeout` and `[domains.run] admission_seconds` can set less.
+const ADMISSION_WAIT_FLOOR_SECONDS: u64 = 60;
+
 enum WorktreeAdmissionError {
     Own(worktree::OwnWorktreeError),
     Run(run::RunError),
@@ -1391,12 +1395,15 @@ pub(super) fn dispatch_inner(
         })?;
 
     let initial_deadline = if let Some(wait_seconds) = command.wait {
-        let wait_deadline = DurationMicros::from_seconds(wait_seconds)
-            .ok()
-            .and_then(|duration| now_wall.checked_add(duration).ok())
-            .ok_or_else(|| {
-                Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid wait timeout")
-            })?;
+        // Waiting to observe a lane is not a reason to give up on admitting it:
+        // creating another worktree holds the repository lock for many seconds.
+        let wait_deadline =
+            DurationMicros::from_seconds(wait_seconds.max(ADMISSION_WAIT_FLOOR_SECONDS))
+                .ok()
+                .and_then(|duration| now_wall.checked_add(duration).ok())
+                .ok_or_else(|| {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid wait timeout")
+                })?;
         initial_deadline.min(wait_deadline)
     } else {
         initial_deadline
