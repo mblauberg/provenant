@@ -1526,6 +1526,64 @@ fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn competing_initial_lane_claims_publish_only_one_owner() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "competing-claims".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let first = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("competing-first".parse()?),
+        branch: "competing-claims".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    let second = WorktreeOwner {
+        operation_id: Some("competing-second".parse()?),
+        ..first.clone()
+    };
+    let barrier = std::sync::Barrier::new(2);
+    let claim = |owner: &WorktreeOwner| {
+        barrier.wait();
+        save_lane_owner_when_free(&context, &tree, owner, info.head, None, false, &cancel())
+    };
+    let results = std::thread::scope(|scope| {
+        let first_result = scope.spawn(|| claim(&first));
+        let second_result = scope.spawn(|| claim(&second));
+        Ok::<_, Box<dyn Error>>((
+            first_result
+                .join()
+                .map_err(|_| "first claim thread panicked")?,
+            second_result
+                .join()
+                .map_err(|_| "second claim thread panicked")?,
+        ))
+    })?;
+    assert!(
+        matches!(
+            (&results.0, &results.1),
+            (Ok(()), Err(WorktreeError::IdentityChanged))
+                | (Err(WorktreeError::IdentityChanged), Ok(()))
+        ),
+        "both claims must not succeed: {results:?}"
+    );
+    let owner = load_owner(&tree)?.ok_or("missing winning owner")?;
+    assert!(owner == first || owner == second);
+    Ok(())
+}
+
+#[test]
 fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Result<(), Box<dyn Error>>
 {
     let fixture = Fixture::new()?;
