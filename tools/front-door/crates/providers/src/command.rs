@@ -78,7 +78,7 @@ fn prepare(
     let mut env = base_env(
         input,
         scratch,
-        &format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display()),
+        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display()),
     );
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),

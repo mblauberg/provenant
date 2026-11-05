@@ -170,16 +170,6 @@ fn prepare(
         Access::ReadOnly => "deny",
         Access::WorktreeWrite => "allow",
     };
-    // Scratch is outside the workspace; headless runs cannot answer the
-    // external-directory prompt. Keep the exception inside its existing grant.
-    // https://opencode.ai/docs/permissions/#external-directories
-    let scratch = format!(
-        "{}/**",
-        plan.scratch
-            .path
-            .to_str()
-            .ok_or(ProviderError::InvalidPath)?
-    );
     let staged_skills = input.stage_user_skills();
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
@@ -192,6 +182,16 @@ fn prepare(
     let mut external = serde_json::Map::new();
     let mut reads = serde_json::Map::new();
     if input.git_context {
+        // Scratch is outside the workspace; headless runs cannot answer the
+        // external-directory prompt. Keep the exception inside its existing grant.
+        // https://opencode.ai/docs/permissions/#external-directories
+        let scratch = format!(
+            "{}/**",
+            plan.scratch
+                .path
+                .to_str()
+                .ok_or(ProviderError::InvalidPath)?
+        );
         external.insert(scratch.clone(), "allow".into());
         reads.insert(scratch, "allow".into());
     }
@@ -225,18 +225,22 @@ fn prepare(
     let cargo_bin = input.home.join(".cargo/bin");
     let mut path_entries = vec![bin.as_path()];
     if shell {
-        path_entries.push(cargo_bin.as_path());
+        if std::env::join_paths([&cargo_bin]).is_ok() {
+            path_entries.push(cargo_bin.as_path());
+        } else {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: OpenCode cannot include the Cargo bin directory in PATH; continuing without it"
+            );
+        }
     }
     path_entries.extend([
         std::path::Path::new("/usr/bin"),
         std::path::Path::new("/bin"),
     ]);
     let path = std::env::join_paths(path_entries).map_err(|_| ProviderError::InvalidPath)?;
-    let mut env = base_env(
-        input,
-        &plan.scratch.path,
-        path.to_str().ok_or(ProviderError::InvalidPath)?,
-    );
+    let mut env = base_env(input, &plan.scratch.path, path);
     let xdg = |key, fallback| {
         (input.host_var)(key)
             .map(PathBuf::from)
@@ -1616,6 +1620,58 @@ mod tests {
                 .iter()
                 .all(|g| g.scope == provenant_confinement::permissions::PathScope::Exact)
         );
+    }
+
+    #[test]
+    fn writer_search_path_preserves_non_utf8_home() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let plan = crate::tests::read_only_plan("/fixture", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let home = PathBuf::from(OsString::from_vec(b"/fixture/home-\xff".to_vec()));
+        let mut input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        input.home = &home;
+        let spec = prepare(
+            &input,
+            Access::WorktreeWrite,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let path = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
+        assert!(std::env::split_paths(&path.1).any(|entry| entry == home.join(".cargo/bin")));
+    }
+
+    #[test]
+    fn writer_search_path_skips_home_with_path_separator() {
+        let plan = crate::tests::read_only_plan("/fixture", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let home = std::path::Path::new("/fixture/home:with-separator");
+        let mut input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        input.home = home;
+        let spec = prepare(
+            &input,
+            Access::WorktreeWrite,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let path = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
+        assert!(!std::env::split_paths(&path.1).any(|entry| entry == home.join(".cargo/bin")));
     }
 
     #[test]

@@ -463,12 +463,12 @@ pub(crate) fn admit(
 pub(crate) fn base_env(
     input: &PrepareInput<'_>,
     scratch: &Path,
-    path: &str,
+    path: impl AsRef<std::ffi::OsStr>,
 ) -> Vec<(OsString, OsString)> {
     let mut env = vec![
         ("HOME".into(), input.home.into()),
         ("USER".into(), input.user.into()),
-        ("PATH".into(), path.into()),
+        ("PATH".into(), path.as_ref().to_owned()),
         ("TMPDIR".into(), scratch.into()),
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
         ("LANG".into(), "en_US.UTF-8".into()),
