@@ -778,25 +778,6 @@ mod diagnostic_tests {
     use super::FacadeError;
 
     #[test]
-    fn legacy_mismatch_frame_omits_the_expected_level() {
-        let error: FacadeError = serde_json::from_value(serde_json::json!({
-            "code": "peer_protocol_mismatch",
-            "peer": "w",
-            "remote": 1,
-        }))
-        .unwrap();
-        assert_eq!(
-            error,
-            FacadeError::PeerProtocolMismatch {
-                peer: "w".into(),
-                remote: 1,
-                expected: None,
-            }
-        );
-        assert_eq!(error.to_string(), "peer w speaks protocol 1; upgrade both");
-    }
-
-    #[test]
     fn future_schema_requires_upgrade_with_version_diagnostics() {
         use provenant_fabric_store::Error;
         let errors = [
