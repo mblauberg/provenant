@@ -209,8 +209,9 @@ fn pull_for_branch(project: &Path, branch: &str, head: GitOid) -> Result<BranchP
     })
 }
 /// The one same-repository pull request whose head branch is `branch` and
-/// that is open or already at `head`. A fork's namesake, or an earlier pull
-/// request from a reused branch name, never matches.
+/// that is open or already at `head`. If neither exists, a unique merged PR
+/// reveals a moved head. A fork's namesake never matches; multiple candidates
+/// are ambiguous and refuse reconciliation.
 fn pull_for_branch_with(
     branch: &str,
     head: GitOid,
@@ -246,7 +247,7 @@ fn pull_for_branch_with(
         "-f",
         &head_filter,
     ])?;
-    let mut matching: Vec<PullRequest> = serde_json::from_slice::<Vec<Vec<PullRequest>>>(&bytes)?
+    let candidates: Vec<PullRequest> = serde_json::from_slice::<Vec<Vec<PullRequest>>>(&bytes)?
         .into_iter()
         .flatten()
         .filter(|pull| {
@@ -259,7 +260,19 @@ fn pull_for_branch_with(
                     .is_some_and(|(head, base)| {
                         head.full_name.eq_ignore_ascii_case(&base.full_name)
                     })
-                && (pull.state == "open" || pull.head.sha == head)
+        })
+        .collect();
+    let has_current = candidates
+        .iter()
+        .any(|pull| pull.state == "open" || pull.head.sha == head);
+    let mut matching: Vec<_> = candidates
+        .into_iter()
+        .filter(|pull| {
+            if has_current {
+                pull.state == "open" || pull.head.sha == head
+            } else {
+                pull.merged_at.is_some()
+            }
         })
         .collect();
     match matching.len() {
@@ -518,6 +531,15 @@ mod branch_pull_tests {
                 .unwrap()
                 .number,
             456
+        );
+        let moved = select(serde_json::json!([pull(457, "MERGED", OTHER, false)])).unwrap();
+        assert_eq!(
+            (
+                moved.number,
+                moved.state.as_str(),
+                moved.head.to_string().as_str()
+            ),
+            (457, "MERGED", OTHER)
         );
         let ambiguous = select(serde_json::json!([
             pull(456, "OPEN", HEAD, false),

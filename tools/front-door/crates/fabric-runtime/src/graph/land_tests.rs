@@ -36,6 +36,9 @@ struct Owner {
     observed: Vec<(String, String)>,
     /// Whether the chair has merged by hand, which observation reports.
     chair_merged: bool,
+    reconcile_merged: bool,
+    merge_applied: bool,
+    merge_effects: usize,
     outcomes: VecDeque<LandObservation>,
     policy: Option<LandChoice>,
     reply: Option<String>,
@@ -46,6 +49,7 @@ struct Owner {
     /// The verdict line reviewers end with; PASS when unset.
     review_verdict: Option<&'static str>,
     wall_seconds: i64,
+    clock_unavailable: bool,
     tick: bool,
     backoff: CiPollBackoff,
 }
@@ -75,7 +79,11 @@ impl AttemptOwner for Owner {
         "fixture".into()
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
-        provenant_core::WallTime::from_micros(self.wall_seconds.saturating_mul(1_000_000)).ok()
+        if self.clock_unavailable {
+            None
+        } else {
+            provenant_core::WallTime::from_micros(self.wall_seconds.saturating_mul(1_000_000)).ok()
+        }
     }
     fn respect_ci_wake(&self) -> bool {
         self.tick
@@ -119,13 +127,24 @@ impl AttemptOwner for Owner {
             request.head.into(),
             authority.clone(),
         ));
-        Ok(self
+        if self.reconcile_merged && self.merge_applied {
+            return Ok(LandObservation::Merged {
+                pull_request: Some(7),
+                note: None,
+            });
+        }
+        let observation = self
             .outcomes
             .pop_front()
             .unwrap_or(LandObservation::Merged {
                 pull_request: Some(7),
                 note: None,
-            }))
+            });
+        if self.reconcile_merged && matches!(observation, LandObservation::Merged { .. }) {
+            self.merge_applied = true;
+            self.merge_effects += 1;
+        }
+        Ok(observation)
     }
     fn observe_or_start(
         &mut self,
@@ -488,6 +507,111 @@ fn a_pending_land_is_observed_again_and_a_refusal_fails_the_node() {
     assert_eq!(land.advance_error_code.as_deref(), Some("land_refused"));
     assert_eq!(owner.lands.len(), 2);
     assert!(owner.lands.iter().all(|(_, head, _)| head == REPAIR_HEAD));
+}
+
+#[test]
+fn land_replay_after_journal_failure_observes_one_merge() {
+    struct FailMerged(GraphCheckpoint);
+    impl GraphJournal for FailMerged {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(Some(self.0.clone()))
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if node(checkpoint, "land").state == NodeState::Succeeded {
+                return Err(std::io::Error::other("injected save failure"));
+            }
+            self.0 = checkpoint.clone();
+            Ok(())
+        }
+    }
+    let mut owner = owner();
+    owner.reconcile_merged = true;
+    owner.outcomes = VecDeque::from([
+        LandObservation::Pending {
+            reason: "waiting".into(),
+        },
+        LandObservation::Merged {
+            pull_request: Some(7),
+            note: None,
+        },
+    ]);
+    let document = document("routine", None);
+    let mut journal = Journal::default();
+    for _ in 0..12 {
+        let checkpoint = advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint;
+        if node(&checkpoint, "land")
+            .land
+            .as_ref()
+            .is_some_and(|land| land.pending_observations == 1)
+        {
+            break;
+        }
+    }
+    let prior = journal.0.unwrap();
+    assert_eq!(node(&prior, "land").state, NodeState::Running);
+    let before = serde_json::to_vec(&prior).unwrap();
+    let mut failing = FailMerged(prior);
+    assert!(matches!(
+        advance(&document, &mut owner, &mut failing),
+        Err(GraphError::Journal(_))
+    ));
+    assert_eq!(serde_json::to_vec(&failing.0).unwrap(), before);
+    assert_eq!(owner.merge_effects, 1);
+    let mut journal = Journal(Some(failing.0));
+    let recovered = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        node(&recovered.checkpoint, "land").state,
+        NodeState::Succeeded
+    );
+    assert_eq!(owner.merge_effects, 1);
+}
+
+#[test]
+fn pending_land_without_wall_clock_preserves_checkpoint() {
+    let mut owner = owner();
+    owner.outcomes = VecDeque::from([
+        LandObservation::Pending {
+            reason: "first".into(),
+        },
+        LandObservation::Pending {
+            reason: "still pending".into(),
+        },
+    ]);
+    let document = document("routine", None);
+    let mut journal = Journal::default();
+    for _ in 0..12 {
+        let checkpoint = advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint;
+        if node(&checkpoint, "land")
+            .land
+            .as_ref()
+            .is_some_and(|land| land.pending_observations == 1)
+        {
+            break;
+        }
+    }
+    let before = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        node(journal.0.as_ref().unwrap(), "land")
+            .land
+            .as_ref()
+            .unwrap()
+            .pending_observations,
+        1
+    );
+    owner.clock_unavailable = true;
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Refused(_))
+    ));
+    assert_eq!(
+        serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap(),
+        before
+    );
 }
 
 #[test]
