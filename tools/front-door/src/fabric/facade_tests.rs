@@ -3169,8 +3169,27 @@ pub(crate) mod peer_tests {
         {
             return Ok(());
         }
+        use provenant_fabric_runtime::graph::{self, GraphJournal};
         let fixture = SettlementFixture::resumed()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"terminal-unrelated","nodes":[{"id":"one","prompt":"work",
+                "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+        }))?;
+        let checkpoint: graph::GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"terminal-unrelated","plan_digest":"digest",
+            "nodes":[{"id":"one","state":"succeeded","attempts":[]}]
+        }))?;
+        let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id,
+            "terminal-unrelated", WaitBudget::cli(clock.mono_now(), 10)?, &cancel, &clock)?;
+        journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+            directory: fixture.rig.project.clone(), document })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        graph::take_checkpoint_read_ids();
         settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        assert!(graph::take_checkpoint_read_ids().is_empty());
         let clock = SystemClock;
         let cancel = CancelToken::new();
         let call = provenant_run::Request {
