@@ -1836,16 +1836,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "base"],
     ] {
         provenant_os::fixture::run_git(&project, &args)?;
     }
@@ -2371,16 +2362,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
     std::fs::create_dir_all(&project)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "base"],
     ] {
         provenant_os::fixture::run_git(&project, &args)?;
     }
@@ -2598,16 +2580,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
     std::fs::create_dir_all(&project)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "base"],
     ] {
         provenant_os::fixture::run_git(&project, &args)?;
     }
@@ -2734,16 +2707,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
     let run_git = |args: &[&str]| provenant_os::fixture::run_git(&project, args);
     for args in [
         &["init", "-q"][..],
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ][..],
+        &["commit", "--allow-empty", "-qm", "base"][..],
     ] {
         run_git(args)?;
     }
