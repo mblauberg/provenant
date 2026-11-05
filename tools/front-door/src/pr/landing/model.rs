@@ -118,6 +118,9 @@ pub struct PendingAttempt {
     pub head_moves: BTreeMap<u64, super::head_move::HeadMove>,
     #[serde(default)]
     pub settled: Option<SettledAttempt>,
+    /// Members for which dispatch was prepared; absent on older markers.
+    #[serde(default)]
+    pub dispatched: Option<Vec<u64>>,
 }
 
 /// A definite publication outcome. This phase never authorises publication.

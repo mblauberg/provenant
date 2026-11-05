@@ -158,6 +158,7 @@ pub fn rest_ordered(
     candidate: &Candidate,
     method: MergeMethod,
     landed: &mut Vec<String>,
+    before_dispatch: &mut dyn FnMut(u64) -> Result<(), LandingError>,
 ) -> Result<PublishResult, LandingError> {
     let mut expected = candidate.base.clone();
     for step in &candidate.steps {
@@ -183,6 +184,7 @@ pub fn rest_ordered(
         {
             return Err(LandingError::PullRequestChanged(step.pr.number));
         }
+        before_dispatch(step.pr.number)?;
         expected = merge_member(forge, step.pr.number, &step.pr.head, method)?;
         landed.push(expected.clone());
     }
@@ -431,7 +433,8 @@ mod tests {
                 "main",
                 &candidate(),
                 MergeMethod::Merge,
-                &mut Vec::new()
+                &mut Vec::new(),
+                &mut |_| Ok(())
             ),
             Err(LandingError::PullRequestChanged(2))
         ));
@@ -470,7 +473,8 @@ mod tests {
                 "main",
                 &candidate(),
                 MergeMethod::Merge,
-                &mut Vec::new()
+                &mut Vec::new(),
+                &mut |_| Ok(())
             ),
             Err(LandingError::TargetMoved)
         ));
@@ -494,6 +498,7 @@ mod tests {
             &candidate(),
             MergeMethod::Squash,
             &mut Vec::new(),
+            &mut |_| Ok(()),
         )?;
         assert_eq!(
             forge.merges,

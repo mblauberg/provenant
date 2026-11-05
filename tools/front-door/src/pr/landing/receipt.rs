@@ -286,6 +286,7 @@ pub(crate) mod tests {
             cost: CostEstimate::Known { micros: 1 },
             head_moves: Default::default(),
             settled: None,
+            dispatched: None,
         }
     }
 

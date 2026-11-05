@@ -481,6 +481,7 @@ fn run_inner(
                         })
                         .collect(),
                     settled: None,
+                    dispatched: Some(Vec::new()),
                 };
                 receipt::record_pending(request.state, &attempt)?;
                 let mut progress = Vec::new();
@@ -495,6 +496,10 @@ fn run_inner(
                         &candidate,
                         request.settings.method,
                         &mut progress,
+                        &mut |number| {
+                            attempt.dispatched.get_or_insert_default().push(number);
+                            receipt::record_pending(request.state, &attempt)
+                        },
                     ),
                 };
                 match published {
@@ -635,6 +640,7 @@ fn run_inner(
                     cost: record.cost.clone(),
                     head_moves: record.head_moves.clone(),
                     settled: None,
+                    dispatched: None,
                 };
                 reconcile::settle(request.state, &mut attempt, record, None)?;
                 let record = reconcile::finish_settled(
@@ -1728,6 +1734,7 @@ mod tests {
                     },
                     head_moves: Default::default(),
                     settled: None,
+                    dispatched: None,
                 },
             )?;
             let result = reconcile::recover_pending(
@@ -1800,6 +1807,7 @@ mod tests {
                     },
                     head_moves: Default::default(),
                     settled: None,
+                    dispatched: None,
                 },
             )?;
             let result = reconcile::recover_pending(
@@ -1892,6 +1900,7 @@ mod tests {
                 },
                 head_moves: Default::default(),
                 settled: None,
+                dispatched: None,
             },
         )?;
         let result = reconcile::recover_pending(
@@ -2011,6 +2020,7 @@ mod tests {
                     },
                     head_moves: Default::default(),
                     settled: None,
+                    dispatched: None,
                 },
             )?;
             let mut recovered = Vec::new();
@@ -2091,6 +2101,7 @@ mod tests {
                 },
                 head_moves: Default::default(),
                 settled: None,
+                dispatched: None,
             },
         )?;
         let mut recovered = Vec::new();
@@ -2244,6 +2255,87 @@ mod tests {
     }
 
     #[test]
+    fn recovery_excludes_members_never_dispatched() -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::ports::{PullRequestState, StackMembership};
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
+        forge.pull_requests.get_mut(&1).unwrap().stack = Some(StackMembership {
+            number: 42,
+            size: 2,
+            position: 1,
+            base_branch: "main".into(),
+        });
+        let state = tempfile::tempdir()?;
+        let mut attempt = super::super::receipt::tests::attempt("main", "step-2");
+        attempt.policy = LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )?;
+        attempt.gate_definition = definition;
+        attempt.candidate.base = repo.target.clone();
+        attempt.candidate.steps = (1..=2)
+            .map(|n| CandidateStep {
+                pr: EligiblePr {
+                    number: n,
+                    head: forge.pull_requests[&n].head.clone(),
+                    approval: format!("approval-{n}"),
+                    base_branch: "main".into(),
+                },
+                commit: format!("step-{n}"),
+                tree: format!("tree-{n}"),
+            })
+            .collect();
+        attempt.dispatched = Some(vec![1]);
+        repo.refs.insert(
+            attempt.candidate.ref_name.clone(),
+            attempt.candidate.commit.clone(),
+        );
+        receipt::record_pending(state.path(), &attempt)?;
+        let mut recovered = Vec::new();
+        let unknown = reconcile::recover_pending_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut recovered,
+            &|_| {},
+        );
+        assert!(matches!(
+            unknown,
+            Err(LandingError::PublicationUnknownAt { .. })
+        ));
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
+        forge.pull_requests.get_mut(&1).unwrap().state = PullRequestState::Merged;
+        forge.pull_requests.get_mut(&1).unwrap().merged_commit = Some("landed-1".into());
+        reconcile::recover_pending_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut recovered,
+            &|_| {},
+        )?;
+        assert_eq!(recovered[0].outcomes[&1], Outcome::Landed);
+        assert_eq!(recovered[0].outcomes[&2], Outcome::Excluded);
+        assert!(forge.merge_attempts.is_empty());
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn recovery_checks_target_before_each_ordered_retry() -> Result<(), Box<dyn std::error::Error>>
     {
         let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
@@ -2300,6 +2392,7 @@ mod tests {
                 },
                 head_moves: Default::default(),
                 settled: None,
+                dispatched: None,
             },
         )?;
         let mut recovered = Vec::new();
@@ -2387,6 +2480,7 @@ mod tests {
                 },
                 head_moves: Default::default(),
                 settled: None,
+                dispatched: None,
             },
         )?;
         let mut recovered = Vec::new();
@@ -2478,6 +2572,7 @@ mod tests {
                     },
                     head_moves: Default::default(),
                     settled: None,
+                    dispatched: None,
                 },
             )?;
         }

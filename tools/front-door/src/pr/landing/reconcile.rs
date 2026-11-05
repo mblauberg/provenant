@@ -447,6 +447,12 @@ pub(crate) fn recover_pending_with(
                     outcomes.insert(step.pr.number, Outcome::PendingUnknown);
                     continue;
                 }
+            } else if attempt
+                .dispatched
+                .as_ref()
+                .is_some_and(|sent| !sent.contains(&step.pr.number))
+            {
+                None
             } else {
                 let pr = match forge.pull_request(step.pr.number) {
                     Ok(pr) => pr,
