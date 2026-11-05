@@ -617,9 +617,8 @@ changes only manifests and lockfiles may auto-merge once `ci-status` is green.
 A major bump, a new dependency, or any change outside manifests and lockfiles
 takes at least one `routine` reviewer.
 [`dependabot-automerge.yml`](../../.github/workflows/dependabot-automerge.yml)
-queues `gh pr merge --auto` for semver-patch updates without checking changed
-paths. Until #2844 adds minor updates and the manifest-and-lockfile check, land
-minor updates by hand after CI and check a patch update's paths before it merges.
+queues `gh pr merge --auto` for eligible updates after checking the metadata
+and changed paths. Other updates wait for review.
 
 ### After merge
 
