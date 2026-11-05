@@ -4227,7 +4227,11 @@ fn delete_ref_compare_and_swap_preserves_a_moved_ref() -> Result<(), Box<dyn Err
 fn detached_worktree_names_the_head_and_both_fixes() -> Result<(), Box<dyn std::error::Error>> {
     let head = GitOid::parse("0123456789abcdef0123456789abcdef01234567")?;
     let message = WorktreeError::DetachedWorktree { head }.to_string();
-    for part in ["0123456789abcdef0123456789abcdef01234567", "git switch -c", "--mode read-only"] {
+    for part in [
+        "0123456789abcdef0123456789abcdef01234567",
+        "git switch -c",
+        "--mode read-only",
+    ] {
         assert!(message.contains(part), "{message}");
     }
     Ok(())

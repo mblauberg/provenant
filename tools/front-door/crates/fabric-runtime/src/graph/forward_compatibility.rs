@@ -210,7 +210,6 @@ fn review_schema_versions_and_stored_digests() {
         serde_json::from_slice::<GraphDocument>(&serde_json::to_vec(&v2).unwrap()).unwrap(),
         v2
     );
-
 }
 
 #[test]

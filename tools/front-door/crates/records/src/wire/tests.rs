@@ -500,8 +500,12 @@ fn published_set_is_stable_versioned_and_self_describing() {
     let files = published();
     let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
     for required in [
-        "lanes.schema.json", "status.schema.json", "output.schema.json",
-        "cancel.schema.json", "error.schema.json", "mcp/fabric_run.schema.json",
+        "lanes.schema.json",
+        "status.schema.json",
+        "output.schema.json",
+        "cancel.schema.json",
+        "error.schema.json",
+        "mcp/fabric_run.schema.json",
         "mcp/fabric_output.schema.json",
     ] {
         assert!(names.contains(&required), "missing {required}");

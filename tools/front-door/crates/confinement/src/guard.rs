@@ -584,7 +584,6 @@ mod tests {
         assert!(violation("rm -rf ~/state", &ctx, &GuardConfig::default()).is_none());
     }
 
-
     #[test]
     fn config_turns_rules_off_and_rejects_unknown_ids() {
         let (_dir, root) = tree();

@@ -1040,7 +1040,6 @@ mod overload_tests {
         assert_eq!(run("substitute"), "substitute");
     }
 
-
     #[test]
     fn resumed_answer_rejects_substitution_after_a_helper() {
         let mut stream = StreamState::new("claude", decode);

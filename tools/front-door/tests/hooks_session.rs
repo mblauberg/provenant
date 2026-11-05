@@ -436,7 +436,6 @@ fn autosave_never_writes_the_chair_file_and_output_shows_both_parts() -> Result 
     Ok(())
 }
 
-
 #[test]
 fn pre_compact_without_a_checkpoint_saves_state_and_says_notes_are_missing() -> Result {
     let rig = TestRig::new()?;

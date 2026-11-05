@@ -6,7 +6,10 @@ use std::os::unix::fs::PermissionsExt;
 #[test]
 fn admission_clock_error_preserves_wire_message() {
     let error = CustodyError::from(AdmissionError::Clock);
-    assert!(matches!(error, CustodyError::Admission(AdmissionError::Clock)));
+    assert!(matches!(
+        error,
+        CustodyError::Admission(AdmissionError::Clock)
+    ));
     assert!(error.to_string().contains("host monotonic clock"));
 }
 

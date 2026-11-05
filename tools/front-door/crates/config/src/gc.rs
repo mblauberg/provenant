@@ -653,9 +653,11 @@ mod build_tests {
     fn lane_port_space_defaults_validates_and_can_be_switched_off() {
         let defaults = LaneBuildSettings::default();
         assert!(defaults.invalid_keys().is_empty());
-        assert!(defaults.lane_port_base_value()
-            + defaults.lane_port_block_size() * defaults.lane_port_blocks()
-            <= u16::MAX as u64 + 1);
+        assert!(
+            defaults.lane_port_base_value()
+                + defaults.lane_port_block_size() * defaults.lane_port_blocks()
+                <= u16::MAX as u64 + 1
+        );
         let off: LaneBuildSettings = toml_edit::de::from_str("lane_port_blocks = 0").unwrap();
         assert!(off.invalid_keys().is_empty());
         assert_eq!(off.lane_port_blocks(), 0);
@@ -703,7 +705,10 @@ mod build_tests {
         assert_eq!(only_host.writer_lanes(), 20);
         assert_eq!(only_host.project_writer_lanes(), 20);
         let roomy: LaneBuildSettings = toml_edit::de::from_str("max_writer_lanes = 50").unwrap();
-        assert_eq!(roomy.project_writer_lanes(), defaults.project_writer_lanes().min(50));
+        assert_eq!(
+            roomy.project_writer_lanes(),
+            defaults.project_writer_lanes().min(50)
+        );
     }
     #[test]
     fn automatic_build_slots_follow_cores_jobs_and_memory() {

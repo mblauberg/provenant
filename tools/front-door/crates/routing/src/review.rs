@@ -1107,9 +1107,29 @@ mod tests {
         let shape = &review.shapes["standard"];
         let panel = review.panel(shape, None, &[], false, &[]);
         let names = lens_names(&panel);
-        assert_eq!(names.len(), shape.reviewers.iter().map(|reviewer| reviewer.count).sum());
-        assert_eq!(names.iter().copied().collect::<std::collections::BTreeSet<_>>().len(), names.len());
-        assert!(names.iter().all(|name| review.lenses.order.iter().any(|lens| lens.as_str() == *name)));
+        assert_eq!(
+            names.len(),
+            shape
+                .reviewers
+                .iter()
+                .map(|reviewer| reviewer.count)
+                .sum::<usize>()
+        );
+        assert_eq!(
+            names
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            names.len()
+        );
+        assert!(names.iter().all(|name| {
+            review
+                .lenses
+                .order
+                .iter()
+                .any(|lens| lens.as_str() == *name)
+        }));
     }
 
     #[test]
@@ -1385,7 +1405,10 @@ mod tests {
             let selected = review
                 .select_shape(None, Some(tier), None, &[], None)
                 .unwrap();
-            assert!(review.shapes.contains_key(selected.name), "risk tier {tier}");
+            assert!(
+                review.shapes.contains_key(selected.name),
+                "risk tier {tier}"
+            );
             assert_eq!(selected.source, "by_risk", "risk tier {tier}");
         }
     }

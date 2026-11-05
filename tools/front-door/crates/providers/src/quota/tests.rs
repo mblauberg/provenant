@@ -232,7 +232,13 @@ fn opencode_decodes_live_partial_local_ledger_and_reports_exhausted_weekly_pool(
     assert_eq!(snapshot.windows[2].resets_unix_seconds, Some(1_794_957_600));
     let details = snapshot.details.unwrap();
     assert_eq!(details.plan.as_deref(), Some("Go"));
-    assert!(details.note.as_deref().unwrap().contains("Partial lower bound"));
+    assert!(
+        details
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("Partial lower bound")
+    );
     let mut envelope: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/opencode.json")).unwrap();
     envelope["payload"]["windows"][2]["used_percent"] = serde_json::json!(125.5);

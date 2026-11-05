@@ -121,7 +121,6 @@ fn registered(state: CiState, summary: &str) -> CiObservation {
     }
 }
 
-
 #[test]
 fn ci_outcomes_are_recorded_and_fail_closed() {
     for (state, expected_state, reason) in [

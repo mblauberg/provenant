@@ -993,7 +993,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn lane_priority_defaults_and_bounds() {
         let mut config = config();

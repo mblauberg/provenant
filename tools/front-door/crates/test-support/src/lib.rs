@@ -138,8 +138,6 @@ mod tests {
         assert!(error.contains("still starting"));
     }
 
-
-
     #[test]
     fn native_prerequisites_fail_when_required_and_name_optional_skips() {
         for capability in ["sandbox backend", "rg", "PostgreSQL 18", "node/pnpm"] {

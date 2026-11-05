@@ -1,8 +1,8 @@
 use std::io::Cursor;
 
 use provenant_records::{
-    AttemptOutcome, CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits,
-    RecordHeader, decode, decode_v1,
+    AttemptOutcome, CanonicalError, CanonicalV1, DecodeError, FileDigest, Limits, RecordHeader,
+    decode, decode_v1,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -218,7 +218,6 @@ fn canonical_v1_rejects_float_values() {
         Err(CanonicalError::IntegerOutOfRange)
     ));
 }
-
 
 #[test]
 fn json_encode_rejects_nonfinite_values_without_losing_finite_floats() {

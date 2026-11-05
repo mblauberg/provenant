@@ -2258,7 +2258,10 @@ fn invalid_install_home_names_the_repair() -> Result {
         assert_eq!(value["status"], "invalid", "{value}");
         assert_eq!(value["error"]["code"], "HOME", "{value}");
         let repair = value["error"]["repair"].as_str().ok_or("repair")?;
-        assert!(repair.contains("HOME") && repair.contains("absolute home directory"), "{repair}");
+        assert!(
+            repair.contains("HOME") && repair.contains("absolute home directory"),
+            "{repair}"
+        );
     }
     Ok(())
 }

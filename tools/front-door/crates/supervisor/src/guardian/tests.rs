@@ -1468,7 +1468,6 @@ fn process_tree_path_replaces_foreign_environment_and_clears_it_when_unavailable
 }
 
 #[cfg(feature = "fixture")]
-
 #[test]
 fn a_leased_port_block_replaces_any_block_the_launch_environment_named() {
     let temp = tempfile::tempdir().unwrap();

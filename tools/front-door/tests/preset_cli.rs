@@ -1755,14 +1755,25 @@ fn preset_list_and_show_human_output_match_goldens() -> Result<(), Box<dyn std::
         Ok(scrub(&String::from_utf8(out.stdout)?, &root))
     };
     let list = run(&["preset", "list"])?;
-    for entry in std::fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/presets"))? {
+    for entry in
+        std::fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/presets"))?
+    {
         let path = entry?.path();
-        if path.extension().is_some_and(|extension| extension == "toml") {
-            let name = path.file_stem().and_then(|name| name.to_str()).ok_or("preset name")?;
-            assert!(list.lines().any(|line| {
-                let mut columns = line.split_whitespace();
-                columns.next() == Some(name) && columns.next() == Some("bundled")
-            }), "missing bundled {name}: {list}");
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "toml")
+        {
+            let name = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .ok_or("preset name")?;
+            assert!(
+                list.lines().any(|line| {
+                    let mut columns = line.split_whitespace();
+                    columns.next() == Some(name) && columns.next() == Some("bundled")
+                }),
+                "missing bundled {name}: {list}"
+            );
         }
     }
     golden_in(
@@ -1803,14 +1814,25 @@ fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
 fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
     for (name, args, nodes, edges, max_attempts) in [
         ("scout-swarm", &["--plan", "off"][..], 7, 6, 12),
-        ("generator-evaluator", &["--set", "parameters.worktree=\".\""][..], 3, 3, 3),
+        (
+            "generator-evaluator",
+            &["--set", "parameters.worktree=\".\""][..],
+            3,
+            3,
+            3,
+        ),
     ] {
         let text = explain_text(name, args)?;
         let field = |prefix: &str| text.lines().find_map(|line| line.strip_prefix(prefix));
-        let admission: serde_json::Value = serde_json::from_str(field("Admission: ").ok_or("missing admission")?)?;
-        let inspection: serde_json::Value = serde_json::from_str(field("Inspection: ").ok_or("missing inspection")?)?;
+        let admission: serde_json::Value =
+            serde_json::from_str(field("Admission: ").ok_or("missing admission")?)?;
+        let inspection: serde_json::Value =
+            serde_json::from_str(field("Inspection: ").ok_or("missing inspection")?)?;
         assert_eq!(admission["status"], "admitted", "{text}");
-        assert!(text.contains(&format!("Preset selection: {name} (override)")), "{text}");
+        assert!(
+            text.contains(&format!("Preset selection: {name} (override)")),
+            "{text}"
+        );
         assert_eq!(inspection["nodes"], nodes, "{text}");
         assert_eq!(inspection["edges"], edges, "{text}");
         assert_eq!(inspection["max_attempts"], max_attempts, "{text}");

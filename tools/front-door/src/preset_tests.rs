@@ -4713,19 +4713,52 @@ mod planner_front_end {
         let roots = vec![("read_roots".to_owned(), json!(["/repo/extra"]))];
         let scoped = vec![("worktree".to_owned(), json!("/repo/lane"))];
         for (name, params, expected, last_dependency) in [
-            ("scout-swarm", roots, & ["plan", "synthesis"][..], Some("plan")),
-            ("review-council", council, & ["subject", "plan", "verify", "synthesis"][..], Some("verify")),
-            ("fan-out", Vec::new(), & ["plan"][..], None),
-            ("fan-out-synthesise", Vec::new(), & ["plan", "synthesis"][..], Some("plan")),
-            ("scope-then-run", scoped, & ["plan", "synthesis", "scope", "ready", "run"][..], Some("ready")),
+            (
+                "scout-swarm",
+                roots,
+                &["plan", "synthesis"][..],
+                Some("plan"),
+            ),
+            (
+                "review-council",
+                council,
+                &["subject", "plan", "verify", "synthesis"][..],
+                Some("verify"),
+            ),
+            ("fan-out", Vec::new(), &["plan"][..], None),
+            (
+                "fan-out-synthesise",
+                Vec::new(),
+                &["plan", "synthesis"][..],
+                Some("plan"),
+            ),
+            (
+                "scope-then-run",
+                scoped,
+                &["plan", "synthesis", "scope", "ready", "run"][..],
+                Some("ready"),
+            ),
         ] {
             let expansion = run(&layers(PlanMode::On, None), name, "brief", params.clone());
-            assert_eq!(ids(&expansion).iter().map(String::as_str).collect::<Vec<_>>(), expected.to_vec(), "{name}");
+            assert_eq!(
+                ids(&expansion)
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                expected.to_vec(),
+                "{name}"
+            );
             let nodes = expansion.document["nodes"].as_array().unwrap();
             let planner = nodes.iter().find(|node| node["id"] == "plan").unwrap();
             assert_eq!(route(planner)["alias"], "principal", "{name}");
             if let Some(dependency) = last_dependency {
-                assert!(nodes.last().unwrap()["depends_on"].as_array().unwrap().contains(&json!(dependency)), "{name}");
+                assert!(
+                    nodes.last().unwrap()["depends_on"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(dependency)),
+                    "{name}"
+                );
             }
             if name == "review-council" {
                 assert_eq!(lens_names(&expansion), static_lenses(params));
@@ -4918,11 +4951,25 @@ mod planner_front_end {
 
     #[test]
     fn planned_big_batch_preserves_stages_and_lane_count() {
-        let expansion = run(&layers(PlanMode::On, None), "big-batch", "brief", worktrees());
-        assert_eq!(ids(&expansion), ["scout", "plan", "council", "refactor", "repair"]);
+        let expansion = run(
+            &layers(PlanMode::On, None),
+            "big-batch",
+            "brief",
+            worktrees(),
+        );
+        assert_eq!(
+            ids(&expansion),
+            ["scout", "plan", "council", "refactor", "repair"]
+        );
         let plan = &expansion.document["nodes"][1];
         assert_eq!(route(plan)["alias"], "principal");
-        assert_eq!(plan["plan"]["fallback"]["nodes"][0]["composite"]["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            plan["plan"]["fallback"]["nodes"][0]["composite"]["nodes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }
 
@@ -5677,7 +5724,6 @@ fn preset_file_spec_resolves_relative_writer_from_launch_and_falls_back_to_main(
         );
     }
 }
-
 
 #[test]
 fn retry_allowances_survive_preset_and_node_expansion() {

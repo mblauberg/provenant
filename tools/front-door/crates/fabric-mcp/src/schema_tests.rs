@@ -979,7 +979,6 @@ fn rejected_values_describe_expected_constraints() {
     assert!(expected("fabric_run", &input, "arguments.op").contains("submit"));
 }
 
-
 #[test]
 fn output_schema_lists_only_supported_parts() {
     let output = all_catalogue()
