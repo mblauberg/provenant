@@ -519,8 +519,11 @@ impl Registry<'_> {
         provider_state: &Path,
         host_settlement: bool,
     ) -> Result<run::Decoded, String> {
-        let is_claude =
-            route.provider.as_deref() == Some(provenant_records::Harness::Claude.spec().name);
+        let result_event_usage = route
+            .provider
+            .as_deref()
+            .and_then(provenant_records::AdapterSpec::get)
+            .is_some_and(|spec| spec.result_event_usage);
         let failed = |reason: &str| run::Decoded {
             outcome: run::Outcome::Failed,
             result: String::new(),
@@ -528,7 +531,7 @@ impl Registry<'_> {
             observed_route: None,
             // `source` names why usage is absent; records stay readable by older builds.
             usage: run::UsageRecord {
-                source: is_claude.then(|| "absent: no result event".into()),
+                source: result_event_usage.then(|| "absent: no result event".into()),
                 ..run::UsageRecord::default()
             },
             session: None,
@@ -700,9 +703,7 @@ impl Registry<'_> {
                     .insert_str(0, "[output truncated; retained tail]\n");
             }
         }
-        if (is_claude || adapter.id() == provenant_records::Harness::Claude.spec().name)
-            && !has_usage
-        {
+        if result_event_usage && !has_usage {
             let has_result = stdout.split(|&b| b == b'\n').any(|line| {
                 serde_json::from_slice::<serde_json::Value>(line)
                     .is_ok_and(|event| event["type"] == "result")

@@ -6376,6 +6376,15 @@ fn claude_absent_usage_names_its_reason() {
         decoded_no_usage.usage.source.as_deref(),
         Some("absent: result event has no usage")
     );
+
+    let unknown = run::RouteRecord {
+        provider: Some("unregistered-fixture".into()),
+        ..Default::default()
+    };
+    let decoded_unknown = Registry::default()
+        .decode(&unknown, b"", &clean_exit(), Path::new("/unused"))
+        .unwrap();
+    assert_eq!(decoded_unknown.usage.source, None);
 }
 
 #[test]
