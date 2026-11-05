@@ -7185,10 +7185,25 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
                         .into_iter()
                         .all(|grant| !overlaps_skill(grant, staged))
                 );
+                let env_path = |name: &str| -> std::path::PathBuf {
+                    spec.env
+                        .iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| std::path::PathBuf::from(value))
+                        .expect("adapter environment")
+                };
+                let expected = match adapter {
+                    "claude" => env_path("CLAUDE_CONFIG_DIR").join("skills"),
+                    "codex" => env_path("HOME").join(".agents/skills"),
+                    "agy" => env_path("HOME").join(".gemini/skills"),
+                    "cursor" => env_path("HOME").join(".cursor/skills"),
+                    "opencode" => env_path("XDG_CONFIG_HOME").join("opencode/skills"),
+                    _ => unreachable!(),
+                };
                 assert!(
                     spec.setup.iter().any(|step| matches!(step,
-                    SetupStep::Symlink { target, .. } if target == staged)),
-                    "{adapter} must discover staged tree"
+                    SetupStep::Symlink { link, target } if link == &expected && target == staged)),
+                    "{adapter} must discover staged tree at {expected:?}"
                 );
                 assert_eq!(spec.user_skills.file_count, 1);
             }
