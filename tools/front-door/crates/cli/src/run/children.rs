@@ -333,13 +333,6 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
         let stopping = cancel.is_cancelled();
         let scan_cancel = CancelToken::new();
         let call = request(&clock, &scan_cancel).map_err(|error| error.message)?;
-        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)
-            .map_err(|error| error.to_string())?;
-        let maximum = config
-            .knobs
-            .get("lanes.max_depth")
-            .and_then(|knob| knob.value.as_u64())
-            .ok_or("lanes.max_depth missing")?;
         // The lane can write every record this scan reads, so a read
         // failure is reported, never fatal: the stop below must still run.
         let queued = session
@@ -349,6 +342,19 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                 launch_error = Some(error.to_string());
                 Vec::new()
             });
+        // Parsing configuration costs far more than listing the queue, and this
+        // loop runs ten times a second for the whole lane, so read it only when a
+        // child is actually waiting for its depth check.
+        let maximum = if queued.is_empty() {
+            0
+        } else {
+            provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)
+                .map_err(|error| error.to_string())?
+                .knobs
+                .get("lanes.max_depth")
+                .and_then(|knob| knob.value.as_u64())
+                .ok_or("lanes.max_depth missing")?
+        };
         let scan = scan_queued(
             &session.store,
             queued,
