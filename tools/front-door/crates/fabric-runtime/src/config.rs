@@ -538,6 +538,7 @@ impl DomainConfig for FabricConfig {
         let mut errors = Vec::new();
         let mut reject = |field: String| {
             errors.push(SectionError {
+                detail: None,
                 field,
                 code: "range",
             })

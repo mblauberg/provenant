@@ -6622,11 +6622,20 @@ fn shared_settings_refuse_identity_credential_and_hook_keys() {
         source: None,
         keys: Some(vec!["refreshtoken".into()]),
     });
-    let message = settings.settings_error().unwrap();
+    let (message, code) = settings.settings_error().unwrap();
+    assert_eq!(code, Some("SHARED_SETTINGS_NEVER_SYNCED"));
     assert!(
         message.contains("`refreshtoken`") && message.contains("`token`"),
         "{message}"
     );
+    let errors = provenant_config::DomainConfig::validate(&settings);
+    let error = errors
+        .iter()
+        .find(|error| error.field == "shared_settings")
+        .unwrap();
+    assert_eq!(error.code, "SHARED_SETTINGS_NEVER_SYNCED");
+    assert_eq!(error.detail, Some(message));
+    assert!(error.to_string().contains("is never synced"));
     settings.shared_settings = None;
     let mut entry = accounts::Registration {
         adapter: "claude".into(),

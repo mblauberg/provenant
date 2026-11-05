@@ -451,7 +451,9 @@ established error envelope. These are bounded, terminal-safe facts selected by
 the owner. The local CLI can name an absolute worktree or refused grant;
 remote diagnostics need a repository or home anchor or use an inspection
 action. Unknown account references use `UNKNOWN_ACCOUNT`; pacing profiles
-that resolve to the same account use `DUPLICATE_PACING_PROFILE`. Resource
+that resolve to the same account use `DUPLICATE_PACING_PROFILE`. Identity or
+credential settings that cannot be synced use `SHARED_SETTINGS_NEVER_SYNCED`;
+the shared-settings owner supplies the corrective action. Resource
 projections name the observed limits and the relevant setting or operating-system
 limit; their actions name the condition to correct. A writer
 with unknown custody remains refused until custody is checked.

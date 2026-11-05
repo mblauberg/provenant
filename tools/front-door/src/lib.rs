@@ -474,8 +474,23 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
             };
             let code = match error.downcast_ref::<provenant_config::ConfigError>() {
                 Some(provenant_config::ConfigError::StaleRevision { .. }) => "STALE_REVISION",
+                Some(error) if error.refusal_code().is_some() => error
+                    .refusal_code()
+                    .unwrap_or(provenant_config::shared_settings::NEVER_SYNCED_CODE),
                 _ => "CONFIG",
             };
+            if code == provenant_config::shared_settings::NEVER_SYNCED_CODE {
+                let projection = provenant_config::shared_settings::never_synced_diagnostic();
+                let mut result = CommandResult::new(command, status, ());
+                result.error = Some(CommandError {
+                    diagnostic: Some((&projection).into()),
+                    code: projection.code.clone(),
+                    message: error.to_string(),
+                    cause: projection.detail.clone(),
+                    repair: projection.next.clone(),
+                });
+                return emit(&result, globals, "", false);
+            }
             fail(command, status, code, &error.to_string(), globals)
         }
     }

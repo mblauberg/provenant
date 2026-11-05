@@ -5112,6 +5112,7 @@ which may be reworded.
 | `LANE_CONTEXT` | The lane environment is missing or inconsistent. |
 | `IDENTITY` | The project or actor identity could not be resolved. |
 | `CONFIG` | Configuration could not be loaded or is invalid. |
+| `SHARED_SETTINGS_NEVER_SYNCED` | Identity and credential settings cannot be shared between accounts. |
 | `UNKNOWN_ACCOUNT` | The requested account is not registered. |
 | `DUPLICATE_PACING_PROFILE` | Multiple pacing profiles resolve to the same account. |
 | `GIT` | Git is unavailable or a Git query failed. |

@@ -64,6 +64,8 @@ pub enum InstallError {
     Config(#[from] crate::ConfigError),
     #[error("invalid harness configuration: {0}")]
     InvalidConfig(&'static str),
+    #[error("invalid harness configuration: {0}")]
+    SharedSettingsNeverSynced(&'static str),
     #[error(
         "symlinked or non-regular harness config refused: {0}; replace the link with a regular copy, then rerun install"
     )]

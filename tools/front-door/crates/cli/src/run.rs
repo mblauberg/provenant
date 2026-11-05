@@ -106,6 +106,19 @@ impl Fail {
             projection: None,
         }
     }
+
+    fn config(status: Status, error: provenant_config::ConfigError) -> Self {
+        let kind = if error.refusal_code().is_some() {
+            ErrorKind::SharedSettingsNeverSynced
+        } else {
+            ErrorKind::Config
+        };
+        let mut fail = Self::new(status, kind, error.to_string());
+        if kind == ErrorKind::SharedSettingsNeverSynced {
+            fail.projection = Some(Box::new(kind.diagnostic()));
+        }
+        fail
+    }
 }
 impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {

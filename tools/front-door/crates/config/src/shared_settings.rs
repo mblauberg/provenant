@@ -23,6 +23,15 @@ pub const DEFAULT_KEYS: [&str; 7] = [
     "cleanupPeriodDays",
 ];
 
+pub const NEVER_SYNCED_CODE: &str = "SHARED_SETTINGS_NEVER_SYNCED";
+
+/// The owner projection is shared by command and installation envelopes.
+pub fn never_synced_diagnostic() -> provenant_records::diagnostic::Diagnostic {
+    provenant_records::diagnostic::Diagnostic::new(NEVER_SYNCED_CODE)
+        .category("invalid")
+        .next("remove the identity or credential key from shared settings")
+}
+
 /// Selector prefix for a settings key recorded in the receipt.
 pub(crate) const PREFIX: &str = "setting:";
 
@@ -137,29 +146,52 @@ pub fn denied_key(name: &str) -> bool {
     denied_reason(name).is_some()
 }
 
+/// The shared-settings owner distinguishes the credential boundary from the
+/// separately managed hooks setting without inspecting a rendered message.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SharedSettingsError {
+    #[error("`hooks` is managed by `provenant install --hooks`, not shared settings")]
+    HooksManaged,
+    #[error("`{key}` is never synced: {reason}")]
+    NeverSynced { key: String, reason: String },
+}
+
+impl SharedSettingsError {
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::NeverSynced { .. } => Some(NEVER_SYNCED_CODE),
+            Self::HooksManaged => None,
+        }
+    }
+}
+
 /// What may never be synced. `Err` names the offending key, never a value.
-pub fn check_key(key: &str) -> Result<(), String> {
+pub fn check_key(key: &str) -> Result<(), SharedSettingsError> {
     if key == "hooks" {
-        return Err(
-            "`hooks` is managed by `provenant install --hooks`, not shared settings".into(),
-        );
+        return Err(SharedSettingsError::HooksManaged);
     }
     match denied_reason(key) {
-        Some(reason) => Err(format!("`{key}` is never synced: {reason}")),
+        Some(reason) => Err(SharedSettingsError::NeverSynced {
+            key: key.into(),
+            reason,
+        }),
         None => Ok(()),
     }
 }
 
 /// Refuses an allow-list or a value tree that would sync identity or credentials.
 /// Environment variable names inside `env` are held to the same rule.
-pub fn check_value(key: &str, value: &Value) -> Result<(), String> {
+pub fn check_value(key: &str, value: &Value) -> Result<(), SharedSettingsError> {
     if key == "env"
         && let Some(env) = value.as_object()
         && let Some((name, reason)) = env
             .keys()
             .find_map(|name| denied_reason(name).map(|reason| (name, reason)))
     {
-        return Err(format!("`env.{name}` is never synced: {reason}"));
+        return Err(SharedSettingsError::NeverSynced {
+            key: format!("env.{name}"),
+            reason,
+        });
     }
     Ok(())
 }

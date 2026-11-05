@@ -197,6 +197,7 @@ fn valid_writer_write(path: &Path) -> bool {
 fn valid_patterns(field: &str, patterns: &[String], errors: &mut Vec<SectionError>) {
     if patterns.len() > MAX_PATTERNS {
         errors.push(SectionError {
+            detail: None,
             field: field.into(),
             code: "range",
         });
@@ -204,6 +205,7 @@ fn valid_patterns(field: &str, patterns: &[String], errors: &mut Vec<SectionErro
     for (index, pattern) in patterns.iter().enumerate() {
         if !valid_pattern(pattern) {
             errors.push(SectionError {
+                detail: None,
                 field: format!("{field}.{index}"),
                 code: "path",
             });
@@ -213,6 +215,7 @@ fn valid_patterns(field: &str, patterns: &[String], errors: &mut Vec<SectionErro
 fn valid_writer_writes(field: &str, paths: &[PathBuf], errors: &mut Vec<SectionError>) {
     if paths.len() > MAX_WRITER_WRITES {
         errors.push(SectionError {
+            detail: None,
             field: field.into(),
             code: "range",
         });
@@ -220,6 +223,7 @@ fn valid_writer_writes(field: &str, paths: &[PathBuf], errors: &mut Vec<SectionE
     for (index, path) in paths.iter().enumerate() {
         if !valid_writer_write(path) {
             errors.push(SectionError {
+                detail: None,
                 field: format!("{field}.{index}"),
                 code: "path",
             });
@@ -231,6 +235,7 @@ impl DomainConfig for RunConfig {
         let mut errors = Vec::new();
         if let Some(0) = self.admission_seconds {
             errors.push(SectionError {
+                detail: None,
                 field: "admission_seconds".into(),
                 code: "range",
             });
@@ -241,6 +246,7 @@ impl DomainConfig for RunConfig {
         ] {
             if value == 0 {
                 errors.push(SectionError {
+                    detail: None,
                     field: field.into(),
                     code: "range",
                 });
@@ -251,12 +257,14 @@ impl DomainConfig for RunConfig {
         for (project, settings) in &self.projects {
             if !project_key(project) {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("projects.{project}"),
                     code: "key",
                 });
             }
             if let Some(0) = settings.admission_seconds {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("projects.{project}.admission_seconds"),
                     code: "range",
                 });

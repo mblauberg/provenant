@@ -46,6 +46,7 @@ impl DomainConfig for GuardConfig {
             .any(|id| !RULES.iter().any(|(rule, _)| rule == id));
         if unknown {
             vec![SectionError {
+                detail: None,
                 field: "deny".into(),
                 code: "unknown-rule",
             }]

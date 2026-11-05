@@ -2887,6 +2887,16 @@ pub fn run(
                 EdgeError::Routing(_) | EdgeError::Unresolved { .. } | EdgeError::Pacing(_) => {
                     (Outcome::Invalid, "INVALID")
                 }
+                EdgeError::Config(error) | EdgeError::PacingConfig(error)
+                    if error.refusal_code().is_some() =>
+                {
+                    (
+                        Outcome::Invalid,
+                        error
+                            .refusal_code()
+                            .unwrap_or(provenant_config::shared_settings::NEVER_SYNCED_CODE),
+                    )
+                }
                 EdgeError::Config(_) | EdgeError::PacingConfig(_) => (Outcome::Invalid, "CONFIG"),
                 EdgeError::AccountProfile { kind, .. } => (Outcome::Invalid, kind.code()),
                 _ => (Outcome::Error, "IO"),
@@ -2894,6 +2904,11 @@ pub fn run(
             let mut result = CommandResult::new(name, status, None);
             let projection = match &error {
                 EdgeError::AccountProfile { kind, .. } => kind.kind().map(|kind| kind.diagnostic()),
+                EdgeError::Config(error) | EdgeError::PacingConfig(error)
+                    if error.refusal_code().is_some() =>
+                {
+                    Some(provenant_run::ErrorKind::SharedSettingsNeverSynced.diagnostic())
+                }
                 _ => None,
             };
             result.error = Some(CommandError {

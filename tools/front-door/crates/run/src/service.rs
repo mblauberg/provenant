@@ -619,6 +619,7 @@ error_kinds! {
     LaneContext => "LANE_CONTEXT", "The lane environment is missing or inconsistent.";
     Identity => "IDENTITY", "The project or actor identity could not be resolved.";
     Config => "CONFIG", "Configuration could not be loaded or is invalid.";
+    SharedSettingsNeverSynced => "SHARED_SETTINGS_NEVER_SYNCED", "Identity and credential settings cannot be shared between accounts.";
     UnknownAccount => "UNKNOWN_ACCOUNT", "The requested account is not registered.";
     DuplicatePacingProfile => "DUPLICATE_PACING_PROFILE", "Multiple pacing profiles resolve to the same account.";
     Git => "GIT", "Git is unavailable or a Git query failed.";
@@ -664,6 +665,9 @@ error_kinds! {
 impl ErrorKind {
     /// Safe projection for refusal kinds that do not need additional facts.
     pub fn diagnostic(self) -> provenant_records::diagnostic::Diagnostic {
+        if self == Self::SharedSettingsNeverSynced {
+            return provenant_config::shared_settings::never_synced_diagnostic();
+        }
         let diagnostic =
             provenant_records::diagnostic::Diagnostic::new(self.code()).category(self.category());
         match self {
@@ -685,6 +689,7 @@ impl ErrorKind {
             | Self::NotFound
             | Self::WorktreeMissing
             | Self::UnknownAccount
+            | Self::SharedSettingsNeverSynced
             | Self::DuplicatePacingProfile => "invalid",
             Self::WorktreeUnregistered
             | Self::Refused
@@ -717,7 +722,7 @@ impl ErrorKind {
     pub const fn boundary_class(self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
-            Self::CredentialRoot => B::Credentials,
+            Self::CredentialRoot | Self::SharedSettingsNeverSynced => B::Credentials,
             Self::ObjectImportLimit | Self::StateCorrupt => B::Integrity,
             Self::WriterRefLocked | Self::SetupLockTimeout | Self::RetainedWriterImport => {
                 B::LaneGit

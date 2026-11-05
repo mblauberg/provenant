@@ -418,6 +418,7 @@ pub(crate) fn retired_schedule_keys(
         for (key, code) in RETIRED_SCHEDULE_KEYS {
             if row.contains_key(key) {
                 errors.push(SectionError {
+                    detail: None,
                     field: if strict(row) {
                         format!("{record}.{key}")
                     } else {
@@ -566,6 +567,7 @@ pub(crate) fn fallback_advisories(table: &toml_edit::Table) -> Vec<SectionError>
         };
         if let Some(code) = code {
             findings.push(SectionError {
+                detail: None,
                 field: format!("{field}.result.fallback"),
                 code,
             });
@@ -691,6 +693,7 @@ impl ModelPolicies {
     pub(crate) fn validate(&self, errors: &mut Vec<SectionError>) {
         if self.rules.len() > 128 {
             errors.push(SectionError {
+                detail: None,
                 field: "model_policy.rules".into(),
                 code: if self.rules.iter().any(|rule| rule.policy.restricts()) {
                     "restriction"
@@ -701,6 +704,7 @@ impl ModelPolicies {
         }
         for (field, code) in self.defaults.invalid_fields() {
             errors.push(SectionError {
+                detail: None,
                 field: format!("model_policy.defaults.{field}"),
                 code,
             });
@@ -708,6 +712,7 @@ impl ModelPolicies {
         for (i, rule) in self.rules.iter().enumerate() {
             for (field, code) in rule.policy.invalid_fields() {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("model_policy.rules.{i}.policy.{field}"),
                     code,
                 });
@@ -716,6 +721,7 @@ impl ModelPolicies {
             // rule without either would apply more widely than written.
             if !rule.scope_valid() {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("model_policy.rules.{i}"),
                     code: if rule.policy.restricts() {
                         "restriction"
@@ -1432,6 +1438,7 @@ mod tests {
         assert_eq!(
             errors,
             [SectionError {
+                detail: None,
                 field: "model_policy.rules.0".into(),
                 code: "policy",
             }]

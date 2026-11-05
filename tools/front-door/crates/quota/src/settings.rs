@@ -123,6 +123,7 @@ impl DomainConfig for Settings {
         .into_iter()
         .filter(|(_, ok)| !ok)
         .map(|(field, _)| SectionError {
+            detail: None,
             field: field.into(),
             code: "ceiling",
         })
@@ -130,6 +131,7 @@ impl DomainConfig for Settings {
         for (adapter, intervals) in &self.polling_intervals {
             if !crate::component(adapter) {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("polling_intervals.{adapter}"),
                     code: "adapter",
                 });
@@ -141,6 +143,7 @@ impl DomainConfig for Settings {
                 // The scheduler multiplies by up to four, then uses signed seconds.
                 if seconds.is_some_and(|n| n == 0 || n > i64::MAX as u64 / 4) {
                     errors.push(SectionError {
+                        detail: None,
                         field: format!("polling_intervals.{adapter}.{field}"),
                         code: "interval",
                     });
@@ -151,12 +154,14 @@ impl DomainConfig for Settings {
             .contains(&self.history_max_bytes)
         {
             errors.push(SectionError {
+                detail: None,
                 field: "history_max_bytes".into(),
                 code: "ceiling",
             });
         }
         if !valid_icon(&self.display.icon) {
             errors.push(SectionError {
+                detail: None,
                 field: "display.icon".into(),
                 code: "icon",
             });
@@ -164,6 +169,7 @@ impl DomainConfig for Settings {
         for (account, calibration) in &self.calibration {
             if !crate::component(account) || !calibration.valid() {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("calibration.{account}"),
                     code: "calibration",
                 });

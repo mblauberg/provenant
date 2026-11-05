@@ -174,7 +174,12 @@ fn execute_inner(
     kind: &mut Option<provenant_run::ErrorKind>,
 ) -> Result<Settings, String> {
     let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?
+        .map_err(|error| {
+            if error.refusal_code().is_some() {
+                *kind = Some(provenant_run::ErrorKind::SharedSettingsNeverSynced);
+            }
+            error.to_string()
+        })?
         .domains
         .accounts;
     if let Accounts::Set {

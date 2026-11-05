@@ -40,14 +40,7 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
             match provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS) {
                 Ok(config) => config,
                 Err(error) => {
-                    return reply(
-                        "run",
-                        Err(Fail::new(
-                            Status::Error,
-                            ErrorKind::Config,
-                            error.to_string(),
-                        )),
-                    );
+                    return reply("run", Err(Fail::config(Status::Error, error)));
                 }
             };
         if let Ok(catalogue) = provenant_routing::Catalogue::bundled() {
@@ -633,7 +626,7 @@ pub(super) fn dispatch_inner(
     // see the same effective capabilities as the provider.
     let explicit = command.access.capability.clone();
     let settings = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Error, error))?;
     let project = if settings.domains.lanes.projects.is_empty() {
         None
     } else {
@@ -1141,7 +1134,7 @@ pub(super) fn dispatch_inner(
     };
     // Validate deterministic admission inputs before creating or claiming a tree.
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Invalid, error))?;
     config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
@@ -1654,7 +1647,7 @@ pub fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>)
     let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
     let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Error, error))?;
     let max_depth = config
         .knobs
         .get("lanes.max_depth")
@@ -1726,7 +1719,7 @@ pub(super) fn replay_owned_dispatch(
         None => None,
     };
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Invalid, error))?;
     let mut profile = config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;

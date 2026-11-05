@@ -355,6 +355,7 @@ impl DomainConfig for Sample {
     fn validate(&self) -> Vec<SectionError> {
         if self.limit == 0 || self.limit > 8 {
             vec![SectionError {
+                detail: None,
                 field: "limit".into(),
                 code: "outside_allowed_range",
             }]
@@ -1179,6 +1180,7 @@ fn semantic_locations_keep_original_indices_after_invalid_empty_default_array_me
                 .enumerate()
                 .filter(|(_, value)| **value == 0)
                 .map(|(index, _)| SectionError {
+                    detail: None,
                     field: format!("values.{index}"),
                     code: "nonzero",
                 })

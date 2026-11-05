@@ -589,7 +589,7 @@ pub(super) fn submit_with_host_and_wait(
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Invalid, error))?;
     // Nested proposals are checked by the host before provider preparation.
     // A confined parent cannot open a sibling worktree to sample its volume.
     if parent_attempt.is_none() {
