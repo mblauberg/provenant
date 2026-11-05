@@ -1,8 +1,8 @@
 //! Attempt-scoped persistence for cloud job identities and observations.
 //!
-//! The caller supplies a trusted private attempt directory and holds its run
-//! lock across each read/modify/write. This store does not discover jobs or
-//! dispatch providers.
+//! The run owner supplies a private, attempt-scoped cloud directory and holds
+//! its cloud lock across each read/modify/write. This store does not discover
+//! jobs or dispatch providers.
 use provenant_os::fs::{Directory, FsError, PublishMode};
 use provenant_providers::cloud::{CloudJobStore, RemoteJob, RemoteState};
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,20 @@ pub struct AttemptCloudStore {
 }
 
 impl AttemptCloudStore {
-    pub fn new(directory: Directory) -> Self {
+    /// Operate under the run owner's attempt-scoped cloud lock.
+    pub fn with_attempt<T>(
+        runs: &provenant_run::RunStore,
+        id: provenant_core::AttemptId,
+        create: bool,
+        call: &provenant_run::Request<'_>,
+        operation: impl FnOnce(&mut Self) -> T,
+    ) -> provenant_run::Result<T> {
+        runs.with_cloud_storage(id, create, call, |directory| {
+            operation(&mut Self::new(directory))
+        })
+    }
+
+    fn new(directory: Directory) -> Self {
         Self { directory }
     }
 
