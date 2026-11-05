@@ -840,6 +840,12 @@ pub(super) fn deferred_review_catalogue(
             )?);
         }
     }
+    for name in names {
+        let expected = format!("lens-{name}");
+        if !lowered.iter().any(|pattern| pattern["name"] == expected) {
+            return Err(format!("review catalogue lacks {expected}"));
+        }
+    }
     Ok(json!({"patterns":lowered,"guidance":catalogue.get("guidance")}))
 }
 

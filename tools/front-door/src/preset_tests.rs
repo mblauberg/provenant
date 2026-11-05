@@ -5164,6 +5164,35 @@ mod planner_front_end {
     }
 
     #[test]
+    fn deliver_warns_and_keeps_review_when_catalogue_cannot_supply_lenses() {
+        let mut configured = super::real_selector("/nonexistent");
+        configured.plan = layers(PlanMode::On, None).plan;
+        let review = include_str!("../assets/presets/review.toml").replace(
+            "name = \"lens-${item.name}\"",
+            "name = \"other-${item.name}\"",
+        );
+        configured.insert("test", "review", &review).unwrap();
+        let expansion = run(
+            &configured,
+            "deliver",
+            "brief",
+            vec![("worktree".into(), json!("/repo/lane"))],
+        );
+        assert!(!expansion.plan.as_ref().unwrap().applied);
+        assert!(
+            expansion
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("review planner unavailable"))
+        );
+        assert!(
+            expansion.document["nodes"][2]["composite"]["nodes"][0]
+                .get("review_planner")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn plan_on_swaps_the_lanes_for_a_principal_planner_with_the_catalogue() {
         let expansion = run(
             &layers(PlanMode::On, None),
