@@ -55,6 +55,11 @@ in-progress Git operations under repository and writer custody. A different
 operation cannot replace a nonterminal lane owner, including a reservation that
 has not yet acquired an attempt ID. A replay of that same operation can use
 its reservation despite advisory census evidence, after reacquiring custody.
+Publishing an initial owner also takes repository and writer custody and checks
+the previously observed owner, so a creator cannot overwrite a competing claim.
+Failed-creation cleanup rechecks the operation owner under those locks before
+removing the tree. An unreadable owner record is custody uncertainty with the
+worktree scope and read failure, not an unowned checkout.
 
 A lane owner whose recorded attempt is confirmed terminal may be reassigned
 when the writer lock is free even if the census sees a process in the tree.
