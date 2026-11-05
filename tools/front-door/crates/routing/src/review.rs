@@ -567,6 +567,19 @@ impl ReviewConfig {
         ReviewShape { reviewers }
     }
 
+    // Review requests are ready by definition; preserve configured ready rules.
+    fn select_review_rule(
+        &self,
+        override_value: Option<&String>,
+        risk: Option<&str>,
+        kind: Option<&str>,
+        paths: &[String],
+        size: Option<&str>,
+    ) -> Selection<String> {
+        self.select
+            .select(override_value, risk, kind, paths, size, Some(true))
+    }
+
     pub fn select_shape<'a>(
         &'a self,
         override_name: Option<&'a str>,
@@ -583,13 +596,12 @@ impl ReviewConfig {
         let integration = (kind == Some("integration"))
             .then(|| self.select.by_kind.get("integration"))
             .flatten();
-        let mut selected = self.select.select(
+        let mut selected = self.select_review_rule(
             integration.or(override_name.map(str::to_owned).as_ref()),
             risk,
             kind,
             paths,
             size,
-            Some(true),
         );
         if integration.is_some() {
             selected.source = "by_kind";
@@ -603,17 +615,14 @@ impl ReviewConfig {
                     && !by_paths
                     && (kind.is_some_and(|k| self.select.by_kind.contains_key(k))
                         || size.is_some_and(|s| self.select.by_size.contains_key(s))))
-                .then(|| self.select.select(None, None, kind, &[], size, Some(true))),
+                .then(|| self.select_review_rule(None, None, kind, &[], size)),
                 (override_name.is_none()
                     && !by_paths
                     && kind != Some("docs")
                     && size.is_some_and(|s| self.select.by_size.contains_key(s)))
-                .then(|| self.select.select(None, None, None, &[], size, Some(true))),
+                .then(|| self.select_review_rule(None, None, None, &[], size)),
                 risk.filter(|r| self.select.by_risk.contains_key(*r))
-                    .map(|r| {
-                        self.select
-                            .select(None, Some(r), None, &[], None, Some(true))
-                    }),
+                    .map(|r| self.select_review_rule(None, Some(r), None, &[], None)),
             ];
             for candidate in candidates.into_iter().flatten() {
                 let slots = |name: &str| {
@@ -1463,6 +1472,19 @@ mod tests {
                 .name,
             "deep"
         );
+    }
+
+    #[test]
+    fn review_shape_honours_ready_rule() {
+        let mut review = ReviewConfig::default();
+        let name = review.select.default.clone();
+        review
+            .select
+            .by_readiness
+            .insert("ready".into(), name.clone());
+        let selected = review.select_shape(None, None, None, &[], None).unwrap();
+        assert_eq!(selected.name, name);
+        assert_eq!(selected.source, "readiness");
     }
 
     #[test]
