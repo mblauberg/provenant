@@ -643,3 +643,176 @@ fn hosts_lists_readiness_and_fabric_host_is_gone() -> Result {
     assert_eq!(code(&removed), 2);
     Ok(())
 }
+
+#[test]
+fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
+    use provenant_core::Clock;
+    use provenant_fabric_runtime::graph::{self, AttemptOwner};
+    use std::convert::Infallible;
+
+    struct FixtureOwner;
+    impl AttemptOwner for FixtureOwner {
+        type Error = Infallible;
+        fn input_cap_source(&self) -> graph::InputCapSource {
+            graph::InputCapSource::Configured
+        }
+        fn actor(&self) -> String {
+            "fixture".into()
+        }
+        fn bind_writer_worktree(
+            &mut self,
+            path: &str,
+        ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Infallible> {
+            Ok(Some(graph::WriterWorktreeBinding {
+                extra: [(
+                    "source_directory_identity".into(),
+                    json!({"device":7,"inode":9}),
+                )]
+                .into(),
+                worktree: path.into(),
+                head: "1".repeat(40),
+            }))
+        }
+        fn applied_route(
+            &mut self,
+            _: &str,
+        ) -> std::result::Result<Option<graph::GraphRoute>, Infallible> {
+            Ok(Some(
+                serde_json::from_value(json!({"adapter":"fixture","model":"fixture/model"}))
+                    .unwrap(),
+            ))
+        }
+        fn observe_or_start(
+            &mut self,
+            key: &graph::AttemptKey,
+            _: graph::NodeInput<'_>,
+            _: &graph::GraphRoute,
+            _: graph::AccessMode,
+            _: Option<&str>,
+            _: graph::Replay<'_>,
+        ) -> std::result::Result<graph::AttemptObservation, Infallible> {
+            let mut capture = provenant_records::result_capture::ResultCapture::new(None);
+            capture.push(b"fixture result\nVERDICT: PASS\n");
+            Ok(graph::AttemptObservation::Terminal {
+                attempt_ref: Some(format!("fixture/{}", key.node_id)),
+                outcome: graph::AttemptOutcome::Succeeded,
+                launched: true,
+                result: Some(Box::new(capture.finish())),
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: Some("1".repeat(40)),
+            })
+        }
+    }
+    let rig = TestRig::new()?;
+    let project: provenant_core::ProjectId =
+        call(&rig, &["fabric", "identity"], 0)?["data"]["project"]
+            .as_str()
+            .ok_or("project")?
+            .parse()?;
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let root = provenant_core::StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let document: graph::GraphDocument = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"inspection","nodes":[
+            {"id":"producer","prompt":"produce","access":"read_only","source":{"type":"commit","commit":"1".repeat(40)},"route":{"adapter":"fixture","model":"fixture/model"}},
+            {"id":"ordering-only","prompt":"order","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}},
+            {"id":"writer","prompt":"write","access":"worktree_write","worktree":rig.project.to_string_lossy(),"source":{"type":"commit","commit":"1".repeat(40)},"route":{"adapter":"fixture","model":"fixture/model"}},
+            {"id":"consumer","prompt":"consume","access":"read_only","depends_on":["producer","ordering-only"],"source":{"type":"node","node":"producer"},
+             "inputs":[{"node":"producer","outputs":["commit"],"required_outputs":["commit"]}],"route":{"adapter":"fixture","model":"fixture/model"}}
+        ]
+    }))?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
+    {
+        let mut journal =
+            graph::FileJournal::open(&root, project, "inspection", budget, &cancel, &clock)?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(),
+            directory: rig.project.clone(),
+            document: document.clone(),
+            review_base: None,
+            integration_base: None,
+        })?;
+        let config = provenant_fabric_runtime::config::GraphConfig::default();
+        graph::advance_with_budget(
+            &document,
+            &mut FixtureOwner,
+            &mut journal,
+            &config.limits,
+            &config.budget,
+        )?;
+    }
+    let status = call(
+        &rig,
+        &["fabric", "graph", "status", "inspection", "--full"],
+        0,
+    )?;
+    let nodes = status["data"]["checkpoint"]["nodes"]
+        .as_array()
+        .ok_or("nodes")?;
+    let writer = nodes
+        .iter()
+        .find(|node| node["id"] == "writer")
+        .ok_or("writer")?;
+    assert_eq!(writer["writer_binding"]["worktree"], "[redacted]");
+    assert_eq!(writer["writer_binding"]["head"], "1".repeat(40));
+    assert!(
+        writer["writer_binding"]
+            .get("source_directory_identity")
+            .is_none()
+    );
+    let consumer = nodes
+        .iter()
+        .find(|node| node["id"] == "consumer")
+        .ok_or("consumer")?;
+    let attempt = &consumer["attempts"][0];
+    let dependencies = attempt["input_manifest"]["dependencies"]
+        .as_array()
+        .ok_or("dependencies")?;
+    assert!(dependencies.contains(&json!("producer")));
+    assert!(dependencies.contains(&json!("ordering-only")));
+    assert_eq!(
+        attempt["input_manifest"]["inputs"]
+            .as_array()
+            .ok_or("selected inputs")?
+            .len(),
+        1
+    );
+    assert_eq!(
+        attempt["input_manifest"]["inputs"][0]["producer_node"],
+        "producer"
+    );
+    assert_eq!(
+        attempt["input_manifest"]["inputs"][0]["delivery"],
+        "delivered"
+    );
+    assert_eq!(
+        attempt["input_manifest"]["applied_route"]["model"],
+        "fixture/model"
+    );
+    assert_eq!(attempt["input_cap"], 262144);
+    assert_eq!(attempt["input_cap_source"], "configured");
+    assert_eq!(attempt["outcome"], "succeeded");
+    let human = rig.command(&["fabric", "graph", "status", "inspection", "--full"])?;
+    assert_eq!(code(&human), 0);
+    let human = String::from_utf8(human.stdout.bytes)?;
+    assert!(!human.contains(rig.project.to_str().ok_or("project path")?));
+    for fact in [
+        "inspection",
+        "consumer",
+        "producer",
+        "fixture/model",
+        "selected_input",
+        "dependencies=",
+        "ordering-only",
+        "input_limit_source=configured",
+        "delivery=Delivered",
+        "Succeeded",
+    ] {
+        assert!(human.contains(fact), "missing {fact}: {human}");
+    }
+    Ok(())
+}

@@ -260,7 +260,7 @@ fn pattern_summary(spec: &PlanSpec) -> String {
 
 pub fn prompt(node: &GraphNode) -> String {
     let mut prompt = node.prompt.clone();
-    if node.require_findings && !prompt.contains("```findings") {
+    if node.require_findings {
         prompt.push_str(
             "\n\nInclude a fenced `findings` JSON block in your final response. If there are no findings, emit exactly:\n```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nEach finding must include its id, severity, file, summary and status.",
         );
@@ -385,14 +385,7 @@ pub(super) fn expand(
 ) -> Result<GraphDocument, String> {
     let mut expanded = loops::expand(document, extensions, limits)?;
     let mut sources = std::collections::BTreeSet::new();
-    let mut review_base = None;
     for addition in expansions {
-        if let Some(review) = &addition.review {
-            if review_base.is_some_and(|base| base != review.base) {
-                return Err("review expansions disagree on the base".into());
-            }
-            review_base = Some(review.base);
-        }
         if addition.nodes.is_empty()
             || !sources.insert(&addition.source)
             || !expanded.nodes.iter().any(|n| n.id == addition.source)
@@ -768,6 +761,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
             }
         }
         return vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: root.id.clone(),
             outputs,
@@ -799,6 +793,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
             }
         }
         return vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: format!("{}--fallback", expansion.source),
             outputs,
@@ -810,6 +805,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
         .filter_map(|instance| {
             let pattern = spec.patterns.iter().find(|p| p.name == instance.name)?;
             Some(pattern.exports.iter().map(move |export| GraphInput {
+                required_outputs: Vec::new(),
                 extra: Default::default(),
                 node: format!("{}--{}", instance.id, export.node),
                 outputs: export.outputs.clone(),
@@ -839,6 +835,7 @@ fn wire_exports(node: &mut GraphNode, source: &str, exported: &[GraphInput]) {
             continue;
         }
         node.inputs.push(GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: export.node.clone(),
             outputs,

@@ -209,8 +209,13 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
             NodeProgress {
                 extra: Default::default(),
                 children: node.composite_members.clone(),
+                source_binding: node.source.clone(),
                 min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_commit: node.source.as_ref().map(|_| "1".repeat(64)),
+                writer_binding: None,
+        writer_binding_pending: plans::writer(node),
+                review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
+        review_base_pending: false,
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
                 handoff: plans::writer(node).then(|| "\"".repeat(plans::STORED_HANDOFF_BYTES / 2 - 1)),
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
@@ -265,12 +270,14 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 skip_reason: Some("graph cancelled".into()),
                 advance_error: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
                 advance_error_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
-                launch_retry: (!boundary
+                launch_retry: None,
+                last_launch_retry: (!boundary
                     && node.composite.is_none()
                     && node.decide.is_none()
                     && node.land.is_none())
                 .then(|| LaunchRetry {
                     extra: Default::default(),
+                    policy: LaunchRetryPolicy::default(),
                     failures: u8::MAX,
                     deadline: Some(envelope::latest()),
                     wake_at: Some(envelope::latest()),
@@ -302,6 +309,19 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                         outcome: Some(AttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
                         input_cap: Some(usize::MAX),
+                        input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
+                        input_manifest: Some(AttemptInputManifest {
+                            extra: Default::default(), schema_version: 1,
+                            source_commit: node.source.as_ref().map(|_| "a".repeat(64)),
+                            source_producer: node.source.as_ref().map(|_| AttemptKey { extra: Default::default(), graph_id: plan.graph_id.clone(), node_id: "n".repeat(64), route_index: u16::MAX }),
+                            writer_head: plans::writer(node).then(|| "a".repeat(64)),
+                            review_base: node.extra.get("review_base").map(|_| "a".repeat(64)),
+                            graph_review_base: Some("a".repeat(64)), integration_base: Some("a".repeat(64)), integration_source: Some("a".repeat(64)),
+                            applied_route: Some(GraphRoute { extra: Default::default(), adapter: Some("a".repeat(256)), model: Some("m".repeat(256)), effort: Some("e".repeat(256)), account: Some("a".repeat(256)), name: None, alias: None }),
+                            dependencies: Some(node.depends_on.iter().take(MANIFEST_INPUT_LIMIT).cloned().collect()), dependencies_omitted: node.depends_on.len().saturating_sub(MANIFEST_INPUT_LIMIT),
+                            inputs: node.inputs.iter().flat_map(|input| input.outputs.iter().map(move |kind| AttemptInputEvidence { extra: Default::default(), producer_node: input.node.clone(), producer_attempt: Some(AttemptKey { extra: Default::default(), graph_id: plan.graph_id.clone(), node_id: input.node.clone(), route_index: u16::MAX }), kind: *kind, required: true, producer_result_digest: Some("a".repeat(71)), commit: Some("a".repeat(64)), delivery: InputDelivery::Delivered, file_delivery: InputDelivery::Delivered })).take(MANIFEST_INPUT_LIMIT).collect(),
+                            omitted: node.inputs.iter().map(|input| input.outputs.len()).sum::<usize>().saturating_sub(MANIFEST_INPUT_LIMIT),
+                        }),
                         settled: u64::MAX,
                         usage: Some(AttemptUsage {
                             extra: Default::default(),
@@ -318,6 +338,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         })
         .collect();
     GraphCheckpoint {
+        bound_review_base: Some("f".repeat(64)),
+        bound_integration_base: Some("f".repeat(64)),
         extra: Default::default(),
         expansions: Vec::new(),
         remaining: Some(RemainingBudgets {
@@ -946,6 +968,24 @@ fn check_big_batch_panels(document: GraphDocument) {
     }
 }
 
+#[test]
+fn independent_review_expansions_can_retain_different_bases() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../assets/presets/fixtures/big-batch-five-lane-checkpoint.json"
+    )).unwrap();
+    let document: GraphDocument = serde_json::from_value(fixture).unwrap();
+    let limits = plans::generous();
+    let expanded = loops::expand(&document, &[], &limits).unwrap();
+    let sources: Vec<_> = expanded.nodes.iter().filter(|node| node.review.is_some()).take(2).cloned().collect();
+    assert_eq!(sources.len(), 2);
+    let additions: Vec<_> = sources.iter().enumerate().map(|(index, source)| {
+        let mut addition = fixture_review_expansion(source, &"1".repeat(40));
+        addition.review.as_mut().unwrap().base = (if index == 0 { "2" } else { "3" }).repeat(40).parse().unwrap();
+        addition
+    }).collect();
+    assert!(plans::expand(&document, &[], &additions, &limits).is_ok());
+}
+
 fn fixture_review_expansion(source: &GraphNode, subject: &str) -> Expansion {
     let id = source.id.clone();
     let spec = source.review.as_ref().unwrap();
@@ -1107,6 +1147,9 @@ fn five_lane_big_batch_expands_through_runtime() {
         type Error = std::convert::Infallible;
         fn actor(&self) -> String {
             "fixture".into()
+        }
+        fn bind_writer_worktree(&mut self, worktree: &str) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+            Ok(Some(WriterWorktreeBinding { extra: Default::default(), worktree: if std::path::Path::new(worktree).is_absolute() { worktree.to_owned() } else { format!("/fixture/{worktree}") }, head: "1111111111111111111111111111111111111111".into() }))
         }
         fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
             Ok(Some("1".repeat(40)))

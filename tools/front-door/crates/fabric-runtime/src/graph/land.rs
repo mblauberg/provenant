@@ -69,6 +69,8 @@ pub struct LandRequest<'a> {
     pub node_id: &'a str,
     pub branch: &'a str,
     pub head: &'a str,
+    /// The PR identity saved before an authorised merge is attempted.
+    pub pull_request: Option<u64>,
     pub tier: RiskTier,
     /// `None` while the tier asks: the host only observes whether the chair
     /// merged the pull request at `head`, and never merges.
@@ -77,6 +79,8 @@ pub struct LandRequest<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LandObservation {
+    /// A uniquely identified PR; save this identity before any merge effect.
+    Identified { pull_request: u64 },
     Merged {
         pull_request: Option<u64>,
         note: Option<String>,
@@ -238,7 +242,7 @@ pub(super) fn delivered_head(
     checkpoint: &GraphCheckpoint,
     writer: &str,
 ) -> Option<(String, String)> {
-    delivered_within(plan, checkpoint, writer, |_| true)
+    delivered_within(plan, checkpoint, writer, |_| true).map(|(branch, head, _)| (branch, head))
 }
 
 /// As [`delivered_head`], counting only the chain nodes `include` accepts.
@@ -247,7 +251,7 @@ fn delivered_within(
     checkpoint: &GraphCheckpoint,
     writer: &str,
     include: impl Fn(usize) -> bool,
-) -> Option<(String, String)> {
+) -> Option<(String, String, Option<AttemptKey>)> {
     plan.nodes
         .iter()
         .zip(&checkpoint.nodes)
@@ -263,10 +267,15 @@ fn delivered_within(
                 .attempts
                 .last()
                 .map_or(0, |attempt| attempt.settled);
-            Some((settled, outputs.branch.clone()?, outputs.commit.clone()?))
+            Some((
+                settled,
+                outputs.branch.clone()?,
+                outputs.commit.clone()?,
+                progress.attempts.last().map(|attempt| attempt.key.clone()),
+            ))
         })
-        .max_by_key(|(settled, _, _)| *settled)
-        .map(|(_, branch, commit)| (branch, commit))
+        .max_by_key(|(settled, _, _, _)| *settled)
+        .map(|(_, branch, commit, attempt)| (branch, commit, attempt))
 }
 
 /// The head a reviewer judged, or `None` for a node that is not a reviewer.
@@ -321,7 +330,20 @@ pub(super) fn chain_head(
 ) -> Option<String> {
     let upstream = ancestors(&plan.nodes, positions, node);
     delivered_within(plan, checkpoint, writer, |index| upstream.contains(&index))
-        .map(|(_, head)| head)
+        .map(|(_, head, _)| head)
+}
+
+/// The attempt that supplied the head selected by the same chain ordering.
+pub(super) fn chain_source_attempt(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    node: &str,
+    writer: &str,
+) -> Option<AttemptKey> {
+    let upstream = ancestors(&plan.nodes, positions, node);
+    delivered_within(plan, checkpoint, writer, |index| upstream.contains(&index))
+        .and_then(|(_, _, attempt)| attempt)
 }
 
 /// Attempt references of `writer` and of the writers that continue it among
@@ -516,6 +538,7 @@ fn outputs(record: &LandRecord) -> NodeOutputs {
         }),
         verdict: Some(LANDED.into()),
         findings: Vec::new(),
+        findings_available: None,
         branch: Some(record.branch.clone()),
         commit: Some(record.head.clone()),
         warnings: Vec::new(),
@@ -592,19 +615,45 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
             None => return Ok(()),
         },
     };
-    let observation = owner
-        .land(LandRequest {
-            graph_id: &plan.graph_id,
-            node_id: &node.id,
-            branch: &record.branch,
-            head: &record.head,
-            tier: record.tier,
-            authority: record.authorised_by.as_ref(),
-        })
-        .map_err(GraphError::Run)?;
+    let observation = loop {
+        let observation = owner
+            .land(LandRequest {
+                graph_id: &plan.graph_id,
+                node_id: &node.id,
+                branch: &record.branch,
+                head: &record.head,
+                pull_request: record.pull_request,
+                tier: record.tier,
+                authority: record.authorised_by.as_ref(),
+            })
+            .map_err(GraphError::Run)?;
+        match observation {
+            LandObservation::Identified { pull_request } => {
+                if pull_request == 0 || record.pull_request.is_some() {
+                    return Err(GraphError::Refused(format!(
+                        "node {}: land owner returned an invalid or repeated PR identity",
+                        node.id
+                    )));
+                }
+                record.pull_request = Some(pull_request);
+                checkpoint.nodes[index].land = Some(record.clone());
+                journal.save(checkpoint).map_err(GraphError::Journal)?;
+            }
+            other => break other,
+        }
+    };
     record.wake_at = None;
     match observation {
+        LandObservation::Identified { .. } => {
+            unreachable!("identity is saved in the observation loop")
+        }
         LandObservation::Merged { pull_request, note } => {
+            if record.pull_request.is_none() || record.pull_request != pull_request {
+                return Err(GraphError::Refused(format!(
+                    "node {}: land observation did not match the saved PR identity",
+                    node.id
+                )));
+            }
             if let Some(ask_id) = asked {
                 record.authorised_by = Some(LandAuthority::Chair { ask_id });
             }

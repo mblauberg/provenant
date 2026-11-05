@@ -119,11 +119,28 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
     fn actor(&self) -> String {
         "deliver-test".into()
     }
+    fn bind_writer_worktree(
+        &mut self,
+        worktree: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
+        Ok(Some(
+            provenant_fabric_runtime::graph::WriterWorktreeBinding {
+                extra: Default::default(),
+                worktree: if std::path::Path::new(worktree).is_absolute() {
+                    worktree.to_owned()
+                } else {
+                    format!("/fixture/{worktree}")
+                },
+                head: self.integration.clone().unwrap_or_else(|| BASE.into()),
+            },
+        ))
+    }
     fn preparation_fallback_evidence(
         &mut self,
         key: &AttemptKey,
         reference: &str,
-    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+    ) -> Result<Option<provenant_fabric_runtime::graph::PreparationFallbackEvidence>, Self::Error>
+    {
         let refused_locally = self.host_native_unavailable
             && key.route_index == 0
             && reference
@@ -135,8 +152,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
             && self.routes.iter().any(|(id, route)| {
                 id == &key.node_id && route.adapter.as_deref() == Some("host-native")
             });
-        Ok(refused_locally
-            .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable))
+        Ok(refused_locally.then_some(
+            provenant_fabric_runtime::graph::PreparationFallbackEvidence {
+                failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+            },
+        ))
     }
     fn attempt_families(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
         Ok(if self.one_family && !attempts.is_empty() {
@@ -160,6 +182,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
         Ok(None)
     }
     fn land(&mut self, request: LandRequest<'_>) -> Result<LandObservation, Self::Error> {
+        if request.pull_request.is_none() {
+            return Ok(LandObservation::Identified { pull_request: 7 });
+        }
         // A tier that asks only observes; the chair has not merged by hand.
         if request.authority.is_none() {
             return Ok(LandObservation::Pending {
@@ -985,6 +1010,19 @@ fn big_batch_lanes_deliver_then_the_council_gates_the_principal_and_repairer() {
     fn pin(value: &mut Value) {
         match value {
             Value::Object(map) => {
+                if map.get("access") == Some(&json!("worktree_write")) {
+                    let lane = match map.get("worktree").and_then(Value::as_str) {
+                        Some("/repo/a") => Some("a".repeat(40)),
+                        Some("/repo/b") => Some("b".repeat(40)),
+                        _ => None,
+                    };
+                    if let Some(lane) = lane
+                        && let Some(source) = map.get_mut("source").and_then(Value::as_object_mut)
+                        && source.get("commit") == Some(&json!("HEAD"))
+                    {
+                        source.insert("commit".into(), json!(lane));
+                    }
+                }
                 if map.get("type") == Some(&json!("commit"))
                     && map.get("commit") == Some(&json!("HEAD"))
                 {
@@ -1029,6 +1067,15 @@ fn big_batch_lanes_deliver_then_the_council_gates_the_principal_and_repairer() {
         .filter(|id| id.starts_with("lanes") && id.ends_with("--implement"))
         .collect();
     assert_eq!(lane_writers.len(), 2, "{:?}", host.launched);
+    for (lane, head) in [("lane-a", "a".repeat(40)), ("lane-b", "b".repeat(40))] {
+        assert!(
+            host.sources.iter().any(|(id, source)| id.contains(lane)
+                && id.ends_with("--implement")
+                && source.as_deref() == Some(head.as_str())),
+            "{:?}",
+            host.sources
+        );
+    }
     for writer in &lane_writers {
         let (_, mode, fast_forward) = delivery(writer);
         assert_eq!(
@@ -1079,8 +1126,6 @@ fn big_batch_lanes_deliver_then_the_council_gates_the_principal_and_repairer() {
     assert!(combined.is_some());
     // Each repair round continues the worktree and descends from the head the
     // previous delivery left on the integration branch, never a stale pin.
-    assert_eq!(source("repair--r1--fix"), None);
-    assert_eq!(source("repair--r2--fix"), None);
     let head = |id: &str| {
         progress(&run.checkpoint, id)
             .outputs
@@ -1094,6 +1139,8 @@ fn big_batch_lanes_deliver_then_the_council_gates_the_principal_and_repairer() {
         head("repair--r1--fix"),
         head("repair--r2--fix"),
     );
+    assert_eq!(source("repair--r1--fix"), principal);
+    assert_eq!(source("repair--r2--fix"), round_one);
     assert!(principal.is_some() && round_one.is_some() && round_two.is_some());
     assert_ne!(principal, round_one);
     assert_ne!(round_one, round_two);

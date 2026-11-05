@@ -659,10 +659,29 @@ impl WorktreeAdmissionError {
             Self::Own(worktree::OwnWorktreeError::Other(run::RunError::Writer(err)))
             | Self::Run(run::RunError::Writer(err)) => matches!(
                 err,
-                WorktreeError::RegistryLockTimeout | WorktreeError::UnknownWriter
+                WorktreeError::RegistryLockTimeout
+                    | WorktreeError::LockBusy
+                    | WorktreeError::UnknownWriter
+                    | WorktreeError::UnknownWriterAt { .. }
             ),
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod admission_retry_tests {
+    use super::*;
+    use provenant_confinement::worktrees::WorktreeError;
+
+    #[test]
+    fn lock_contention_and_unknown_writer_retry_but_live_writer_refuses() {
+        let retry =
+            |error| WorktreeAdmissionError::Run(run::RunError::Writer(error)).is_transient();
+        assert!(retry(WorktreeError::LockBusy));
+        assert!(retry(WorktreeError::UnknownWriter));
+        assert!(!retry(WorktreeError::LiveWriter));
+        assert!(!retry(WorktreeError::Dirty(String::new())));
     }
 }
 
@@ -1366,11 +1385,32 @@ pub(super) fn dispatch_inner(
             )
         })?;
 
+    let initial_deadline = if let Some(wait_seconds) = command.wait {
+        let wait_deadline = DurationMicros::from_seconds(wait_seconds)
+            .ok()
+            .and_then(|duration| now_wall.checked_add(duration).ok())
+            .ok_or_else(|| {
+                Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid wait timeout")
+            })?;
+        initial_deadline.min(wait_deadline)
+    } else {
+        initial_deadline
+    };
+
     let mut admission_window = match session
         .store
         .admission_window(&command.operation_id, &call)?
     {
-        Some(window) => window,
+        Some(mut window) => {
+            if initial_deadline < window.deadline {
+                window.deadline = initial_deadline;
+                session
+                    .store
+                    .save_admission_window(&command.operation_id, window, &call)?
+            } else {
+                window
+            }
+        }
         None => session.store.save_admission_window(
             &command.operation_id,
             run::AdmissionWindow {
@@ -1390,6 +1430,7 @@ pub(super) fn dispatch_inner(
             Duration::from_secs(2),
         );
         let mut retries = 0_u64;
+        let mut last_admission_error = None;
         loop {
             if cancel.is_cancelled() {
                 return Err(Fail::new(
@@ -1419,10 +1460,15 @@ pub(super) fn dispatch_inner(
                 .wall_now()
                 .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
             if now >= admission_window.deadline {
-                return Err(Fail::new(
-                    Status::Refused,
-                    ErrorKind::Refused,
-                    "admission deadline exceeded",
+                return Err(last_admission_error.map_or_else(
+                    || {
+                        Fail::new(
+                            Status::Refused,
+                            ErrorKind::Refused,
+                            "admission deadline exceeded",
+                        )
+                    },
+                    Fail::from,
                 ));
             }
             let remaining =
@@ -1550,7 +1596,7 @@ pub(super) fn dispatch_inner(
                     break Some(value);
                 }
                 Err(err) => {
-                    if !err.is_transient() {
+                    if command.wait.is_none() || !err.is_transient() {
                         return Err(err.into());
                     }
                     let now = clock
@@ -1559,6 +1605,7 @@ pub(super) fn dispatch_inner(
                     if now >= admission_window.deadline {
                         return Err(err.into());
                     }
+                    last_admission_error = Some(err);
                     let delay = backoff.delay(retries);
                     let left_micros = u64::try_from(
                         admission_window
@@ -2835,6 +2882,29 @@ pub(super) fn launch_unknown(started: &[run::Started]) -> Vec<String> {
 }
 
 pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
+    if !started.is_empty()
+        && started.iter().all(|item| {
+            matches!(
+                item,
+                run::Started::Refused { .. } | run::Started::Blocked { .. }
+            )
+        })
+        && let Some((attempt, error)) = started.iter().find_map(|item| match item {
+            run::Started::Blocked { attempt, error } => Some((attempt, error)),
+            _ => None,
+        })
+    {
+        let reason = format!("{attempt}: launch blocked: {error}");
+        let mut failure = Fail::new(Status::Refused, ErrorKind::Refused, &reason);
+        failure.detail = Some(Box::new(
+            provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason,
+            },
+        ));
+        return Err(failure);
+    }
     // Preserve the full receipt whenever a sibling can still make progress
     // or needs unknown-handoff recovery, including Fabric's operation replay.
     if started

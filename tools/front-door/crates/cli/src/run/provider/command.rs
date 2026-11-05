@@ -55,7 +55,19 @@ pub(super) fn prepare_command(
         .first()
         .filter(|program| !program.is_empty())
         .ok_or("configured command has no executable")?;
-    let cwd = canonical(registry.cwd.ok_or("working directory is unavailable")?)?;
+    let source = source_cwd(registry, task)?;
+    let isolated = task.access.source_root.is_some();
+    let cwd = if isolated {
+        let assets = registry.assets.ok_or("product assets are unavailable")?;
+        super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
+        let git = canonical(&match registry.host {
+            Some(host) => host.git.clone(),
+            None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
+        })?;
+        super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
+    } else {
+        source.clone()
+    };
     let invocation = if program.contains('/') {
         cwd.join(program)
     } else {
@@ -102,8 +114,20 @@ pub(super) fn prepare_command(
         provider,
         false,
     )?;
-    let (plan, observed_head, repository, worktree_gitdir) =
-        read_only_plan(roots, project, &cwd, &git, request)?;
+    let (plan, mut observed_head, repository, mut worktree_gitdir) =
+        read_only_plan(roots, project, &source, &git, request, isolated)?;
+    if isolated {
+        observed_head = Some(
+            task.head
+                .as_deref()
+                .ok_or("graph source head missing")?
+                .parse()
+                .map_err(|_| "invalid graph source head")?,
+        );
+        worktree_gitdir = Some(cwd.join(".git"));
+    } else {
+        require_source_head(task, observed_head)?;
+    }
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?
@@ -216,6 +240,13 @@ pub(super) fn prepare_command(
         settings.jobs(),
     );
     spec.complete_tool_requirements(&plan, &home, &cwd);
+    if isolated {
+        super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)?;
+        super::source_tree::ensure_view_read_only(
+            &cwd,
+            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
+        )?;
+    }
     apply_setup(&spec.setup, &[&scratch, &paths.provider_state], None)?;
     let warnings: Vec<String> = spec
         .omitted_discovery

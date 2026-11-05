@@ -7597,6 +7597,10 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
         &fixture.tree,
         |edge| -> Result<(), Box<dyn std::error::Error>> {
             crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            std::fs::write(
+                edge.roots.state.as_path().join("config.toml"),
+                "schema_version=1\n[gc]\nfree_floor='1B'\n",
+            )?;
             provenant_config::bind_host(edge.roots)?;
             allow_any_free_disk(edge)?;
 
@@ -7678,7 +7682,7 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
                 "--admission-timeout",
                 "60s",
             ])?;
-            cmd.wait = None;
+            cmd.wait = Some(15);
 
             let reply = dispatch_with_workers(cmd, edge, &Free);
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);

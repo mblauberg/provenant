@@ -7,6 +7,7 @@ pub(super) fn graph_human_full(run: &provenant_fabric_runtime::graph::GraphRun) 
 }
 
 fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool) -> String {
+    let waits = provenant_fabric_runtime::graph::graph_waits(&run.checkpoint);
     let members: std::collections::BTreeSet<_> = run
         .checkpoint
         .nodes
@@ -14,6 +15,22 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         .flat_map(|node| node.children.iter())
         .collect();
     let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
+    if full
+        && (run.checkpoint.bound_review_base.is_some()
+            || run.checkpoint.bound_integration_base.is_some())
+    {
+        human.push_str(&format!(
+            "Graph bases: review={} integration={}\n",
+            run.checkpoint
+                .bound_review_base
+                .as_deref()
+                .unwrap_or("unavailable"),
+            run.checkpoint
+                .bound_integration_base
+                .as_deref()
+                .unwrap_or("unavailable")
+        ));
+    }
     if let Some(outcome) = run.outcome {
         human.push_str(&format!("Outcome: {outcome:?}\n"));
     }
@@ -43,7 +60,12 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
             && (members.contains(&node.id) || node.round.is_some())
             && waiting_ci.is_none()
             && !substituted
-            && node.state != provenant_fabric_runtime::graph::NodeState::Failed
+            && !matches!(
+                node.state,
+                provenant_fabric_runtime::graph::NodeState::Running
+                    | provenant_fabric_runtime::graph::NodeState::Blocked
+                    | provenant_fabric_runtime::graph::NodeState::Failed
+            )
         {
             continue;
         }
@@ -117,11 +139,90 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         }
         if let Some(head) = &node.source_commit {
             human.push_str(&format!(" source={head}"));
+        } else if node.source_binding.is_some() {
+            human.push_str(" source=pending");
+        }
+        if let Some(base) = &node.review_base {
+            human.push_str(&format!(" review_base={base}"));
+        }
+        if let Some(wait) = waits.iter().find(|wait| wait.node == node.id) {
+            human.push_str(&format!(
+                " wait={} disposition={} code={} current_attempt={} route={} failures={} limit={} limit_source={} wake_at={} next={}",
+                wait.wait, wait.disposition, bounded_reason(&wait.code), bounded_reason(&wait.attempt),
+                wait.route, wait.failures, wait.limit, bounded_reason(&wait.limit_source),
+                bounded_reason(&wait.wake_at), bounded_reason(&wait.next)
+            ));
         }
         human.push('\n');
-        if full && let Some(outputs) = &node.outputs {
-            for warning in &outputs.warnings {
-                human.push_str(&format!("    warning: {}\n", bounded_reason(warning)));
+        if full {
+            for attempt in &node.attempts {
+                if let Some(manifest) = &attempt.input_manifest {
+                    let route = manifest.applied_route.as_ref();
+                    human.push_str(&format!(
+                        "    attempt route_index={} state={:?} outcome={:?} applied_adapter={} applied_model={} applied_effort={} applied_account={} source={} review_base={} graph_review_base={} integration_base={} integration_source={} input_limit={} input_limit_source={} omitted={}\n",
+                        attempt.key.route_index, attempt.state, attempt.outcome,
+                        route.and_then(|route| route.adapter.as_deref()).unwrap_or("unavailable"),
+                        route.and_then(|route| route.model.as_deref()).unwrap_or("unavailable"),
+                        route.and_then(|route| route.effort.as_deref()).unwrap_or("unavailable"),
+                        route.and_then(|route| route.account.as_deref()).unwrap_or("unavailable"),
+                        manifest.source_commit.as_deref().unwrap_or("unavailable"),
+                        manifest.review_base.as_deref().unwrap_or("unavailable"),
+                        manifest.graph_review_base.as_deref().unwrap_or("unavailable"),
+                        manifest.integration_base.as_deref().unwrap_or("unavailable"),
+                        manifest.integration_source.as_deref().unwrap_or("unavailable"),
+                        attempt.input_cap.map_or_else(|| "unavailable".into(), |cap| cap.to_string()),
+                        attempt.input_cap_source.map_or("unavailable", |source| match source {
+                            provenant_fabric_runtime::graph::InputCapSource::EffectiveGraphLimits => "effective_graph_limits",
+                            provenant_fabric_runtime::graph::InputCapSource::Default => "default",
+                            provenant_fabric_runtime::graph::InputCapSource::Configured => "configured",
+                        }),
+                        manifest.omitted,
+                    ));
+                    if let Some(producer) = &manifest.source_producer {
+                        human.push_str(&format!(
+                            "      source_producer graph={} node={} attempt={}\n",
+                            producer.graph_id, producer.node_id, producer.route_index
+                        ));
+                    }
+                    if let Some(head) = &manifest.writer_head {
+                        human.push_str(&format!("      writer_initial_head={head}\n"));
+                    }
+                    match &manifest.dependencies {
+                        Some(dependencies) => human.push_str(&format!(
+                            "      dependencies={} omitted={}\n",
+                            dependencies.join(","),
+                            manifest.dependencies_omitted
+                        )),
+                        None => human.push_str("      dependencies=unavailable\n"),
+                    }
+                    for input in &manifest.inputs {
+                        let producer = input.producer_attempt.as_ref();
+                        human.push_str(&format!(
+                            "      selected_input node={} graph={} attempt={} kind={:?} required={} digest={} commit={} delivery={:?} file={:?}\n",
+                            input.producer_node,
+                            producer.map_or("unavailable", |key| key.graph_id.as_str()),
+                            producer.map_or_else(|| "unavailable".into(), |key| key.route_index.to_string()),
+                            input.kind, input.required,
+                            input.producer_result_digest.as_deref().unwrap_or("unavailable"),
+                            input.commit.as_deref().unwrap_or("unavailable"),
+                            input.delivery, input.file_delivery,
+                        ));
+                    }
+                }
+            }
+            if let Some(outputs) = &node.outputs {
+                human.push_str(&format!(
+                    "    outputs digest={} commit={} verdict={}\n",
+                    outputs
+                        .result
+                        .as_ref()
+                        .map_or("unavailable", |result| result.digest.as_str()),
+                    outputs.commit.as_deref().unwrap_or("unavailable"),
+                    outputs.verdict.as_deref().unwrap_or("unavailable")
+                ));
+                for warning in &outputs.warnings {
+                    human.push_str(&format!("    warning: {}\n", bounded_reason(warning)));
+                }
             }
         }
     }
