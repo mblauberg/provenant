@@ -480,6 +480,11 @@ boundary = "lane_git"
 reason = "A bound writer Git launcher must be placed first in PATH so Git uses its private view."
 
 [[guard]]
+site = "providers/src/lane.rs#git_wrapper"
+boundary = "authority"
+reason = "A Git executable containing a NUL cannot identify an executable to launch; native non-UTF-8 and shell-special bytes are preserved."
+
+[[guard]]
 site = "providers/src/lane.rs#LaneRuntime::environment"
 boundary = "unclassified"
 reason = "Private Git wrapper and runtime setup can reject paths or unavailable configuration."

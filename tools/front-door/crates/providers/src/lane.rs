@@ -210,8 +210,9 @@ impl crate::LaunchSpec {
 }
 
 fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderError> {
-    let git = git.to_str().ok_or(ProviderError::InvalidPath)?;
-    if git.chars().any(char::is_control) {
+    use std::os::unix::ffi::OsStrExt;
+    let git = git.as_os_str().as_bytes();
+    if git.contains(&0) {
         return Err(ProviderError::InvalidPath);
     }
     let mut bytes = b"#!/bin/sh\n".to_vec();
@@ -221,13 +222,21 @@ fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderErro
             bytes.extend_from_slice(bound_exports(bound)?.as_bytes());
         }
     }
-    let executable = shell_quote(git);
+    bytes.extend_from_slice(b"exec '");
+    for byte in git {
+        if *byte == b'\'' {
+            bytes.extend_from_slice(b"'\\''");
+        } else {
+            bytes.push(*byte);
+        }
+    }
+    bytes.push(b'\'');
     let include = options
         .include
         .as_deref()
         .map(|value| format!(" -c {value}"))
         .unwrap_or_default();
-    bytes.extend_from_slice(format!("exec {executable}{include} \"$@\"\n").as_bytes());
+    bytes.extend_from_slice(format!("{include} \"$@\"\n").as_bytes());
     Ok(bytes)
 }
 
@@ -1637,6 +1646,36 @@ mod tests {
         let link = outside.join("link");
         std::os::unix::fs::symlink(&worktree, &link).unwrap();
         assert_eq!(run(&link, &["status"]), bound("status"));
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_preserves_native_executable_path() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::{
+            ffi::{OsStrExt, OsStringExt},
+            fs::PermissionsExt,
+        };
+        let dir = tempfile::tempdir()?;
+        let git = PathBuf::from(OsString::from_vec(b"/fixture/git-\xff-'\n".to_vec()));
+        let mut script = git_wrapper(
+            &git,
+            &GitWrapper {
+                scrub: true,
+                ..Default::default()
+            },
+        )?;
+        let position = script
+            .windows(5)
+            .position(|bytes| bytes == b"exec ")
+            .ok_or("missing exec")?;
+        script.splice(position..position + 5, b"printf '%s' ".iter().copied());
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(&wrapper, script)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let output = std::process::Command::new(wrapper).output()?;
+        assert!(output.status.success());
+        assert_eq!(output.stdout, git.as_os_str().as_bytes());
+        Ok(())
     }
 
     #[test]
