@@ -2039,7 +2039,7 @@ fn existing_pr_requires_positive_absence_and_reconciles_identity()
     // A command failure cannot authorise another creation.
     assert!(matches!(
         lookup(),
-        Err(RunError::Delivery(WriterDeliveryStage::PullRequest))
+        Err(RunError::PullRequestReconciliation { .. })
     ));
     std::fs::write(fixture.root.join("pulls"), "[]")?;
     assert_eq!(lookup()?, None);
@@ -2059,7 +2059,7 @@ fn existing_pr_requires_positive_absence_and_reconciles_identity()
         std::fs::write(
             fixture.root.join("pulls"),
             serde_json::to_vec(&serde_json::json!([{
-                "url": url, "state": state, "baseRefName": base, "headRefOid": oid
+                "number": 1, "url": url, "state": state, "baseRefName": base, "headRefOid": oid
             }]))?,
         )?;
         match expected {
@@ -2068,10 +2068,24 @@ fn existing_pr_requires_positive_absence_and_reconciles_identity()
                 lookup(),
                 Err(RunError::Delivery(WriterDeliveryStage::Verify))
             )),
-            _ => assert!(matches!(
-                lookup(),
-                Err(RunError::Delivery(WriterDeliveryStage::PullRequest))
-            )),
+            _ => {
+                let error = lookup().expect_err("reconciliation blocked");
+                assert!(matches!(
+                    error,
+                    RunError::PullRequestReconciliation {
+                        number: Some(1),
+                        ..
+                    }
+                ));
+                let diagnostic =
+                    error.diagnostic(provenant_records::diagnostic::Destination::Local);
+                assert!(diagnostic.next.as_deref().unwrap().contains("#1"));
+                let WriterDeliveryState::Failed { extra, stage } = failed_state(&error) else {
+                    panic!("failed receipt")
+                };
+                assert_eq!(stage, WriterDeliveryStage::PullRequest);
+                assert!(extra.contains_key("next"));
+            }
         }
     }
     Ok(())

@@ -324,6 +324,11 @@ pub enum RunError {
     Input { kind: ErrorKind, message: String },
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
+    #[error("pull request reconciliation blocked: {reason}")]
+    PullRequestReconciliation {
+        reason: &'static str,
+        number: Option<u64>,
+    },
     #[error(
         "host writer delivery failed at Integrate (integration_head_moved): the integration target moved after the round began and a loop round only fast-forwards it; rerun the graph to review the new head"
     )]
@@ -615,6 +620,19 @@ impl RunError {
                 if matches!(error, WorktreeError::Dirty(_)) {
                     diagnostic = diagnostic.detail("the writer worktree has uncommitted edits");
                 }
+            }
+            Self::PullRequestReconciliation { reason, number } => {
+                let next = number.map_or_else(
+                    || "restore forge access and inspect pull requests for the delivery branch before retrying".to_owned(),
+                    |number| format!("inspect pull request #{number} and resolve its state or base before retrying"),
+                );
+                diagnostic =
+                    diagnostic
+                        .detail(*reason)
+                        .next(next)
+                        .fact(DiagnosticFact::DeliveryStage(
+                            WriterDeliveryStage::PullRequest,
+                        ));
             }
             Self::Delivery(stage) => {
                 diagnostic = diagnostic

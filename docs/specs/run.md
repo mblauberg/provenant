@@ -1323,7 +1323,9 @@ PR bodies use commit subjects and bodies with run and attempt IDs, capped at
 PR reconciliation reuses a merged PR at the exact delivered head, or an open
 PR at that head and the repository default base. Only a successful empty branch
 lookup permits creation. Failed or ambiguous lookups, a closed PR, or a base
-mismatch stop delivery; a moved head is refused at verification.
+mismatch stop delivery; a moved head is refused at verification. A reconciliation
+refusal records a safe reason and next action in the failed delivery receipt,
+including the PR number when known.
 - Why: delivery is host authority attached to a verified result, and a later
   pickup must not silently deliver unrelated edits.
 - Test: `crates/run/src/delivery_tests.rs::local_integration_fast_forwards_merges_and_replays`;

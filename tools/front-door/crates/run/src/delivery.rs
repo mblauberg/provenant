@@ -1695,32 +1695,49 @@ impl HostDeliveryContext {
     ) -> Result<Option<String>> {
         // A failed lookup is not evidence of absence. Only an empty list
         // permits creation; all ambiguous results leave the effect stopped.
-        let raw = self.command(
-            cwd,
-            "gh",
-            &[
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--head",
-                branch,
-                "--state",
-                "all",
-                "--limit",
-                "1000",
-                "--json",
-                "url,state,headRefOid,baseRefName",
-            ],
-            Stage::PullRequest,
-        )?;
+        let raw = self
+            .command(
+                cwd,
+                "gh",
+                &[
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--head",
+                    branch,
+                    "--state",
+                    "all",
+                    "--limit",
+                    "1000",
+                    "--json",
+                    "number,url,state,headRefOid,baseRefName",
+                ],
+                Stage::PullRequest,
+            )
+            .map_err(|error| match error {
+                RunError::Delivery(Stage::PullRequest) => RunError::PullRequestReconciliation {
+                    reason: "pull request lookup failed",
+                    number: None,
+                },
+                error => error,
+            })?;
         let pulls: Vec<serde_json::Value> =
-            serde_json::from_str(&raw).map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+            serde_json::from_str(&raw).map_err(|_| RunError::PullRequestReconciliation {
+                reason: "pull request lookup returned invalid data",
+                number: None,
+            })?;
         let value = match pulls.as_slice() {
             [] => return Ok(None),
             [value] => value,
-            _ => return Err(RunError::Delivery(Stage::PullRequest)),
+            _ => {
+                return Err(RunError::PullRequestReconciliation {
+                    reason: "multiple pull requests match the delivery branch",
+                    number: None,
+                });
+            }
         };
+        let number = value["number"].as_u64();
         if value["headRefOid"].as_str() != Some(head.to_string().as_str()) {
             return Err(RunError::Delivery(Stage::Verify));
         }
@@ -1728,28 +1745,62 @@ impl HostDeliveryContext {
             Some("MERGED") => {}
             Some("OPEN") => {
                 // `gh pr create` without --base targets the repository default.
-                let raw = self.command(
-                    cwd,
-                    "gh",
-                    &["repo", "view", repo, "--json", "defaultBranchRef"],
-                    Stage::PullRequest,
-                )?;
-                let repository: serde_json::Value = serde_json::from_str(&raw)
-                    .map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+                let raw = self
+                    .command(
+                        cwd,
+                        "gh",
+                        &["repo", "view", repo, "--json", "defaultBranchRef"],
+                        Stage::PullRequest,
+                    )
+                    .map_err(|error| match error {
+                        RunError::Delivery(Stage::PullRequest) => {
+                            RunError::PullRequestReconciliation {
+                                reason: "repository base lookup failed",
+                                number,
+                            }
+                        }
+                        error => error,
+                    })?;
+                let repository: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
+                    RunError::PullRequestReconciliation {
+                        reason: "repository base lookup returned invalid data",
+                        number,
+                    }
+                })?;
                 let base = repository["defaultBranchRef"]["name"]
                     .as_str()
                     .filter(|name| !name.is_empty())
-                    .ok_or(RunError::Delivery(Stage::PullRequest))?;
+                    .ok_or(RunError::PullRequestReconciliation {
+                        reason: "repository default base is unavailable",
+                        number,
+                    })?;
                 if value["baseRefName"].as_str() != Some(base) {
-                    return Err(RunError::Delivery(Stage::PullRequest));
+                    return Err(RunError::PullRequestReconciliation {
+                        reason: "pull request base differs from the expected base",
+                        number,
+                    });
                 }
             }
-            _ => return Err(RunError::Delivery(Stage::PullRequest)),
+            Some("CLOSED") => {
+                return Err(RunError::PullRequestReconciliation {
+                    reason: "pull request was closed without merging",
+                    number,
+                });
+            }
+            _ => {
+                return Err(RunError::PullRequestReconciliation {
+                    reason: "pull request state is unavailable",
+                    number,
+                });
+            }
         }
         let url = value["url"]
             .as_str()
             .filter(|url| url.starts_with("https://") && url.lines().count() == 1)
-            .ok_or(RunError::Delivery(Stage::PullRequest))?;
+            .ok_or(RunError::PullRequestReconciliation {
+                reason: "pull request URL is unavailable",
+                number,
+            })?;
         Ok(Some(url.to_owned()))
     }
 
@@ -1963,6 +2014,9 @@ pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
 pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
     let (stage, reason) = match error {
         RunError::Delivery(stage) => (*stage, None),
+        RunError::PullRequestReconciliation { .. } => {
+            (Stage::PullRequest, Some(prepare_reason(error)))
+        }
         RunError::IntegrationHeadMoved => (Stage::Integrate, None),
         RunError::DeliveryLimit { stage, .. } => (*stage, Some(prepare_reason(error))),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
@@ -1971,6 +2025,12 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
     let mut extra = provenant_records::ExtraFields::default();
     if let Some(reason) = reason {
         extra.insert("reason".into(), reason.into());
+    }
+    if let RunError::PullRequestReconciliation { .. } = error {
+        let diagnostic = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        if let Some(next) = diagnostic.next {
+            extra.insert("next".into(), next.into());
+        }
     }
     WriterDeliveryState::Failed { extra, stage }
 }
