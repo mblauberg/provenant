@@ -225,24 +225,14 @@ impl Contributions {
         }
         crate::db::companions(&root, FILE)?;
         let db = provenant_sqlite::open_connection(&host.join(FILE), true)?;
-        match provenant_sqlite::read_version(&db, 4) {
-            Ok(version @ 1..=4) => Ok(Some(Self(db, version))),
-            Ok(_) => Err(RunError::Version(0)),
-            Err(provenant_sqlite::VersionError::Unsupported(version)) => {
-                Err(RunError::Version(version))
-            }
-            Err(provenant_sqlite::VersionError::Unversioned) => Err(RunError::Version(0)),
-            Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
+        match provenant_sqlite::read_version(&db, 4)? {
+            version @ 1..=4 => Ok(Some(Self(db, version))),
+            _ => Err(RunError::Version(0)),
         }
     }
     pub fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
         let (_, db, _lock) = open_database(host, FILE, call)?;
-        let version = match provenant_sqlite::read_version(&db, 4) {
-            Ok(v) => Ok(v),
-            Err(provenant_sqlite::VersionError::Unsupported(v)) => Err(RunError::Version(v)),
-            Err(provenant_sqlite::VersionError::Unversioned) => Err(RunError::Version(0)),
-            Err(provenant_sqlite::VersionError::Sqlite(e)) => Err(e.into()),
-        }?;
+        let version = provenant_sqlite::read_version(&db, 4)?;
         if version == 0 {
             immediate(&db, call, |tx| {
                 tx.execute_batch(

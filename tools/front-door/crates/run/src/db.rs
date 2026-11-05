@@ -452,14 +452,7 @@ pub(crate) fn open_database(
     Ok((root, db, initialisation))
 }
 fn version(db: &Connection) -> Result<i64> {
-    match provenant_sqlite::read_version(db, 8) {
-        Ok(version) => Ok(version as i64),
-        Err(provenant_sqlite::VersionError::Unsupported(version)) => {
-            Err(RunError::Version(version))
-        }
-        Err(provenant_sqlite::VersionError::Unversioned) => Err(RunError::Version(0)),
-        Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
-    }
+    Ok(provenant_sqlite::read_version(db, 8)? as i64)
 }
 pub(crate) fn private(directory: &Directory) -> Result<()> {
     let m = directory.metadata()?;
