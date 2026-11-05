@@ -82,6 +82,11 @@ boundary = "unclassified"
 reason = "Repository opening and revalidation can reject Git registration, identity, metadata and filesystem failures; map each caller and boundary."
 
 [[guard]]
+site = "providers/src/opencode.rs#prepare"
+boundary = "unclassified"
+reason = "Authentication selection, private state, continuation and path conversion can refuse adapter preparation; classify each branch."
+
+[[guard]]
 site = "providers/src/command.rs#prepare"
 boundary = "unclassified"
 reason = "Unsupported access, session, route, authentication or command invocation refuses preparation; capability eligibility is tracked separately."
@@ -98,8 +103,18 @@ reason = "A resumed invocation requires its validated continuation identity."
 
 [[guard]]
 site = "providers/src/agy.rs#prepare"
+boundary = "credentials"
+reason = "The selected keychain and attempt-private home are required to confine Agy's authentication."
+
+[[guard]]
+site = "providers/src/agy.rs#prepare"
+boundary = "authority"
+reason = "A resumed invocation requires its validated continuation identity."
+
+[[guard]]
+site = "providers/src/agy.rs#prepare"
 boundary = "unclassified"
-reason = "Unsupported selected authentication or missing private state refuses preparation."
+reason = "Remaining prompt and staged skill path refusals require classification."
 
 [[guard]]
 site = "providers/src/codex.rs#prepare"
@@ -145,6 +160,21 @@ reason = "Validates route, continuation, executable and account inputs before ad
 site = "providers/src/launch.rs#package_grant"
 boundary = "warning"
 reason = "A shared package prefix is omitted and the executable receives an exact grant; the omission is reported."
+
+[[guard]]
+site = "providers/src/launch.rs#private_git_objects"
+boundary = "lane_git"
+reason = "A writer's Git wrapper must bind commands to the private Git and object directories."
+
+[[guard]]
+site = "providers/src/launch.rs#private_git_objects"
+boundary = "unclassified"
+reason = "Read-only Git executable and search-path setup can also fail and needs classification."
+
+[[guard]]
+site = "providers/src/lane.rs#LaunchSpec::configure_publishing"
+boundary = "credentials"
+reason = "The publishing wrapper must preserve the selected GitHub credential policy and avoid exposing it to other lanes."
 
 [[guard]]
 site = "providers/src/lane.rs#LaneRuntime::environment"
