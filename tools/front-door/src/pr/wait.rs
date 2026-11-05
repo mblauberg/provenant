@@ -46,6 +46,8 @@ pub(super) struct Check {
     pub bucket: String,
     /// The GitHub App that reported a check run; legacy statuses have none.
     pub app: Option<u64>,
+    pub(crate) app_slug: Option<String>,
+    pub(crate) conclusion: Option<String>,
     /// The latest time GitHub recorded activity for this check.
     pub registered: Option<jiff::Timestamp>,
 }
@@ -360,7 +362,7 @@ fn rate_delay_at(headers: &str, fallback: Duration, now: i64) -> (Duration, Stri
 /// Both check runs and legacy status contexts are addressed by immutable SHA.
 /// GitHub lists statuses newest first; older states of a context cannot veto a
 /// successful retry. Pagination is needed even when required checks arrive late.
-fn commit_checks(
+pub(crate) fn commit_checks(
     repository: &str,
     head: GitOid,
     read: &impl Fn(&[&str]) -> Result<provenant_os::exec::ExecOutcome>,
@@ -431,6 +433,15 @@ fn parse_commit_checks(
                     .get("app")
                     .and_then(|app| app.get("id"))
                     .and_then(serde_json::Value::as_u64),
+                app_slug: check
+                    .get("app")
+                    .and_then(|app| app.get("slug"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                conclusion: check
+                    .get("conclusion")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
                 registered: started.max(completed),
             });
         }
@@ -459,6 +470,8 @@ fn parse_commit_checks(
                 name: name.into(),
                 bucket: bucket.into(),
                 app: None,
+                app_slug: None,
+                conclusion: None,
                 registered: created.max(updated),
             });
         }
@@ -635,6 +648,8 @@ mod tests {
             name: name.into(),
             bucket: bucket.into(),
             app: None,
+            app_slug: None,
+            conclusion: None,
             registered: Some(at("2020-01-01T00:00:00Z")),
         }
     }

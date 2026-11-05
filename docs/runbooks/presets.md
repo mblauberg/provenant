@@ -412,7 +412,11 @@ finding one disposition: accepted, rejected or deferred, with a reason. The
 `min_lenses` parameter defaults to 0 (all selected lenses but one, at least
 one); set a positive number to require that many, including the full panel.
 Preset explain shows the parameter and its origin. Unavailable lenses are
-named in the evaluator input.
+named in the evaluator input. A malformed findings block makes that lens
+unavailable and counts against the threshold, just like a failed lens. The
+evaluator receives bounded, severity-ranked findings and paths to the full
+lens results; it must consult those results for findings omitted from the
+bounded export.
 
 A review of a `head` or `node` subject with no `size` or `review_shape`
 (`deliver`, `generator-evaluator`, `big-batch`) cannot be measured when the

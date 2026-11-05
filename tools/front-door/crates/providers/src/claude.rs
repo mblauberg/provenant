@@ -21,6 +21,8 @@ pub struct Claude;
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &Claude,
     quota_source: Some(&Claude),
+    stdout_decoder: None,
+    stderr_decoder: None,
     display_name: "Claude",
     quota: provenant_quota::QuotaPolicy {
         adapter: "claude",

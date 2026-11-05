@@ -109,8 +109,18 @@ pub enum Command {
     /// Merge on green CI and prune the merged worktree
     #[command(add = crate::metadata::CoreCommand(2, "provenant land 1947 --wait"))]
     Land {
+        /// Pull request numbers in landing order
         #[arg(catalog_u64_range = 1..)]
-        number: u64,
+        numbers: Vec<u64>,
+        /// Use batch landing even for one pull request
+        #[arg(long)]
+        batch: bool,
+        /// Compute the candidate and decisions without publishing
+        #[arg(long)]
+        shadow: bool,
+        /// Apply the named landing risk tier
+        #[arg(long, value_parser = parse_landing_tier)]
+        tier: Option<String>,
         /// Pin a reviewed head instead of using the current PR head
         #[arg(long, hide = true)]
         head: Option<GitOid>,
@@ -120,7 +130,7 @@ pub enum Command {
         /// Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)
         #[arg(long, catalog_u64_range = 1..)]
         poll: Option<u64>,
-        /// Show the effective polling interval and retry budget without landing
+        /// Show the resolved landing policy without landing
         #[arg(long)]
         explain: bool,
     },
@@ -1552,4 +1562,12 @@ pub struct Status {
     /// Include full records and older lanes
     #[arg(long)]
     pub all: bool,
+}
+
+fn parse_landing_tier(value: &str) -> Result<String, String> {
+    serde_json::from_value::<provenant_records::workflow::RiskTier>(serde_json::Value::String(
+        value.into(),
+    ))
+    .map(|_| value.to_owned())
+    .map_err(|_| "expected routine, substantial, crucial or terminal".into())
 }

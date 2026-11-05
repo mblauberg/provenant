@@ -1268,8 +1268,9 @@ stored id is used when unique among groups; otherwise a qualified id is chosen
 without colliding with any other group's display id, including ids containing
 colons. One disposition settles the group. Settled outputs record that disposition
 and reason on every copy, retaining each copy's evidence even when the decision
-supplies a field already present in that copy. Independent findings need separate
-dispositions.
+supplies a field already present in that copy. Each inherited copy links back to
+its selected input, so later selections retain the same structural root.
+Independent findings need separate dispositions.
 Use the exported qualified id. A bare id is also accepted when it matches exactly
 one selected upstream identity; ambiguous or unknown identity-only references fail
 and name the id. New findings still require all descriptive fields.

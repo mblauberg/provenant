@@ -42,7 +42,7 @@ lanes  role=- tier=- family=any kind=composite access=read_only worktree=-
       inputs: [{"node":"implement","outputs":["result"]}]
     evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
       source: {"node":"implement","type":"node"}
-      inputs: [{"node":"lens","outputs":["result","findings"]},{"node":"implement","outputs":["findings"]}]
+      inputs: [{"node":"lens","outputs":["findings"]},{"node":"implement","outputs":["findings"]}]
     exports: [{"node":"implement","outputs":["branch","commit"]},{"node":"evaluate","outputs":["result","findings","verdict"]}]
   lane-two  role=- tier=- family=any kind=composite access=read_only worktree=-
     implement  role=write.implement tier=senior family=any kind=- access=worktree_write worktree=-
@@ -54,7 +54,7 @@ lanes  role=- tier=- family=any kind=composite access=read_only worktree=-
       inputs: [{"node":"implement","outputs":["result"]}]
     evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
       source: {"node":"implement","type":"node"}
-      inputs: [{"node":"lens","outputs":["result","findings"]},{"node":"implement","outputs":["findings"]}]
+      inputs: [{"node":"lens","outputs":["findings"]},{"node":"implement","outputs":["findings"]}]
     exports: [{"node":"implement","outputs":["branch","commit"]},{"node":"evaluate","outputs":["result","findings","verdict"]}]
   exports: [{"node":"lane-one","outputs":["result","findings"]},{"node":"lane-two","outputs":["result","findings"]}]
 council  role=- tier=- family=any kind=composite access=read_only worktree=-

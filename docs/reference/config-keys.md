@@ -43,6 +43,100 @@ Set these in `[domains.pr.land]` in the host configuration. Omit a key for its d
 | Key | Default | Effect |
 |---|---|---|
 | `poll_seconds` | 30 | Initial delay between pending land CI samples; later delays double up to four times this value. A per-command --poll overrides it. (seconds, 1 or more). |
+| `integration` | batch | Integration strategy. (batch, single or forge_queue). |
+| `batch_size` | 8 | Maximum pull requests in a batch. (1 or more). |
+| `batch_wait_seconds` | 30 | Maximum batch collection time. (0 or more seconds). |
+| `candidate_ref_prefix` | land/ | Prefix for temporary candidate refs. (valid Git ref prefix). |
+| `publish_settle_seconds` | 30 | Time to wait before observing an unresolved publication again. (0 or more seconds). |
+| `max_rebuilds` | 3 | Maximum rebuilds after target movement. (0 or more). |
+| `gate.kind` | checks | Candidate gate type. (checks or commands). |
+| `gate.checks` | ci-status | Required candidate checks. (check names). |
+| `gate.issuer` | unset | Required check issuer. (forge app or workflow identity). |
+| `gate.commands` | empty | Candidate command plan. (commands). |
+| `gate.executor` | unset | Executor for the candidate command plan. (executor identity). |
+| `gate.pool` | unset | Pool for candidate gate pricing; check issuer is the fallback. (pool name). |
+| `gate.env_passthrough` | empty | Credentials explicitly passed to candidate commands. (environment variable names). |
+| `gate.timeout_seconds` | 3600 | Candidate gate timeout. (1 or more seconds). |
+| `gate.coverage` | empty | Declared gate coverage. (coverage identifiers). |
+| `pr_ci.mode` | always | Pull request evidence policy; forge requirements still apply. (always, opt_in, affected or none). |
+| `pr_ci.label` | unset | Opt-in label for pull request CI. (label name). |
+| `publish` | auto | Publication strategy. (auto, rest_ordered or fast_forward). |
+| `method` | merge | Forge merge method. (merge, squash or rebase). |
+| `post_merge.pool` | unset | Pool for post-merge pricing. (pool name). |
+| `post_merge.timeout_seconds` | 3600 | Maximum time to follow post-merge checks. (1 or more seconds). |
+| `post_merge.checks` | empty | Post-merge check plan. (check names). |
+| `post_merge.bisect` | false | Bisect failed post-merge checks. (true or false). |
+| `post_merge.revert_forward` | false | Authorise revert-forward pull requests. (true or false). |
+| `budget.rate_micros_per_minute.{pool}` | unset | Pool price in millionths of the configured currency per minute. (0 or more). |
+| `budget.advisory_micros` | unset | Advisory amount in millionths of the configured currency. (0 or more). |
+| `budget.cap_micros` | unset | Spending cap in millionths of the configured currency. (0 or more). |
+| `local_gate.mode` | warn | Fast pre-push gate behaviour. (warn, enforce or off). |
+| `local_gate.commands` | empty | Fast pre-push command plan. (commands). |
+| `local_gate.timeout_seconds` | 60 | Fast pre-push gate timeout. (1 or more seconds). |
+| `projects.{project}.poll_seconds` | inherited | Override poll_seconds for this project; omitted fields inherit lower layers. (seconds, 1 or more). |
+| `projects.{project}.integration` | inherited | Override integration for this project; omitted fields inherit lower layers. (batch, single or forge_queue). |
+| `projects.{project}.batch_size` | inherited | Override batch_size for this project; omitted fields inherit lower layers. (1 or more). |
+| `projects.{project}.batch_wait_seconds` | inherited | Override batch_wait_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
+| `projects.{project}.candidate_ref_prefix` | inherited | Override candidate_ref_prefix for this project; omitted fields inherit lower layers. (valid Git ref prefix). |
+| `projects.{project}.publish_settle_seconds` | inherited | Override publish_settle_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
+| `projects.{project}.max_rebuilds` | inherited | Override max_rebuilds for this project; omitted fields inherit lower layers. (0 or more). |
+| `projects.{project}.gate.kind` | inherited | Override gate.kind for this project; omitted fields inherit lower layers. (checks or commands). |
+| `projects.{project}.gate.checks` | inherited | Override gate.checks for this project; omitted fields inherit lower layers. (check names). |
+| `projects.{project}.gate.issuer` | inherited | Override gate.issuer for this project; omitted fields inherit lower layers. (forge app or workflow identity). |
+| `projects.{project}.gate.commands` | inherited | Override gate.commands for this project; omitted fields inherit lower layers. (commands). |
+| `projects.{project}.gate.executor` | inherited | Override gate.executor for this project; omitted fields inherit lower layers. (executor identity). |
+| `projects.{project}.gate.pool` | inherited | Override gate.pool for this project; omitted fields inherit lower layers. (pool name). |
+| `projects.{project}.gate.env_passthrough` | inherited | Override gate.env_passthrough for this project; omitted fields inherit lower layers. (environment variable names). |
+| `projects.{project}.gate.timeout_seconds` | inherited | Override gate.timeout_seconds for this project; omitted fields inherit lower layers. (1 or more seconds). |
+| `projects.{project}.gate.coverage` | inherited | Override gate.coverage for this project; omitted fields inherit lower layers. (coverage identifiers). |
+| `projects.{project}.pr_ci.mode` | inherited | Override pr_ci.mode for this project; omitted fields inherit lower layers. (always, opt_in, affected or none). |
+| `projects.{project}.pr_ci.label` | inherited | Override pr_ci.label for this project; omitted fields inherit lower layers. (label name). |
+| `projects.{project}.publish` | inherited | Override publish for this project; omitted fields inherit lower layers. (auto, rest_ordered or fast_forward). |
+| `projects.{project}.method` | inherited | Override method for this project; omitted fields inherit lower layers. (merge, squash or rebase). |
+| `projects.{project}.post_merge.pool` | inherited | Override post_merge.pool for this project; omitted fields inherit lower layers. (pool name). |
+| `projects.{project}.post_merge.timeout_seconds` | inherited | Override post_merge.timeout_seconds for this project; omitted fields inherit lower layers. (1 or more seconds). |
+| `projects.{project}.post_merge.checks` | inherited | Override post_merge.checks for this project; omitted fields inherit lower layers. (check names). |
+| `projects.{project}.post_merge.bisect` | inherited | Override post_merge.bisect for this project; omitted fields inherit lower layers. (true or false). |
+| `projects.{project}.post_merge.revert_forward` | inherited | Override post_merge.revert_forward for this project; omitted fields inherit lower layers. (true or false). |
+| `projects.{project}.budget.rate_micros_per_minute.{pool}` | inherited | Override budget.rate_micros_per_minute.{pool} for this project; omitted fields inherit lower layers. (0 or more). |
+| `projects.{project}.budget.advisory_micros` | inherited | Override budget.advisory_micros for this project; omitted fields inherit lower layers. (0 or more). |
+| `projects.{project}.budget.cap_micros` | inherited | Override budget.cap_micros for this project; omitted fields inherit lower layers. (0 or more). |
+| `projects.{project}.local_gate.mode` | inherited | Override local_gate.mode for this project; omitted fields inherit lower layers. (warn, enforce or off). |
+| `projects.{project}.local_gate.commands` | inherited | Override local_gate.commands for this project; omitted fields inherit lower layers. (commands). |
+| `projects.{project}.local_gate.timeout_seconds` | inherited | Override local_gate.timeout_seconds for this project; omitted fields inherit lower layers. (1 or more seconds). |
+| `tiers.{tier}.poll_seconds` | inherited | Override poll_seconds for this risk tier; omitted fields inherit lower layers. (seconds, 1 or more). |
+| `tiers.{tier}.integration` | inherited | Override integration for this risk tier; omitted fields inherit lower layers. (batch, single or forge_queue). |
+| `tiers.{tier}.batch_size` | inherited | Override batch_size for this risk tier; omitted fields inherit lower layers. (1 or more). |
+| `tiers.{tier}.batch_wait_seconds` | inherited | Override batch_wait_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |
+| `tiers.{tier}.candidate_ref_prefix` | inherited | Override candidate_ref_prefix for this risk tier; omitted fields inherit lower layers. (valid Git ref prefix). |
+| `tiers.{tier}.publish_settle_seconds` | inherited | Override publish_settle_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |
+| `tiers.{tier}.max_rebuilds` | inherited | Override max_rebuilds for this risk tier; omitted fields inherit lower layers. (0 or more). |
+| `tiers.{tier}.gate.kind` | inherited | Override gate.kind for this risk tier; omitted fields inherit lower layers. (checks or commands). |
+| `tiers.{tier}.gate.checks` | inherited | Override gate.checks for this risk tier; omitted fields inherit lower layers. (check names). |
+| `tiers.{tier}.gate.issuer` | inherited | Override gate.issuer for this risk tier; omitted fields inherit lower layers. (forge app or workflow identity). |
+| `tiers.{tier}.gate.commands` | inherited | Override gate.commands for this risk tier; omitted fields inherit lower layers. (commands). |
+| `tiers.{tier}.gate.executor` | inherited | Override gate.executor for this risk tier; omitted fields inherit lower layers. (executor identity). |
+| `tiers.{tier}.gate.pool` | inherited | Override gate.pool for this risk tier; omitted fields inherit lower layers. (pool name). |
+| `tiers.{tier}.gate.env_passthrough` | inherited | Override gate.env_passthrough for this risk tier; omitted fields inherit lower layers. (environment variable names). |
+| `tiers.{tier}.gate.timeout_seconds` | inherited | Override gate.timeout_seconds for this risk tier; omitted fields inherit lower layers. (1 or more seconds). |
+| `tiers.{tier}.gate.coverage` | inherited | Override gate.coverage for this risk tier; omitted fields inherit lower layers. (coverage identifiers). |
+| `tiers.{tier}.pr_ci.mode` | inherited | Override pr_ci.mode for this risk tier; omitted fields inherit lower layers. (always, opt_in, affected or none). |
+| `tiers.{tier}.pr_ci.label` | inherited | Override pr_ci.label for this risk tier; omitted fields inherit lower layers. (label name). |
+| `tiers.{tier}.publish` | inherited | Override publish for this risk tier; omitted fields inherit lower layers. (auto, rest_ordered or fast_forward). |
+| `tiers.{tier}.method` | inherited | Override method for this risk tier; omitted fields inherit lower layers. (merge, squash or rebase). |
+| `tiers.{tier}.post_merge.pool` | inherited | Override post_merge.pool for this risk tier; omitted fields inherit lower layers. (pool name). |
+| `tiers.{tier}.post_merge.timeout_seconds` | inherited | Override post_merge.timeout_seconds for this risk tier; omitted fields inherit lower layers. (1 or more seconds). |
+| `tiers.{tier}.post_merge.checks` | inherited | Override post_merge.checks for this risk tier; omitted fields inherit lower layers. (check names). |
+| `tiers.{tier}.post_merge.bisect` | inherited | Override post_merge.bisect for this risk tier; omitted fields inherit lower layers. (true or false). |
+| `tiers.{tier}.post_merge.revert_forward` | inherited | Override post_merge.revert_forward for this risk tier; omitted fields inherit lower layers. (true or false). |
+| `tiers.{tier}.budget.rate_micros_per_minute.{pool}` | inherited | Override budget.rate_micros_per_minute.{pool} for this risk tier; omitted fields inherit lower layers. (0 or more). |
+| `tiers.{tier}.budget.advisory_micros` | inherited | Override budget.advisory_micros for this risk tier; omitted fields inherit lower layers. (0 or more). |
+| `tiers.{tier}.budget.cap_micros` | inherited | Override budget.cap_micros for this risk tier; omitted fields inherit lower layers. (0 or more). |
+| `tiers.{tier}.local_gate.mode` | inherited | Override local_gate.mode for this risk tier; omitted fields inherit lower layers. (warn, enforce or off). |
+| `tiers.{tier}.local_gate.commands` | inherited | Override local_gate.commands for this risk tier; omitted fields inherit lower layers. (commands). |
+| `tiers.{tier}.local_gate.timeout_seconds` | inherited | Override local_gate.timeout_seconds for this risk tier; omitted fields inherit lower layers. (1 or more seconds). |
+| `projects.{project}.*` | empty | Project-specific landing overrides. (partial land settings). |
+| `tiers.{tier}.*` | empty | Risk-tier landing overrides. (partial land settings). |
 
 ## Host graph settings
 

@@ -56,8 +56,13 @@ is a paid subscription model (see the
 
 OpenCode quota refusals come from its structured quota and free-limit events,
 and from stderr diagnostics naming `AI.Error.QuotaExceeded` or `usage limit
-exceeded`. Stderr evidence is read from the matching line and the one after
-it, only for a run that did not succeed. It is scoped to `opencode-go`, or
+exceeded`. During a run, a line beginning with `AI.Error.QuotaExceeded:`
+(after whitespace or ANSI control sequences) is treated as an authoritative
+refusal and triggers cleanup even if the process might otherwise succeed. The
+live rule also accepts an unterminated line; log-prefixed errors and generic
+quota wording do not trigger it. At exit, stderr evidence is read from the
+matching line and the one after it only if the adapter did not accept the run.
+The refusal is scoped to `opencode-go`, or
 `opencode-free` when that text names the free tier or free usage; a retry
 interval with a unit (or a bare `retry-after` header value, in seconds) sets
 the refusal expiry.

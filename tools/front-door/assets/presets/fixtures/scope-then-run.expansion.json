@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-e8c71d1e9f4793eee21450edf2184dc2",
+  "graph_id": "preset-86b9247b5884c9f73eac066484b14da2",
   "nodes": [
     {
       "access": "read_only",
@@ -420,7 +420,6 @@
               {
                 "node": "lens",
                 "outputs": [
-                  "result",
                   "findings"
                 ]
               },

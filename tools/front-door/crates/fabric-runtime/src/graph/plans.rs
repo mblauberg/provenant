@@ -591,10 +591,23 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
     let exported = fragment_exports(document, expansion);
     for node in &mut document.nodes {
         if node.dependencies().any(|name| name == &expansion.source) {
-            node.after_expansion
-                .extend(expansion.nodes.iter().map(|n| n.id.clone()));
+            if expansion.review.is_some() {
+                // The review boundary settles after its members and owns their
+                // success threshold; consumers must not require every leaf.
+                if let Some(root) = exported.first() {
+                    node.after_expansion.push(root.node.clone());
+                }
+            } else {
+                node.after_expansion
+                    .extend(expansion.nodes.iter().map(|n| n.id.clone()));
+            }
             if !expansion.continuation {
                 wire_exports(node, &expansion.source, &exported);
+                if expansion.review.is_some() {
+                    // A resolved review is a structural node, not an agent
+                    // attempt, and has no result of its own to consume.
+                    node.inputs.retain(|input| input.node != expansion.source);
+                }
                 if expansion.review.is_some()
                     && let Some(root) = exported.first()
                     && let Some(composite) = &mut node.composite

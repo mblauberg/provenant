@@ -3,7 +3,7 @@
     "pattern": "big-batch",
     "preset": "big-batch"
   },
-  "graph_id": "preset-586c126b3512bc4908b2bafffef3209b",
+  "graph_id": "preset-ddd53679a0c07d91208955e38ca60e23",
   "integration_branch": "batch/graph",
   "nodes": [
     {
@@ -408,7 +408,6 @@
                     {
                       "node": "lens",
                       "outputs": [
-                        "result",
                         "findings"
                       ]
                     },
@@ -606,7 +605,6 @@
                     {
                       "node": "lens",
                       "outputs": [
-                        "result",
                         "findings"
                       ]
                     },

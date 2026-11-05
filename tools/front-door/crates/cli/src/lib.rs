@@ -1530,10 +1530,10 @@ mod tests {
         for length in [40, 64] {
             let sha = "a".repeat(length);
             let inv = valid(&["land", "1953", "--head", &sha]);
-            let Command::Land { number, head, .. } = inv.command else {
+            let Command::Land { numbers, head, .. } = inv.command else {
                 panic!("land command");
             };
-            assert_eq!(number, 1953);
+            assert_eq!(numbers, [1953]);
             assert_eq!(head.map(|head| head.to_string()), Some(sha));
         }
         invalid(&["land", "1953", "--head", "abc"]);
@@ -1547,6 +1547,30 @@ mod tests {
         };
         assert!(text.contains("--head"), "{text}");
     }
+    #[test]
+    fn batch_land_and_policy_explanation_parse() -> Result<(), Box<dyn std::error::Error>> {
+        let inv = valid(&[
+            "land", "12", "34", "--batch", "--shadow", "--tier", "crucial",
+        ]);
+        let Command::Land {
+            numbers,
+            batch,
+            shadow,
+            tier,
+            ..
+        } = inv.command
+        else {
+            return Err("expected land command".into());
+        };
+        assert_eq!(numbers, [12, 34]);
+        assert!(batch && shadow);
+        assert_eq!(tier.as_deref(), Some("crucial"));
+        invalid(&["land", "12", "--tier", "high"]);
+        valid(&["land", "--explain", "--json"]);
+        invalid(&["land", "0", "--batch"]);
+        Ok(())
+    }
+
     #[test]
     fn agent_output_controls_and_land_wait_are_global_and_bounded() {
         valid(&["--full", "quota"]);
