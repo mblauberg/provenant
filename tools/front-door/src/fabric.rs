@@ -1128,6 +1128,7 @@ pub(crate) fn tick_graphs(
                     }),
                     integration_branch: execution.document.integration_branch.clone(),
                     network: graph_network(&execution.document)?,
+                    capability_overrides: graph_capability_overrides(&execution.document)?,
                     exclude: graph_exclude(&execution.document)?,
                     budget,
                     cancel: &cancel,
@@ -2149,6 +2150,7 @@ impl BinaryRunOwner<'_> {
             cancel,
             provenant_records::run::LaneAccess::default(),
             None,
+            true,
         )
         .map_err(|error| scope_io(error, "submit"))
     }
@@ -2161,7 +2163,7 @@ impl BinaryRunOwner<'_> {
         access: provenant_records::run::LaneAccess,
         settlement_retry_limit: Option<u8>,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        self.submit_inner(input, budget, cancel, access, settlement_retry_limit)
+        self.submit_inner(input, budget, cancel, access, settlement_retry_limit, false)
             .map_err(|error| scope_io(error, "submit"))
     }
     fn submit_inner(
@@ -2171,6 +2173,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
         access: provenant_records::run::LaneAccess,
         settlement_retry_limit: Option<u8>,
+        apply_project_defaults: bool,
     ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
         let SubmitInput::Submit {
@@ -2247,6 +2250,22 @@ impl BinaryRunOwner<'_> {
             task.worktree = Some(worktree.path.clone());
             created = Some(worktree);
         }
+        let defaults = if apply_project_defaults {
+            let config = provenant_config::read_with_domains(
+                &self.factory.context.roots,
+                &provenant_cli::domains::SECTIONS,
+            )
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            config
+                .domains
+                .lanes
+                .projects
+                .get(&self.factory.context.identity.project.to_string())
+                .map(|settings| settings.capabilities.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut submitted = Vec::new();
         for (index, task) in tasks.into_iter().enumerate() {
             worktree_access(
@@ -2254,6 +2273,24 @@ impl BinaryRunOwner<'_> {
                 task.worktree.as_deref().map(Path::new),
             )
             .map_err(fail_error)?;
+            let mut task_access = access.clone();
+            if apply_project_defaults {
+                let capabilities = task.capabilities.as_deref().unwrap_or_else(|| {
+                    if task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                        defaults.as_slice()
+                    } else {
+                        &[]
+                    }
+                });
+                for capability in capabilities {
+                    if capability == "postgres" {
+                        task_access.database_ipc = true;
+                        task_access.extra.insert("capability_sources".into(), serde_json::json!([{"name":"postgres", "source": if task.capabilities.is_some() { task.capability_sources.get("postgres").map(String::as_str).filter(|source| matches!(*source, "flag" | "project default" | "task")).unwrap_or("task") } else { "project default" }}]));
+                    } else {
+                        provenant_cli::run::warn_ignored_capability("project ", capability);
+                    }
+                }
+            }
             submitted.push(Submitted {
                 cloud: None,
                 require_skill_location: task.require_skill_location,
@@ -2273,7 +2310,7 @@ impl BinaryRunOwner<'_> {
                 delivery_id: task.delivery_id,
                 deliver: task.deliver,
                 worktree: task.worktree.map(PathBuf::from),
-                access: access.clone(),
+                access: task_access,
             });
         }
         let session = self.session(cancel)?;
@@ -2985,6 +3022,7 @@ struct BoundGraphOwner<'a> {
     /// The graph's explicit network reach for every node lane, such as
     /// `run --network off` bound before automatic preset selection.
     network: Option<provenant_cli::Switch>,
+    capability_overrides: (Vec<String>, Vec<String>),
     /// The graph's route-exclusion selectors, passed to each node as the
     /// `routing.graph_exclude` knob.
     exclude: Vec<String>,
@@ -3571,6 +3609,7 @@ fn advance_graphs_after_settlement(
                 }),
                 integration_branch: execution.document.integration_branch.clone(),
                 network: graph_network(&execution.document)?,
+                capability_overrides: graph_capability_overrides(&execution.document)?,
                 exclude: graph_exclude(&execution.document)?,
                 budget,
                 cancel: &cancel,
@@ -5328,6 +5367,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     head: node.source_commit.map(str::to_owned),
                     account: route.account.clone(),
                     access,
+                    capabilities: None,
+                    capability_sources: Default::default(),
                     worktree: worktree.map(str::to_owned),
                     prompt: node.prompt.into(),
                     title: Some(node.title.to_owned()),
@@ -5408,6 +5449,50 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 provenant_core::ActorId::parse(replay.launch_actor)
                     .map_err(|_| FacadeError::StateCorrupt)?,
             );
+            let configured = provenant_config::read_with_domains(
+                &self.factory.context.roots,
+                &provenant_cli::domains::SECTIONS,
+            )
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            let default_capabilities = configured
+                .domains
+                .lanes
+                .projects
+                .get(&self.factory.context.identity.project.to_string())
+                .map(|settings| settings.capabilities.as_slice())
+                .unwrap_or_default();
+            let mut capabilities = node
+                .capabilities
+                .unwrap_or_else(|| {
+                    if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                        default_capabilities
+                    } else {
+                        &[]
+                    }
+                })
+                .to_vec();
+            capabilities.retain(|name| {
+                if name == "postgres" {
+                    true
+                } else {
+                    provenant_cli::run::warn_ignored_capability("node or project ", name);
+                    false
+                }
+            });
+            if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                for capability in &self.capability_overrides.0 {
+                    if capability != "postgres" {
+                        provenant_cli::run::warn_ignored_capability("flag ", capability);
+                        continue;
+                    }
+                    if !capabilities.contains(capability) {
+                        capabilities.push(capability.clone());
+                    }
+                }
+            }
+            capabilities.retain(|name| !self.capability_overrides.1.contains(name));
+            let mut seen = std::collections::BTreeSet::new();
+            capabilities.retain(|name| seen.insert(name.clone()));
             let mut grants = provenant_cli::run::lane_access(
                 &provenant_cli::Access {
                     mode: Some(provenant_cli::Mode::ReadOnly),
@@ -5426,12 +5511,23 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         .collect(),
                     write_root: Vec::new(),
                     network: self.network,
-                    capability: Vec::new(),
+                    capability: capabilities.clone(),
+                    no_capability: Vec::new(),
                 },
                 self.factory.context.roots.state.as_path(),
                 &self.factory.home,
             )
             .map_err(dispatch_refused)?;
+            if !capabilities.is_empty() {
+                let sources: Vec<_> = capabilities.iter().map(|name| {
+                    let inherited = node.capability_sources.and_then(|v| v.as_array()).into_iter().flatten()
+                        .find(|entry| entry["name"] == *name).and_then(|entry| entry["source"].as_str());
+                    serde_json::json!({"name": name, "source": if self.capability_overrides.0.contains(name) { "flag" } else { inherited.unwrap_or(if node.capabilities.is_some() { "node" } else { "project default" }) }})
+                }).collect();
+                grants
+                    .extra
+                    .insert("capability_sources".into(), serde_json::json!(sources));
+            }
             grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
             let receipt =
@@ -5670,6 +5766,18 @@ fn graph_network(
             _ => Err(FacadeError::InvalidInput { detail: None }),
         },
     }
+}
+
+fn graph_capability_overrides(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<(Vec<String>, Vec<String>), FacadeError> {
+    let parse = |key| {
+        document.extra.get(key).map_or(Ok(Vec::new()), |value| {
+            serde_json::from_value(value.clone())
+                .map_err(|_| FacadeError::InvalidInput { detail: None })
+        })
+    };
+    Ok((parse("capability")?, parse("no_capability")?))
 }
 
 /// A graph route's exact model in `ADAPTER/ID` form.
@@ -6242,6 +6350,7 @@ impl Factory {
                 }),
                 integration_branch: document.integration_branch.clone(),
                 network: graph_network(document)?,
+                capability_overrides: graph_capability_overrides(document)?,
                 exclude: graph_exclude(document)?,
                 budget,
                 cancel,
@@ -6339,6 +6448,7 @@ impl Factory {
                 integration_base: None,
                 integration_branch: None,
                 network: None,
+                capability_overrides: Default::default(),
                 exclude: Vec::new(),
                 budget,
                 cancel,

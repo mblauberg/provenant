@@ -53,6 +53,7 @@ fn row() -> LaneRow {
         provider_error: None,
         cloud: None,
         cloud_state: None,
+        capabilities: None,
     }
 }
 

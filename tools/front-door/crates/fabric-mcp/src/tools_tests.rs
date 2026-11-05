@@ -281,6 +281,10 @@ fn run_submission_requires_its_explicit_operation() {
         ToolCall::parse("fabric_run", tagged.clone()),
         Ok(ToolCall::SubmitWait(_, 30, false))
     ));
+    tagged["tasks"][0]["capabilities"] = json!(["postgres"]);
+    assert!(
+        matches!(ToolCall::parse("fabric_run", tagged.clone()), Ok(ToolCall::SubmitWait(SubmitInput::Submit { tasks, .. }, _, _)) if tasks[0].capabilities.as_deref() == Some(["postgres".to_owned()].as_slice()))
+    );
     tagged["tasks"][0]["timeout_seconds"] = json!("soon");
     assert!(
         matches!(ToolCall::parse("fabric_run", tagged.clone()), Err(InvalidInput::Arguments { path }) if path == "arguments.tasks[0].timeout_seconds")

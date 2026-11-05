@@ -547,6 +547,7 @@ pub(super) fn validate_flat_plan(
             distinct_strength: node.distinct_strength,
             dispositions: node.dispositions.clone(),
             read_roots: node.read_roots.clone(),
+            capabilities: node.capabilities.clone(),
             source: node.source.clone(),
             after_expansion: node.after_expansion.clone(),
             plan: node.plan.clone(),

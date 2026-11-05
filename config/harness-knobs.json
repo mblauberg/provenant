@@ -242,6 +242,12 @@
         "default": 16777216,
         "effect": "Maximum bytes copied into an attempt's read-only user skill tree. Content exceeding the bound is skipped with a warning. Inspect value and origin with config show."
       },
+      "projects.{project}.capabilities": {
+        "type": "string_list",
+        "allowed": "postgres",
+        "default": [],
+        "effect": "Capabilities granted by default to this project's writer lanes; node settings and invocation flags may override them. Read-only lanes do not inherit them."
+      },
       "projects.{project}.shared_paths": {
         "type": "string_list",
         "allowed": "existing absolute, ~/ or checkout-relative paths",

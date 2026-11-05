@@ -74,6 +74,7 @@ lane_row! {
         provider_error: String => string();
         cloud: Value => open_object();
         cloud_state: String => string();
+        capabilities: Value => array(object(&[("name", string()), ("source", string())], &[]));
     }
 }
 
@@ -294,6 +295,7 @@ impl LaneRow {
             provider_error: None,
             cloud: lane.cloud_view.0.clone(),
             cloud_state,
+            capabilities: None,
         }
     }
 }

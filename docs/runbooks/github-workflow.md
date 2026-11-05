@@ -645,3 +645,39 @@ Afterwards:
    automatic merged-head cleanup needs no separate per-branch authority. Forced
    deletion, and deletion of an unmerged branch on either side, remains an
    explicit user gate.
+
+### Event intake
+
+The standalone worker is not yet included in the release installer. Build it
+from the checkout with `cargo build --release --locked --bin event-intake` in
+`tools/front-door`, and run the resulting binary from its Cargo target directory.
+Run one `event-intake` worker for each repository and state directory. Its
+[configuration reference](event-intake-configuration.md) lists the environment
+variables. With `PROVENANT_INTAKE_BIND` unset it runs polling only. To receive
+webhooks, bind to loopback, put an operator-managed stable HTTPS tunnel in front
+of `/webhook`, and configure a repository webhook with the same secret and
+these events: pull request, push, check run, check suite, status, issue comment,
+pull request review and pull request review comment. The tunnel provider is an
+operator choice; keep the endpoint private to the tunnel where possible.
+
+The worker runs an authoritative sweep at startup and every 300 seconds by
+default. It also reconciles signed hints, coalescing duplicate targets and
+turning unmappable checks into repository sweeps. Requests use `gh` credentials
+and persisted ETags. Keep the state directory private: it contains response
+bodies, delivery IDs and timing data. Do not run two workers with the same
+state directory. Existing `gh` commands do not depend on the worker. Run
+`event-intake status` with the same repository and directory to inspect counters,
+304/200 ratio, rate-limit headers, sweep watermark and oldest pending marker.
+
+Before relying on the service, the chair must record two live checks on a test
+repository and configured tunnel. For latency, send at least 20 each of push,
+completed check, comment, review and merge events; record the event time and
+when the corresponding current state appears in `state.json`, then calculate
+p95 per event type and record request counts and 304/200 ratio from status.
+The `deliveries.json` markers include the received and completed times and event
+name, which help attribute samples; compare with the independently recorded
+event time to include delivery delay. Each p95 must be below 30 seconds. For
+the outage drill, stop the receiver or tunnel, make changes including a merge,
+restore it and verify against GitHub that the first successful sweep captured
+all changes. Record times, PRs, status counters and results. Do not claim these
+live checks from fake-forge tests.
