@@ -564,7 +564,9 @@ impl Forge for GhForge {
         });
         Ok(latest.map(|(_, _, review)| super::head_move::ReviewedHead {
             head: review["commit_id"].as_str().unwrap_or_default().to_owned(),
-            // The REST review does not contain its approval-time base.
+            // REST does not record the approval-time base. A merge base with the
+            // current target cannot prove it: the target may have been rewritten
+            // since approval, so its old base need not precede the merge parent.
             base: None,
             valid: review["state"].as_str() == Some("APPROVED"),
         }))

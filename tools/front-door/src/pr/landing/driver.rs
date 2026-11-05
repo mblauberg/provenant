@@ -956,67 +956,82 @@ mod tests {
             head_move::{HeadMove, ReviewedHead},
             ports::{DeltaFile, DeltaStats},
         };
-        let mut outcomes = Vec::new();
-        for class in [None, Some("A"), Some("B"), Some("C")] {
-            let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
-            let head = forge.pull_requests[&1].head.clone();
-            if let Some(class) = class {
-                forge.latest_reviews.insert(
-                    1,
-                    ReviewedHead {
-                        head: "reviewed".into(),
-                        base: Some("old-base".into()),
-                        valid: class != "C",
-                    },
-                );
-                if class == "A" {
-                    repo.parents
-                        .insert(head.clone(), vec!["reviewed".into(), "base-side".into()]);
-                    repo.parents
-                        .insert("base-side".into(), vec!["old-base".into()]);
-                    repo.parents
-                        .insert(repo.target.clone(), vec!["base-side".into()]);
-                    repo.trees
-                        .insert(head.clone(), "tree-reviewed-base-side".into());
-                } else {
-                    repo.parents.insert(head.clone(), vec!["reviewed".into()]);
+        for refuse in [false, true] {
+            let mut outcomes = Vec::new();
+            for class in [None, Some("A"), Some("B"), Some("C")] {
+                let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+                let head = forge.pull_requests[&1].head.clone();
+                if let Some(class) = class {
+                    forge.latest_reviews.insert(
+                        1,
+                        ReviewedHead {
+                            head: "reviewed".into(),
+                            base: Some("old-base".into()),
+                            valid: class != "C",
+                        },
+                    );
+                    if class == "A" {
+                        repo.parents
+                            .insert(head.clone(), vec!["reviewed".into(), "base-side".into()]);
+                        repo.parents
+                            .insert("base-side".into(), vec!["old-base".into()]);
+                        repo.parents
+                            .insert(repo.target.clone(), vec!["base-side".into()]);
+                        repo.trees
+                            .insert(head.clone(), "tree-reviewed-base-side".into());
+                    } else {
+                        repo.parents.insert(head.clone(), vec!["reviewed".into()]);
+                    }
+                    repo.review_deltas.insert(
+                        ("reviewed".into(), head),
+                        DeltaStats {
+                            complete: true,
+                            files: vec![DeltaFile {
+                                path: "src/lib.rs".into(),
+                                added: 2,
+                                deleted: 1,
+                                eligible: true,
+                            }],
+                        },
+                    );
                 }
-                repo.review_deltas.insert(
-                    ("reviewed".into(), head),
-                    DeltaStats {
-                        complete: true,
-                        files: vec![DeltaFile {
-                            path: "src/lib.rs".into(),
-                            added: 2,
-                            deleted: 1,
-                            eligible: true,
-                        }],
-                    },
-                );
+                if refuse {
+                    forge.approvals_at_head.clear();
+                }
+                let state = tempfile::tempdir()?;
+                let report = exercise(
+                    &mut forge,
+                    &mut repo,
+                    &mut gate,
+                    &settings,
+                    &definition,
+                    &[1],
+                    false,
+                    state.path(),
+                )?;
+                outcomes.push(report.outcomes.clone());
+                let observed = report.head_moves.get(&1);
+                assert!(match class {
+                    None => observed.is_none(),
+                    Some("A") => matches!(observed, Some(HeadMove::A { .. })),
+                    Some("B") => matches!(observed, Some(HeadMove::B { .. })),
+                    Some("C") => matches!(observed, Some(HeadMove::C { .. })),
+                    _ => false,
+                });
+                if !refuse {
+                    assert_eq!(report.receipts[0].head_moves.get(&1), observed);
+                }
             }
-            let state = tempfile::tempdir()?;
-            let report = exercise(
-                &mut forge,
-                &mut repo,
-                &mut gate,
-                &settings,
-                &definition,
-                &[1],
-                false,
-                state.path(),
-            )?;
-            outcomes.push(report.outcomes.clone());
-            let observed = report.head_moves.get(&1);
-            assert!(match class {
-                None => observed.is_none(),
-                Some("A") => matches!(observed, Some(HeadMove::A { .. })),
-                Some("B") => matches!(observed, Some(HeadMove::B { .. })),
-                Some("C") => matches!(observed, Some(HeadMove::C { .. })),
-                _ => false,
-            });
-            assert_eq!(report.receipts[0].head_moves.get(&1), observed);
+            assert!(outcomes.windows(2).all(|pair| pair[0] == pair[1]));
+            assert_eq!(
+                outcomes[0][&1],
+                if refuse {
+                    Outcome::Excluded
+                } else {
+                    Outcome::Landed
+                }
+            );
         }
-        assert!(outcomes.windows(2).all(|pair| pair[0] == pair[1]));
         Ok(())
     }
 
