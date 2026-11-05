@@ -14,6 +14,7 @@ pub struct FakeForge {
     pub shared_target: Option<std::rc::Rc<std::cell::RefCell<String>>>,
     pub move_after_merge: Option<(u64, String)>,
     pub pull_requests: BTreeMap<u64, PullRequestInfo>,
+    pub stacks: BTreeMap<u64, Vec<StackMember>>,
     pub after_wait_reads: Option<WaitReads>,
     pub heads: BTreeMap<u64, String>,
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
@@ -37,6 +38,12 @@ pub struct FakeForge {
     pub reverts: Vec<(u64, String, String, String)>,
 }
 impl Forge for FakeForge {
+    fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError> {
+        self.stacks
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| LandingError::Failed("missing stack".into()))
+    }
     fn repository_identity(&mut self) -> Result<String, LandingError> {
         Ok("fake-repository".into())
     }
@@ -423,6 +430,7 @@ mod tests {
                 author: "author".into(),
                 state: PullRequestState::Open,
                 merged_commit: None,
+                stack: None,
             },
         );
         assert!(forge.merge(7, "head", MergeMethod::Merge).is_err());

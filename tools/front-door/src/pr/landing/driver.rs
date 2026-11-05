@@ -659,6 +659,7 @@ mod tests {
                     author: "author".into(),
                     state: PullRequestState::Open,
                     merged_commit: None,
+                    stack: None,
                 },
             );
             forge.heads.insert(n, head.clone());

@@ -4416,6 +4416,7 @@ impl BoundGraphOwner<'_> {
                 measured_size: measure.measured.size.unwrap_or("unknown").to_owned(),
                 shape: panel.shape.clone(),
                 source,
+                substitutions: Vec::new(),
             }),
             extra: Default::default(),
             source: node.id.clone(),

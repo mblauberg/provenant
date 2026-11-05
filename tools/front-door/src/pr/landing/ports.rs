@@ -10,6 +10,19 @@ pub struct PullRequestInfo {
     pub author: String,
     pub state: PullRequestState,
     pub merged_commit: Option<String>,
+    pub stack: Option<StackMembership>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackMembership {
+    pub number: u64,
+    pub size: u64,
+    pub position: u64,
+    pub base_branch: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackMember {
+    pub number: u64,
+    pub state: PullRequestState,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PullRequestState {
@@ -25,6 +38,8 @@ pub struct Approval {
 pub trait Forge {
     fn set_project_path(&mut self, _path: &std::path::Path) {}
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;
+    /// The stack's pull requests in bottom-to-top order.
+    fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError>;
     fn repository_identity(&mut self) -> Result<String, LandingError>;
     fn target_branch(&mut self) -> Result<String, LandingError>;
     fn head(&mut self, number: u64) -> Result<String, LandingError>;

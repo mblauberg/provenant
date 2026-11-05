@@ -4,9 +4,12 @@ use super::{
     model::*,
     ports::{
         AlarmSink, Approval, Forge, GateRunner, MergeTree, PullRequestInfo, PullRequestState, Repo,
+        StackMember, StackMembership,
     },
 };
-use crate::pr::{TimedOut, execute_with, git::Git, git::plain_ref, merge_with, rest_pull, wait};
+use crate::pr::{
+    RestPull, TimedOut, execute_with, git::Git, git::plain_ref, merge_with, rest_pull, wait,
+};
 use provenant_cli::domains::MergeMethod;
 use provenant_os::exec::Termination;
 use std::{
@@ -146,6 +149,61 @@ impl GhForge {
     }
 }
 
+fn pull_info(number: u64, pull: RestPull) -> PullRequestInfo {
+    let merged = pull.merged_at.is_some();
+    PullRequestInfo {
+        number,
+        head: pull.head.sha.to_string(),
+        base_branch: pull.base.branch,
+        author: pull.user.map(|user| user.login).unwrap_or_default(),
+        state: if merged {
+            PullRequestState::Merged
+        } else if pull.state == "open" {
+            PullRequestState::Open
+        } else {
+            PullRequestState::Closed
+        },
+        merged_commit: if merged { pull.merge_commit_sha } else { None },
+        stack: pull.stack.map(|stack| StackMembership {
+            number: stack.number,
+            size: stack.size,
+            position: stack.position,
+            base_branch: stack.base.branch,
+        }),
+    }
+}
+
+fn stack_members(value: &serde_json::Value) -> Result<Vec<StackMember>, LandingError> {
+    let members = value["pull_requests"]
+        .as_array()
+        .ok_or_else(|| LandingError::Failed("stack response has no pull requests".into()))?;
+    let mut seen = std::collections::BTreeSet::new();
+    members
+        .iter()
+        .map(|member| {
+            let number = member["number"]
+                .as_u64()
+                .filter(|number| *number != 0 && seen.insert(*number))
+                .ok_or_else(|| {
+                    LandingError::Failed("stack has invalid pull request number".into())
+                })?;
+            let state = match (member["state"].as_str(), member.get("merged_at")) {
+                (Some("closed"), Some(serde_json::Value::String(date))) if !date.is_empty() => {
+                    PullRequestState::Merged
+                }
+                (Some("closed"), Some(serde_json::Value::Null)) => PullRequestState::Closed,
+                (Some("open"), Some(serde_json::Value::Null)) => PullRequestState::Open,
+                _ => {
+                    return Err(LandingError::Failed(
+                        "stack has invalid pull request state".into(),
+                    ));
+                }
+            };
+            Ok(StackMember { number, state })
+        })
+        .collect()
+}
+
 /// Fold per-check results: any failure fails, then pending, then missing,
 /// then a skipped or neutral check; only an all-passed set passes.
 pub(super) fn fold_results(results: impl IntoIterator<Item = GateResult>) -> GateResult {
@@ -219,6 +277,19 @@ fn encode_branch(branch: &str) -> String {
 }
 
 impl Forge for GhForge {
+    fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError> {
+        let endpoint = format!("repos/{{owner}}/{{repo}}/stacks/{number}");
+        let bytes = self.get(&[&endpoint, "-H", "X-GitHub-Api-Version:2026-03-10"])?;
+        let response: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            LandingError::Failed(format!("GitHub returned invalid stack JSON: {error}"))
+        })?;
+        if response["number"].as_u64() != Some(number) {
+            return Err(LandingError::Failed(
+                "stack response number does not match request".into(),
+            ));
+        }
+        stack_members(&response)
+    }
     fn set_project_path(&mut self, path: &Path) {
         self.project = path.to_owned();
     }
@@ -248,23 +319,16 @@ impl Forge for GhForge {
     }
 
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
-        let pull =
-            rest_pull(&|argv| self.reader().read(argv), &number.to_string()).map_err(failed)?;
-        let merged = pull.merged_at.is_some();
-        Ok(PullRequestInfo {
-            number,
-            head: pull.head.sha.to_string(),
-            base_branch: pull.base.branch,
-            author: pull.user.map(|user| user.login).unwrap_or_default(),
-            state: if merged {
-                PullRequestState::Merged
-            } else if pull.state == "open" {
-                PullRequestState::Open
-            } else {
-                PullRequestState::Closed
+        let pull = rest_pull(
+            &|argv| {
+                let mut request = argv.to_vec();
+                request.extend(["-H", "X-GitHub-Api-Version:2026-03-10"]);
+                self.reader().read(&request)
             },
-            merged_commit: if merged { pull.merge_commit_sha } else { None },
-        })
+            &number.to_string(),
+        )
+        .map_err(failed)?;
+        Ok(pull_info(number, pull))
     }
     fn target_branch(&mut self) -> Result<String, LandingError> {
         self.json("repos/{owner}/{repo}")?["default_branch"]
@@ -1089,6 +1153,60 @@ mod tests {
     use serde_json::json;
     use std::process::Command;
 
+    #[test]
+    fn pull_info_reads_stack_membership_from_rest() {
+        let head = "1".repeat(40);
+        let mut payload = json!({
+            "state":"open", "head":{"sha":head,"ref":"upper","repo":null},
+            "base":{"sha":head,"ref":"lower","repo":null},
+            "mergeable":true, "mergeable_state":"clean", "merged_at":null,
+            "merge_commit_sha":null, "title":"fixture", "user":{"login":"author"},
+            "stack":{"number":42,"size":2,"position":2,"base":{"ref":"main","sha":head}}
+        });
+        let info = pull_info(102, serde_json::from_value(payload.clone()).unwrap());
+        assert_eq!(
+            info.stack,
+            Some(StackMembership {
+                number: 42,
+                size: 2,
+                position: 2,
+                base_branch: "main".into()
+            })
+        );
+        payload.as_object_mut().unwrap().remove("stack");
+        assert_eq!(
+            pull_info(102, serde_json::from_value(payload).unwrap()).stack,
+            None
+        );
+    }
+
+    #[test]
+    fn stack_response_retains_bottom_to_top_order_and_state() {
+        let response = json!({"number":42,"base":{"ref":"main"},"pull_requests":[
+            {"number":101,"state":"closed","merged_at":"2026-01-01T00:00:00Z"},
+            {"number":102,"state":"open","merged_at":null},
+            {"number":103,"state":"open","merged_at":null}
+        ]});
+        assert_eq!(
+            stack_members(&response).unwrap(),
+            vec![
+                StackMember {
+                    number: 101,
+                    state: PullRequestState::Merged
+                },
+                StackMember {
+                    number: 102,
+                    state: PullRequestState::Open
+                },
+                StackMember {
+                    number: 103,
+                    state: PullRequestState::Open
+                },
+            ]
+        );
+        assert!(stack_members(&json!({"pull_requests":[{"number":101,"state":"open","merged_at":null},{"number":101,"state":"open","merged_at":null}]})).is_err());
+    }
+
     mod rest_calls {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1214,6 +1332,7 @@ mod tests {
                 "{landing_calls}pr list --head branch\n"
             )));
             assert!(calls.contains(&format!("sha={HEAD}")), "{calls}");
+            assert!(calls.contains("X-GitHub-Api-Version:2026-03-10"), "{calls}");
             assert_eq!(
                 calls
                     .lines()

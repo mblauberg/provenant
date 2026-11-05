@@ -29,6 +29,33 @@ pub fn select_batch(
                 continue;
             }
             let info = forge.pull_request(number)?;
+            if let Some(stack) = &info.stack {
+                if stack.base_branch != target {
+                    continue;
+                }
+                let members = forge.stack_members(stack.number)?;
+                let position = members
+                    .iter()
+                    .position(|member| member.number == number)
+                    .ok_or_else(|| {
+                        LandingError::Failed(format!(
+                            "stack {} does not contain pull request #{number}",
+                            stack.number
+                        ))
+                    })?;
+                if let Some(lower) = members[..position]
+                    .iter()
+                    .find(|member| member.state != PullRequestState::Merged)
+                {
+                    if !numbers.contains(&lower.number) {
+                        return Err(LandingError::Refused(format!(
+                            "pull request #{number} has unmerged lower pull request #{}",
+                            lower.number
+                        )));
+                    }
+                    continue;
+                }
+            }
             if info.number != number
                 || info.state != PullRequestState::Open
                 || info.base_branch != target
@@ -145,7 +172,37 @@ mod tests {
             author: author.into(),
             state: PullRequestState::Open,
             merged_commit: None,
+            stack: None,
         }
+    }
+    #[test]
+    fn upper_stack_selection_names_its_unmerged_lower_member() {
+        use crate::pr::landing::ports::{StackMember, StackMembership};
+        let mut forge = FakeForge::default();
+        let mut upper = info(2, "author", "lower");
+        upper.stack = Some(StackMembership {
+            number: 42,
+            size: 2,
+            position: 2,
+            base_branch: "main".into(),
+        });
+        forge.pull_requests.insert(2, upper);
+        forge.stacks.insert(
+            42,
+            vec![
+                StackMember {
+                    number: 1,
+                    state: PullRequestState::Open,
+                },
+                StackMember {
+                    number: 2,
+                    state: PullRequestState::Open,
+                },
+            ],
+        );
+        let error = select_batch(&mut forge, &[2], "main", 1, 0).unwrap_err();
+        assert!(error.to_string().contains("#1"));
+        assert!(forge.merge_attempts.is_empty());
     }
     #[test]
     fn selection_requires_independent_approval_at_head_and_target() -> Result<(), LandingError> {

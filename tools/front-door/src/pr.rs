@@ -157,6 +157,20 @@ struct RestPull {
     title: String,
     #[serde(default)]
     user: Option<RestUser>,
+    #[serde(default)]
+    stack: Option<RestStack>,
+}
+#[derive(Deserialize)]
+struct RestStack {
+    number: u64,
+    size: u64,
+    position: u64,
+    base: RestStackBase,
+}
+#[derive(Deserialize)]
+struct RestStackBase {
+    #[serde(rename = "ref")]
+    branch: String,
 }
 #[derive(Deserialize)]
 struct RestUser {

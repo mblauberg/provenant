@@ -148,6 +148,7 @@
       "limits.nodes": {"type": "int", "allowed": "1 or more", "default": "512", "effect": "Graph nodes limit."},
       "limits.edges": {"type": "int", "allowed": "1 or more", "default": "4096", "effect": "Graph edges limit."},
       "limits.routes_per_node": {"type": "int", "allowed": "1 or more", "default": "16", "effect": "Graph routes per node limit."},
+      "limits.review_substitutions": {"type": "int", "allowed": "0 or more", "default": "1", "effect": "Maximum substitutions per review member."},
       "limits.node_prompt_bytes": {"type": "int", "allowed": "1 or more", "default": "262144", "effect": "Graph node prompt bytes limit."},
       "limits.graph_prompt_bytes": {"type": "int", "allowed": "1 or more", "default": "4194304", "effect": "Graph graph prompt bytes limit."},
       "limits.fan_out_width": {"type": "int", "allowed": "1 or more", "default": "32", "effect": "Graph fan out width limit."},

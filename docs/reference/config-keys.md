@@ -153,6 +153,7 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | `limits.nodes` | 512 | Graph nodes limit. (1 or more). |
 | `limits.edges` | 4096 | Graph edges limit. (1 or more). |
 | `limits.routes_per_node` | 16 | Graph routes per node limit. (1 or more). |
+| `limits.review_substitutions` | 1 | Maximum substitutions per review member. (0 or more). |
 | `limits.node_prompt_bytes` | 262144 | Graph node prompt bytes limit. (1 or more). |
 | `limits.graph_prompt_bytes` | 4194304 | Graph graph prompt bytes limit. (1 or more). |
 | `limits.fan_out_width` | 32 | Graph fan out width limit. (1 or more). |
