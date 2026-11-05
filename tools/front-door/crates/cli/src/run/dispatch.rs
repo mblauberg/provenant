@@ -6,6 +6,7 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
         return reply("run", Err(fail));
     }
     if command.host.is_none()
+        && !matches!(command.access.mode, Some(Mode::ReadOnly))
         && let Some(path) = &command.access.worktree
     {
         let absolute = if path.is_absolute() {
@@ -1035,6 +1036,7 @@ pub(super) fn dispatch_inner(
     } else {
         worktree_access(
             matches!(command.access.mode(), Mode::WorktreeWrite) && command.branch.is_none(),
+            matches!(command.access.mode, Some(Mode::ReadOnly)),
             command.access.worktree.as_deref(),
         )?;
         None
@@ -1063,6 +1065,16 @@ pub(super) fn dispatch_inner(
             }
             new_worktree = Some(remote::new_worktree(&command)?);
         }
+    }
+    if command.host.is_some()
+        && matches!(command.access.mode, Some(Mode::ReadOnly))
+        && command.access.worktree.is_some()
+    {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::WorktreeNotApplicable,
+            "--worktree names a local checkout and cannot be used with a peer --host",
+        ));
     }
     if command.branch.is_some() && new_worktree.is_none() {
         return Err(Fail::new(
@@ -1435,7 +1447,30 @@ pub(super) fn dispatch_inner(
 
     // Preflight is complete: create or claim the owned tree, then admit.
     let mut pinned_base = None;
-    let worktree = if owned.is_some() || command.access.worktree.is_some() {
+    let live_reader =
+        matches!(command.access.mode, Some(Mode::ReadOnly)) && command.access.worktree.is_some();
+    let worktree = if live_reader {
+        let path = command.access.worktree.as_deref().ok_or_else(|| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::WorktreeRequired,
+                "reader worktree missing",
+            )
+        })?;
+        let source = run::resolve_reader_source(edge.roots.state.as_path(), edge.cwd, path)?;
+        let directory = provenant_os::fs::Directory::open_anchor(&source)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+        let metadata = directory
+            .metadata()
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+        lane_access.source_root = Some(source.clone());
+        lane_access.source_live = true;
+        lane_access.source_identity = Some(run::SourceIdentity {
+            device: metadata.device,
+            inode: metadata.inode,
+        });
+        Some(json!({"path": source, "owned": false, "mode": "read-only"}))
+    } else if owned.is_some() || command.access.worktree.is_some() {
         let backoff = provenant_core::retry::Backoff::new(
             Duration::from_millis(100),
             2,
@@ -1693,7 +1728,11 @@ pub(super) fn dispatch_inner(
                     provider_timeout: command.provider_timeout,
                     delivery_id,
                     deliver,
-                    worktree: command.access.worktree.clone(),
+                    worktree: if live_reader {
+                        None
+                    } else {
+                        command.access.worktree.clone()
+                    },
                     access,
                 }
             },

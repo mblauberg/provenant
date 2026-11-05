@@ -120,15 +120,7 @@ pub(crate) fn seed_git(enabled: bool, home: &Path, cache: &Path) -> Outcome {
     }
     #[cfg(target_os = "macos")]
     {
-        seed_store_with(home, cache, "git", |source, dest| {
-            clone_registry(source, dest).map_err(|reason| match reason {
-                "registry_unavailable" => "git_unavailable",
-                "registry_read_failed" => "git_read_failed",
-                "registry_too_deep" => "git_too_deep",
-                "registry_contains_unsupported_entry" => "git_contains_unsupported_entry",
-                other => other,
-            })
-        })
+        seed_store_with(home, cache, "git", clone_git)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -254,6 +246,8 @@ fn seed_target_with(
             .open_verified_directory(&stage)
             .map_err(|_| "staging_unavailable")?;
         clone(&source, &staging)?;
+        // As for the registry: durable before the rename can be.
+        staging.sync().map_err(|_| "staging_sync_failed")?;
         cache_dir
             .rename_noreplace(&stage, &cache_dir, OsStr::new("target"))
             .map_err(|_| "publish_failed")?;
@@ -262,7 +256,11 @@ fn seed_target_with(
     match result {
         Ok(()) => Outcome {
             status: "seeded",
-            reason: "cloned",
+            reason: if cache_dir.sync().is_ok() {
+                "cloned"
+            } else {
+                "durability_unconfirmed"
+            },
             detail: None,
         },
         Err(reason) => {
@@ -280,48 +278,17 @@ fn clone_target(
     destination: &provenant_os::fs::Directory,
 ) -> Result<(), &'static str> {
     // The seed can be read-only; make each clone writable without changing the seed.
-    fn walk(
-        source: &provenant_os::fs::Directory,
-        dest: &provenant_os::fs::Directory,
-        depth: usize,
-    ) -> Result<(), &'static str> {
-        use provenant_os::fs::FileKind;
-        if depth > 128 {
-            return Err("target_too_deep");
-        }
-        for entry in source.entries().map_err(|_| "target_read_failed")? {
-            let name = entry.map_err(|_| "target_read_failed")?;
-            match source
-                .metadata_at(&name, false)
-                .map_err(|_| "target_read_failed")?
-                .kind
-            {
-                FileKind::Directory => {
-                    let child = source
-                        .open_verified_directory(&name)
-                        .map_err(|_| "target_read_failed")?;
-                    dest.mkdir(&name, 0o700).map_err(|_| "clone_failed")?;
-                    let target = dest
-                        .open_verified_directory(&name)
-                        .map_err(|_| "clone_failed")?;
-                    walk(&child, &target, depth + 1)?;
-                }
-                FileKind::Regular => {
-                    let file = source.open_read(&name).map_err(|_| "target_read_failed")?;
-                    dest.clone_file_from(&file, &name)
-                        .map_err(|_| "clone_failed")?;
-                    dest.open_read(&name)
-                        .and_then(|file| file.make_owner_writable())
-                        .map_err(|_| "clone_failed")?;
-                }
-                _ => return Err("target_contains_unsupported_entry"),
-            }
-        }
-        Ok(())
-    }
-    let source =
-        provenant_os::fs::Directory::open_anchor(source).map_err(|_| "target_unavailable")?;
-    walk(&source, destination, 0)
+    clone_tree(
+        source,
+        destination,
+        &CloneStore {
+            unavailable: "target_unavailable",
+            read_failed: "target_read_failed",
+            too_deep: "target_too_deep",
+            unsupported: "target_contains_unsupported_entry",
+            writable_files: true,
+        },
+    )
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -418,7 +385,9 @@ fn seed_store_with(
             .open_verified_directory(&stage_name)
             .map_err(|_| "staging_unavailable")?;
         clone(&home.join(".cargo").join(store), &staging)?;
-        sync_tree(&staging).map_err(|_| "staging_sync_failed")?;
+        // A clone writes no file data, and APFS commits metadata in order, so
+        // flushing here makes the tree durable before the rename can be.
+        staging.sync().map_err(|_| "staging_sync_failed")?;
         match cargo_dir.rename_noreplace(&stage_name, &cargo_dir, destination) {
             Ok(()) => {}
             Err(error) if error.is_exists() => return Err("publish_raced"),
@@ -449,64 +418,126 @@ fn seed_store_with(
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn sync_tree(directory: &provenant_os::fs::Directory) -> provenant_os::fs::Result<()> {
-    use provenant_os::fs::FileKind;
-    for name in directory.entries()? {
-        let name = name?;
-        match directory.metadata_at(&name, false)?.kind {
-            FileKind::Directory => sync_tree(&directory.open_verified_directory(&name)?)?,
-            FileKind::Regular => directory.open_read(&name)?.sync()?,
-            _ => return Err(provenant_os::fs::FsError::NotRegular { name }),
-        }
-    }
-    directory.sync()
-}
-
 #[cfg(target_os = "macos")]
 fn clone_registry(
     source: &Path,
     destination: &provenant_os::fs::Directory,
 ) -> Result<(), &'static str> {
+    clone_tree(
+        source,
+        destination,
+        &CloneStore {
+            unavailable: "registry_unavailable",
+            read_failed: "registry_read_failed",
+            too_deep: "registry_too_deep",
+            unsupported: "registry_contains_unsupported_entry",
+            writable_files: false,
+        },
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn clone_git(source: &Path, destination: &provenant_os::fs::Directory) -> Result<(), &'static str> {
+    clone_tree(
+        source,
+        destination,
+        &CloneStore {
+            unavailable: "git_unavailable",
+            read_failed: "git_read_failed",
+            too_deep: "git_too_deep",
+            unsupported: "git_contains_unsupported_entry",
+            writable_files: false,
+        },
+    )
+}
+
+/// One seeded store: its refusal codes, and whether clones must be writable.
+#[cfg(target_os = "macos")]
+struct CloneStore {
+    unavailable: &'static str,
+    read_failed: &'static str,
+    too_deep: &'static str,
+    unsupported: &'static str,
+    writable_files: bool,
+}
+
+/// Clone a store into `destination`, then hold the clone to the seed's rules.
+///
+/// Each top-level directory is cloned in one call. A registry holds tens of
+/// thousands of files, and cloning them one at a time took minutes when several
+/// lanes started together; the kernel clones the same tree in seconds.
+#[cfg(target_os = "macos")]
+fn clone_tree(
+    source: &Path,
+    destination: &provenant_os::fs::Directory,
+    store: &CloneStore,
+) -> Result<(), &'static str> {
     use provenant_os::fs::{Directory, FileKind};
-    fn walk(source: &Directory, destination: &Directory, depth: usize) -> Result<(), &'static str> {
-        if depth > 128 {
-            return Err("registry_too_deep");
-        }
-        for entry in source.entries().map_err(|_| "registry_read_failed")? {
-            let name = entry.map_err(|_| "registry_read_failed")?;
-            match source
-                .metadata_at(&name, false)
-                .map_err(|_| "registry_read_failed")?
-                .kind
-            {
-                FileKind::Directory => {
-                    let child = source
-                        .open_verified_directory(&name)
-                        .map_err(|_| "registry_read_failed")?;
-                    destination
-                        .mkdir(&name, 0o700)
-                        .map_err(|_| "clone_failed")?;
-                    let target = destination
-                        .open_verified_directory(&name)
-                        .map_err(|_| "clone_failed")?;
-                    walk(&child, &target, depth + 1)?;
-                }
-                FileKind::Regular => {
-                    let file = source
-                        .open_read(&name)
-                        .map_err(|_| "registry_read_failed")?;
-                    destination
-                        .clone_file_from(&file, &name)
-                        .map_err(|_| "clone_failed")?;
-                }
-                _ => return Err("registry_contains_unsupported_entry"),
+    let source = Directory::open_anchor(source).map_err(|_| store.unavailable)?;
+    for entry in source.entries().map_err(|_| store.read_failed)? {
+        let name = entry.map_err(|_| store.read_failed)?;
+        match source
+            .metadata_at(&name, false)
+            .map_err(|_| store.read_failed)?
+            .kind
+        {
+            FileKind::Directory => {
+                let child = source
+                    .open_verified_directory(&name)
+                    .map_err(|_| store.read_failed)?;
+                destination
+                    .clone_directory_from(&child, &name)
+                    .map_err(|_| "clone_failed")?;
             }
+            FileKind::Regular => {
+                let file = source.open_read(&name).map_err(|_| store.read_failed)?;
+                destination
+                    .clone_file_from(&file, &name)
+                    .map_err(|_| "clone_failed")?;
+            }
+            _ => return Err(store.unsupported),
         }
-        Ok(())
     }
-    let source = Directory::open_anchor(source).map_err(|_| "registry_unavailable")?;
-    walk(&source, destination, 0)
+    settle_clone(destination, store, 0)
+}
+
+/// Refuse what a seed may not hold, and make the cloned tree private to the lane.
+/// Nothing here follows a link, so an entry refused here was never used.
+#[cfg(target_os = "macos")]
+fn settle_clone(
+    directory: &provenant_os::fs::Directory,
+    store: &CloneStore,
+    depth: usize,
+) -> Result<(), &'static str> {
+    use provenant_os::fs::FileKind;
+    if depth > 128 {
+        return Err(store.too_deep);
+    }
+    for entry in directory.entries().map_err(|_| "clone_failed")? {
+        let name = entry.map_err(|_| "clone_failed")?;
+        match directory
+            .metadata_at(&name, false)
+            .map_err(|_| "clone_failed")?
+            .kind
+        {
+            FileKind::Directory => {
+                let child = directory
+                    .open_verified_directory(&name)
+                    .map_err(|_| "clone_failed")?;
+                child.make_private().map_err(|_| "clone_failed")?;
+                settle_clone(&child, store, depth + 1)?;
+            }
+            FileKind::Regular if store.writable_files => {
+                directory
+                    .open_read(&name)
+                    .and_then(|file| file.make_owner_writable())
+                    .map_err(|_| "clone_failed")?;
+            }
+            FileKind::Regular => {}
+            _ => return Err(store.unsupported),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -697,6 +728,37 @@ mod tests {
         );
         std::fs::write(cache.join("target/file"), b"lane").unwrap();
         assert_eq!(std::fs::read(&seed).unwrap(), b"seed");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn target_clone_of_a_read_only_tree_is_private_and_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation(tmp.path(), "001", "v1", "host");
+        let target = crate::target_seed::store_path(tmp.path()).join("generations/001/target");
+        let nested = target.join("debug/deps");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("artifact"), b"seed").unwrap();
+        let read_only = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        read_only(&nested.join("artifact"), 0o444);
+        read_only(&nested, 0o555);
+        read_only(&target.join("debug"), 0o555);
+        assert_eq!(
+            seed_target_with(tmp.path(), &cache, "v1", "host", clone_target).status,
+            "seeded"
+        );
+        let lane = cache.join("target/debug/deps");
+        std::fs::write(lane.join("artifact"), b"lane").unwrap();
+        std::fs::write(lane.join("new"), b"lane").unwrap();
+        assert_eq!(std::fs::read(nested.join("artifact")).unwrap(), b"seed");
+        assert!(!nested.join("new").exists());
+        read_only(&target.join("debug"), 0o755);
+        read_only(&nested, 0o755);
     }
 
     #[test]
@@ -984,6 +1046,26 @@ mod tests {
             std::fs::read(home.join(".cargo/registry/index/item")).unwrap(),
             b"host"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn registry_clone_copies_every_nested_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cache = tmp.path().join("cache");
+        let nested = home.join(".cargo/registry/src/index/crate-1.0/src");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::write(nested.join("lib.rs"), b"host").unwrap();
+        std::fs::write(home.join(".cargo/registry/top"), b"top").unwrap();
+        assert_eq!(seed_registry(true, &home, &cache).status, "seeded");
+        let seeded = cache.join("cargo-home/registry");
+        assert_eq!(
+            std::fs::read(seeded.join("src/index/crate-1.0/src/lib.rs")).unwrap(),
+            b"host"
+        );
+        assert_eq!(std::fs::read(seeded.join("top")).unwrap(), b"top");
     }
 
     #[cfg(target_os = "macos")]

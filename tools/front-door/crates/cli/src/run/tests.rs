@@ -669,6 +669,124 @@ fn explicit_read_only_from_a_linked_worktree_dispatches() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn worktree_access_readers_leave_existing_writer_lease_untouched()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane(
+        "run::tests::worktree_access_readers_leave_existing_writer_lease_untouched",
+    )? {
+        return Ok(());
+    }
+    use provenant_confinement::worktrees;
+    use provenant_supervisor::custody::{self, Scope};
+    let fixture = linked_fixture()?;
+    let prompt = fixture.root.join("prompt.md");
+    std::fs::write(&prompt, "review the checkout")?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            provenant_config::bind_project(
+                edge.roots,
+                provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
+            )?;
+            provenant_config::bind_host(edge.roots)?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let held = worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &fixture.project,
+                &clock,
+                &cancel,
+                |context| {
+                    let verified =
+                        provenant_confinement::verify_worktree(context.repo, &fixture.tree)?;
+                    let info = worktrees::list(context, &cancel)?
+                        .into_iter()
+                        .find(|info| info.path == fixture.tree)
+                        .ok_or(worktrees::WorktreeError::NotFound)?;
+                    worktrees::writer_custody(
+                        context.project_state,
+                        &verified,
+                        &provenant_confinement::repo::GitRefName::branch("writer")
+                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                        info.head,
+                        || {
+                            Ok(provenant_confinement::run_utility(
+                                context.executor,
+                                provenant_confinement::GitRead::WorktreeList,
+                                context.repo,
+                                context.utility,
+                                context.utility_budget,
+                                &cancel,
+                            )?
+                            .stdout
+                            .bytes)
+                        },
+                    )
+                },
+            )?;
+            let lease = custody::acquire_writer(
+                held.0,
+                Scope {
+                    run: RunId::from_bytes([7; 16]),
+                    attempt: AttemptId::from_bytes([7; 16]),
+                    generation: 1,
+                },
+                held.1,
+                provenant_core::WaitBudget::cli(clock.mono_now(), 1)?,
+                &cancel,
+                &clock,
+            )?;
+            for operation in ["reader-one", "reader-two"] {
+                let command = parsed_run(&[
+                    "--operation-id",
+                    operation,
+                    "--model",
+                    "codex/gpt-6-luna",
+                    "--mode",
+                    "read-only",
+                    "--worktree",
+                    fixture.tree.to_str().ok_or("path")?,
+                    "--prompt-file",
+                    prompt.to_str().ok_or("prompt")?,
+                ])?;
+                let reply = dispatch(command, edge);
+                assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+                let id = reply.result.data["run_id"]
+                    .as_str()
+                    .ok_or("run id")?
+                    .parse()?;
+                let request = session.store.request(id, &call)?;
+                assert!(request.tasks[0].writer.is_none());
+                assert!(request.tasks[0].access.source_live);
+                assert_eq!(
+                    request.tasks[0].access.source_root.as_deref(),
+                    Some(fixture.tree.as_path())
+                );
+            }
+            assert!(worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &fixture.project,
+                &clock,
+                &cancel,
+                |context| Ok(matches!(
+                    worktrees::cache_writer_probe(context.project_state, &fixture.tree),
+                    Err(worktrees::WorkerState::Busy)
+                ))
+            )?);
+            drop(lease);
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
 fn run_explain_warns_once_for_existing_brief_paths_outside_read_roots()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -4334,7 +4452,7 @@ fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_contr
         .result
         .error
         .expect("failed reconcile must explain its blocker");
-    assert_eq!(error.code, "reconcile_incomplete");
+    assert_eq!(error.code, "RECONCILE_INCOMPLETE");
     assert!(error.message.contains("invalid anchor"));
 }
 

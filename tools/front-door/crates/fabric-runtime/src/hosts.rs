@@ -1226,6 +1226,7 @@ mod tests {
             extra: Default::default(),
         })
         .unwrap();
+        // The peer wire keeps its own tag; only the code a caller sees changed spelling.
         assert_eq!(value["data"]["error"]["code"], "launch_unknown");
         assert!(matches!(
             serde_json::from_value::<PeerResult>(value).unwrap(),
