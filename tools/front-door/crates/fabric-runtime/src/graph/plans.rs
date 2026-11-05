@@ -41,6 +41,25 @@ pub struct PlanSpec {
     pub fallback_title: Option<String>,
 }
 
+impl PlanSpec {
+    /// Bind review catalogue leaves to the commit resolved at review launch.
+    /// The catalogue is host-authored, but it may have been captured before the
+    /// writer's head existed. A lens must never inherit a framing node as its
+    /// source or retain the writer's moving head binding.
+    pub fn pin_review_subject(&mut self, commit: &str) -> Result<(), String> {
+        let source = serde_json::json!({"type": "commit", "commit": commit});
+        for pattern in &mut self.patterns {
+            for node in &mut pattern.nodes {
+                let object = node.as_object_mut().ok_or_else(|| {
+                    format!("review pattern {} contains a non-object node", pattern.name)
+                })?;
+                object.insert("source".into(), source.clone());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatternSpec {
     #[serde(flatten)]

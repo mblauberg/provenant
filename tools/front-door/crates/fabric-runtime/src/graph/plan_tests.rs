@@ -1773,6 +1773,25 @@ fn single_planned_review_records_rationale_before_lens() {
 }
 
 #[test]
+fn review_catalogue_binds_every_lens_to_the_pinned_commit() {
+    let mut doc = planned_fixture("review");
+    let spec = doc.nodes.iter_mut().find(|node| node.id == "plan").unwrap().plan.as_mut().unwrap();
+    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    spec.pin_review_subject(head).unwrap();
+    for pattern in &spec.patterns {
+        for lens in &pattern.nodes {
+            assert_eq!(lens["source"], json!({"type":"commit", "commit":head}));
+        }
+    }
+    let output = pattern_result(json!({"id":"correctness", "pattern":"lens-correctness-spec"}));
+    let mut owner = fixture_owner(&["framed", &output, "done\nVERDICT: PASS", "done\nVERDICT: PASS", "done\nVERDICT: PASS"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let lens = run.checkpoint.expansions[0].nodes.iter().find(|node| node.id == "plan--correctness--lens").unwrap();
+    assert_eq!(lens.source, Some(SourceBinding::Commit { commit: head.into() }));
+}
+
+#[test]
 fn planned_review_expands_only_the_lens_legs_the_catalogue_lists() {
     let doc = planned_fixture("review");
     let leg = |lens: &str, tier: &str| {
