@@ -78,7 +78,11 @@ alphanumeric. Run scopes it by caller and project, and binds it to the
 operation kind and a digest of the prompt, route, authority and execution
 controls. Reader waits are excluded from the digest. The same ID and digest
 return the recorded outcome without repeating effects. The same ID with a
-different digest fails with `operation_conflict` (exit 2).
+different digest fails with `operation_conflict` (exit 2). A recorded
+pre-admission refusal carries its safe diagnostic, registered worktree
+identifier when available and refusal time. `status` and `lanes` include these
+records in `refusals`, with the operation ID, code and next action; no attempt
+identity is fabricated for a dispatch that never reached admission.
 - Why: lost replies and concurrent duplicates, including resume, must never
   launch twice.
 - Test: `crates/core/src/ids.rs::operation_keys_are_bounded_and_cannot_be_path_components`;

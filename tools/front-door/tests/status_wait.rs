@@ -452,3 +452,67 @@ fn run_wait_retries_until_the_registry_lock_is_released() -> Result {
     );
     Ok(())
 }
+
+#[test]
+fn saved_refusal_is_visible_in_status_and_lanes() -> Result {
+    let rig = TestRig::new()?;
+    let (store, attempt) = seed(&rig)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let lane = store.record(attempt, &call)?;
+    let refusal = provenant_run::OperationRecord {
+        extra: Default::default(),
+        schema_version: 1,
+        project_id: lane.project_id,
+        actor_id: ActorId::from_bytes([2; 16]),
+        operation_id: OperationId::parse("visible-refusal")?,
+        kind: provenant_run::OperationKind::Dispatch,
+        request_digest: Digest::from_bytes([11; 32]),
+        run_id: RunId::from_bytes([12; 16]),
+        state: provenant_run::OperationState::Terminal,
+        refusal: Some(provenant_run::OperationRefusal {
+            extra: Default::default(),
+            diagnostic: provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                .category("integrity")
+                .detail("writer scope refused")
+                .next("inspect the worktree"),
+            worktree: Some(provenant_records::PathWire::from_relative(
+                &provenant_core::RelativePath::parse("writer")?,
+            )?),
+            refused_at: clock.wall_now()?,
+        }),
+    };
+    store.record_refusal(&refusal, &call)?;
+    drop(store);
+    for command in ["status", "lanes"] {
+        let json = rig.command(&[command, "--json"])?;
+        assert_eq!(
+            support::code(&json),
+            0,
+            "{}",
+            String::from_utf8_lossy(&json.stderr.bytes)
+        );
+        let data: Value = serde_json::from_slice(&json.stdout.bytes)?;
+        let rows = data["data"]["refusals"]
+            .as_array()
+            .ok_or("missing refusal list")?;
+        assert_eq!(rows.len(), 1, "{data}");
+        assert_eq!(rows[0]["operation_id"], "visible-refusal");
+        assert_eq!(rows[0]["code"], "WRITER_SCOPE");
+        assert_eq!(rows[0]["next"], "inspect the worktree");
+        let human = rig.command(&[command])?;
+        assert_eq!(support::code(&human), 0);
+        let text = String::from_utf8(human.stdout.bytes)?;
+        assert!(
+            text.contains("visible-refusal")
+                && text.contains("WRITER_SCOPE")
+                && text.contains("inspect the worktree"),
+            "{text}"
+        );
+    }
+    Ok(())
+}

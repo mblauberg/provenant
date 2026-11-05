@@ -176,9 +176,19 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             compact
                 .lines
                 .extend(capabilities.lines().take(8).map(str::to_owned));
-            summary = Some(compact);
             human.push_str(&capabilities);
             data["review_exempt"] = exempt;
+            if command.id.is_none() && command.cursor.is_none() {
+                let refusals = session.store.refused_operations(None, &call)?;
+                let lines = attach_refusals(&refusals, &mut data, &mut human);
+                if !lines.is_empty() {
+                    if rows.is_empty() {
+                        compact.lines.retain(|line| line != "no lanes");
+                    }
+                    compact.lines.extend(lines);
+                }
+            }
+            summary = Some(compact);
             attach_cloud_jobs(&session.store, &rows, &mut data, &mut human, &call)?;
             if data.get("cloud_jobs").is_some() {
                 summary = None;
@@ -1075,7 +1085,18 @@ pub fn lanes_streaming(
         && out.result.data["lanes"].is_array()
         && !(command.watch.is_some() && !json)
     {
-        out.summary = Some(lane_summary(&lane_lines(&out.result.data), None));
+        let mut summary = lane_summary(&lane_lines(&out.result.data), None);
+        let refusals = refusal_summary_lines(&out.result.data);
+        if !refusals.is_empty() {
+            if out.result.data["lanes"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+            {
+                summary.lines.retain(|line| line != "no lanes");
+            }
+            summary.lines.extend(refusals);
+        }
+        out.summary = Some(summary);
     }
     out.read_only = true;
     out
@@ -1379,6 +1400,26 @@ pub(super) fn lanes_inner(
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
     attach_cloud_jobs(&session.store, &lanes, &mut data, &mut human, &call)?;
+    if command.id.is_empty()
+        && command.cursor.is_none()
+        && (command.states.is_empty()
+            || command
+                .states
+                .iter()
+                .any(|state| state.as_str() == "rejected"))
+    {
+        let owner = command.session.as_ref().map(|_| owner);
+        let mut refusals = session.store.refused_operations(owner, &call)?;
+        if let Some(since) = since {
+            refusals.retain(|record| {
+                record
+                    .refusal
+                    .as_ref()
+                    .is_some_and(|refusal| refusal.refused_at >= since)
+            });
+        }
+        attach_refusals(&refusals, &mut data, &mut human);
+    }
     Ok((data, human, false))
 }
 
@@ -1439,6 +1480,60 @@ pub(super) fn attach_cloud_jobs(
         data["cloud_jobs"] = Value::Array(jobs);
     }
     Ok(())
+}
+
+/// Project saved pre-admission refusals without inventing attempt identities.
+fn attach_refusals(
+    records: &[run::OperationRecord],
+    data: &mut Value,
+    human: &mut String,
+) -> Vec<String> {
+    let rows: Vec<Value> = records
+        .iter()
+        .filter_map(|record| {
+            let refusal = record.refusal.as_ref()?;
+            Some(json!({
+                "operation_id": record.operation_id,
+                "run_id": record.run_id,
+                "state": "rejected",
+                "code": refusal.diagnostic.code,
+                "category": refusal.diagnostic.category,
+                "detail": refusal.diagnostic.detail,
+                "next": refusal.diagnostic.next,
+                "worktree": refusal.worktree,
+                "refused_at": refusal.refused_at,
+            }))
+        })
+        .collect();
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    data["refusals"] = Value::Array(rows);
+    let lines = refusal_summary_lines(data);
+    for line in &lines {
+        human.push_str(line);
+        human.push('\n');
+    }
+    lines
+}
+
+fn refusal_summary_lines(data: &Value) -> Vec<String> {
+    data["refusals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let id = row["operation_id"].as_str()?;
+            let code = row["code"].as_str()?;
+            let next = row["next"].as_str().unwrap_or("unavailable");
+            Some(format!(
+                "refused {} {}: {}",
+                plain_text(id, usize::MAX),
+                plain_text(code, usize::MAX),
+                plain_text(next, usize::MAX)
+            ))
+        })
+        .collect()
 }
 
 /// What a pull request body needs from one local attempt's own record.
@@ -1599,4 +1694,46 @@ pub fn attempt_facts(
             Ok(facts)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod refusal_projection_tests {
+    use super::*;
+
+    #[test]
+    fn refusal_projection_has_code_next_and_no_fabricated_attempt() {
+        let record = run::OperationRecord {
+            extra: Default::default(),
+            schema_version: 1,
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            operation_id: OperationId::parse("refused-op").unwrap(),
+            kind: run::OperationKind::Dispatch,
+            request_digest: provenant_core::Digest::from_bytes([3; 32]),
+            run_id: RunId::from_bytes([4; 16]),
+            state: run::OperationState::Terminal,
+            refusal: Some(run::OperationRefusal {
+                extra: Default::default(),
+                diagnostic: provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                    .category("integrity")
+                    .detail("writer scope refused")
+                    .next("inspect the worktree"),
+                worktree: Some(
+                    provenant_records::PathWire::from_relative(
+                        &provenant_core::RelativePath::parse("writer").unwrap(),
+                    )
+                    .unwrap(),
+                ),
+                refused_at: WallTime::from_micros(100).unwrap(),
+            }),
+        };
+        let mut data = json!({"lanes": []});
+        let mut human = String::new();
+        let lines = attach_refusals(&[record], &mut data, &mut human);
+        assert_eq!(data["refusals"][0]["code"], "WRITER_SCOPE");
+        assert_eq!(data["refusals"][0]["next"], "inspect the worktree");
+        assert!(data["refusals"][0].get("attempt_id").is_none());
+        assert!(human.contains("refused-op WRITER_SCOPE: inspect the worktree"));
+        assert_eq!(lines, refusal_summary_lines(&data));
+    }
 }
