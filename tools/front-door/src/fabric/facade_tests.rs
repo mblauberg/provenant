@@ -29,10 +29,13 @@ pub(crate) mod peer_tests {
 
     #[test]
     fn graph_factory_reopens_the_retained_directory() -> Result<(), Box<dyn std::error::Error>> {
-        let rig = crate::worktree_tests::support::TestRig::new()?;
-        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        if host_test("fabric::peer_tests::graph_factory_reopens_the_retained_directory")? {
+            return Ok(());
+        }
+        let rig = crate::worktree_tests::support::TestRig::new().map_err(|e| format!("fixture: {e}"))?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone()).map_err(|e| format!("roots: {e}"))?;
         let factory = Factory {
-            context: Context::open(roots, &rig.home, &rig.project)?,
+            context: Context::open(roots, &rig.home, &rig.project).map_err(|e| format!("context: {e}"))?,
             project_attribution: false,
             clock: SystemClock,
             backoff: ThreadPause,
@@ -46,7 +49,9 @@ pub(crate) mod peer_tests {
         };
         let retained = rig.project.join("retained-directory");
         std::fs::create_dir(&retained)?;
-        let rebound = factory.for_graph_directory(&retained)?;
+        let rebound = factory
+            .for_graph_directory(&retained)
+            .map_err(|error| format!("rebind retained directory: {error}"))?;
         assert_eq!(rebound.cwd, retained);
         assert_eq!(rebound.context.identity.project, factory.context.identity.project);
         let foreign = crate::worktree_tests::support::TestRig::new()?;
