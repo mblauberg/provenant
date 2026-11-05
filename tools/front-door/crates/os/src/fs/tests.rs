@@ -9,10 +9,21 @@ fn retired_owner_lock_refuses_stale_and_shared_guards() {
     assert!(directory.retire_owner_lock(name, &shared).is_err());
     drop(shared);
     let guard = directory.try_lock(name, LockMode::Exclusive).unwrap();
+    // This descriptor models a waiter that opened the old lock before
+    // retirement but has not yet acquired it.
+    let waiting = os::open_lock(&directory.file, name).unwrap();
+    assert!(os::try_flock(&waiting, LockMode::Exclusive).is_err());
     directory.retire_owner_lock(name, &guard).unwrap();
     let replacement = directory.try_lock(name, LockMode::Exclusive).unwrap();
     assert!(directory.verify_held_lock(name, &guard).is_err());
     assert!(directory.retire_owner_lock(name, &guard).is_err());
+    drop(guard);
+    os::try_flock(&waiting, LockMode::Exclusive).unwrap();
+    let stale = LockGuard {
+        _file: waiting,
+        exclusive: true,
+    };
+    assert!(directory.verify_held_lock(name, &stale).is_err());
     assert!(directory.verify_held_lock(name, &replacement).is_ok());
 }
 

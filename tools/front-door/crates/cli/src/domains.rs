@@ -763,6 +763,7 @@ mod tests {
             ("int", Some(1), Some(3650), &json!(7))
         );
         let graph_retention = field("gc.graph_checkpoint_days");
+        assert_eq!(graph_retention.source, provenant_config::Layer::Default);
         assert_eq!(
             (
                 graph_retention.kind,

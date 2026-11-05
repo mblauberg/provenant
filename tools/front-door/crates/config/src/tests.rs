@@ -281,7 +281,12 @@ fn assert_chair_log_retention_defaults_overrides_and_validation() {
 }
 
 fn assert_gc_settings_parse_defaults_and_warnings() {
-    let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
+    let default_config = load::<&[u8]>(&roots(), None).unwrap();
+    assert!(matches!(
+        default_config.origins["gc.graph_checkpoint_days"],
+        Origin::Compiled { .. }
+    ));
+    let defaults = serde_json::to_value(default_config).unwrap();
     assert_eq!(defaults["gc"]["schedule"], true);
     assert_eq!(defaults["gc"]["idle_days"], 7);
     assert_eq!(defaults["gc"]["graph_checkpoint_days"], 90);
@@ -295,6 +300,10 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
     assert_eq!(value["gc"]["schedule"], false);
     assert_eq!(value["gc"]["idle_days"], 14);
     assert_eq!(value["gc"]["graph_checkpoint_days"], 30);
+    assert!(matches!(
+        config.origins["gc.graph_checkpoint_days"],
+        Origin::User { .. }
+    ));
     assert_eq!(value["gc"]["free_floor"], "20G");
     test_support::assert_leaf_origins(&config);
     let configured = load(&roots(), Some(b"schema_version=1\n[gc]\nalert_below='20G'\n[gc.projects.example]\nregenerable=['target','node_modules']\nkeep=['web/target']".as_slice())).unwrap();
