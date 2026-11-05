@@ -621,10 +621,17 @@ fn lane_port_allocation(
     };
     match plan.try_acquire() {
         Ok(Some(lease)) => Ok((Some(lease), None)),
-        Ok(None) => Err(format!(
-            "no free lane port block; effective domains.fabric.lanes.lane_port_blocks={} (raise or disable this setting)",
-            plan.blocks
-        )),
+        Ok(None) => {
+            let origin = match plan.blocks_origin {
+                Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => "compiled default",
+                Some(provenant_os::lane_ports::BlocksOrigin::HostConfig) => "host configuration",
+                None => "recorded plan",
+            };
+            Err(format!(
+                "no free lane port block; domains.fabric.lanes.lane_port_blocks={} ({origin}); raise or disable this setting",
+                plan.blocks
+            ))
+        }
         Err(_) => Ok((
             None,
             Some(

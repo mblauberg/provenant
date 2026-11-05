@@ -101,6 +101,7 @@ fn inherited_port_block_outlives_the_callers_handle() -> Result<(), Box<dyn std:
         base: 30000,
         size: 16,
         blocks: 1,
+        blocks_origin: None,
     };
     let lease = plan.try_acquire()?.ok_or("no block")?;
     let reaper = Reaper::new(1)?;

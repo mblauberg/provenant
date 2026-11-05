@@ -108,7 +108,7 @@ reason = "Unreadable or unrepresentable lane-port settings warn and leave the la
 site = "supervisor/src/guardian.rs#Driver::run"
 boundary = "configurable_default"
 setting = "domains.fabric.lanes.lane_port_blocks"
-reason = "An exhausted port-block pool refuses the writer and names the setting that can raise the pool or disable allocation."
+reason = "An exhausted port-block pool refuses the writer and reports the effective count, its host or compiled origin, and the setting that can raise the pool or disable allocation."
 
 [[guard]]
 site = "supervisor/src/guardian.rs#lane_port_allocation"

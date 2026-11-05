@@ -1476,6 +1476,7 @@ fn a_leased_port_block_replaces_any_block_the_launch_environment_named() {
         base: 30000,
         size: 16,
         blocks: 2,
+        blocks_origin: None,
     };
     let held = plan.try_acquire().unwrap().unwrap();
     let lease = plan.try_acquire().unwrap().unwrap();
@@ -1505,6 +1506,7 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         base: 30000,
         size: 16,
         blocks: 1,
+        blocks_origin: Some(provenant_os::lane_ports::BlocksOrigin::HostConfig),
     };
     let (lease, warning) =
         lane_port_allocation(Some(&unavailable)).map_err(std::io::Error::other)?;
@@ -1529,6 +1531,6 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
     let error = lane_port_allocation(Some(&available))
         .err()
         .ok_or("expected exhausted pool")?;
-    assert!(error.contains("domains.fabric.lanes.lane_port_blocks=1"));
+    assert!(error.contains("domains.fabric.lanes.lane_port_blocks=1 (host configuration)"));
     Ok(())
 }

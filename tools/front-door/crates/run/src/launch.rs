@@ -1902,6 +1902,11 @@ fn lane_port_plan(
         base: narrow(settings.lane_port_base_value())?,
         size: narrow(settings.lane_port_block_size())?,
         blocks: narrow(blocks)?,
+        blocks_origin: Some(if settings.lane_port_blocks.is_some() {
+            provenant_os::lane_ports::BlocksOrigin::HostConfig
+        } else {
+            provenant_os::lane_ports::BlocksOrigin::CompiledDefault
+        }),
     }))
 }
 
@@ -1929,7 +1934,21 @@ mod lane_environment_tests {
         let not_directory = temp.path().join("not-directory");
         std::fs::write(&not_directory, b"fixture")?;
         assert!(lane_port_plan_or_warn(&not_directory).is_none());
-        assert!(lane_port_plan_or_warn(temp.path()).is_some());
+        let defaults = lane_port_plan_or_warn(temp.path()).expect("default plan");
+        assert_eq!(
+            defaults.blocks_origin,
+            Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault)
+        );
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "schema_version=1\n[domains.fabric.lanes]\nlane_port_blocks=2\n",
+        )?;
+        let configured = lane_port_plan_or_warn(temp.path()).expect("configured plan");
+        assert_eq!(configured.blocks, 2);
+        assert_eq!(
+            configured.blocks_origin,
+            Some(provenant_os::lane_ports::BlocksOrigin::HostConfig)
+        );
         Ok(())
     }
 

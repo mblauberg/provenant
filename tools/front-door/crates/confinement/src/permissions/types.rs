@@ -69,7 +69,7 @@ pub enum PermissionError {
     )]
     ProfileTooLarge { bytes: usize, limit: usize },
     #[error(
-        "{family} exceeds the effective domains.run.grant_limit of {limit}; raise domains.run.grant_limit to allow more"
+        "{family} exceeds its effective limit of {limit}; raise domains.run.grant_limit to allow more"
     )]
     GrantLimitExceeded { family: &'static str, limit: usize },
     #[error("{family} exceeds its bound of {limit}: {path:?}")]
