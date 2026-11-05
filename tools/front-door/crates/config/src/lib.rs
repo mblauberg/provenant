@@ -238,7 +238,7 @@ pub use managed::{
     AccountHome, AccountState, AccountStatus, Action, Disposition, EntryIdentity, HarnessTarget,
     InstallContext, InstallError, InstallFinding, InstallInspection, InstallOutcome, InstallPlan,
     InstallReporter, ManualInclude, ReleaseSmoke, SelectorChange, Snapshots, Targets,
-    inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
+    inspect_accounts, inspect_install, install, peer_agent_plist,
     plan_and_install, plan_install, private_directory, release_root, systemd_user_dir,
     tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
 };

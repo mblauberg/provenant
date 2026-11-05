@@ -413,7 +413,6 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
             .harnesses
             .contains(&Harness::Codex)
     );
-    assert_eq!(installed_binary(&targets).unwrap(), None);
     let release = f.release();
     assert!(matches!(
         Snapshots::capture(&release, &targets),
@@ -525,8 +524,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             let inspection =
                 inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
             assert!(inspection.error.is_none(), "{:?}", inspection.error);
-            assert_eq!(installed_binary(&targets).unwrap(), None);
-            let outcome = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
+                    let outcome = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
             assert!(
                 outcome
                     .findings
@@ -711,10 +709,6 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
     );
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     assert!(f.plan().findings().is_empty());
-    assert_eq!(
-        installed_binary(&f.targets).unwrap(),
-        Some(f.targets.bin_dir.join("provenant"))
-    );
     assert_eq!(fs::read(&old_binary).unwrap(), b"old release canary\n");
 }
 

@@ -1758,13 +1758,6 @@ pub struct InstallFinding {
 pub(crate) fn read_receipt(targets: &Targets) -> Result<Option<InstallReceipt>, InstallError> {
     Ok(read_receipt_inspected(targets, None)?.map(|decoded| decoded.receipt))
 }
-/// Validated stable binary path for recognising a historical peer plist.
-pub fn installed_binary(targets: &Targets) -> Result<Option<PathBuf>, InstallError> {
-    read_receipt_inspected(targets, None)?
-        .filter(|decoded| !decoded.stale.iter().any(|entry| entry.selector == "binary"))
-        .map(|decoded| Ok(decoded.receipt.bin_dir.to_path_buf()?.join("provenant")))
-        .transpose()
-}
 /// The recorded targets uninstall of `targets` selects, and every recorded
 /// target. Shared entries go only when the two match.
 fn uninstall_selection(
