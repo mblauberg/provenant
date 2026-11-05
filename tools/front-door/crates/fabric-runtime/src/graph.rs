@@ -200,7 +200,7 @@ pub trait AttemptOwner {
         &mut self,
         _key: &AttemptKey,
         _reference: &str,
-    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+    ) -> Result<Option<PreparationFallbackEvidence>, Self::Error> {
         Ok(None)
     }
 

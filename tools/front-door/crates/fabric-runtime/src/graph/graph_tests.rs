@@ -109,8 +109,16 @@ impl AttemptOwner for FakeOwner {
         &mut self,
         _key: &AttemptKey,
         reference: &str,
-    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
-        Ok(self.fallback_evidence.get(reference).copied())
+    ) -> Result<Option<PreparationFallbackEvidence>, Self::Error> {
+        Ok(self
+            .fallback_evidence
+            .get(reference)
+            .copied()
+            .map(|failure| PreparationFallbackEvidence {
+                failure,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+            }))
     }
 
     fn resolve_review(

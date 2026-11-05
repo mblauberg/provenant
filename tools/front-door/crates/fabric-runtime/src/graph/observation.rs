@@ -24,6 +24,14 @@ pub enum AttemptOutcome {
     DeadlineExceeded,
 }
 
+/// Owner-observed facts used to decide whether another route is safe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparationFallbackEvidence {
+    pub failure: provenant_records::run::PreparationFailure,
+    pub handoff: provenant_routing::FallbackHandoff,
+    pub custody_released: bool,
+}
+
 fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcome {
     match outcome {
         AttemptOutcome::AuthRequired => provenant_routing::FallbackOutcome::AuthRequired,
@@ -51,25 +59,27 @@ pub(super) fn historical_fallback_admissible(
 pub(super) fn live_fallback_allowed(
     outcome: AttemptOutcome,
     launched: bool,
-    evidence: Option<provenant_records::run::PreparationFailure>,
+    evidence: Option<PreparationFallbackEvidence>,
 ) -> bool {
     use provenant_records::run::PreparationFailure;
     if launched {
         return false;
     }
-    let expected = match evidence {
-        Some(PreparationFailure::AuthRequired) => provenant_routing::FallbackOutcome::AuthRequired,
-        Some(PreparationFailure::UsageLimited) => provenant_routing::FallbackOutcome::UsageLimited,
-        Some(PreparationFailure::AdapterUnavailable) => {
+    let Some(evidence) = evidence else {
+        return false;
+    };
+    let expected = match evidence.failure {
+        PreparationFailure::AuthRequired => provenant_routing::FallbackOutcome::AuthRequired,
+        PreparationFailure::UsageLimited => provenant_routing::FallbackOutcome::UsageLimited,
+        PreparationFailure::AdapterUnavailable => {
             provenant_routing::FallbackOutcome::AdapterUnavailable
         }
-        None => return false,
     };
     expected == routing_outcome(outcome)
         && provenant_routing::FallbackPolicy {
             outcome: expected,
-            handoff: provenant_routing::FallbackHandoff::Local,
-            custody_released: true,
+            handoff: evidence.handoff,
+            custody_released: evidence.custody_released,
             budget_remaining: true,
             pinned: false,
         }
@@ -102,30 +112,51 @@ mod fallback_evidence_tests {
 
     #[test]
     fn contradictory_or_wrong_scope_evidence_cannot_switch() {
+        let evidence = PreparationFallbackEvidence {
+            failure: PreparationFailure::AuthRequired,
+            handoff: provenant_routing::FallbackHandoff::Local,
+            custody_released: true,
+        };
         assert!(live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
-            Some(PreparationFailure::AuthRequired)
+            Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             true,
-            Some(PreparationFailure::AuthRequired)
+            Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::UsageLimited,
             false,
-            Some(PreparationFailure::AuthRequired)
+            Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::TaskFailed,
             false,
-            Some(PreparationFailure::AuthRequired)
+            Some(evidence)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
             None
+        ));
+        assert!(!live_fallback_allowed(
+            AttemptOutcome::AuthRequired,
+            false,
+            Some(PreparationFallbackEvidence {
+                custody_released: false,
+                ..evidence
+            })
+        ));
+        assert!(!live_fallback_allowed(
+            AttemptOutcome::AuthRequired,
+            false,
+            Some(PreparationFallbackEvidence {
+                handoff: provenant_routing::FallbackHandoff::UncertainOrLaunched,
+                ..evidence
+            })
         ));
     }
 }

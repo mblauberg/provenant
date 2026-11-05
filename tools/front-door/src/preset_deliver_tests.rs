@@ -121,15 +121,21 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
         &mut self,
         key: &AttemptKey,
         reference: &str,
-    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+    ) -> Result<Option<provenant_fabric_runtime::graph::PreparationFallbackEvidence>, Self::Error>
+    {
         let refused_locally = self.host_native_unavailable
             && key.route_index == 0
             && reference == format!("fixture/{}", key.node_id)
             && self.routes.iter().any(|(id, route)| {
                 id == &key.node_id && route.adapter.as_deref() == Some("host-native")
             });
-        Ok(refused_locally
-            .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable))
+        Ok(refused_locally.then_some(
+            provenant_fabric_runtime::graph::PreparationFallbackEvidence {
+                failure: provenant_records::run::PreparationFailure::AdapterUnavailable,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+            },
+        ))
     }
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
         Ok(self.integration.clone())
