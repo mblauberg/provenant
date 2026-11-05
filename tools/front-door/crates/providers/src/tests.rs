@@ -7959,7 +7959,15 @@ fn agy_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> 
                 .any(|(name, value)| name == "HOME" && value == scratch.as_os_str())
         );
         assert_eq!(launch.profile.spec.authentication.len(), 1);
-        assert_eq!(launch.profile.spec.authentication[0].mechanism, "keychain");
+        let authentication = &launch.profile.spec.authentication[0];
+        assert_eq!(authentication.mechanism, "keychain");
+        assert_eq!(
+            authentication.roots,
+            [crate::launch::exact(
+                "/fixture/home/Library/Keychains/login.keychain-db"
+            )]
+        );
+        assert!(authentication.in_place_writes.is_empty());
     }
     Ok(())
 }
