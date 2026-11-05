@@ -756,7 +756,10 @@ limit, limit source, `wake_at` and `next`. Missing recorded facts are
 `usage_limited` and no wake. Launch retry records its limit and source with the
 failure, and an exhausted launch retains that budget when it blocks. Human CLI
 and MCP status use the same projection. Reading it never advances a node or
-changes the checkpoint.
+changes the checkpoint. A recorded pre-admission dispatch refusal remains on
+its operation rather than inventing an attempt. The host's `status` and `lanes`
+views show its code and next action, and selecting that operation with
+`lanes --wait` returns the saved refusal immediately.
 
 Pending CI gates persist their next `wake_at` and observation count in the
 checkpoint. The graph's `wake_at` is the earliest running CI deadline or open

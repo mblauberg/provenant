@@ -484,9 +484,19 @@ fn saved_refusal_is_visible_in_status_and_lanes() -> Result {
                 &provenant_core::RelativePath::parse("writer")?,
             )?),
             refused_at: clock.wall_now()?,
+            chair: None,
         }),
     };
     store.record_refusal(&refusal, &call)?;
+    let hex_id = "ABCDEF0123456789ABCDEF0123456789";
+    let mut hex_refusal = refusal.clone();
+    hex_refusal.operation_id = OperationId::parse(hex_id)?;
+    hex_refusal.run_id = RunId::from_bytes([13; 16]);
+    store.record_refusal(&hex_refusal, &call)?;
+    let mut collision = refusal.clone();
+    collision.operation_id = OperationId::parse(&attempt.to_string())?;
+    collision.run_id = RunId::from_bytes([14; 16]);
+    store.record_refusal(&collision, &call)?;
     drop(store);
     for command in ["status", "lanes"] {
         let json = rig.command(&[command, "--json"])?;
@@ -500,10 +510,17 @@ fn saved_refusal_is_visible_in_status_and_lanes() -> Result {
         let rows = data["data"]["refusals"]
             .as_array()
             .ok_or("missing refusal list")?;
-        assert_eq!(rows.len(), 1, "{data}");
-        assert_eq!(rows[0]["operation_id"], "visible-refusal");
-        assert_eq!(rows[0]["code"], "WRITER_SCOPE");
-        assert_eq!(rows[0]["next"], "inspect the worktree");
+        assert_eq!(rows.len(), 3, "{data}");
+        let row = rows
+            .iter()
+            .find(|row| row["operation_id"] == "visible-refusal")
+            .ok_or("missing operation")?;
+        assert_eq!(row["code"], "WRITER_SCOPE");
+        assert_eq!(row["next"], "inspect the worktree");
+        assert_eq!(row["worktree"]["path"], "writer");
+        assert!(row["refused_at"].is_string());
+        assert!(row.get("run_id").is_none());
+        assert!(row.get("attempt_id").is_none());
         let human = rig.command(&[command])?;
         assert_eq!(support::code(&human), 0);
         let text = String::from_utf8(human.stdout.bytes)?;
@@ -513,6 +530,124 @@ fn saved_refusal_is_visible_in_status_and_lanes() -> Result {
                 && text.contains("inspect the worktree"),
             "{text}"
         );
+    }
+    for args in [
+        vec!["status", "visible-refusal", "--json"],
+        vec!["lanes", "--id", "visible-refusal", "--json"],
+        vec!["status", hex_id, "--json"],
+        vec!["lanes", "--id", hex_id, "--json"],
+    ] {
+        let output = rig.command(&args)?;
+        assert_eq!(
+            support::code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(
+            data["data"]["refusals"][0]["code"], "WRITER_SCOPE",
+            "{data}"
+        );
+    }
+    let lane_id = attempt.to_string();
+    let mixed = rig.command(&[
+        "lanes",
+        "--id",
+        "visible-refusal",
+        "--id",
+        &lane_id,
+        "--json",
+    ])?;
+    assert_eq!(support::code(&mixed), 0);
+    let mixed: Value = serde_json::from_slice(&mixed.stdout.bytes)?;
+    assert_eq!(
+        mixed["data"]["refusals"][0]["operation_id"],
+        "visible-refusal"
+    );
+    assert_eq!(mixed["data"]["lanes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(mixed["data"]["refusals"].as_array().map(Vec::len), Some(1));
+    for id in ["visible-refusal", hex_id] {
+        let started = Instant::now();
+        let waited = rig.command(&["lanes", "--id", id, "--wait", "60s", "--json"])?;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_ne!(support::code(&waited), 0);
+        let data: Value = serde_json::from_slice(&waited.stdout.bytes)?;
+        assert_eq!(data["error"]["code"], "WRITER_SCOPE", "{data}");
+        assert_eq!(data["error"]["next"], "inspect the worktree", "{data}");
+    }
+    Ok(())
+}
+
+#[test]
+fn refusal_only_store_never_says_there_are_no_lanes() -> Result {
+    let rig = TestRig::new()?;
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let project = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
+    let context = ExecutionContext {
+        state_root: roots.state,
+        project_id: project,
+        actor_id: ActorId::from_bytes([2; 16]),
+        read_prompts: false,
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = RunStore::open(&context, &call)?;
+    store.record_refusal(
+        &provenant_run::OperationRecord {
+            extra: Default::default(),
+            schema_version: 1,
+            project_id: project,
+            actor_id: context.actor_id,
+            operation_id: OperationId::parse("only-refusal")?,
+            kind: provenant_run::OperationKind::Dispatch,
+            request_digest: Digest::from_bytes([31; 32]),
+            run_id: RunId::from_bytes([32; 16]),
+            state: provenant_run::OperationState::Terminal,
+            refusal: Some(provenant_run::OperationRefusal {
+                extra: Default::default(),
+                diagnostic: provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                    .category("integrity")
+                    .detail("writer scope refused")
+                    .next("inspect the worktree"),
+                worktree: Some(provenant_records::PathWire::from_relative(
+                    &provenant_core::RelativePath::parse("writer")?,
+                )?),
+                refused_at: clock.wall_now()?,
+                chair: None,
+            }),
+        },
+        &call,
+    )?;
+    drop(store);
+    for command in ["status", "lanes"] {
+        for full in [false, true] {
+            let mut args = vec![command];
+            if full {
+                args.push("--full");
+            }
+            let output = rig.command(&args)?;
+            assert_eq!(support::code(&output), 0);
+            let text = String::from_utf8(output.stdout.bytes)?;
+            assert!(
+                text.contains("only-refusal") && text.contains("WRITER_SCOPE"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("no lanes") && !text.contains("no matching lanes"),
+                "{text}"
+            );
+        }
     }
     Ok(())
 }

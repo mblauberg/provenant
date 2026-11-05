@@ -226,9 +226,10 @@ Recovery uses the existing commands:
 - **Resume:** use `provenant fabric graph resume --document PATH` to advance a
   retained graph, or `provenant resume ATTEMPT --prompt-file followup.md` to
   continue an attempt where its provider supports continuation.
-- **Retry:** rerun the same submission to reattach to its identity; inspect the
-  recorded refusal and resolve its cause before another advance. An uncertain
-  effect needs observation of its recorded identity before any new submission.
+- **Retry:** rerun the same submission to reattach to its identity. A saved
+  refusal replays unchanged; inspect its cause, repair it and submit under a new
+  operation ID. An uncertain effect needs observation of its recorded identity
+  before any new submission.
 - **Fallback:** configured routes and continuation fallback are selected by
   their existing policies; inspect the attempt and custody evidence before
   choosing another route manually.
@@ -239,7 +240,10 @@ Recovery uses the existing commands:
 
 For a background launch, retain its printed ID and check `provenant status` or
 `provenant lanes`; a successful submission alone does not prove that a writer
-started or completed.
+started or completed. When a refusal is recorded, `provenant status OPERATION`
+and `provenant lanes --id OPERATION` show its code and next action. Waiting on
+that ID with `provenant lanes --id OPERATION --wait 60s` returns the refusal
+immediately.
 For a graph, `provenant fabric graph status GRAPH_ID` reports each node's
 wait kind, disposition, cause, recorded attempt and route, budget, wake and next
 action. `--json` and MCP `fabric_graph` status expose the same `waits` facts;

@@ -315,6 +315,9 @@ pub(super) fn resolve(
     allow_run: bool,
 ) -> Result<Candidate, Fail> {
     let mut selection = text(target);
+    if !selection.contains('/') && selection.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        selection.make_ascii_lowercase();
+    }
     if let Some((qualifier, attempt)) = selection.split_once('/')
         && !attempt.contains('/')
         && let Ok(qualifier) = qualifier.parse()

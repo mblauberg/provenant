@@ -3219,6 +3219,7 @@ fn refused_operation(context: &ExecutionContext) -> OperationRecord {
                 .unwrap(),
             ),
             refused_at: WallTime::from_micros(100).unwrap(),
+            chair: None,
         }),
     }
 }
@@ -3232,6 +3233,12 @@ fn refused_operation_is_immutable_and_replays_once() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
     let mut refusal = refused_operation(&context);
+    refusal.refusal.as_mut().unwrap().chair = Some(ChairBinding {
+        extra: Default::default(),
+        host: provenant_core::HostId::from_bytes([24; 16]),
+        actor: ActorId::from_bytes([25; 16]),
+        session: Some("chair-session".into()),
+    });
     refusal.refusal.as_mut().unwrap().diagnostic.fact =
         Some(provenant_records::diagnostic::DiagnosticFact::WorktreeUnregistered);
     let saved = store.record_refusal(&refusal, &call)?;
@@ -3241,6 +3248,14 @@ fn refused_operation_is_immutable_and_replays_once() -> TestResult {
     let mut replay = refusal.clone();
     replay.run_id = RunId::from_bytes([19; 16]);
     replay.refusal.as_mut().unwrap().refused_at = WallTime::from_micros(200)?;
+    replay
+        .refusal
+        .as_mut()
+        .unwrap()
+        .chair
+        .as_mut()
+        .unwrap()
+        .actor = ActorId::from_bytes([26; 16]);
     assert_eq!(store.record_refusal(&replay, &call)?, refusal);
     replay.request_digest = Digest::from_bytes([20; 32]);
     assert!(matches!(
@@ -3356,8 +3371,48 @@ fn refused_operation_listing_is_project_and_actor_scoped_and_read_only() -> Test
     );
     assert_eq!(
         store.refused_operations(Some(context.actor_id), &call)?,
+        vec![first.clone()]
+    );
+    assert_eq!(
+        store.matching_refusals(&first.operation_id, Some(context.actor_id), &call)?,
         vec![first]
     );
     assert_eq!(store.db.total_changes(), changes);
+    Ok(())
+}
+
+#[test]
+fn refused_operation_rejects_index_identity_mismatch() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let refusal = refused_operation(&context);
+    store.record_refusal(&refusal, &call)?;
+    store.db.execute(
+        "UPDATE operations SET digest=?1 WHERE operation=?2",
+        rusqlite::params![
+            Digest::from_bytes([25; 32]).to_string(),
+            refusal.operation_id.as_str()
+        ],
+    )?;
+    assert!(matches!(
+        store.operation(&refusal.operation_id, &call),
+        Err(RunError::Validation("operation index identity"))
+    ));
+    assert!(matches!(
+        store.refused_operations(None, &call),
+        Err(RunError::Validation("operation index identity"))
+    ));
+    assert!(matches!(
+        store.matching_refusals(&refusal.operation_id, None, &call),
+        Err(RunError::Validation("operation index identity"))
+    ));
+    assert!(matches!(
+        store.record_refusal(&refusal, &call),
+        Err(RunError::Validation("operation index identity"))
+    ));
     Ok(())
 }

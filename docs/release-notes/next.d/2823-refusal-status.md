@@ -1,4 +1,4 @@
 ## Additions
 ### Lanes and settlement
 
-- Status and lanes show recorded dispatch refusals with their code and next action.
+- Status and lanes show recorded dispatch refusals with their code and next action; lanes can select a refusal by operation ID.

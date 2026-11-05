@@ -82,7 +82,9 @@ different digest fails with `operation_conflict` (exit 2). A recorded
 pre-admission refusal carries its safe diagnostic, registered worktree
 identifier when available and refusal time. `status` and `lanes` include these
 records in `refusals`, with the operation ID, code and next action; no attempt
-identity is fabricated for a dispatch that never reached admission.
+identity is fabricated for a dispatch that never reached admission. A saved
+refusal can be selected by operation ID; `lanes --id OPERATION --wait` returns
+the recorded refusal immediately instead of waiting for an attempt.
 - Why: lost replies and concurrent duplicates, including resume, must never
   launch twice.
 - Test: `crates/core/src/ids.rs::operation_keys_are_bounded_and_cannot_be_path_components`;

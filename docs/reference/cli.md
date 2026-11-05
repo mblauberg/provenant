@@ -2568,7 +2568,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--target` | `{"description": "Observe lane:ID, graph:ID, pr:NUMBER or land:NUMBER (repeatable; land only observes)", "name": "target", "repeatable": true, "requires": ["wait"]}` |
 | `--until` | `{"defaults": ["any"], "description": "Return on any transition or when all targets are terminal", "name": "until", "requires": ["wait"], "values": ["any", "all"]}` |
 | `--follow` | `{"defaults": ["false"], "description": "Stream transitions until all targets are terminal or the wait expires", "name": "follow", "requires": ["wait"], "values": ["true", "false"]}` |
-| `id` | `{"description": "Show this run, task, attempt or graph ID, including settled records", "name": "id", "positional": true}` |
+| `id` | `{"description": "Show this run, task, attempt, graph or refused operation ID, including settled records", "name": "id", "positional": true}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum full records per page", "name": "limit"}` |
 | `--cursor` | `{"description": "Continue a full-record page from its cursor", "name": "cursor"}` |
 | `--all` | `{"defaults": ["false"], "description": "Include full records and older lanes", "name": "all", "values": ["true", "false"]}` |
@@ -2781,7 +2781,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `--session-stream` | `{"defaults": ["false"], "description": "Stream a bounded page for the SessionStart collector", "name": "session_stream", "values": ["true", "false"]}` |
-| `--id` | `{"description": "Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)", "name": "id", "repeatable": true}` |
+| `--id` | `{"description": "Show this attempt, RUN[/TASK[/ATTEMPT]], or refused operation ID (repeatable)", "name": "id", "repeatable": true}` |
 | `--host` | `{"conflicts": ["id", "cursor"], "description": "List, wait on or watch a configured peer's own lanes, by label or host ID", "name": "host"}` |
 | `--session` | `{"conflicts": ["all"], "description": "Keep lanes submitted by this session (its agent label)", "name": "session"}` |
 | `--all` | `{"defaults": ["false"], "description": "Show every lane, newest first", "name": "all", "values": ["true", "false"]}` |
@@ -5151,7 +5151,8 @@ which may be reworded.
 | `TIMEOUT` | The wait budget expired. |
 | `PEER` | The peer host returned an error. |
 | `WRITER_SCOPE` | The writer worktree scope was refused. |
-| `WRITER_BUSY` | The writer or its lock is held by another operation. |
+| `WRITER_BUSY` | A live writer holds the worktree. |
+| `WRITER_LOCK_BUSY` | The writer custody or registry lock is contended. |
 | `WRITER_UNKNOWN` | Writer custody could not be determined. |
 | `CREDENTIAL_ROOT` | A requested grant overlaps a credential root. |
 | `WRITER_PROJECT_MISMATCH` | The writer worktree belongs to a different project than the selected one. |

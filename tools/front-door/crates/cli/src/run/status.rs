@@ -14,6 +14,22 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             {
                 return Ok((data, human));
             }
+            if let Some(id) = command.id.as_deref()
+                && id.parse::<Target>().is_err()
+            {
+                let operation = OperationId::parse(id).map_err(|_| {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid operation ID")
+                })?;
+                let record = lookup_refusal(edge, &operation, None, &call)?
+                    .ok_or(run::RunError::NotFound)?;
+                let (data, human, lines) = selected_refusal_view(edge, record, &call)?;
+                summary = Some(crate::Summary {
+                    lines,
+                    next: None,
+                    omitted: 0,
+                });
+                return Ok((data, human));
+            }
             let id_target = command
                 .id
                 .as_deref()
@@ -22,10 +38,34 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error))
                 })
                 .transpose()?;
-            let resolved = id_target
+            let resolved = match id_target
                 .as_ref()
                 .map(|target| targets::resolve(edge, target, true))
-                .transpose()?;
+                .transpose()
+            {
+                Ok(resolved) => resolved,
+                Err(fail) if fail.kind == ErrorKind::NotFound => {
+                    let operation = command
+                        .id
+                        .as_deref()
+                        .and_then(|id| OperationId::parse(id).ok());
+                    let record = match operation {
+                        Some(operation) => lookup_refusal(edge, &operation, None, &call)?,
+                        None => None,
+                    };
+                    if let Some(record) = record {
+                        let (data, human, lines) = selected_refusal_view(edge, record, &call)?;
+                        summary = Some(crate::Summary {
+                            lines,
+                            next: None,
+                            omitted: 0,
+                        });
+                        return Ok((data, human));
+                    }
+                    return Err(fail);
+                }
+                Err(fail) => return Err(fail),
+            };
             let targets: Vec<Target> = resolved
                 .as_ref()
                 .map(|candidate| vec![candidate.target.clone()])
@@ -1226,18 +1266,79 @@ pub(super) fn lanes_inner(
     wait_entry: Option<(Instant, WallTime)>,
 ) -> Result<(Value, String, bool), Fail> {
     let mut normalised = command.clone();
-    let mut projects = std::collections::BTreeSet::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let mut selected_refusals = Vec::new();
+    let mut lane_targets = Vec::new();
+    for target in &normalised.id {
+        let operation_only = target
+            .selection
+            .as_deref()
+            .filter(|value| value.parse::<Target>().is_err());
+        if let Some(value) = operation_only {
+            let operation = OperationId::parse(value).map_err(|_| {
+                Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid operation ID")
+            })?;
+            let record = lookup_refusal(edge, &operation, command.session.as_deref(), &call)?
+                .ok_or(run::RunError::NotFound)?;
+            if !selected_refusals
+                .iter()
+                .any(|prior: &run::OperationRecord| prior.operation_id == record.operation_id)
+            {
+                selected_refusals.push(record);
+            }
+        } else {
+            lane_targets.push(target.clone());
+        }
+    }
+    normalised.id = lane_targets;
+    let mut projects: std::collections::BTreeSet<_> = selected_refusals
+        .iter()
+        .map(|record| record.project_id)
+        .collect();
     let mut first = None;
-    for target in &mut normalised.id {
-        let candidate = targets::resolve(edge, target, true)?;
+    let mut resolved_targets = Vec::new();
+    for target in normalised.id.drain(..) {
+        let candidate = match targets::resolve(edge, &target, true) {
+            Ok(candidate) => candidate,
+            Err(fail) if fail.kind == ErrorKind::NotFound => {
+                let operation = target
+                    .selection
+                    .as_deref()
+                    .filter(|value| !value.contains('/'))
+                    .and_then(|value| OperationId::parse(value).ok());
+                let found = match operation {
+                    Some(operation) => {
+                        lookup_refusal(edge, &operation, command.session.as_deref(), &call)?
+                    }
+                    None => None,
+                };
+                if let Some(record) = found {
+                    projects.insert(record.project_id);
+                    if !selected_refusals
+                        .iter()
+                        .any(|prior: &run::OperationRecord| {
+                            prior.operation_id == record.operation_id
+                        })
+                    {
+                        selected_refusals.push(record);
+                    }
+                    continue;
+                }
+                return Err(fail);
+            }
+            Err(fail) => return Err(fail),
+        };
         if let Some(project) = candidate.project {
             projects.insert(project);
         }
-        *target = candidate.target.clone();
+        resolved_targets.push(candidate.target.clone());
         if first.is_none() {
             first = Some(candidate);
         }
     }
+    normalised.id = resolved_targets;
     if projects.len() > 1 {
         return Err(Fail::new(
             Status::Invalid,
@@ -1245,14 +1346,28 @@ pub(super) fn lanes_inner(
             "targets belong to different projects; run one `provenant lanes --id ID --wait 4m` command per project",
         ));
     }
+    if wait_entry.is_some() && !selected_refusals.is_empty() {
+        let refusal = selected_refusals[0]
+            .refusal
+            .as_ref()
+            .ok_or(run::RunError::NotFound)?;
+        return Err(run::RunError::RecordedRefusal(Box::new(refusal.diagnostic.clone())).into());
+    }
+    if !selected_refusals.is_empty() && normalised.id.is_empty() {
+        let mut data = json!({"lanes": [], "next_cursor": null, "capacity_cooldowns": []});
+        let mut human = String::new();
+        attach_refusals(&selected_refusals, &mut data, &mut human);
+        return Ok((data, human, false));
+    }
     let command = &normalised;
     if let Some(host) = command.host.as_deref()
         && !remote::names_local_host(edge, host)?
     {
         return remote::host_lanes(command, host, edge, json, emit);
     }
-    if let Some(placed) = remote::lanes(command, edge, json, emit)? {
-        return Ok(placed);
+    if let Some((mut data, mut human, timed_out)) = remote::lanes(command, edge, json, emit)? {
+        attach_refusals(&selected_refusals, &mut data, &mut human);
+        return Ok((data, human, timed_out));
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -1400,7 +1515,9 @@ pub(super) fn lanes_inner(
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
     attach_cloud_jobs(&session.store, &lanes, &mut data, &mut human, &call)?;
-    if command.id.is_empty()
+    if !selected_refusals.is_empty() {
+        attach_refusals(&selected_refusals, &mut data, &mut human);
+    } else if command.id.is_empty()
         && command.cursor.is_none()
         && (command.states.is_empty()
             || command
@@ -1482,6 +1599,51 @@ pub(super) fn attach_cloud_jobs(
     Ok(())
 }
 
+fn selected_refusal_view(
+    edge: &Edge<'_>,
+    record: run::OperationRecord,
+    call: &run::Request<'_>,
+) -> Result<(Value, String, Vec<String>), Fail> {
+    let (context, _) = open_read_only(edge, call)?;
+    let (exempt, exempt_line) = review_exempt_view(&context);
+    let mut data = json!({"lanes": [], "next_cursor": null, "review_exempt": exempt});
+    let mut human = String::new();
+    let lines = attach_refusals(&[record], &mut data, &mut human);
+    human.push_str(&exempt_line);
+    Ok((data, human, lines))
+}
+
+/// Resolve an operation ID without changing a refusal or guessing among actors.
+fn lookup_refusal(
+    edge: &Edge<'_>,
+    operation: &OperationId,
+    session: Option<&str>,
+    call: &run::Request<'_>,
+) -> Result<Option<run::OperationRecord>, Fail> {
+    let (context, store) = open_read_only(edge, call)?;
+    let Some(store) = store else { return Ok(None) };
+    let owner = session
+        .map(|label| session_actor(edge, label))
+        .transpose()?;
+    let mut matches = store.matching_refusals(operation, owner, call)?;
+    if owner.is_none()
+        && let Some(index) = matches
+            .iter()
+            .position(|record| record.actor_id == context.actor_id)
+    {
+        return Ok(Some(matches.remove(index)));
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => Err(Fail::new(
+            Status::Refused,
+            ErrorKind::Conflict,
+            "operation ID is ambiguous across actors",
+        )),
+    }
+}
+
 /// Project saved pre-admission refusals without inventing attempt identities.
 fn attach_refusals(
     records: &[run::OperationRecord],
@@ -1494,7 +1656,6 @@ fn attach_refusals(
             let refusal = record.refusal.as_ref()?;
             Some(json!({
                 "operation_id": record.operation_id,
-                "run_id": record.run_id,
                 "state": "rejected",
                 "code": refusal.diagnostic.code,
                 "category": refusal.diagnostic.category,
@@ -1509,6 +1670,12 @@ fn attach_refusals(
         return Vec::new();
     }
     data["refusals"] = Value::Array(rows);
+    for prefix in ["no lanes\n", "no matching lanes\n"] {
+        if human.starts_with(prefix) {
+            human.drain(..prefix.len());
+            break;
+        }
+    }
     let lines = refusal_summary_lines(data);
     for line in &lines {
         human.push_str(line);
@@ -1725,14 +1892,17 @@ mod refusal_projection_tests {
                     .unwrap(),
                 ),
                 refused_at: WallTime::from_micros(100).unwrap(),
+                chair: None,
             }),
         };
         let mut data = json!({"lanes": []});
-        let mut human = String::new();
+        let mut human = "no matching lanes\n".to_owned();
         let lines = attach_refusals(&[record], &mut data, &mut human);
         assert_eq!(data["refusals"][0]["code"], "WRITER_SCOPE");
         assert_eq!(data["refusals"][0]["next"], "inspect the worktree");
         assert!(data["refusals"][0].get("attempt_id").is_none());
+        assert!(data["refusals"][0].get("run_id").is_none());
+        assert!(!human.contains("no matching lanes"));
         assert!(human.contains("refused-op WRITER_SCOPE: inspect the worktree"));
         assert_eq!(lines, refusal_summary_lines(&data));
     }

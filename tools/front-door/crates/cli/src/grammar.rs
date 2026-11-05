@@ -840,6 +840,32 @@ impl FromStr for Target {
 /// `attempt_ref`) or `RUN/TASK/ATTEMPT`. In the two-part form the qualifier
 /// is parsed into `Target::run` and resolved against stored runs and known
 /// hosts later; `task` is `None` only there.
+/// `lanes --id` also accepts a complete operation ID for a refused dispatch.
+fn lane_target_or_operation(value: &str) -> Result<Target, &'static str> {
+    // Keep the exact spelling for operation lookup after lane resolution;
+    // operation IDs are case-sensitive.
+    if (8..=32).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(Target {
+            selection: Some(value.to_owned()),
+            run: None,
+            task: None,
+            attempt: None,
+        });
+    }
+    match value.parse::<Target>() {
+        Ok(target) => Ok(target),
+        Err(error) => {
+            OperationId::parse(value).map_err(|_| error)?;
+            Ok(Target {
+                selection: Some(value.to_owned()),
+                run: None,
+                task: None,
+                attempt: None,
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Attempt(pub Target);
 impl Attempt {
@@ -950,8 +976,8 @@ pub struct Lanes {
     /// Stream a bounded page for the SessionStart collector.
     #[arg(long, hide = true)]
     pub session_stream: bool,
-    /// Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)
-    #[arg(long)]
+    /// Show this attempt, RUN[/TASK[/ATTEMPT]], or refused operation ID (repeatable)
+    #[arg(long, value_parser = lane_target_or_operation)]
     pub id: Vec<Target>,
     /// List, wait on or watch a configured peer's own lanes, by label or host ID
     #[arg(long, conflicts_with_all = ["id", "cursor"])]
@@ -1621,7 +1647,7 @@ pub struct Status {
     /// Stream transitions until all targets are terminal or the wait expires
     #[arg(long, catalog_requires = "wait")]
     pub follow: bool,
-    /// Show this run, task, attempt or graph ID, including settled records
+    /// Show this run, task, attempt, graph or refused operation ID, including settled records
     pub id: Option<String>,
     /// Maximum full records per page
     #[arg(long, hide = true, default_value = "50", catalog_u64_range = 1..=100)]

@@ -127,22 +127,24 @@ impl RunStore {
             return Err(RunError::Validation("invalid dispatch refusal"));
         }
         self.write(call, |tx| {
-            let previous: Option<Vec<u8>> = tx
+            let previous: Option<(String, String, Vec<u8>)> = tx
                 .query_row(
-                    "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                    "SELECT digest, run, record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
                     params![
                         record.project_id.to_string(),
                         record.actor_id.to_string(),
                         record.operation_id.as_str()
                     ],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?;
-            if let Some(previous) = previous {
+            if let Some((digest, run, previous)) = previous {
                 let previous: OperationRecord = decode(&previous)?;
                 if previous.project_id != record.project_id
                     || previous.actor_id != record.actor_id
                     || previous.operation_id != record.operation_id
+                    || (previous.refusal.is_some()
+                        && (previous.request_digest.to_string() != digest || previous.run_id.to_string() != run))
                 {
                     return Err(RunError::Validation("operation index identity"));
                 }

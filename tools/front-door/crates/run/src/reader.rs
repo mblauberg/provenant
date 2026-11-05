@@ -318,23 +318,18 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<Option<OperationRecord>> {
         call.check()?;
-        let raw: Option<Vec<u8>> = self
-            .db
-            .query_row(
-                "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
-                params![
-                    self.context.project_id.to_string(),
-                    self.context.actor_id.to_string(),
-                    id.as_str()
-                ],
-                |r| r.get(0),
-            )
-            .optional()?;
-        raw.map(|raw| {
+        let raw: Option<(String, String, Vec<u8>)> = self.db.query_row(
+            "SELECT digest, run, record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+            params![self.context.project_id.to_string(), self.context.actor_id.to_string(), id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        raw.map(|(digest, run, raw)| {
             let op: OperationRecord = decode(&raw)?;
             if op.project_id != self.context.project_id
                 || op.actor_id != self.context.actor_id
                 || op.operation_id != *id
+                || (op.refusal.is_some()
+                    && (op.request_digest.to_string() != digest || op.run_id.to_string() != run))
             {
                 return Err(RunError::Validation("operation index identity"));
             }
@@ -349,22 +344,50 @@ impl RunStore {
         owner: Option<ActorId>,
         call: &Request<'_>,
     ) -> Result<Vec<OperationRecord>> {
+        self.read_refusals(owner, None, call)
+    }
+
+    /// Look up a complete operation ID without loading unrelated records.
+    pub fn matching_refusals(
+        &self,
+        id: &OperationId,
+        owner: Option<ActorId>,
+        call: &Request<'_>,
+    ) -> Result<Vec<OperationRecord>> {
+        self.read_refusals(owner, Some(id), call)
+    }
+
+    fn read_refusals(
+        &self,
+        owner: Option<ActorId>,
+        id: Option<&OperationId>,
+        call: &Request<'_>,
+    ) -> Result<Vec<OperationRecord>> {
         call.check()?;
         let mut query = self.db.prepare(
-            "SELECT actor, operation, record FROM operations WHERE project=?1 AND (?2 IS NULL OR actor=?2) ORDER BY rowid DESC",
+            "SELECT actor, operation, digest, run, record FROM operations WHERE project=?1 AND (?2 IS NULL OR actor=?2) AND (?3 IS NULL OR operation=?3) ORDER BY rowid DESC",
         )?;
         let owner = owner.map(|actor| actor.to_string());
-        let mut rows = query.query(params![self.context.project_id.to_string(), owner])?;
+        let mut rows = query.query(params![
+            self.context.project_id.to_string(),
+            owner,
+            id.map(OperationId::as_str)
+        ])?;
         let mut refusals = Vec::new();
         while let Some(row) = rows.next()? {
             call.check()?;
             let actor: String = row.get(0)?;
             let operation: String = row.get(1)?;
-            let raw: Vec<u8> = row.get(2)?;
+            let digest: String = row.get(2)?;
+            let run: String = row.get(3)?;
+            let raw: Vec<u8> = row.get(4)?;
             let record: OperationRecord = decode(&raw)?;
             if record.project_id != self.context.project_id
                 || record.actor_id.to_string() != actor
                 || record.operation_id.as_str() != operation
+                || (record.refusal.is_some()
+                    && (record.request_digest.to_string() != digest
+                        || record.run_id.to_string() != run))
             {
                 return Err(RunError::Validation("operation index identity"));
             }
