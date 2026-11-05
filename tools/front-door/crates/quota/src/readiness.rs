@@ -607,6 +607,52 @@ mod tests {
     }
 
     #[test]
+    fn readiness_ready_evidence_requires_fresh_matching_scope() {
+        let scope = ReadinessScope {
+            host: "host".into(),
+            adapter: "fixture".into(),
+            account_key: "account".into(),
+            route: "model".into(),
+        };
+        let file = ReadinessFile {
+            records: vec![RouteReadiness {
+                schema_version: 1,
+                scope: scope.clone(),
+                state: ReadinessState::Ready,
+                reason: None,
+                observed_unix_seconds: 10,
+                expires_unix_seconds: 20,
+                reset_unix_seconds: None,
+                evidence_ref: Some("probe:1".into()),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(file.get(&scope, 10).state, ReadinessState::Ready);
+        assert_eq!(file.get(&scope, 9).state, ReadinessState::Unknown);
+        assert_eq!(file.get(&scope, 20).state, ReadinessState::Unknown);
+        for other in [
+            ReadinessScope {
+                host: "other".into(),
+                ..scope.clone()
+            },
+            ReadinessScope {
+                adapter: "other".into(),
+                ..scope.clone()
+            },
+            ReadinessScope {
+                account_key: "other".into(),
+                ..scope.clone()
+            },
+            ReadinessScope {
+                route: "other".into(),
+                ..scope.clone()
+            },
+        ] {
+            assert_eq!(file.get(&other, 10).state, ReadinessState::Unknown);
+        }
+    }
+
+    #[test]
     fn receipt_projection_covers_every_reason_and_ready() {
         use ReadinessReason::*;
         use provenant_records::{RouteExclusionReason as E, RouteReadiness as R};
