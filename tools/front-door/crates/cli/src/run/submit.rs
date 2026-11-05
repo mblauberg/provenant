@@ -525,14 +525,10 @@ pub fn submit_with_host(
     submit_with_host_and_wait(session, edge, submission, call, host, None)
 }
 
-pub(super) fn submit_with_host_and_wait(
-    session: &Session,
+fn prepare_submission(
     edge: &Edge<'_>,
     submission: Submission,
-    call: &run::Request<'_>,
-    host: Option<&run::HostLaunchContext>,
-    provider_lease_wait: Option<u64>,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<run::DispatchRequest, Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
@@ -619,18 +615,27 @@ pub(super) fn submit_with_host_and_wait(
         .is_none()
         .then_some(submission.chair)
         .flatten();
-    let record = run::Service::new(&session.store).dispatch(
-        run::DispatchRequest {
-            chair,
-            operation_id: submission.operation_id,
-            tasks,
-            concurrency,
-            lane_depth,
-            parent_attempt,
-        },
-        edge.cwd,
-        call,
-    )?;
+    Ok(run::DispatchRequest {
+        chair,
+        operation_id: submission.operation_id,
+        tasks,
+        concurrency,
+        lane_depth,
+        parent_attempt,
+    })
+}
+
+pub(super) fn submit_with_host_and_wait(
+    session: &Session,
+    edge: &Edge<'_>,
+    submission: Submission,
+    call: &run::Request<'_>,
+    host: Option<&run::HostLaunchContext>,
+    provider_lease_wait: Option<u64>,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    let input = prepare_submission(edge, submission)?;
+    let parent_attempt = input.parent_attempt;
+    let record = run::Service::new(&session.store).dispatch(input, edge.cwd, call)?;
     if parent_attempt.is_none() {
         let canonical = session.store.request(record.run_id, call)?;
         with_chair_index(edge.roots, call, |index, call| {
