@@ -2660,6 +2660,30 @@ fn composite_running_status_does_not_consume_an_attempt_slot() {
 }
 
 #[test]
+fn composite_expansion_identifies_duplicate_and_invalid_child_ids() {
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"composite-identifiers","nodes":[{
+            "id":"group","kind":"composite","access":"read_only",
+            "composite":{"nodes":[
+                {"id":"same","access":"read_only","prompt":"a","route":{"alias":"junior"}},
+                {"id":"same","access":"read_only","prompt":"b","route":{"alias":"junior"}}
+            ],"exports":[]}
+        }]
+    }))
+    .unwrap();
+    let limits = crate::config::GraphLimits::default();
+    let error = composites::expand(&document, &limits).unwrap_err();
+    assert!(error.contains("group--same"), "{error}");
+    assert!(error.contains("duplicated"), "{error}");
+    let children = &mut document.nodes[0].composite.as_mut().unwrap().nodes;
+    children[1].id = "bad name".into();
+    let error = composites::expand(&document, &limits).unwrap_err();
+    assert!(error.contains("group--bad name"), "{error}");
+    assert!(error.contains("ASCII"), "{error}");
+    assert!(error.contains("shorten"), "{error}");
+}
+
+#[test]
 fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
     let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"failed-composite","nodes":[{

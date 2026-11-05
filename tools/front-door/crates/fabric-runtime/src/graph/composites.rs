@@ -87,9 +87,14 @@ fn children(
     if depth > max_depth {
         return Err("composite expansion depth exceeds the limit".into());
     }
-    let locals: BTreeSet<_> = nodes.iter().map(|node| node.id.as_str()).collect();
-    if locals.len() != nodes.len() {
-        return Err("node id".into());
+    let mut locals = BTreeSet::new();
+    for node in nodes {
+        if !locals.insert(node.id.as_str()) {
+            return Err(format!(
+                "expanded node id {:?} is duplicated; use distinct node names",
+                bounded(&scoped(prefix, &node.id), 256)
+            ));
+        }
     }
     let mut visible_names = inherited_names.clone();
     visible_names.extend(
@@ -103,7 +108,10 @@ fn children(
         let mut node = original.clone();
         node.id = scoped(prefix, &node.id);
         if !valid_identifier(&node.id) {
-            return Err("expanded composite node id exceeds 64 bytes".into());
+            return Err(format!(
+                "expanded node id {:?} is invalid; use at most 64 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or node name",
+                bounded(&node.id, 256)
+            ));
         }
         for parent in &mut node.depends_on {
             *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
