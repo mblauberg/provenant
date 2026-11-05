@@ -661,7 +661,10 @@ fn review_collect(edge: &Edge<'_>, data: &mut Value) -> Result<(), Fail> {
     Ok(())
 }
 fn captured_review_verdict(captured: &CapturedResult) -> Option<ReviewVerdict> {
-    captured.verdict.as_deref().and_then(ReviewVerdict::from_token)
+    captured
+        .verdict
+        .as_deref()
+        .and_then(ReviewVerdict::from_token)
 }
 #[cfg(test)]
 mod review_shape_tests {
