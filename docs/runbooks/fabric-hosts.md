@@ -732,6 +732,8 @@ that, naming the omitted bytes); `--full` reads the full byte window and
 their objects remain readable; peer summaries report this evidence as
 unavailable rather than guessing a diff.
 
+Use `provenant fabric graph wait GRAPH --wait 5m` to observe a graph until it settles or pauses. The wait does not advance the graph; its deadline returns `waiting` with the status command.
+
 Foreground `run --preset` prepares and retains the graph document in
 `.provenant/scratch` before its first graph poll, using one preparation per
 wait. A failure there names the preparation step, path and cause. An

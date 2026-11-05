@@ -685,6 +685,13 @@ pub(super) struct BatchTracking {
     tracker: Option<LandTracker>,
     view: Pull,
 }
+impl BatchTracking {
+    pub(super) fn repository(&self) -> Option<&str> {
+        self.tracker
+            .as_ref()
+            .map(|tracker| tracker.repository.as_str())
+    }
+}
 
 /// Record the batch PR attribution before attempting its gate.
 #[allow(
@@ -1258,6 +1265,7 @@ pub(crate) fn execute(
     let mut steps = Vec::new();
     let mut failure_code = "PR_UNAVAILABLE";
     let mut landed: Option<(String, String, i64)> = None;
+    let mut observed_repository: Option<String> = None;
     let result = (|| -> Result<()> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let effective_poll = poll_setting(globals, poll).0;
@@ -1278,6 +1286,12 @@ pub(crate) fn execute(
                 .as_ref()
                 .ok_or("pull request has no base repository")?
                 .full_name
+        );
+        observed_repository = Some(
+            repository
+                .strip_prefix("repos/")
+                .unwrap_or(&repository)
+                .to_owned(),
         );
         let base = rest.base.branch.clone();
         captured = Some(current);
@@ -1518,6 +1532,10 @@ pub(crate) fn execute(
             "steps": steps,
         }),
     );
+    report.data["lanes"] =
+        serde_json::json!(observed_repository.as_deref().and_then(|repository| {
+            super::contributions::projected_lanes(globals, &[number], repository)
+        }));
     if let Err(error) = &result
         && !merged
     {

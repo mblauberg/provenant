@@ -1627,3 +1627,5 @@ launches are auto-resolved.
   `crates/run/src/delivery_tests.rs::graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes`;
   `crates/run/src/delivery_tests.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
+
+`fabric graph wait GRAPH --wait DURATION` observes the retained status until it settles or the budget expires. It does not advance the graph. A pending graph at the deadline returns `waiting`; a paused graph returns immediately.

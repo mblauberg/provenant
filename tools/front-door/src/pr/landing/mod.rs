@@ -390,6 +390,9 @@ fn run_inner(
             );
         }
     }
+    let tracked_repository = tracking
+        .values()
+        .find_map(|entry| entry.repository().map(str::to_owned));
     let definition = gate_definition(&effective.gate)?;
     let (mut forge, mut repo, mut runner, mut alarms) =
         adapters::connect(&resolved.project, globals, workers, tracking)?;
@@ -417,7 +420,11 @@ fn run_inner(
     if let Some(warning) = tier_warning {
         report.warnings.push(warning);
     }
-    let response = batch_response(report, failure);
+    let mut response = batch_response(report, failure);
+    response.data["lanes"] =
+        serde_json::json!(tracked_repository.as_deref().and_then(|repository| {
+            super::contributions::projected_lanes(globals, &options.numbers, repository)
+        }));
     let text = match &response.error {
         Some(error) => format!(
             "{}: {}\n{}\n",

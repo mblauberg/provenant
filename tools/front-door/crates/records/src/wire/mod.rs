@@ -39,7 +39,9 @@ pub use cancel::{
     CANCEL_STATES, CancelData, CancelReceiptWire, CancelRecovered, CancelRow, CancelRowError,
 };
 pub use error::{CodeKind, EDGE_ERROR_CODES, EdgeErrorCode, error_schema};
-pub use lane::{LaneList, LaneRow, LaneSettlement, LaneTranscript, provider_seconds};
+pub use lane::{
+    LaneList, LaneProjectionFacts, LaneRow, LaneSettlement, LaneTranscript, provider_seconds,
+};
 pub use output::{ChunkBytes, OutputChunk, OutputData, ReviewerReceipt};
 
 /// Version of the planned typed wire contract; see the module notes.
@@ -53,7 +55,7 @@ pub const SCHEMA_ID_BASE: &str = "https://provenant.dev/schemas/v1/";
 
 /// CLI commands with a typed `data` schema, in publication order. The name is
 /// the envelope's `command` member.
-pub const COMMANDS: &[&str] = &["lanes", "status", "output", "cancel"];
+pub const COMMANDS: &[&str] = &["lanes", "status", "output", "cancel", "land"];
 
 fn outcome_names() -> Vec<String> {
     Outcome::ALL
@@ -108,6 +110,11 @@ pub fn data_schema(command: &str) -> Option<Value> {
         "lanes" | "status" => lane::lane_list_schema(),
         "output" => output::output_data_schema(),
         "cancel" => cancel::cancel_data_schema(),
+        "land" => {
+            let mut schema = schema::open_object();
+            schema["properties"] = serde_json::json!({"lanes": schema::nullable(schema::array(lane::lane_row_schema()))});
+            schema
+        }
         _ => return None,
     })
 }
