@@ -1286,7 +1286,7 @@ pub(super) fn output(
         ));
     };
     let peer = Peer::open_for(edge, [placement])?;
-    read_output(command, host, attempt, peer, edge.roots.state.as_path())
+    read_output(command, host, attempt, peer)
 }
 
 /// `output --host PEER` or `PEER/ATTEMPT`: the peer's own attempt, with no
@@ -1349,7 +1349,7 @@ pub(super) fn output_on_peer(
         .ok_or_else(|| Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required"))?;
     let peer = Peer::open(edge)?;
     peer.project()?;
-    read_output(command, host, attempt, peer, edge.roots.state.as_path())
+    read_output(command, host, attempt, peer)
 }
 
 fn read_output(
@@ -1357,7 +1357,6 @@ fn read_output(
     host: HostId,
     attempt: AttemptId,
     peer: Peer,
-    state_root: &std::path::Path,
 ) -> Result<(Value, String), Fail> {
     if command.path {
         return Err(unsupported("--path"));
@@ -1438,34 +1437,6 @@ fn read_output(
         chunk
     };
     let (mut data, mut text) = chunk_response(attempt, host, &command.part, chunk)?;
-    let records = read_records(
-        &[(host, attempt)],
-        &window,
-        &mut |host, action, duration| peer.call_within(host, action, duration),
-    )?;
-    let record = records.first().ok_or_else(corrupt)?;
-    let successors = record
-        .superseded_by
-        .map(|id| (record.attempt_id, id))
-        .into_iter()
-        .collect();
-    let mut row = super::project_lane(
-        record,
-        &[],
-        state_root,
-        &successors,
-        SystemClock::new().wall_now().ok(),
-        false,
-    );
-    row.host = Some(host.to_string());
-    row.stale = None;
-    row.result_path = Value::Null;
-    if let Some(transcript) = &mut row.transcript {
-        transcript.path = None;
-    }
-    if let (Some(data), Some(row)) = (data.as_object_mut(), json!(row).as_object()) {
-        data.extend(row.clone());
-    }
     if let Some(reason) = fallback {
         super::output::add_planner_fallback(&mut data, &mut text, reason);
     }
@@ -1567,6 +1538,7 @@ fn chunk_response(
     chunk: OutputResult,
 ) -> Result<(Value, String), Fail> {
     let OutputResult::Chunk {
+        extra,
         state,
         reason,
         offset,
@@ -1579,25 +1551,22 @@ fn chunk_response(
     else {
         return Err(corrupt());
     };
+    if extra.get("attempt_id").and_then(Value::as_str) != Some(attempt.to_string().as_str()) {
+        return Err(corrupt());
+    }
     let text = match &bytes {
         OutputBytes::Utf8(text) => text.clone(),
         OutputBytes::Base64(data) => data.clone(),
     };
-    Ok((
-        json!({
-            "attempt_id": attempt,
-            "host": host,
-            "state": state,
-            "reason": reason,
-            "part": format!("{part:?}").to_lowercase(),
-            "offset": offset,
-            "next_offset": next_offset,
-            "eof": eof,
-            "digest": digest,
-            "bytes": bytes,
-        }),
-        text,
-    ))
+    let mut data = json!({
+        "attempt_id": attempt, "host": host, "state": state, "reason": reason,
+        "part": format!("{part:?}").to_lowercase(), "offset": offset,
+        "next_offset": next_offset, "length": null, "eof": eof, "clipped": null, "complete": null, "digest": digest, "bytes": bytes,
+    });
+    if let Some(object) = data.as_object_mut() {
+        object.extend(extra);
+    }
+    Ok((data, text))
 }
 
 /// Ask the owning peer to cancel each named attempt. The peer records its own
@@ -1850,7 +1819,7 @@ mod tests {
             host: None,
         };
         let chunk = |text: &str, offset, eof, byte| OutputResult::Chunk {
-            extra: Default::default(),
+            extra: [("attempt_id".into(), json!(target.attempt))].into(),
             target: target.clone(),
             part: OutputPart::Result,
             state: "succeeded".into(),
@@ -1894,7 +1863,7 @@ mod tests {
             host: None,
         };
         let chunk = |sequence, eof| OutputResult::Chunk {
-            extra: Default::default(),
+            extra: [("attempt_id".into(), json!(target.attempt))].into(),
             target: target.clone(),
             part: OutputPart::Events,
             state: "succeeded".into(),
@@ -2206,7 +2175,7 @@ mod tests {
         let attempt = AttemptId::from_bytes([3; 16]);
         let host = HostId::from_bytes([7; 16]);
         let chunk = OutputResult::Chunk {
-            extra: Default::default(),
+            extra: [("attempt_id".into(), json!(attempt))].into(),
             target: AttemptTarget {
                 extra: Default::default(),
                 attempt,

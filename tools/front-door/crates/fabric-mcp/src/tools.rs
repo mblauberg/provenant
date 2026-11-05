@@ -1250,7 +1250,53 @@ impl ToolCall {
                 }
                 response(tool_name, value)
             }
-            Self::Output(input) => call!(facade, output, input),
+            Self::Output(input) => {
+                let mut output =
+                    serde_json::to_value(service.facade.output(input, budget, cancel)?)?;
+                if let Some(object) = output.as_object_mut() {
+                    if ![
+                        "run_id",
+                        "task_id",
+                        "attempt_id",
+                        "state",
+                        "retry_of",
+                        "superseded_by",
+                    ]
+                    .iter()
+                    .all(|field| object.contains_key(*field))
+                    {
+                        return Err(FacadeError::StateCorrupt.into());
+                    }
+                    for field in [
+                        "write_grants",
+                        "read_only_writable",
+                        "protected_paths",
+                        "delivery",
+                    ] {
+                        if object.contains_key(field) {
+                            object.insert(field.into(), Value::Null);
+                        }
+                    }
+                    for field in ["resolved_route", "applied_route", "observed_route"] {
+                        if let Some(route) = object.get_mut(field).and_then(Value::as_object_mut) {
+                            for sensitive in ["account_key", "source", "pool_selection"] {
+                                route.remove(sensitive);
+                            }
+                        }
+                    }
+                    if let Some(path) = object
+                        .get_mut("artifact")
+                        .and_then(|artifact| artifact.get_mut("path"))
+                    {
+                        let relative: provenant_records::PathWire =
+                            serde_json::from_value(path.clone())?;
+                        *path = serde_json::json!(
+                            provenant_records::StructuredPathWire::from_wire(&relative)
+                        );
+                    }
+                }
+                response(tool_name, output)
+            }
             Self::Hosts(input) => {
                 #[derive(Serialize)]
                 struct Hosts<T> {

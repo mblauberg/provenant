@@ -5,7 +5,7 @@
 //! (`provider_seconds` instead of `provider_ms`, `AbsolutePath` as
 //! root-plus-path-wire) and let unknown members through.
 use super::schema::{
-    any, array, boolean, choices, constant, nullable, one_of, open, path_wire, string, unsigned,
+    any, array, boolean, choices, constant, nullable, one_of, open, string, unsigned,
 };
 use serde_json::Value;
 
@@ -95,10 +95,31 @@ fn bytes() -> Value {
 }
 
 /// `structuredContent` of `fabric_output`, tagged by `kind`.
+fn with_lane(mut schema: Value) -> Value {
+    let lane = mcp_attempt_schema();
+    if let (Some(properties), Some(fields)) = (
+        schema["properties"].as_object_mut(),
+        lane["properties"].as_object(),
+    ) {
+        properties.extend(fields.clone());
+    }
+    if let (Some(required), Some(fields)) = (
+        schema["required"].as_array_mut(),
+        lane["required"].as_array(),
+    ) {
+        for field in fields {
+            if !required.contains(field) {
+                required.push(field.clone());
+            }
+        }
+    }
+    schema
+}
+
 pub fn output_result_schema() -> Value {
     let target = open(&[("attempt", string())], &[("host", nullable(string()))]);
     one_of(vec![
-        tagged(
+        with_lane(tagged(
             "kind",
             "chunk",
             &[
@@ -112,8 +133,8 @@ pub fn output_result_schema() -> Value {
                 ("digest", string()),
                 ("bytes", bytes()),
             ],
-        ),
-        tagged(
+        )),
+        with_lane(tagged(
             "kind",
             "artifact",
             &[
@@ -121,13 +142,16 @@ pub fn output_result_schema() -> Value {
                 (
                     "artifact",
                     open(
-                        &[("path", path_wire()), ("digest", nullable(string()))],
+                        &[
+                            ("path", super::schema::worktree_path()),
+                            ("digest", nullable(string())),
+                        ],
                         &[],
                     ),
                 ),
                 ("digest", string()),
                 ("bytes", bytes()),
             ],
-        ),
+        )),
     ])
 }

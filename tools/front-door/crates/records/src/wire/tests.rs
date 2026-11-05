@@ -161,10 +161,10 @@ fn chunk() -> OutputChunk {
         part: "result".into(),
         offset: 0,
         next_offset: 5,
-        length: 5,
+        length: Some(5),
         eof: true,
-        clipped: false,
-        complete: true,
+        clipped: Some(false),
+        complete: Some(true),
         digest: Some(format!("sha256:{}", "a".repeat(64))),
         bytes: ChunkBytes::Utf8("hello".into()),
         tail: None,
@@ -486,28 +486,28 @@ fn mcp_results_validate_by_tag_and_allow_unknown_members() {
 
     let out = mcp::output_result_schema();
     let target = json!({"attempt": id, "host": null});
-    validate(&out, &json!({
+    let mut chunk = json!({
         "kind": "chunk", "target": target, "part": "result", "state": "terminal", "reason": null,
         "offset": 0, "next_offset": 2, "eof": true, "digest": "sha256:00",
         "bytes": {"encoding": "utf8", "data": "ok"}
-    })).unwrap();
-    validate(
-        &out,
-        &json!({
-            "kind": "artifact", "target": target, "digest": "sha256:00",
-            "artifact": {"path": {"encoding": "utf8", "path": "result.md"}, "digest": null},
-            "bytes": {"encoding": "base64", "data": "AA=="}
-        }),
-    )
-    .unwrap();
-    rejected(
-        &out,
-        json!({
-            "kind": "artifact", "target": target, "digest": "sha256:00",
-            "artifact": {"path": {"encoding": "utf8", "path": "result.md"}, "digest": null},
-            "bytes": {"encoding": "base64", "data": "%%%"}
-        }),
-    );
+    });
+    chunk
+        .as_object_mut()
+        .unwrap()
+        .extend(attempt.as_object().unwrap().clone());
+    validate(&out, &chunk).unwrap();
+    let mut artifact = json!({
+        "kind": "artifact", "target": target, "digest": "sha256:00",
+        "artifact": {"path": {"kind":"relative", "relative":{"encoding":"utf8", "path":"result.md"}}, "digest": null},
+        "bytes": {"encoding": "base64", "data": "AA=="}
+    });
+    artifact
+        .as_object_mut()
+        .unwrap()
+        .extend(attempt.as_object().unwrap().clone());
+    validate(&out, &artifact).unwrap();
+    artifact["bytes"]["data"] = json!("%%%");
+    rejected(&out, artifact);
 }
 
 #[test]
@@ -521,6 +521,7 @@ fn published_set_is_stable_versioned_and_self_describing() {
             "status.schema.json",
             "output.schema.json",
             "cancel.schema.json",
+            "land.schema.json",
             "error.schema.json",
             "mcp/fabric_run.schema.json",
             "mcp/fabric_output.schema.json"

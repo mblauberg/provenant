@@ -2368,7 +2368,39 @@ impl BinaryRunOwner<'_> {
             .service()
             .status(target.attempt, &call)
             .map_err(run_error)?;
-        let (state, reason) = provenant_cli::run::state_and_reason(&record.state);
+        let tail = session
+            .store
+            .policy_tail(record.attempt_id, &call)
+            .map_err(run_error)?;
+        let successors = (tail.attempt_id != record.attempt_id)
+            .then_some((record.attempt_id, tail.attempt_id))
+            .into_iter()
+            .collect();
+        let mut row = provenant_cli::run::project_lane(
+            &record,
+            &[],
+            session.context.state_root.as_path(),
+            &successors,
+            self.factory.clock.wall_now().ok(),
+            false,
+        );
+        row.host = target.host.map(|host| host.to_string());
+        row.provider_seconds = provenant_records::wire::provider_seconds(record.provider_ms);
+        let state = row.state.clone();
+        let reason = row.reason.clone();
+        let mut fields: provenant_records::ExtraFields = serde_json::from_value(
+            serde_json::to_value(row).map_err(|_| FacadeError::StateCorrupt)?,
+        )
+        .map_err(|_| FacadeError::StateCorrupt)?;
+        fields.insert(
+            "provider_seconds".into(),
+            serde_json::json!(provenant_records::wire::provider_seconds(
+                record.provider_ms
+            )),
+        );
+        let mut chunk_fields = fields.clone();
+        chunk_fields.remove("state");
+        chunk_fields.remove("reason");
         let digest = |chunk: &provenant_run::OutputChunk| {
             provenant_core::Digest::from_bytes(*chunk.digest.bytes())
         };
@@ -2399,7 +2431,7 @@ impl BinaryRunOwner<'_> {
                         return Err(FacadeError::OutputTooLarge);
                     }
                     return Ok(OutputResult::Chunk {
-                        extra: Default::default(),
+                        extra: chunk_fields,
                         target,
                         part,
                         state,
@@ -2431,7 +2463,7 @@ impl BinaryRunOwner<'_> {
                 provenant_cli::run::align_utf8_tail(&mut chunk);
                 // The serving side reads its own graph, so `output --host` can
                 // name the planner fallback it recorded.
-                let mut extra = provenant_records::ExtraFields::new();
+                let mut extra = chunk_fields;
                 extra.insert("length".into(), serde_json::Value::from(chunk.len));
                 if matches!(part, OutputPart::Result)
                     && let Some(reason) = provenant_cli::run::planner_fallback_reason(
@@ -2491,7 +2523,7 @@ impl BinaryRunOwner<'_> {
                     bytes.extend_from_slice(&chunk.bytes);
                     if chunk.eof {
                         return Ok(OutputResult::Artifact {
-                            extra: Default::default(),
+                            extra: fields,
                             target,
                             artifact,
                             digest: digest(&chunk),

@@ -1284,8 +1284,32 @@ impl F3Facade for FakeFacade {
         else {
             return Err(FacadeError::NotFound);
         };
+        let record: provenant_records::run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": target.attempt,
+            "run_id": provenant_core::RunId::from_bytes([2; 16]),
+            "project_id": ProjectId::from_bytes([3; 16]),
+            "task_id": provenant_core::TaskId::from_bytes([4; 16]),
+            "operation_id": "output-fixture",
+            "attempt_number": 1, "revision": 1, "generation": 0,
+            "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": WallTime::from_micros(1).unwrap(),
+            "state": {"state":"running"}, "usage": {},
+            "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},
+                "digest":provenant_records::CanonicalV1::file_digest(b""),
+                "bytes":0,"complete":true,"redacted":false}
+        }))
+        .unwrap();
+        let row = provenant_records::wire::lane::LaneRow::project(&record, Default::default());
+        let mut fields = serde_json::to_value(row)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        fields.insert("provider_seconds".into(), Value::Null);
         Ok(OutputResult::Artifact {
-            extra: Default::default(),
+            extra: fields.into_iter().collect(),
             target,
             artifact,
             digest: provenant_core::Digest::from_bytes([1; 32]),
