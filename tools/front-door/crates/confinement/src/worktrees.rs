@@ -172,6 +172,7 @@ pub enum WorktreeError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionCause {
     RegistryLockTimeout,
+    CustodyLockContention,
     CensusIncomplete,
     RegistrationOrCustodyUnknown,
     LiveWriter,
@@ -193,12 +194,13 @@ impl WorktreeError {
     pub fn admission_cause(&self) -> Option<AdmissionCause> {
         match self {
             Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
+            Self::LockBusy => Some(AdmissionCause::CustodyLockContention),
             Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::CensusUnknown { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::GitEntryHeld { .. } => {
                 Some(AdmissionCause::RegistrationOrCustodyUnknown)
             }
-            Self::LockBusy | Self::LiveWriter | Self::LiveProcess(_) | Self::WriterBusy { .. } => {
+            Self::LiveWriter | Self::LiveProcess(_) | Self::WriterBusy { .. } => {
                 Some(AdmissionCause::LiveWriter)
             }
             Self::Dirty(_) | Self::IgnoredPaths(_) => Some(AdmissionCause::DirtyTree),
@@ -629,6 +631,10 @@ mod tests {
         );
         assert_eq!(
             WorktreeError::LockBusy.admission_cause(),
+            Some(AdmissionCause::CustodyLockContention)
+        );
+        assert_eq!(
+            WorktreeError::LiveWriter.admission_cause(),
             Some(AdmissionCause::LiveWriter)
         );
         assert_eq!(
