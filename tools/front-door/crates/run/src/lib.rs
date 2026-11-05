@@ -705,9 +705,18 @@ impl RunError {
                     .fact(DiagnosticFact::Resource(fact));
             }
             Self::Admission(AdmissionError::Processes { used, limit }) => {
-                diagnostic = diagnostic
-                    .detail(format!("host user process count is {used} of the operating system limit {limit}"))
-                    .next("reduce host process use or raise the per-user process limit before retrying");
+                let fact = provenant_records::diagnostic::ResourceFact::Processes {
+                    used: *used,
+                    limit: *limit,
+                    reserved: provenant_os::sys::resources::ProcessBudget {
+                        used: *used,
+                        limit: *limit,
+                    }
+                    .headroom(),
+                };
+                diagnostic = fact
+                    .project(diagnostic)
+                    .fact(DiagnosticFact::Resource(fact));
             }
             Self::Admission(AdmissionError::LaneCap {
                 active,
@@ -846,7 +855,7 @@ mod diagnostic_projection_tests {
             ),
             (
                 AdmissionError::Processes { used: 3, limit: 4 },
-                "operating system limit",
+                "operating system RLIMIT_NPROC",
                 "process",
             ),
             (

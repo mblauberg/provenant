@@ -111,6 +111,35 @@ mod diagnostic_tests {
                 .contains("TOKEN_SENTINEL")
         );
     }
+
+    #[test]
+    fn unreadable_stream_keeps_io_refusal_and_safe_input_reason() {
+        struct FailedRead;
+        impl std::io::Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("TOKEN_SENTINEL /private/host"))
+            }
+        }
+        let fail = read_text(FailedRead).unwrap_err();
+        assert_eq!(fail.kind, ErrorKind::Io);
+        assert!(fail.message.contains("TOKEN_SENTINEL"));
+        let rendered = super::super::command_error(&fail);
+        assert_eq!(rendered.code, "IO");
+        assert!(rendered.cause.as_deref().unwrap().contains("input"));
+        assert!(rendered.repair.is_some());
+        assert!(!rendered.cause.unwrap().contains("TOKEN_SENTINEL"));
+        let projection = fail.projection.unwrap();
+        assert_eq!(projection.code, "IO");
+        assert!(projection.detail.as_deref().unwrap().contains("input"));
+        assert!(projection.next.is_some());
+        let error = fail.detail.unwrap();
+        let decoded: provenant_fabric_runtime::coordination::facade::FacadeError =
+            serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+        let wire = serde_json::to_string(&decoded.diagnostic()).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        assert!(!wire.contains("/private/host"));
+        assert!(wire.contains("input"));
+    }
 }
 
 pub(super) fn read_text(source: impl Read) -> Result<String, Fail> {
@@ -118,7 +147,24 @@ pub(super) fn read_text(source: impl Read) -> Result<String, Fail> {
     source
         .take(PROMPT_LIMIT + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+        .map_err(|error| {
+            let fact = provenant_records::diagnostic::IoFact::InputUnreadable;
+            let detail = provenant_fabric_runtime::coordination::facade::FacadeError::Io {
+                operation: "read input".into(),
+                path: None,
+                delivery_limit: None,
+                delivery_stage: None,
+                resource: None,
+                input_failure: Some(fact),
+            };
+            let mut projection = detail.diagnostic();
+            projection.code = ErrorKind::Io.code().into();
+            projection.category = Some(ErrorKind::Io.category().into());
+            let mut fail = Fail::new(Status::Error, ErrorKind::Io, error.to_string());
+            fail.projection = Some(Box::new(projection));
+            fail.detail = Some(Box::new(detail));
+            fail
+        })?;
     if bytes.len() as u64 > PROMPT_LIMIT {
         return Err(input_failure(
             Status::Invalid,

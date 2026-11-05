@@ -75,6 +75,8 @@ pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeErro
     FacadeError::Io {
         delivery_limit: None,
         delivery_stage: None,
+        resource: None,
+        input_failure: None,
         operation: format!("prepare project scratch: {error}"),
         path: Some(".provenant/scratch".into()),
     }
@@ -854,6 +856,8 @@ fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
             path,
             delivery_limit,
             delivery_stage,
+            resource,
+            input_failure,
         } => {
             let prefix = format!("{scope}: ");
             let operation = if operation.starts_with(&prefix) {
@@ -866,6 +870,8 @@ fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
                 path,
                 delivery_limit,
                 delivery_stage,
+                resource,
+                input_failure,
             }
         }
         other => other,
@@ -1649,6 +1655,19 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                 });
             }
             Some(DiagnosticFact::Resource(fact)) => {
+                if matches!(
+                    fact,
+                    provenant_records::diagnostic::ResourceFact::Processes { .. }
+                ) {
+                    return FacadeError::Io {
+                        operation: "run operation".into(),
+                        path: None,
+                        delivery_limit: None,
+                        delivery_stage: None,
+                        resource: Some(Box::new(*fact)),
+                        input_failure: None,
+                    };
+                }
                 return FacadeError::ConfinementRefused {
                     resource: Some(*fact),
                 };
@@ -1664,10 +1683,14 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             operation,
             delivery_limit,
             delivery_stage,
+            resource,
+            input_failure,
             ..
         }) => FacadeError::Io {
             delivery_limit,
             delivery_stage,
+            resource,
+            input_failure,
             operation,
             path: None,
         },

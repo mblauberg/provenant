@@ -457,8 +457,9 @@ the shared-settings owner supplies the corrective action. Resource
 projections name the observed limits and the relevant setting or operating-system
 limit; disk-floor, memory-pressure and configured writer-lane refusals identify
 the host configuration or shipped default that supplied the limit. Fixed total
-lane ceilings are identified separately from configurable writer limits. Their
-actions name the condition to correct. A writer
+lane ceilings are identified separately from configurable writer limits. A
+process-limit projection names the operating-system soft limit and shipped
+reserved headroom. Actions name the condition to correct. A writer
 with unknown custody remains refused until custody is checked.
 - Why: agents and tests act on the code, and a reworded message must break
   neither.

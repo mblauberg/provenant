@@ -385,6 +385,8 @@ mod diagnostic_tests {
             path: Some("/private/host".into()),
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
         };
         let reason = read_failure_reason(&error);
         assert!(reason.contains("io"));

@@ -2011,6 +2011,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             FacadeError::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "submit: access database".into(),
                 path: None,
             },
@@ -2020,6 +2022,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             FacadeError::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "spawn peer".into(),
                 path: None,
             },

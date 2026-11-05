@@ -111,6 +111,11 @@ pub enum ResourceFact {
         lane_limit: LaneLimit,
         origin: SettingSource,
     },
+    Processes {
+        used: u64,
+        limit: u64,
+        reserved: u64,
+    },
 }
 
 impl ResourceFact {
@@ -130,6 +135,26 @@ impl ResourceFact {
                         .next("wait for an active lane to finish before retrying"),
                 }
             }
+            Self::Processes { used, limit, reserved } => diagnostic
+                .detail(format!("host user process count is {used} of the operating system RLIMIT_NPROC soft limit {limit}; shipped reserved headroom is {reserved}"))
+                .next("reduce host process use or raise the per-user process limit before retrying"),
+        }
+    }
+}
+
+/// I/O facts whose field and reason are safe to disclose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoFact {
+    InputUnreadable,
+}
+
+impl IoFact {
+    pub fn project(self, diagnostic: Diagnostic) -> Diagnostic {
+        match self {
+            Self::InputUnreadable => diagnostic
+                .detail("input could not be read")
+                .next("inspect the input source and retry"),
         }
     }
 }

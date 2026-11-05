@@ -81,6 +81,28 @@ fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
 }
 
 #[test]
+fn process_limit_retains_io_code_and_safe_resource_facts() {
+    let failure = || provenant_run::RunError::Admission(provenant_run::AdmissionError::Processes {
+        used: 950,
+        limit: 1000,
+    });
+    for (error, code) in [
+        (run_error(failure()), "io"),
+        (dispatch_refused(failure().into()), "dispatch_refused"),
+    ] {
+        let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+        let projection = decoded.diagnostic();
+        assert_eq!(projection.code, code);
+        let detail = projection.detail.unwrap();
+        assert!(detail.contains("RLIMIT_NPROC"));
+        assert!(detail.contains("950"));
+        assert!(detail.contains("1000"));
+        assert!(detail.contains("100"));
+        assert!(projection.next.unwrap().contains("process"));
+    }
+}
+
+#[test]
 fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
@@ -3683,6 +3705,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "submit: access Fabric database".into(),
                 path: None,
             }
@@ -3694,6 +3718,8 @@ pub(crate) mod peer_tests {
         let peer_error = super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: "submit: open writer repository".into(),
             path: Some("/repo".into()),
         };
@@ -3703,6 +3729,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "submit: open writer repository".into(),
                 path: Some("/repo".into()),
             }
@@ -3711,6 +3739,8 @@ pub(crate) mod peer_tests {
         let local_error = super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: "open writer repository".into(),
             path: Some("/repo".into()),
         };
@@ -3720,6 +3750,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "submit: open writer repository".into(),
                 path: Some("/repo".into()),
             }
@@ -3795,6 +3827,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "openat directory".into(),
                 path: Some("/state/worktrees".into()),
             },

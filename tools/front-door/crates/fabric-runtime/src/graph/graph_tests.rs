@@ -8208,6 +8208,8 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
         operation: "TOKEN_SENTINEL".into(),
         path: Some("/private/host".into()),
         delivery_stage: Some(provenant_records::run::WriterDeliveryStage::Prepare),
+        resource: None,
+        input_failure: None,
         delivery_limit: Some(fact.clone()),
     };
     let document = graph(vec![node("one", route("first"))]);
@@ -8489,6 +8491,8 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
         FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: "read file".into(),
             path: None,
         },
@@ -9459,6 +9463,94 @@ fn memory_pressure_launch_refusal_names_source_and_action() {
 }
 
 #[test]
+fn process_limit_launch_projection_keeps_io_and_resource_reason() {
+    let error = crate::coordination::facade::FacadeError::Io {
+        operation: "TOKEN_SENTINEL".into(),
+        path: Some("/private/host".into()),
+        delivery_limit: None,
+        delivery_stage: None,
+        resource: Some(Box::new(
+            provenant_records::diagnostic::ResourceFact::Processes {
+                used: 950,
+                limit: 1000,
+                reserved: 100,
+            },
+        )),
+        input_failure: None,
+    };
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, error)].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(
+        &graph(vec![node("one", route("first"))]),
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let reason = retry_of(journal.0.as_ref().unwrap())
+        .reason
+        .as_deref()
+        .unwrap();
+    assert!(reason.contains("io"));
+    assert!(reason.contains("RLIMIT_NPROC"));
+    assert!(reason.contains("process"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(!reason.contains("/private/host"));
+}
+
+#[test]
+fn unreadable_launch_input_keeps_io_code_and_safe_reason() {
+    let error = || crate::coordination::facade::FacadeError::Io {
+        operation: "TOKEN_SENTINEL".into(),
+        path: Some("/private/host".into()),
+        delivery_limit: None,
+        delivery_stage: None,
+        resource: None,
+        input_failure: Some(provenant_records::diagnostic::IoFact::InputUnreadable),
+    };
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: (1..=4).map(|call| (call, error())).collect(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(
+        &graph(vec![node("one", route("first"))]),
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let reason = retry_of(journal.0.as_ref().unwrap())
+        .reason
+        .as_deref()
+        .unwrap();
+    assert!(reason.contains("io"));
+    assert!(reason.contains("input could not be read"));
+    assert!(reason.contains("retry"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(!reason.contains("/private/host"));
+    for now in [6, 17, 38, 3600] {
+        owner.now = Some(at(now));
+        advance(
+            &graph(vec![node("one", route("first"))]),
+            &mut owner,
+            &mut journal,
+        )
+        .unwrap();
+    }
+    let node = &journal.0.as_ref().unwrap().nodes[0];
+    assert_eq!(node.state, NodeState::Blocked);
+    let reason = node.advance_error.as_deref().unwrap();
+    assert!(reason.contains("input could not be read"));
+    assert!(reason.contains("io"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(!reason.contains("/private/host"));
+}
+
+#[test]
 fn launch_projection_omits_untrusted_error_sources() {
     let document = graph(vec![node("one", route("first"))]);
     for operation in [
@@ -9472,6 +9564,8 @@ fn launch_projection_omits_untrusted_error_sources() {
                 crate::coordination::facade::FacadeError::Io {
                     delivery_limit: None,
                     delivery_stage: None,
+                    resource: None,
+                    input_failure: None,
                     operation,
                     path: Some("/private/host".into()),
                 },

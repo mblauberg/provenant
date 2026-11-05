@@ -188,6 +188,57 @@ fn lane_cap_projects_its_actual_limit_and_source() {
     }
 }
 
+#[test]
+fn process_limit_keeps_io_code_and_omits_source_text() {
+    let error = FacadeError::Io {
+        operation: "TOKEN_SENTINEL".into(),
+        path: Some("/private/host".into()),
+        delivery_limit: None,
+        delivery_stage: None,
+        resource: Some(Box::new(
+            provenant_records::diagnostic::ResourceFact::Processes {
+                used: 950,
+                limit: 1000,
+                reserved: 100,
+            },
+        )),
+        input_failure: None,
+    };
+    let decoded: FacadeError =
+        serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+    let value = ServiceError::Facade(decoded).structured_error();
+    assert_eq!(value["code"], "io");
+    assert!(value["detail"].as_str().unwrap().contains("RLIMIT_NPROC"));
+    assert!(value["next"].as_str().unwrap().contains("process"));
+    assert!(!value.to_string().contains("TOKEN_SENTINEL"));
+    assert!(!value.to_string().contains("/private/host"));
+}
+
+#[test]
+fn unreadable_input_io_projects_safe_reason() {
+    let error = FacadeError::Io {
+        operation: "TOKEN_SENTINEL".into(),
+        path: Some("/private/host".into()),
+        delivery_limit: None,
+        delivery_stage: None,
+        resource: None,
+        input_failure: Some(provenant_records::diagnostic::IoFact::InputUnreadable),
+    };
+    let decoded: FacadeError =
+        serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+    let value = ServiceError::Facade(decoded).structured_error();
+    assert_eq!(value["code"], "io");
+    assert!(
+        value["detail"]
+            .as_str()
+            .unwrap()
+            .contains("input could not be read")
+    );
+    assert!(value["next"].is_string());
+    assert!(!value.to_string().contains("TOKEN_SENTINEL"));
+    assert!(!value.to_string().contains("/private/host"));
+}
+
 use super::*;
 use provenant_core::OperationId;
 use serde_json::json;
@@ -760,6 +811,8 @@ fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
     let unsafe_error = ServiceError::Facade(FacadeError::Io {
         delivery_limit: None,
         delivery_stage: None,
+        resource: None,
+        input_failure: None,
         operation: "TOKEN_SENTINEL\u{1b}".into(),
         path: Some("/private/host".into()),
     })

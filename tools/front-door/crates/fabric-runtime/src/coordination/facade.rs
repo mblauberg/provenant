@@ -357,6 +357,10 @@ pub enum FacadeError {
         delivery_limit: Option<provenant_records::diagnostic::DeliveryLimit>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delivery_stage: Option<provenant_records::run::WriterDeliveryStage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_failure: Option<provenant_records::diagnostic::IoFact>,
     },
 }
 
@@ -577,6 +581,8 @@ impl FacadeError {
             }
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
             Self::HostDeliveryStage { stage } | Self::Io { delivery_stage: Some(stage), .. } => projected = projected.detail(format!("host writer delivery failed at {stage:?}")).next("inspect host delivery before retrying"),
+            Self::Io { resource: Some(fact), .. } if matches!(fact.as_ref(), provenant_records::diagnostic::ResourceFact::Processes { .. }) => projected = fact.project(projected),
+            Self::Io { input_failure: Some(fact), .. } => projected = fact.project(projected),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy => projected = projected.next("wait for the current writer or lock holder to finish"),
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
@@ -771,6 +777,8 @@ impl FacadeError {
         Self::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: operation.into(),
             path: None,
         }
@@ -802,6 +810,8 @@ impl FacadeError {
         Self::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: operation.into(),
             path: path
                 .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
@@ -919,6 +929,8 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::Io { path, .. } => Self::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "access Fabric store".into(),
                 path: Some(path.to_string_lossy().into_owned()),
             },
@@ -926,6 +938,8 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::UnsafePath(path) => Self::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "verify Fabric store path".into(),
                 path: Some(path.to_string_lossy().into_owned()),
             },
@@ -1014,6 +1028,8 @@ mod diagnostic_tests {
             path: Some("/private/host".into()),
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
         };
         let diagnostic = error.diagnostic();
         assert_eq!(diagnostic.code, "io");
@@ -1114,6 +1130,8 @@ mod diagnostic_tests {
             FacadeError::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "openat read".into(),
                 path: None,
             }
