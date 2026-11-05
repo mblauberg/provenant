@@ -292,6 +292,28 @@ impl FileJournal {
         }
     }
 
+    /// Read a checkpoint with compacted findings expanded for reporting.
+    pub fn read_materialized_checkpoint(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Option<GraphCheckpoint>, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(mut stored) = load_checkpoint(&directory, graph_id)? else {
+            return Ok(None);
+        };
+        materialize_checkpoint_findings(&stored.execution.document, &mut stored.checkpoint)
+            .map_err(|_| JournalError::BadEnvelope)?;
+        Ok(Some(stored.checkpoint))
+    }
+
     /// Report each unreadable byte snapshot once, independently of advance errors.
     pub fn read_checkpoint_for_tick(
         root: &StateRoot,

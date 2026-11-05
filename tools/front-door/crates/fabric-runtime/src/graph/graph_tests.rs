@@ -1851,6 +1851,17 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         materialized_findings(positions["synthesis"], &plan, &run.checkpoint, &positions);
     let bound = graph_envelope_bound(&document, &[], &[], &plan);
     assert!(canonical_len(&run.checkpoint) <= bound);
+    let mut reporting = run.checkpoint.clone();
+    materialize_checkpoint_findings(&document, &mut reporting).unwrap();
+    assert_eq!(
+        reporting.nodes[positions["synthesis"]]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .findings
+            .len(),
+        20 * MAX_FINDINGS
+    );
     assert_eq!(reconstructed.len(), 20 * MAX_FINDINGS);
     assert!(
         reconstructed

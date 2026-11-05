@@ -540,6 +540,52 @@ pub(super) fn materialized_findings(
         .unwrap_or_default()
 }
 
+/// Materialize compacted findings in a read-only checkpoint projection.
+/// The stored checkpoint remains unchanged.
+pub(super) fn materialize_checkpoint_findings(
+    document: &GraphDocument,
+    checkpoint: &mut GraphCheckpoint,
+) -> Result<(), String> {
+    if !checkpoint.nodes.iter().any(|node| {
+        node.outputs
+            .as_ref()
+            .is_some_and(|outputs| outputs.extra.contains_key(COMPACT_FINDINGS))
+    }) {
+        return Ok(());
+    }
+    let limits = crate::config::GraphLimits {
+        nodes: usize::MAX,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
+        ..crate::config::GraphLimits::default()
+    };
+    let mut expansions = checkpoint.expansions.clone();
+    plans::restore_legacy_topology(document, &checkpoint.extensions, &mut expansions, &limits)
+        .map_err(|(_, reason)| reason.to_owned())?;
+    let expanded = plans::expand(document, &checkpoint.extensions, &expansions, &limits)?;
+    let (plan, positions) = validate_flat_plan(&expanded, &limits).map_err(|e| e.to_string())?;
+    if plan.nodes.len() != checkpoint.nodes.len()
+        || plan
+            .nodes
+            .iter()
+            .zip(&checkpoint.nodes)
+            .any(|(a, b)| a.id != b.id)
+    {
+        return Err("checkpoint nodes do not match the plan".into());
+    }
+    for index in 0..checkpoint.nodes.len() {
+        let findings = materialized_findings(index, &plan, checkpoint, &positions);
+        if let Some(outputs) = checkpoint.nodes[index].outputs.as_mut() {
+            outputs.findings = findings;
+        }
+    }
+    Ok(())
+}
+
 type FindingOrigin = (String, String);
 
 #[derive(Clone)]
@@ -1060,9 +1106,9 @@ pub(super) fn upstream_results(
         let Some(outputs) = progress.outputs.as_ref() else {
             return;
         };
-        let inline_findings =
-            (include_findings && outputs.result.is_none() && !outputs.findings.is_empty())
-                .then(|| outputs.findings.clone());
+        let inline_findings = (include_findings && outputs.result.is_none())
+            .then(|| materialized_findings(index, plan, checkpoint, positions))
+            .filter(|findings| !findings.is_empty());
         if outputs.result.is_none() && inline_findings.is_none() {
             return;
         }
