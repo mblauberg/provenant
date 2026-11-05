@@ -252,6 +252,13 @@ from the new head rather than resuming it.
 
 For recovery, use the existing operation that matches the situation:
 
+- **Unconfirmed launch:** `LAUNCH_UNKNOWN` means the handoff was not confirmed;
+  the guardian may still have started. Run `provenant reconcile --id RUN` and
+  inspect the attempt and custody evidence before considering another launch.
+- **Blocked custody:** a `launch blocked` notice includes the cause. The
+  reservation remains in place; address the reported cause and inspect the
+  attempt's custody evidence. Do not remove
+  the reservation to force another launch.
 - **Resume a graph:** `provenant fabric graph resume` continues its recorded
   checkpoint. A plain rerun of the same preset inputs reattaches to that graph.
 - **Retry a lane:** `provenant resume ATTEMPT` continues from the recorded
