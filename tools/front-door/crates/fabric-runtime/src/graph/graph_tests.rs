@@ -603,10 +603,18 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         exports: vec![GraphInput {
             extra: Default::default(),
             node: "review".into(),
-            outputs: vec![OutputKind::Result],
+            outputs: vec![OutputKind::Result, OutputKind::Findings],
         }],
     });
-    let mut document = graph(vec![outer]);
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.depends_on = vec!["outer".into()];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "outer".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    synthesis.dispositions = vec!["accepted".into()];
+    let mut document = graph(vec![outer, synthesis]);
     document.schema_version = 2;
     let unsupported = advance(
         &document,
@@ -638,7 +646,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         exports: vec![GraphInput {
             extra: Default::default(),
             node: "lens".into(),
-            outputs: vec![OutputKind::Result],
+            outputs: vec![OutputKind::Result, OutputKind::Findings],
         }],
     });
     let expanded = composites::expand(&graph(vec![root]), &plans::generous()).unwrap();
@@ -792,7 +800,11 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
             AttemptObservation::Pending {
                 attempt_ref: Some("h/1".into()),
             },
-            terminal_from("lens result", "h/1"),
+            terminal_from(&findings_text(&entry("")), "h/1"),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
+            ),
         ]
         .into(),
         ..Default::default()
@@ -821,8 +833,21 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
             .as_ref()
             .unwrap()
             .excerpt,
-        "lens result"
+        findings_text(&entry(""))
     );
+    let synthesis = completed
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "synthesis")
+        .unwrap();
+    let finding = &synthesis.outputs.as_ref().unwrap().findings[0];
+    assert_eq!(
+        (finding.file.as_str(), finding.summary.as_str()),
+        ("a.rs", "s")
+    );
+    assert_eq!(finding.disposition.as_deref(), Some("accepted"));
+    assert_eq!(finding.reason.as_deref(), Some("verified"));
     assert_eq!(owner.review_calls, 1);
 }
 
