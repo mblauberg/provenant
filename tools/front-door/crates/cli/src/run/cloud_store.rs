@@ -212,7 +212,6 @@ mod tests {
         missing_id.state = RemoteState::Running;
         assert!(matches!(store.save(&missing_id), Err(Error::Identity)));
         store.save(&original)?;
-        drop(store);
         let reopened_directory = Directory::open_anchor(temp.path())?;
         let mut reopened = AttemptCloudStore::new(&reopened_directory);
         assert_eq!(reopened.load()?, Some(original.clone()));
@@ -291,7 +290,6 @@ mod tests {
         let submitted = submit(&mut Fake, &mut store, request.clone(), "run tests")
             .map_err(|e| format!("{e:?}"))?;
         assert!(submit(&mut Fake, &mut store, request, "run tests").is_err());
-        drop(store);
         let directory = Directory::open_anchor(temp.path())?;
         let mut store = AttemptCloudStore::new(&directory);
         let mut recovered = store.load()?.ok_or("missing job")?;
@@ -320,7 +318,6 @@ mod tests {
             detail: "setup failed".into(),
         };
         store.save(&running)?;
-        drop(store);
         let directory = Directory::open_anchor(temp.path())?;
         let mut reopened = AttemptCloudStore::new(&directory);
         let recovered = reopened.load()?.ok_or("missing job")?;

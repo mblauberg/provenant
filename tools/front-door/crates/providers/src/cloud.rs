@@ -270,7 +270,7 @@ pub enum CloudJobError<P, S> {
     SubmitUnknown(P),
     /// Submission succeeded. Preserve this identity and do not blindly retry.
     SaveAfterSubmit {
-        job: RemoteJob,
+        job: Box<RemoteJob>,
         error: S,
     },
     Store(S),
@@ -310,7 +310,7 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
     store
         .save(&job)
         .map_err(|error| CloudJobError::SaveAfterSubmit {
-            job: job.clone(),
+            job: Box::new(job.clone()),
             error,
         })?;
     Ok(job)
