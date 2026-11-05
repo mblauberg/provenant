@@ -385,7 +385,7 @@ fn checkpoint_collection_removes_matching_scratch_documents() {
         .directory
         .join(".provenant/scratch/graphs");
     std::fs::create_dir_all(&scratch).unwrap();
-    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o755)).unwrap();
     let bytes = serde_json::to_vec(&fixture.execution.document).unwrap();
     let digest = CanonicalV1::file_digest(&bytes).to_string();
     let generated = scratch.join(format!("preset-{}.json", &digest[7..]));
@@ -424,6 +424,10 @@ fn checkpoint_collection_removes_matching_scratch_documents() {
         1
     );
     assert!(!generated.exists());
+    assert_eq!(
+        std::fs::metadata(&scratch).unwrap().permissions().mode() & 0o077,
+        0
+    );
     assert!(!operator.exists());
     assert!(revised.exists());
     assert!(other_path.exists());

@@ -723,7 +723,11 @@ fn collect_scratch_documents(execution: &GraphExecution) -> Result<(), JournalEr
             Err(error) => return Err(error.into()),
         };
     }
-    let metadata = directory.metadata()?;
+    let mut metadata = directory.metadata()?;
+    if metadata.uid == provenant_os::fs::effective_uid() && metadata.mode & 0o077 != 0 {
+        directory.make_private()?;
+        metadata = directory.metadata()?;
+    }
     if metadata.uid != provenant_os::fs::effective_uid() || metadata.mode & 0o077 != 0 {
         return Ok(());
     }
