@@ -406,8 +406,14 @@ fn serialise_io_operation<S: serde::Serializer>(
     serializer.serialize_str(operation)
 }
 
-fn serialise_peer_label<S: serde::Serializer>(_: &str, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str("peer")
+fn serialise_peer_label<S: serde::Serializer>(
+    peer: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match peer.parse::<provenant_core::HostId>() {
+        Ok(host) => serializer.serialize_str(&host.to_string()),
+        Err(_) => serializer.serialize_str("peer"),
+    }
 }
 
 fn delivery_stage_wire<S: serde::Serializer>(
@@ -894,6 +900,13 @@ mod diagnostic_tests {
         let transport = serde_json::to_string(&error).unwrap();
         assert!(!transport.contains("TOKEN_SENTINEL"));
         assert!(!transport.contains("/private"));
+        let host = provenant_core::HostId::from_bytes([7; 16]).to_string();
+        let safe = FacadeError::PeerProtocolMismatch {
+            peer: host.clone(),
+            remote: 3,
+            expected: 6,
+        };
+        assert_eq!(serde_json::to_value(safe).unwrap()["peer"], host);
         assert!(projected.detail.unwrap().contains('3'));
         assert!(projected.next.is_some());
     }

@@ -1043,7 +1043,7 @@ impl SshTransport<'_> {
                     "provenant: fabric peer: invalid peer frame",
                 ) {
                     return Err(PeerError::ProtocolMismatch {
-                        peer: peer.destination.clone(),
+                        peer: peer.host.to_string(),
                         remote: 1,
                         expected: request.protocol,
                     });
@@ -1055,7 +1055,7 @@ impl SshTransport<'_> {
                     )
                 {
                     return Err(PeerError::ProtocolMismatch {
-                        peer: peer.destination.clone(),
+                        peer: peer.host.to_string(),
                         remote: 1,
                         expected: request.protocol,
                     });
@@ -1128,7 +1128,7 @@ impl SshTransport<'_> {
                             && response.protocol != PROTOCOL
                         {
                             return Err(PeerError::ProtocolMismatch {
-                                peer: peer.destination.clone(),
+                                peer: peer.host.to_string(),
                                 remote: response.protocol,
                                 // The probe speaks the base fence only.
                                 expected: PROTOCOL,
@@ -1159,7 +1159,7 @@ impl SshTransport<'_> {
         }
         if response.protocol != request.protocol {
             return Err(PeerError::ProtocolMismatch {
-                peer: peer.destination.clone(),
+                peer: peer.host.to_string(),
                 remote: response.protocol,
                 expected: request.protocol,
             });
@@ -2085,12 +2085,11 @@ mod tests {
                     )
                     .unwrap_err();
                 assert_eq!(error.code(), "peer_version");
-                assert_eq!(
-                    error.to_string(),
-                    format!(
-                        "peer workshop speaks protocol {remote}, this host expects protocol {requested}; upgrade both"
-                    )
-                );
+                assert!(matches!(
+                    error,
+                    PeerError::ProtocolMismatch { peer, remote: observed, expected }
+                        if peer == host.to_string() && observed == remote && expected == requested
+                ));
                 assert!(executor.0.lock().unwrap().is_none());
             }
         }
