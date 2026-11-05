@@ -239,6 +239,10 @@ fn assert_delivery_retry_reopens_matching_attempt(outcome: AttemptOutcome) {
             .expect("pending graph")
             .is_some()
     );
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).expect("pending marker"),
+        ["g-test"]
+    );
 }
 #[test]
 fn tick_reports_undecodable_checkpoint_once_and_recovers() {
