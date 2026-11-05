@@ -357,6 +357,14 @@ mod tests {
         }
         Ok(())
     }
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn configured_shared_path_allows_lane_lock_contended_by_host() -> Result<(), String> {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "native Seatbelt lock contention requires macOS",
+        )
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn configured_shared_path_allows_lane_lock_contended_by_host()
