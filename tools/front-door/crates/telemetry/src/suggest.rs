@@ -286,7 +286,13 @@ pub fn rank(
                 let accept = (a.dimension == "model"
                     && valid_key(&a.risk_tier)
                     && valid_key(&a.task_kind)
-                    && provenant_routing::ModelId::parse(&a.choice).is_ok())
+                    && a.choice.split_once('/').is_some_and(|(adapter, id)| {
+                        valid_key(adapter)
+                            && !id.is_empty()
+                            && !id.chars().any(|c| {
+                                c.is_whitespace() || c.is_control() || matches!(c, '#' | ',')
+                            })
+                    }))
                 .then(|| {
                     let mut table = toml_edit::InlineTable::new();
                     table.insert("dimension", "model".into());
