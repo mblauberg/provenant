@@ -163,6 +163,22 @@ torn line, is kept byte for byte when the store is rewritten.
 `--since` skips files last written before it and messages stamped before it;
 `--provider` other than `claude` ingests nothing.
 
+A caller can track a native Claude tool call with `provenant native start
+--id TOOL_USE_ID --session SESSION --alias ALIAS --model MODEL [--effort EFFORT]`,
+then settle it with `provenant native end --id TOOL_USE_ID --session SESSION
+[--agent AGENT_ID] --settlement succeeded|failed|cancelled`. The agent ID, when
+available, is the
+portion between `agent-` and `.jsonl`. The record contains those identifiers,
+a digest of the serving config directory, start and end times and settlement;
+it never contains a prompt or reply. The ID is scoped to its config directory
+and chair session. Ingest joins a subagent row on that directory digest,
+session and agent ID. A later settlement links already ingested rows without
+rereading the transcript. Unmatched rows remain visible. `status` lists tracked
+native attempts, and `telemetry stats` shows a host-wide native breakdown by
+attempt and model, plus unlinked usage. This breakdown can overlap the chair
+section and is not added to its totals a second time. Settling an attempt
+also requests a best-effort ingest.
+
 Attribution uses directories only, never credentials. Each registered account's
 `directory` and its extra `directories` attribute to its label; a directory
 claimed twice is visited once. Every other `~/.claude*` directory with a
@@ -196,10 +212,12 @@ its cap, ingest stops adding rows and the report says the store is full.
   `::an_expired_deadline_reads_nothing_and_keeps_the_store`;
   `::incremental_ingest_resumes_complete_lines_and_recovers_replacements`;
   `::incremental_ingest_upgrades_existing_chair_without_rereading`;
+  `::native_attempt_links_only_its_matching_subagent_and_updates_after_settlement`;
   `::one_message_in_two_session_files_counts_twice`;
   `tests/telemetry_ingest.rs::ingest_is_idempotent_and_attributes_by_directory`;
   `::chair_session_start_ingests_the_session_as_chair`;
-  `::chair_stop_ingests_new_usage`
+  `::chair_stop_ingests_new_usage`;
+  `::native_attempt_is_visible_in_status_and_linked_usage`
 - Owner: `crates/telemetry/src/ingest.rs`, `src/usage.rs`, `src/hooks.rs`
 
 ## Mileage and effective rates

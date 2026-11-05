@@ -531,3 +531,157 @@ fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
     );
     Ok(())
 }
+
+#[test]
+fn native_attempt_links_only_its_matching_subagent_and_updates_after_settlement() -> Result {
+    use crate::native_attempts::{self, Attempt, End, Settlement};
+    let f = Fixture::new()?;
+    let at = "2026-10-01T00:00:00Z";
+    f.write(
+        "claude",
+        "projects/p/s1/subagents/agent-a.jsonl",
+        &message("m1", at, 1, 0, 0, 4),
+    )?;
+    f.write(
+        "claude",
+        "projects/p/s1/subagents/agent-b.jsonl",
+        &message("m2", at, 2, 0, 0, 6),
+    )?;
+    f.write(
+        "other",
+        "projects/p/s1/subagents/agent-a.jsonl",
+        &message("m3", at, 3, 0, 0, 8),
+    )?;
+    let config = native_attempts::config_key(&f.dir("claude"));
+    native_attempts::start(
+        &f.roots,
+        Attempt {
+            id: "tool-1".into(),
+            alias: "reviewer".into(),
+            model: "claude-opus".into(),
+            effort: Some("high".into()),
+            session: "s1".into(),
+            config: config.clone(),
+            started_at: at.into(),
+            ended_at: None,
+            settlement: None,
+            agent_id: None,
+        },
+    )?;
+    let dirs = [
+        ConfigDir {
+            account: "a".into(),
+            path: f.dir("claude"),
+        },
+        ConfigDir {
+            account: "b".into(),
+            path: f.dir("other"),
+        },
+    ];
+    let chairs = BTreeSet::new();
+    let request = Request {
+        dirs: &dirs,
+        chair_sessions: &chairs,
+        provider: None,
+        since: None,
+        deadline: None,
+        incremental: true,
+    };
+    assert_eq!(ingest(&f.roots, &request)?.added, 3);
+    assert!(
+        read_rows(&f.roots, &RowFilter::default())?
+            .iter()
+            .all(|r| r.native_attempt.is_none())
+    );
+    native_attempts::end(
+        &f.roots,
+        End {
+            config: &config,
+            session: "s1",
+            id: "tool-1",
+            ended_at: "2026-10-01T00:03:00Z",
+            settlement: Settlement::Succeeded,
+            agent_id: Some("a"),
+        },
+    )?;
+    assert_eq!(ingest(&f.roots, &request)?.bytes_read, 0);
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
+    let matched = rows
+        .iter()
+        .find(|r| r.message == "m1")
+        .ok_or("matched row")?;
+    let unmatched = rows
+        .iter()
+        .find(|r| r.message == "m2")
+        .ok_or("unmatched row")?;
+    assert_eq!(matched.native_attempt.as_deref(), Some("tool-1"));
+    assert_eq!(matched.buckets(), [1, 7, 0, 0, 4]);
+    assert_eq!(unmatched.native_attempt, None);
+    assert_eq!(unmatched.source, Source::Subagent);
+    let other = rows
+        .iter()
+        .find(|r| r.message == "m3")
+        .ok_or("other account")?;
+    assert_eq!(other.account, "b");
+    assert_eq!(other.native_attempt, None);
+    let native = native_attempts::report(native_attempts::read(&f.roots)?, &rows);
+    assert_eq!(native.attempts[0].attempt.alias, "reviewer");
+    assert_eq!(native.attempts[0].models["claude-opus"][4], 4);
+    assert_eq!(native.unlinked[0].buckets[4], 14);
+    assert!(
+        !std::fs::read_to_string(f.base.join("state/native-attempts.json"))?.contains("private")
+    );
+    Ok(())
+}
+
+#[test]
+fn native_attempt_store_preserves_unknown_versions_and_rejects_ambiguous_links() -> Result {
+    use crate::native_attempts::{self, Attempt, End, Settlement};
+    let f = Fixture::new()?;
+    std::fs::create_dir_all(f.dir("claude"))?;
+    let config = native_attempts::config_key(&f.dir("claude"));
+    let attempt = |id: &str| Attempt {
+        id: id.into(),
+        alias: "reviewer".into(),
+        model: "claude-opus".into(),
+        effort: None,
+        session: "s1".into(),
+        config: config.clone(),
+        started_at: "2026-10-01T00:00:00Z".into(),
+        ended_at: None,
+        settlement: None,
+        agent_id: None,
+    };
+    native_attempts::start(&f.roots, attempt("tool-1"))?;
+    native_attempts::start(&f.roots, attempt("tool-2"))?;
+    fn end<'a>(config: &'a str, id: &'a str) -> End<'a> {
+        End {
+            config,
+            session: "s1",
+            id,
+            ended_at: "2026-10-01T00:01:00Z",
+            settlement: Settlement::Succeeded,
+            agent_id: Some("a"),
+        }
+    }
+    native_attempts::end(&f.roots, end(&config, "tool-1"))?;
+    assert!(matches!(
+        native_attempts::end(&f.roots, end(&config, "tool-2")),
+        Err(native_attempts::AttemptError::Conflict)
+    ));
+    let mut bad = attempt("tool-3");
+    bad.alias = "private prompt words".into();
+    assert!(matches!(
+        native_attempts::start(&f.roots, bad),
+        Err(native_attempts::AttemptError::Invalid)
+    ));
+    let path = f.base.join("state/native-attempts.json");
+    let future = br#"{"schema_version":2,"attempts":[]}"#;
+    std::fs::write(&path, future)?;
+    assert!(matches!(
+        native_attempts::start(&f.roots, attempt("tool-3")),
+        Err(native_attempts::AttemptError::Store)
+    ));
+    assert_eq!(std::fs::read(&path)?, future);
+    Ok(())
+}

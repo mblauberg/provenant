@@ -154,6 +154,9 @@ pub enum Command {
     /// Report local usage and cost
     #[command(subcommand)]
     Telemetry(Telemetry),
+    /// Record metadata for a native sub-agent attempt
+    #[command(subcommand)]
+    Native(Native),
     /// Show and refresh provider quota
     #[command(add = crate::metadata::CoreCommand(3, "provenant quota"))]
     Quota {
@@ -1116,6 +1119,41 @@ pub enum Lane {
         accept_review: bool,
     },
 }
+#[derive(Debug, Subcommand)]
+pub enum Native {
+    /// Begin tracking a native tool call; do not pass its prompt
+    Start {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        alias: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        effort: Option<String>,
+    },
+    /// Settle a tracked call and associate its native agent file ID
+    End {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, value_enum)]
+        settlement: NativeSettlement,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum NativeSettlement {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Telemetry {
     /// Summarise local attempts, usage and cost

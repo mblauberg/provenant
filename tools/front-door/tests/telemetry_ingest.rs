@@ -311,3 +311,70 @@ fn route_stats_human_output_matches_golden() -> Result {
     assert!(human.contains("codex/gpt-6-luna@low"), "{human}");
     route_stats_golden(&human)
 }
+
+#[test]
+fn native_attempt_is_visible_in_status_and_linked_usage() -> Result {
+    let rig = rig()?;
+    let config = rig.root.join("claude");
+    register_account(&rig, "claude", "current", "current", &config)?;
+    write_session(&config, "chair-session", "chair", 1)?;
+    let subagents = config.join("projects/-fixture/chair-session/subagents");
+    fs::create_dir_all(&subagents)?;
+    fs::write(subagents.join("agent-a.jsonl"), message("linked", 45))?;
+    fs::write(subagents.join("agent-b.jsonl"), message("unlinked", 30))?;
+    let start = rig.command(&[
+        "native",
+        "start",
+        "--id",
+        "tool-1",
+        "--session",
+        "chair-session",
+        "--alias",
+        "reviewer",
+        "--model",
+        "claude-opus-5-5",
+        "--effort",
+        "high",
+        "--json",
+    ])?;
+    assert_eq!(code(&start), 0, "{start:?}");
+    let end = rig.command(&[
+        "native",
+        "end",
+        "--id",
+        "tool-1",
+        "--session",
+        "chair-session",
+        "--agent",
+        "a",
+        "--settlement",
+        "succeeded",
+        "--json",
+    ])?;
+    assert_eq!(code(&end), 0, "{end:?}");
+    let status = rig.command(&["status", "--json"])?;
+    assert_eq!(code(&status), 0, "{status:?}");
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert_eq!(status["data"]["native_attempts"][0]["alias"], "reviewer");
+    assert_eq!(
+        status["data"]["native_attempts"][0]["model"],
+        "claude-opus-5-5"
+    );
+    let stats = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(code(&stats), 0, "{stats:?}");
+    let stats: Value = serde_json::from_slice(&stats.stdout.bytes)?;
+    assert_eq!(
+        stats["data"]["native_subagents"]["attempts"][0]["attempt"]["alias"],
+        "reviewer"
+    );
+    assert_eq!(
+        stats["data"]["native_subagents"]["attempts"][0]["buckets"][4],
+        45
+    );
+    assert_eq!(
+        stats["data"]["native_subagents"]["unlinked"][0]["buckets"][4],
+        30
+    );
+    assert!(!fs::read_to_string(rig.state.join("native-attempts.json"))?.contains("PRIVATE"));
+    Ok(())
+}

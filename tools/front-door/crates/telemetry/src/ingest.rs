@@ -78,6 +78,15 @@ pub struct Row {
     pub session: String,
     pub message: String,
     pub source: Source,
+    /// Native transcript identity, absent for older or non-subagent rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Digest of the config directory that supplied this row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_config: Option<String>,
+    /// Native tool-use ID, present when an attempt matches this transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_attempt: Option<String>,
 }
 
 impl Row {
@@ -183,7 +192,7 @@ pub struct AccountCount {
 pub struct Report {
     pub directories: u64,
     pub files: u64,
-    /// Transcript bytes read during this invocation.
+    /// Transcript bytes processed after the cursor during this invocation.
     pub bytes_read: u64,
     pub messages: u64,
     pub added: u64,
@@ -191,6 +200,8 @@ pub struct Report {
     /// Messages without a usable timestamp are counted, not guessed.
     pub skipped_no_timestamp: u64,
     pub unreadable_files: u64,
+    /// Native attempt metadata could not be read, so linking was skipped.
+    pub attempts_unreadable: bool,
     /// The store hit its cap, so some new messages were not recorded.
     pub store_full: bool,
     /// The request's deadline passed, so some transcripts were not read.
@@ -220,6 +231,8 @@ struct Pending {
     raw: Raw,
     timestamp: jiff::Timestamp,
     source: Source,
+    agent_id: Option<String>,
+    native_config: Option<String>,
 }
 
 /// A message ID or model name is a short opaque token, never free text.
@@ -257,6 +270,8 @@ struct Transcript {
     account: String,
     session: String,
     source: Source,
+    agent_id: Option<String>,
+    native_config: Option<String>,
 }
 
 /// Transcripts under one config directory. Links are never followed.
@@ -272,6 +287,7 @@ fn locate(
     let Ok(projects) = std::fs::read_dir(dir.path.join("projects")) else {
         return Ok(());
     };
+    let config_key = crate::native_attempts::config_key(&dir.path);
     let fresh = |meta: &std::fs::Metadata| match (cutoff, meta.modified()) {
         (Some(cutoff), Ok(modified)) => modified >= cutoff,
         _ => true,
@@ -308,6 +324,8 @@ fn locate(
                     account: dir.account.clone(),
                     session: session.into(),
                     source,
+                    agent_id: None,
+                    native_config: None,
                 });
             } else if valid_session(name) {
                 if plain(&path, true).is_none() {
@@ -323,9 +341,13 @@ fn locate(
                 for file in files.flatten().take(MAX_SUBAGENTS) {
                     let file_name = file.file_name();
                     let file_name = file_name.to_string_lossy();
-                    if !file_name.starts_with("agent-") || !file_name.ends_with(".jsonl") {
+                    let Some(agent_id) = file_name
+                        .strip_prefix("agent-")
+                        .and_then(|name| name.strip_suffix(".jsonl"))
+                    else {
                         continue;
-                    }
+                    };
+                    let agent_id = valid_session(agent_id).then(|| agent_id.to_owned());
                     let Some(meta) = plain(&file.path(), false) else {
                         continue;
                     };
@@ -335,6 +357,8 @@ fn locate(
                             account: dir.account.clone(),
                             session: name.into(),
                             source: Source::Subagent,
+                            agent_id,
+                            native_config: Some(config_key.clone()),
                         });
                     }
                 }
@@ -378,6 +402,7 @@ fn tail_digest(file: &mut std::fs::File, offset: u64) -> std::io::Result<String>
 
 #[derive(Serialize, Deserialize)]
 struct CursorStore {
+    schema_version: u64,
     store_digest: String,
     files: BTreeMap<String, Cursor>,
 }
@@ -395,7 +420,7 @@ fn read_cursors(directory: &Directory, store: &[u8]) -> BTreeMap<String, Cursor>
     }
     serde_json::from_slice::<CursorStore>(&bytes)
         .ok()
-        .filter(|cursor| cursor.store_digest == digest(store))
+        .filter(|cursor| cursor.schema_version == 1 && cursor.store_digest == digest(store))
         .map(|cursor| cursor.files)
         .unwrap_or_default()
 }
@@ -554,6 +579,8 @@ fn read_transcript(
                 raw: usage,
                 timestamp,
                 source: transcript.source,
+                agent_id: transcript.agent_id.clone(),
+                native_config: transcript.native_config.clone(),
             },
         );
     }
@@ -594,6 +621,9 @@ fn row(session: String, message: String, pending: Pending) -> Row {
         session,
         message,
         source: pending.source,
+        agent_id: pending.agent_id,
+        native_config: pending.native_config,
+        native_attempt: None,
     }
 }
 
@@ -730,6 +760,10 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             previous.cache_write_1h = previous.cache_write_1h.max(current.cache_write_1h);
             previous.cache_write = total_write.saturating_sub(previous.cache_write_1h);
             previous.output = previous.output.max(current.output);
+            if previous.agent_id.is_none() {
+                previous.agent_id = current.agent_id;
+                previous.native_config = current.native_config;
+            }
             // A row first seen as a lane is a chair once the hook records it.
             if previous.source == Source::Lane && current.source == Source::Chair {
                 previous.source = Source::Chair;
@@ -737,6 +771,41 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             changed |= *previous != before;
         } else {
             fresh.push(row(session, message, pending));
+        }
+    }
+    let attempts = match crate::native_attempts::read(roots) {
+        Ok(attempts) => attempts,
+        Err(_) => {
+            report.attempts_unreadable = true;
+            Vec::new()
+        }
+    };
+    let links: BTreeMap<_, _> = attempts
+        .iter()
+        .filter_map(|attempt| {
+            Some((
+                (
+                    attempt.config.as_str(),
+                    attempt.session.as_str(),
+                    attempt.agent_id.as_deref()?,
+                ),
+                attempt.id.as_str(),
+            ))
+        })
+        .collect();
+    for row in known.values_mut().chain(fresh.iter_mut()) {
+        if row.source != Source::Subagent {
+            continue;
+        }
+        let link = row
+            .native_config
+            .as_deref()
+            .zip(row.agent_id.as_deref())
+            .and_then(|(config, agent)| links.get(&(config, row.session.as_str(), agent)))
+            .map(|id| (*id).to_owned());
+        if link.is_some() && row.native_attempt != link {
+            row.native_attempt = link;
+            changed = true;
         }
     }
     fresh.sort_by(|a, b| {
@@ -776,6 +845,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     }
     if request.incremental && !report.store_full {
         let bytes = serde_json::to_vec(&CursorStore {
+            schema_version: 1,
             store_digest: digest(if changed { &out } else { &existing }),
             files: cursors,
         })

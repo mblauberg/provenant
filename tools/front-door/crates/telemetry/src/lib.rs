@@ -9,6 +9,7 @@ pub mod experiments;
 pub mod ingest;
 pub mod mileage;
 mod native;
+pub mod native_attempts;
 pub mod outcome;
 mod prices;
 mod reducer;
