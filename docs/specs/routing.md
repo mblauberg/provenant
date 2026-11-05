@@ -166,6 +166,33 @@ the section validator reports the record with code `moved_to_schedule.starts`,
 warning carrying the code. In a rule that enforces a lane restriction the
 error is reported at the key and refuses the configuration.
 
+### Expiring model choice preferences
+
+`domains.routing.model_choices` is an array of inline tables with `dimension =
+"model"`, `risk_tier`, `task_kind`, exact `preferred` model and an RFC 3339
+`expires`. The last matching row wins until its exclusive expiry. A missing or
+invalid expiry drops the row with a warning. Remove a row to revoke it, or use
+`provenant route override clear --risk-tier TIER --task-kind KIND`. Set one with
+`provenant route override set --model ADAPTER/ID --risk-tier TIER --task-kind
+KIND --until RFC3339`; `route override list` shows its activity. Pacing rows
+are independent.
+
+A dispatch with both context values prefers the model on its named route, even
+one outside the route's pool: the operator accepted it explicitly and it expires,
+whereas limiting it to the pool would make a suggestion for another model do
+nothing. The normal account, confidentiality, exclusion, launch and model-policy
+checks still apply; unavailable candidates fall back to the ordinary route. An explicit model pin wins. Dispatch copies `--risk-tier`
+and `--task-kind` into task context; preset dispatch copies them into graph
+context. Graph authors can set the same fields. Missing context does not match.
+
+- Why: a reviewed outcome can guide later route selection without extending
+  authority or making an indefinite policy change.
+- Tests: `crates/routing/src/tests.rs#model_choice_selects_only_eligible_pool_members_before_expiry`,
+  `crates/routing/src/tests.rs#model_choice_outside_route_obeys_restrictions`,
+  `crates/cli/src/route.rs#model_override_set_and_clear_preserve_expiry_and_pacing`
+- Owner: `crates/routing/src/resolve.rs#select_pool`,
+  `crates/cli/src/route.rs#set_model_choice`
+
 ### Go monthly allowance floor
 
 Every OpenCode Go candidate, including an explicit or uncatalogued exact ID,

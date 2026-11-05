@@ -4863,6 +4863,12 @@ pub(crate) fn run_with_review(
                 })
             });
         let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
+        if let Some(risk) = &request.risk_tier {
+            expansion.document["context"]["risk_tier"] = json!(risk);
+        }
+        if let Some(kind) = &request.task_kind {
+            expansion.document["context"]["task_kind"] = json!(kind);
+        }
         expansion.warnings.extend(binding_warnings);
         expansion.document["provenance"]["warnings"] = json!(expansion.warnings);
         let mut spec = None;

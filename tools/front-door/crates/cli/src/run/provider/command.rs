@@ -58,7 +58,7 @@ pub(super) fn prepare_command(
         .filter(|program| !program.is_empty())
         .ok_or("configured command has no executable")?;
     let source = source_cwd(registry, task)?;
-    let isolated = task.access.source_root.is_some();
+    let isolated = task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
         let assets = registry.assets.ok_or("product assets are unavailable")?;
         super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
@@ -116,8 +116,15 @@ pub(super) fn prepare_command(
         provider,
         false,
     )?;
-    let (plan, mut observed_head, repository, mut worktree_gitdir) =
-        read_only_plan(roots, project, &source, &git, request, isolated)?;
+    let (plan, mut observed_head, repository, mut worktree_gitdir) = read_only_plan(
+        roots,
+        project,
+        &source,
+        &git,
+        request,
+        isolated,
+        task.access.source_live,
+    )?;
     if isolated {
         observed_head = Some(
             task.head

@@ -550,7 +550,8 @@ pub(super) fn prepare_candidates(
         Some(writer) => writer.worktree.path().to_owned(),
         None => source_cwd(registry, task)?,
     };
-    let isolated = writer.is_none() && task.access.source_root.is_some();
+    let isolated =
+        writer.is_none() && task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
         super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
@@ -636,13 +637,29 @@ pub(super) fn prepare_candidates(
     };
     request.intent = route_request(task)?.intent;
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
-    let eligible = provenant_routing::probe_adapters(
+    let mut eligible = provenant_routing::probe_adapters(
         &request,
         &catalogue,
         &config.domains.routing,
         provider_registry,
     )
     .map_err(|e| e.to_string())?;
+    if resume.is_none()
+        && let Some(context) = task.context.as_ref()
+        && let (Some(risk), Some(kind)) =
+            (context.risk_tier.as_deref(), context.task_kind.as_deref())
+        && let Ok(now) = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())
+        && let Some(model) = config
+            .domains
+            .routing
+            .preferred_model(&request, risk, kind, now)
+        && let Some(registration) = provider_registry
+            .iter()
+            .find(|entry| entry.adapter.id() == model.adapter())
+        && !eligible.contains(&registration.adapter.id())
+    {
+        eligible.push(registration.adapter.id());
+    }
     // Exclude updates during preparation when the bounded wait succeeds.
     let clock = provenant_os::clock::SystemClock::new();
     use provenant_core::Clock;
@@ -989,6 +1006,9 @@ pub(super) fn prepare_candidates(
             family_constraints,
             &rules,
             rejected,
+            task.context.as_ref().and_then(|context| {
+                Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
+            }),
         )
     };
     let resolved = resolve(&[]).map_err(|error| error.to_string())?;
@@ -1415,23 +1435,30 @@ pub(super) fn prepare_candidates(
                     )
                 })
                 .map_err(|error| error.to_string()),
-            None => read_only_plan(roots, project_id, &source, &git, request, isolated).and_then(
-                |mut planned| {
-                    if isolated {
-                        planned.1 = Some(
-                            task.head
-                                .as_deref()
-                                .ok_or("graph source head missing")?
-                                .parse()
-                                .map_err(|_| "invalid graph source head")?,
-                        );
-                        planned.3 = Some(cwd.join(".git"));
-                    } else {
-                        require_source_head(task, planned.1)?;
-                    }
-                    Ok(planned)
-                },
-            ),
+            None => read_only_plan(
+                roots,
+                project_id,
+                &source,
+                &git,
+                request,
+                isolated,
+                task.access.source_live,
+            )
+            .and_then(|mut planned| {
+                if isolated {
+                    planned.1 = Some(
+                        task.head
+                            .as_deref()
+                            .ok_or("graph source head missing")?
+                            .parse()
+                            .map_err(|_| "invalid graph source head")?,
+                    );
+                    planned.3 = Some(cwd.join(".git"));
+                } else {
+                    require_source_head(task, planned.1)?;
+                }
+                Ok(planned)
+            }),
         }) {
             Ok(planned) => planned,
             Err(error) => {
@@ -1975,6 +2002,7 @@ mod receipt_tests {
         );
         let context = RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,

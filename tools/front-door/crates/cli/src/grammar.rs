@@ -622,7 +622,7 @@ pub struct Access {
     /// Access mode: read-only or worktree-write [default: read-only]
     #[arg(long, value_enum)]
     pub mode: Option<Mode>,
-    /// Writer worktree; local run creates an owned worktree for a missing branch name
+    /// Checkout to read or write; a writer can create an owned worktree for a missing branch name
     #[arg(long)]
     pub worktree: Option<PathBuf>,
     /// Extra directory the lane may read (repeatable)
@@ -705,10 +705,10 @@ pub struct Dispatch {
     /// Explain roles, limits and the expanded graph without running it
     #[arg(long)]
     pub explain: bool,
-    /// Risk tier supplied to automatic preset selection
+    /// Risk tier supplied to preset selection and model-choice preferences
     #[arg(long)]
     pub risk_tier: Option<String>,
-    /// Task kind supplied to automatic preset selection
+    /// Task kind supplied to preset selection and model-choice preferences
     #[arg(long)]
     pub task_kind: Option<String>,
     /// Changed or declared path supplied to automatic preset selection (repeatable)

@@ -2135,7 +2135,10 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--account` | `{"description": "Apply the override to this account (label, entry or adapter/key)", "name": "account"}` |
 | `--provider` | `{"description": "Apply the override to this provider", "name": "provider"}` |
 | `--all` | `{"defaults": ["false"], "description": "Apply the override to all accounts", "name": "all", "values": ["true", "false"]}` |
-| `--policy` | `{"description": "Pacing policy while the override is active", "name": "policy", "required": true, "values": ["pace", "spend", "max", "off"]}` |
+| `--policy` | `{"description": "Pacing policy while the override is active", "name": "policy", "values": ["pace", "spend", "max", "off"]}` |
+| `--model` | `{"conflicts": ["account", "provider", "all", "policy", "starts", "window", "tz"], "description": "Exact preferred model for a risk/task stratum", "name": "model"}` |
+| `--risk-tier` | `{"name": "risk_tier"}` |
+| `--task-kind` | `{"name": "task_kind"}` |
 | `--starts` | `{"description": "First active instant: an RFC 3339 timestamp or a duration from now (e.g. 30m)", "name": "starts"}` |
 | `--until` | `{"description": "Expiry: a future RFC 3339 timestamp or a duration from now (e.g. 2h, 1d). Without it the override stays until cleared", "name": "until"}` |
 | `--window` | `{"description": "Hour window as [DAYS@]START-END, repeatable; DAYS lists weekdays (mon..sun or 0..6, Monday = 0) or ranges, such as mon-fri@9-17 or 23-2", "name": "window", "repeatable": true}` |
@@ -2153,6 +2156,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "provider",
         "all",
         "policy",
+        "model",
+        "risk_tier",
+        "task_kind",
         "starts",
         "until",
         "window",
@@ -2170,7 +2176,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
       ],
       "multiple": false,
       "name": "scope",
-      "required": true
+      "required": false
     }
   ]
 }
@@ -2195,6 +2201,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 |---|---|
 | `--account` | `{"conflicts": ["provider"], "description": "Clear only this account's override", "name": "account"}` |
 | `--provider` | `{"conflicts": ["account"], "description": "Clear only this provider's override", "name": "provider"}` |
+| `--risk-tier` | `{"conflicts": ["account", "provider"], "description": "Revoke the model preference for a risk and task stratum", "name": "risk_tier"}` |
+| `--task-kind` | `{"conflicts": ["account", "provider"], "name": "task_kind"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -2205,7 +2213,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
     {
       "arguments": [
         "account",
-        "provider"
+        "provider",
+        "risk_tier",
+        "task_kind"
       ],
       "multiple": true,
       "name": "OverrideClear",
@@ -2404,8 +2414,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
 | `--fresh` | `{"defaults": ["false"], "description": "Give this preset run a new graph identity, for example to rerun after a cancel", "name": "fresh", "requires": ["preset"], "values": ["true", "false"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
-| `--risk-tier` | `{"description": "Risk tier supplied to automatic preset selection", "name": "risk_tier"}` |
-| `--task-kind` | `{"description": "Task kind supplied to automatic preset selection", "name": "task_kind"}` |
+| `--risk-tier` | `{"description": "Risk tier supplied to preset selection and model-choice preferences", "name": "risk_tier"}` |
+| `--task-kind` | `{"description": "Task kind supplied to preset selection and model-choice preferences", "name": "task_kind"}` |
 | `--path` | `{"description": "Changed or declared path supplied to automatic preset selection (repeatable)", "name": "selection_paths", "repeatable": true}` |
 | `--require-skill-location` | `{"defaults": ["false"], "description": "Require the selected adapter to provide a skill location", "name": "require_skill_location", "values": ["true", "false"]}` |
 | `--build-heavy` | `{"defaults": ["false"], "description": "Use the build-heavy scheduling priority", "name": "build_heavy", "values": ["true", "false"]}` |
@@ -2667,8 +2677,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
 | `--fresh` | `{"defaults": ["false"], "description": "Give this preset run a new graph identity, for example to rerun after a cancel", "name": "fresh", "requires": ["preset"], "values": ["true", "false"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
-| `--risk-tier` | `{"description": "Risk tier supplied to automatic preset selection", "name": "risk_tier"}` |
-| `--task-kind` | `{"description": "Task kind supplied to automatic preset selection", "name": "task_kind"}` |
+| `--risk-tier` | `{"description": "Risk tier supplied to preset selection and model-choice preferences", "name": "risk_tier"}` |
+| `--task-kind` | `{"description": "Task kind supplied to preset selection and model-choice preferences", "name": "task_kind"}` |
 | `--path` | `{"description": "Changed or declared path supplied to automatic preset selection (repeatable)", "name": "selection_paths", "repeatable": true}` |
 | `--require-skill-location` | `{"defaults": ["false"], "description": "Require the selected adapter to provide a skill location", "name": "require_skill_location", "values": ["true", "false"]}` |
 | `--build-heavy` | `{"defaults": ["false"], "description": "Use the build-heavy scheduling priority", "name": "build_heavy", "values": ["true", "false"]}` |
@@ -2687,7 +2697,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
-| `--worktree` | `{"description": "Writer worktree; local run creates an owned worktree for a missing branch name", "name": "worktree"}` |
+| `--worktree` | `{"description": "Checkout to read or write; a writer can create an owned worktree for a missing branch name", "name": "worktree"}` |
 | `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
 | `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
 | `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |

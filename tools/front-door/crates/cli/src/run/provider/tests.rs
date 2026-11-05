@@ -389,6 +389,7 @@ fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
         },
         &RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -3656,6 +3657,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         &repo,
         &git,
         request,
+        false,
         false,
     );
     assert!(result.is_err());
