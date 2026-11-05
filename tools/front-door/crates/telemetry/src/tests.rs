@@ -490,28 +490,24 @@ fn bundled_toml_uses_exact_rates_and_unknowns_without_aliases() {
     ));
     let config: ConfiguredPrices = toml_edit::de::from_str(text).unwrap();
     let table = validate_prices(&config).unwrap();
+    let model = config.models.iter().find(|model| model.provider == "codex" && model.billing == BillingKind::Subscription && model.rates.values().iter().all(Option::is_some)).unwrap();
+    let rate = table.get(&model.provider, &model.model).unwrap().0.uncached_input.unwrap();
     let mut input = fact(1, Some(1_000_000));
     input.resolved_route = Some(RouteFact {
-        provider: Some("codex".into()),
-        model: Some("codex/gpt-6.1-sol".into()),
+        provider: Some(model.provider.clone()),
+        model: Some(model.model.clone()),
         effort: None,
         account_label: None,
     });
     let report = stats([input.clone()], &table, Window::default()).unwrap();
-    assert_eq!(report.prices.reviewed_at, "2026-10-27");
-    assert_eq!(report.totals.cost.complete.unwrap().usd, "2.000000");
+    assert_eq!(report.prices.reviewed_at, config.reviewed_at);
+    assert_eq!(report.totals.cost.complete.unwrap().microdollars, rate);
     input.usage.cache_write = None;
     input.usage.reasoning = None;
     let report = stats([input.clone()], &table, Window::default()).unwrap();
     assert!(report.totals.cost.complete.is_none());
-    assert_eq!(
-        report.totals.cost.known_lower_bound.unwrap().usd,
-        "2.000000"
-    );
+    assert_eq!(report.totals.cost.known_lower_bound.unwrap().microdollars, rate);
     assert_eq!(report.totals.cost.subscription_attempts, 1);
-    input.resolved_route.as_mut().unwrap().model = Some("codex/gpt-6.1-sol-alias".into());
-    let report = stats([input], &table, Window::default()).unwrap();
-    assert_eq!(report.coverage.missing_price, 1);
     let minimal = r#"schema_version = 1
 id = "unpriced"
 reviewed_at = "2026-10-22"
@@ -529,6 +525,9 @@ billing = "subscription"
     assert!(report.totals.cost.complete.is_none());
     assert_eq!(report.totals.cost.subscription_attempts, 1);
     assert_eq!(report.routes[0].totals.cost.subscription_attempts, 1);
+    let mut unknown = fact(2, Some(1));
+    unknown.resolved_route.as_mut().unwrap().model = Some("m-alias".into());
+    assert_eq!(stats([unknown], &table, Window::default()).unwrap().coverage.missing_price, 1);
     let bad = minimal.replace("[models.rates]", "[models.rates]\nother = 1");
     assert!(toml_edit::de::from_str::<ConfiguredPrices>(&bad).is_err());
 }

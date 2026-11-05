@@ -491,7 +491,8 @@ output_excluding_reasoning = 2000000
             "{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"model\":\"claude-haiku-4-5-20251001\",\"usage\":{\"input_tokens\":1000000,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0,\"output_tokens\":0}}}\n",
         )?;
         let report = import_subagents(&session, dir.path(), &prices)?;
-        assert_eq!(report.models[0].cost_usd.as_ref().unwrap().usd, "1.000000");
+        let rate = prices.get("claude", "claude/claude-haiku-4-5-20251001").unwrap().0.uncached_input.unwrap();
+        assert_eq!(report.models[0].cost_usd.as_ref().unwrap().microdollars, rate);
         let mut records = String::new();
         for i in 0..=MAX_MODELS {
             records.push_str(&format!("{{\"type\":\"assistant\",\"message\":{{\"id\":\"{i}\",\"model\":\"model-{i}\",\"usage\":{{}}}}}}\n"));
