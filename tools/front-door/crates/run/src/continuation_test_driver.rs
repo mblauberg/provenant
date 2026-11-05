@@ -67,8 +67,18 @@ pub(super) fn main() -> TestResult {
     }
     provenant_supervisor::fixture::run_libtest(
         &args,
-        &["writer_continuation_launches_pinned_to_predecessor_head"],
-        |_| launches().map_err(|error| std::io::Error::other(error.to_string())),
+        &[
+            "writer_continuation_launches_pinned_to_predecessor_head",
+            "unfinished_writer_continuation_launches_in_previously_owned_worktree",
+        ],
+        |name| {
+            let cause = if name.starts_with("unfinished_") {
+                PolicyCause::Unfinished
+            } else {
+                PolicyCause::Quota
+            };
+            launches(cause).map_err(|error| std::io::Error::other(error.to_string()))
+        },
     )?;
     Ok(())
 }
@@ -242,7 +252,7 @@ fn prepare(task: &TaskRequest, paths: &LaunchPaths) -> TestResult<PreparedLaunch
         }),
     })
 }
-fn launches() -> TestResult {
+fn launches(cause: PolicyCause) -> TestResult {
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let temp = tempfile::tempdir()?;
@@ -371,7 +381,7 @@ fn launches() -> TestResult {
         &old,
         &PolicyRetry {
             schema_version: 2,
-            cause: PolicyCause::Quota,
+            cause,
             action: PolicyAction::Retry,
             route: old.requested_route.clone(),
             resume: false,
@@ -399,7 +409,11 @@ fn launches() -> TestResult {
         RECORD_LIMIT,
     )?;
     let mut publication = crate::tests::publication();
-    publication.outcome = Outcome::QuotaLimited;
+    publication.outcome = if cause == PolicyCause::Unfinished {
+        Outcome::Failed
+    } else {
+        Outcome::QuotaLimited
+    };
     publication.finished_at = clock.wall_now()?;
     publication.started_at = None;
     publication.provider_ms = None;

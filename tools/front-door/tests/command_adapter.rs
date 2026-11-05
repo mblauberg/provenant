@@ -45,7 +45,13 @@ fn macos_ci_requires_writer_continuation_confinement_fixtures() {
     assert!(step.contains(
         "test(=writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source)"
     ));
-    assert!(step.contains("binary(=writer_continuation) & test(=writer_continuation_launches_pinned_to_predecessor_head)"));
+    assert!(step.contains("binary(=writer_continuation)"));
+    assert!(step.contains("test(=writer_continuation_launches_pinned_to_predecessor_head)"));
+    assert!(
+        step.contains(
+            "test(=unfinished_writer_continuation_launches_in_previously_owned_worktree)"
+        )
+    );
 }
 
 fn available() -> Result<bool> {
