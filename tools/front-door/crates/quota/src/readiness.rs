@@ -112,7 +112,7 @@ impl LoginObservation {
 }
 
 /// What a reader learns for one route: a verdict that is never ready by default.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadinessRead {
     pub state: ReadinessState,
     pub reason: Option<ReadinessReason>,

@@ -505,6 +505,7 @@ pub fn report(
         };
         accounts.push(AccountRow {
             account: record.account.clone(),
+            readiness: None,
             login_expiry: None,
             snapshot: record.snapshot.clone(),
             status,

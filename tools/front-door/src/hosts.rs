@@ -49,6 +49,8 @@ struct LoginAccount {
     reason: Option<provenant_quota::ProbeFailure>,
     last_success_unix_seconds: Option<i64>,
     login_expiry: Option<provenant_quota::LoginExpiryView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    readiness: Option<provenant_quota::ReadinessRead>,
     repair: Option<String>,
 }
 fn login_account(row: provenant_quota::AccountRow) -> LoginAccount {
@@ -58,6 +60,7 @@ fn login_account(row: provenant_quota::AccountRow) -> LoginAccount {
         reason: row.error,
         last_success_unix_seconds: row.snapshot.map(|snapshot| snapshot.observed_unix_seconds),
         login_expiry: row.login_expiry,
+        readiness: row.readiness,
         repair: row.repair,
     }
 }
@@ -366,6 +369,11 @@ fn valid_remote(report: &Report) -> bool {
         && report.login_accounts.iter().all(|row| {
             [&row.adapter, &row.label].iter().all(|text| {
                 !text.is_empty() && text.len() <= 128 && !text.chars().any(char::is_control)
+            }) && row.readiness.as_ref().is_none_or(|readiness| {
+                readiness
+                    .evidence_ref
+                    .as_ref()
+                    .is_none_or(|value| value.len() <= 256 && !value.chars().any(char::is_control))
             }) && row
                 .repair
                 .as_ref()
@@ -490,6 +498,12 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_else(|| "unknown".into());
                 text.push_str(&format!("login {} [{}]: {reason}; expiry {expiry}; last successful observation {observed}", row.label.escape_debug(), row.adapter.escape_debug()));
+                if let Some(readiness) = &row.readiness {
+                    text.push_str(&format!(
+                        "; account readiness {}",
+                        provenant_cli::quota::readiness_words(readiness)
+                    ));
+                }
                 if let Some(repair) = &row.repair {
                     text.push_str(&format!("; {repair}"));
                 }
@@ -615,6 +629,14 @@ mod tests {
                 account_key: "key".into(),
                 label: "work".into(),
             },
+            readiness: Some(provenant_quota::ReadinessRead {
+                state: provenant_quota::ReadinessState::Unavailable,
+                reason: Some(provenant_quota::ReadinessReason::LoginExpired),
+                observed_unix_seconds: Some(100),
+                expires_unix_seconds: Some(200),
+                reset_unix_seconds: None,
+                evidence_ref: Some("fixture".into()),
+            }),
             login_expiry: Some(provenant_quota::LoginExpiryView {
                 state: provenant_quota::LoginExpiryState::Expired,
                 expires_unix_seconds: Some(90),
@@ -652,6 +674,9 @@ mod tests {
         assert_eq!(value["reason"], "login_expired");
         assert_eq!(value["last_success_unix_seconds"], 80);
         assert_eq!(value["login_expiry"]["state"], "expired");
+        assert_eq!(value["readiness"]["state"], "unavailable");
+        assert_eq!(value["readiness"]["reason"], "login_expired");
+        assert_eq!(value["readiness"]["observed_unix_seconds"], 100);
         assert_eq!(value["repair"], "run selected login");
     }
 

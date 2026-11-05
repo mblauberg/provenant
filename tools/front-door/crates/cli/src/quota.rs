@@ -1192,6 +1192,16 @@ fn decorate_login(
     now: i64,
 ) {
     for row in &mut report.accounts {
+        row.readiness = Some(read_readiness(
+            state,
+            &ReadinessScope {
+                host: LOCAL_HOST.into(),
+                adapter: row.account.adapter.clone(),
+                account_key: row.account.account_key.clone(),
+                route: provenant_quota::ACCOUNT_ROUTE.into(),
+            },
+            now,
+        ));
         row.login_expiry = Some(login_expiry_at(state, &row.account, warning_seconds, now));
         if row.repair.is_none()
             && row.error != Some(provenant_quota::ProbeFailure::Network)
@@ -1899,6 +1909,36 @@ pub(crate) fn cache_share(cache: &provenant_telemetry::CacheSummary) -> String {
     }
 }
 
+/// A bounded account or model readiness observation, rendered for people.
+pub fn readiness_words(readiness: &ReadinessRead) -> String {
+    let state = match readiness.state {
+        provenant_quota::ReadinessState::Ready => "ready",
+        provenant_quota::ReadinessState::Unavailable => "unavailable",
+        provenant_quota::ReadinessState::Unknown => "unknown",
+    };
+    let reason = readiness
+        .reason
+        .and_then(|reason| serde_json::to_value(reason).ok())
+        .and_then(|value| value.as_str().map(|text| text.replace('_', " ")));
+    let mut result = state.to_owned();
+    if let Some(reason) = reason {
+        result.push_str(&format!(" ({reason})"));
+    }
+    if let Some(observed) = readiness.observed_unix_seconds {
+        result.push_str(&format!("; observed {observed}"));
+    }
+    if let Some(expires) = readiness.expires_unix_seconds {
+        result.push_str(&format!("; valid until {expires}"));
+    }
+    if let Some(evidence) = &readiness.evidence_ref {
+        result.push_str(&format!("; source {}", evidence.escape_debug()));
+    }
+    if readiness.state == provenant_quota::ReadinessState::Unknown {
+        result.push_str("; run `provenant quota tick` to probe");
+    }
+    result
+}
+
 fn quota_human(report: &QuotaReport) -> String {
     quota_human_at(report, jiff::tz::TimeZone::system())
 }
@@ -1930,6 +1970,12 @@ fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String
             row.account.adapter,
             reset.map_or_else(String::new, |label| format!(" {label}"))
         ));
+        if let Some(readiness) = &row.readiness {
+            human.push_str(&format!(
+                "; account readiness {}",
+                readiness_words(readiness)
+            ));
+        }
         if let Some(login) = &row.login_expiry {
             match (
                 login.state,
@@ -2421,6 +2467,9 @@ mod tests {
             SystemClock::new().unix_seconds(),
         );
         assert_eq!(readiness.reason, Some(ReadinessReason::LoginExpired));
+        assert_eq!(rows[0].readiness.as_ref(), Some(&readiness));
+        assert!(readiness_words(&readiness).contains("login expired"));
+        assert!(readiness.observed_unix_seconds.is_some());
         assert!(matches!(
             readiness.project(),
             provenant_records::RouteReadiness::Unavailable {
@@ -2505,6 +2554,7 @@ mod tests {
                         account_key: "agy-google-abc".into(),
                         label: "work".into(),
                     },
+                    readiness: None,
                     login_expiry: None,
                     snapshot: None,
                     status: QuotaStatus::AuthRequired,
@@ -2552,6 +2602,7 @@ mod tests {
                 account_key: "agy-google-abc".into(),
                 label: label.into(),
             },
+            readiness: None,
             login_expiry: None,
             snapshot: None,
             status: QuotaStatus::KeychainUnavailable,
@@ -2600,6 +2651,7 @@ mod tests {
                     account_key: "agy-google-abc".into(),
                     label: "legacy".into(),
                 },
+                readiness: None,
                 login_expiry: None,
                 snapshot: None,
                 status: QuotaStatus::KeychainUnavailable,
@@ -2639,6 +2691,7 @@ mod tests {
                 account_key: "key".into(),
                 label: format!("{status:?}"),
             },
+            readiness: None,
             login_expiry: None,
             snapshot: None,
             status,
@@ -2684,6 +2737,7 @@ mod tests {
                 account_key: label.into(),
                 label: label.into(),
             },
+            readiness: None,
             login_expiry: None,
             snapshot: None,
             status: QuotaStatus::Exhausted,
@@ -2887,6 +2941,7 @@ mod tests {
                 account_key: "k".into(),
                 label: "agy".into(),
             },
+            readiness: None,
             login_expiry: None,
             snapshot,
             status,
