@@ -1390,9 +1390,7 @@ pub(super) fn prepare_candidates(
             }
         };
         let adapter_spec = AdapterSpec::get(adapter.id()).ok_or("adapter is not registered")?;
-        let refreshed = if adapter.id() == provenant_records::Harness::Claude.spec().name
-            && fixture_token.is_none()
-        {
+        let refreshed = if adapter_spec.launch_token_refresh && fixture_token.is_none() {
             let account = account.as_ref().ok_or("Claude account is not registered")?;
             let login = provenant_providers::claude::Login {
                 executable: &executable,
@@ -1441,7 +1439,7 @@ pub(super) fn prepare_candidates(
         } else {
             None
         };
-        let token = if adapter.id() == provenant_records::Harness::Claude.spec().name {
+        let token = if adapter_spec.launch_token_refresh {
             fixture_token.or(refreshed.as_ref())
         } else {
             None
