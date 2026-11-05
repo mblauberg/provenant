@@ -1606,7 +1606,7 @@ fn opencode_stderr_live_quota() -> Result {
         db.execute_batch(
             r#"CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
             INSERT INTO session_message VALUES ('ses_x', 'assistant',
-            '{"model":{"providerID":"opencode-go","id":"beam-free"},"finish":"stop"}');"#,
+            '{"model":{"providerID":"opencode","id":"glm-5.3-flash-free"},"finish":"stop"}');"#,
         )?;
         let bin = rig.root.join("provider/bin");
         fs::create_dir_all(&bin)?;
