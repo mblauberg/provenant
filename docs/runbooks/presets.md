@@ -38,6 +38,9 @@ A typed parameter can declare `bind = "risk_tier"` or `bind = "kind"` to receive
 the corresponding `--risk-tier` or `--task-kind` request. An unbound flag warns
 and is dropped. Parameter files and `--set` retain their usual precedence.
 
+A typed child parameter can declare `inherit = true` to receive a matching
+parent parameter unless the stage supplies its own value.
+
 A string parameter can declare `tracker_advice = true` to request tracker advice
 for its supplied spec before a run.
 

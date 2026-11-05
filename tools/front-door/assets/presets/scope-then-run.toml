@@ -57,7 +57,7 @@ nodes = [
 reason = { type = "string", doc = "Why the brief already answers what the scope stage needs." }
 
 [parameters]
-local_check_policy = { type = "string", default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
+local_check_policy = { type = "string", inherit = true, default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
 width = { type = "integer", default = 3, min = 1, max = 32, doc = "Number of parallel scouts." }
 external = { type = "integer", default = 1, min = 0, max = 8, doc = "External scouts that research outward; 0 opts out." }
 read_roots = { type = "list", default = [], doc = "Extra read roots for the scouts." }

@@ -33,10 +33,10 @@ select_when = "An approved slice should go from implementation to a merged pull 
 tags = ["write", "review", "deliver"]
 
 [parameters]
-local_check_policy = { type = "string", default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
+local_check_policy = { type = "string", inherit = true, default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
 worktree = { type = "string", default = "", doc = "Registered writer worktree; repairs continue its branch." }
 scope = { type = "list", default = ["."], doc = "Literal relative paths the writer and repairers may change." }
-subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
+subject = { type = "table", inherit = true, default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
 delivery = { type = "string", default = "pr", enum = ["pr", "push"], doc = "Writer delivery. Land needs pr; push suits land = 0." }
 base = { type = "string", default = "", doc = "Diff reference the slice is measured from." }
 spec = { type = "string", tracker_advice = true, default = "", doc = "Issue number or file holding the acceptance criteria." }
@@ -45,7 +45,7 @@ ci_timeout_seconds = { type = "integer", default = 7200, min = 1, max = 604800, 
 max_iterations = { type = "integer", default = 3, min = 1, max = 32, doc = "Repair rounds before the loop pauses and asks to stop, extend or accept." }
 repair_tier = { default = "senior", doc = "Routing pool, route table or ordered route tables for each repair agent." }
 decision_session = { type = "string", default = "", doc = "Inbox session for the exhaustion and land asks. Empty pauses an exhausted loop for graph resume, and fails a land whose tier asks." }
-risk_tier = { type = "string", bind = "risk_tier", default = "", doc = "Risk tier that selects the review shape." }
+risk_tier = { type = "string", inherit = true, bind = "risk_tier", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
 kind = { type = "string", bind = "kind", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
 size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty defers the choice: the host measures the pinned reviewed commit against base when the review starts, so the panel fits the work actually written; pass a size to fix it now." }

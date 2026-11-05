@@ -3200,6 +3200,19 @@ fn stage_ids_address_set_paths_on_leaves_and_presets() {
 #[test]
 fn ambient_subject_and_risk_tier_flow_to_children_that_declare_them() {
     let mut layers = Layers::empty();
+    layers.insert("test", "inheriting-child", "stages=[{id='task',prompt='${topic}'}]\n[parameters]\ntopic={type='string',default='child',inherit=true}").unwrap();
+    layers
+        .insert(
+            "test",
+            "inheriting-parent",
+            "stages=[{id='child',preset='inheriting-child'}]\n[parameters]\ntopic='parent'",
+        )
+        .unwrap();
+    let custom = expand(&layers, "inheriting-parent", "brief", &[]).unwrap();
+    assert_eq!(
+        custom.document["nodes"][0]["composite"]["nodes"][0]["prompt"],
+        "parent"
+    );
     layers
         .insert(
             "repo",

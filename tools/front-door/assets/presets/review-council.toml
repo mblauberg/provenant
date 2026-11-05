@@ -39,14 +39,14 @@ nodes = [
 tier = { type = "string", default = "${item.tier}", enum = ["junior", "senior", "principal"], doc = "Route alias for the lens." }
 
 [parameters]
-local_check_policy = { type = "string", default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
-subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Immutable review subject: a commit, a node or the integration head." }
+local_check_policy = { type = "string", inherit = true, default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
+subject = { type = "table", inherit = true, default = { type = "commit", commit = "HEAD" }, doc = "Immutable review subject: a commit, a node or the integration head." }
 worktree = { type = "string", default = "", doc = "Worktree the reviewers may read." }
 base = { type = "string", default = "", doc = "Diff reference the change is measured from, for example origin/main." }
 spec_max_bytes = { type = "integer", default = 16384, min = 1, max = 65536, doc = "Maximum bytes of a file spec included in each review brief." }
 spec = { type = "string", default = "", doc = "Issue number or file the change answers." }
 review_shape = { type = "string", default = "", doc = "Review depth override from routing review shapes (quick, standard, deep)." }
-risk_tier = { type = "string", bind = "risk_tier", default = "", doc = "Risk tier that selects the review shape." }
+risk_tier = { type = "string", inherit = true, bind = "risk_tier", default = "", doc = "Risk tier that selects the review shape." }
 kind = { type = "string", bind = "kind", default = "", doc = "Change kind, for example refactor, integration, or docs." }
 size = { type = "string", default = "", doc = "Review size override: small, medium, or large." }
 min_reviews = { type = "integer", default = 0, min = 0, max = 32, doc = "Lenses that must succeed. Fewer fails the lens group, which stops the council for the chair to substitute a lens or decide. 0 takes the review ladder minimum for risk_tier, at least 1." }

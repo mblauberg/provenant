@@ -478,7 +478,7 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
-const SPEC_KEYS: [&str; 8] = [
+const SPEC_KEYS: [&str; 9] = [
     "type",
     "default",
     "min",
@@ -487,10 +487,9 @@ const SPEC_KEYS: [&str; 8] = [
     "doc",
     "bind",
     "tracker_advice",
+    "inherit",
 ];
 const TYPE_NAMES: [&str; 6] = ["string", "integer", "number", "boolean", "list", "table"];
-/// Parameters every parent hands to a child preset that declares them.
-const AMBIENT: [&str; 3] = ["risk_tier", "subject", "local_check_policy"];
 
 /// A table made only of typed-parameter keys. Other tables are plain values.
 /// A `type` that is not a type name marks a plain value (`{ type = "commit" }`)
@@ -828,6 +827,9 @@ fn flatten_parameters(
         {
             return Err(fail("tracker_advice must be a boolean".into()));
         }
+        if value.get("inherit").is_some_and(|flag| !flag.is_boolean()) {
+            return Err(fail("inherit must be a boolean".into()));
+        }
         for bound in ["min", "max"] {
             if let Some(limit) = value.get(bound)
                 && !limit.is_number()
@@ -1044,7 +1046,9 @@ pub fn expand_with(
     // Request bindings affect how inputs reach parameters, not the graph itself.
     origins.retain(|path, _| {
         !path.ends_with("$scope_read_only")
-            && !((path.ends_with(".bind") || path.ends_with(".tracker_advice"))
+            && !((path.ends_with(".bind")
+                || path.ends_with(".tracker_advice")
+                || path.ends_with(".inherit"))
                 && (path.starts_with("parameters.") || path.contains(".parameters.")))
     });
     if let Some(trusted) = trusted
@@ -2380,10 +2384,19 @@ impl StageBuilder<'_> {
                         .map_err(|error| format!("stage {id}: {error}"))?;
                     }
                 }
-                for key in AMBIENT {
-                    if let Some(value) = self.parameters.get(key)
-                        && config.pointer(&format!("/parameters/{key}")).is_some()
-                        && !passed.iter().any(|passed| passed == key)
+                let inherited: Vec<String> = config
+                    .get("parameters")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(key, spec)| {
+                        (spec.get("inherit").and_then(Value::as_bool) == Some(true))
+                            .then_some(key.clone())
+                    })
+                    .collect();
+                for key in inherited {
+                    if let Some(value) = self.parameters.get(key.as_str())
+                        && !passed.iter().any(|passed| passed == &key)
                     {
                         override_value(
                             &mut config,
