@@ -1874,8 +1874,9 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
         ids,
         provenant_records::ADAPTER_SPECS
             .iter()
-            // Host-native entries delegate to an existing registered provider.
+            // Host-native delegates; the feature-gated fixture is injected by its test.
             .filter(|spec| spec.id != provenant_records::Harness::HostNative)
+            .filter(|spec| spec.name != "fixture-provider")
             .map(|spec| spec.name)
             .collect()
     );

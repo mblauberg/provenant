@@ -8,22 +8,24 @@ use serde::{Deserialize, Serialize};
 /// Latest command output retained by the guardian and adapter.
 pub const COMMAND_OUTPUT_TAIL_BYTES: usize = 65_536;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Harness {
-    Claude,
-    Codex,
-    Cursor,
-    Agy,
-    Opencode,
-    Command,
-    #[serde(rename = "host-native")]
-    HostNative,
-}
-impl Harness {
-    pub fn spec(self) -> &'static AdapterSpec {
-        &ADAPTER_SPECS[self as usize]
-    }
+// Define the wire identity and its facts together so a new adapter has one row.
+macro_rules! adapter_specs {
+    ($( $(#[$cfg:meta])* $variant:ident [$($serde:meta),*] { $($fields:tt)* } ),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        #[non_exhaustive]
+        pub enum Harness {
+            $( $(#[$cfg])* $(#[$serde])* $variant, )*
+        }
+        impl Harness {
+            pub fn spec(self) -> &'static AdapterSpec {
+                &ADAPTER_SPECS[self as usize]
+            }
+        }
+        pub static ADAPTER_SPECS: &[AdapterSpec] = &[
+            $( $(#[$cfg])* AdapterSpec { id: Harness::$variant, $($fields)* }, )*
+        ];
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +143,8 @@ pub struct AdapterSpec {
     pub allowance_windows: &'static [&'static str],
     pub namespaced_models: bool,
     pub catalogue_models_only: bool,
+    /// Require an exact catalogue entry before starting a run.
+    pub require_catalogue_for_launch: bool,
     pub chair_switch: bool,
     /// The local hook can read pending answer offers for this adapter.
     pub local_offer_reader: bool,
@@ -324,9 +328,8 @@ impl AdapterSpec {
 const SKILL_INSTALL_ROOTS: &[&str] = &[".local/share/provenant/v1/releases"];
 
 // Keep the rows in Harness order. CLI installation also uses this order.
-pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
-    AdapterSpec {
-        id: Harness::Claude,
+adapter_specs! {
+    Claude [] {
         name: "claude",
         binary: "claude",
         skills: Some(SkillLocation {
@@ -363,6 +366,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
+        require_catalogue_for_launch: true,
         chair_switch: true,
         local_offer_reader: true,
         session_handoff: true,
@@ -399,8 +403,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             write: true,
         },
     },
-    AdapterSpec {
-        id: Harness::Codex,
+    Codex [] {
         name: "codex",
         binary: "codex",
         skills: Some(SkillLocation {
@@ -441,6 +444,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
+        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         session_handoff: false,
@@ -477,8 +481,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             write: true,
         },
     },
-    AdapterSpec {
-        id: Harness::Cursor,
+    Cursor [] {
         name: "cursor",
         binary: "cursor-agent",
         skills: Some(SkillLocation {
@@ -518,6 +521,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
+        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         session_handoff: false,
@@ -554,8 +558,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             write: true,
         },
     },
-    AdapterSpec {
-        id: Harness::Agy,
+    Agy [] {
         name: "agy",
         binary: "agy",
         skills: Some(SkillLocation {
@@ -599,6 +602,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
+        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         session_handoff: false,
@@ -635,8 +639,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             write: true,
         },
     },
-    AdapterSpec {
-        id: Harness::Opencode,
+    Opencode [] {
         name: "opencode",
         binary: "opencode",
         skills: Some(SkillLocation {
@@ -678,6 +681,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         allowance_windows: &["five_hour", "seven_day", "thirty_day"],
         namespaced_models: true,
         catalogue_models_only: true,
+        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         session_handoff: false,
@@ -714,8 +718,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             write: true,
         },
     },
-    AdapterSpec {
-        id: Harness::Command,
+    Command [] {
         name: "command",
         binary: "",
         skills: None,
@@ -748,6 +751,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
+        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         session_handoff: false,
@@ -786,8 +790,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
     },
     // A named, optional host feature. Preparation delegates to its provider;
     // decoding, accounts and confinement remain owned by that provider.
-    AdapterSpec {
-        id: Harness::HostNative,
+    HostNative [serde(rename = "host-native")] {
         name: "host-native",
         binary: "",
         skills: None,
@@ -820,6 +823,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
+        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         session_handoff: false,
@@ -856,7 +860,78 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             write: true,
         },
     },
-];
+    #[cfg(feature = "registry-fixture")]
+    FixtureProvider [serde(rename = "fixture-provider")] {
+        name: "fixture-provider",
+        binary: "fixture-provider",
+        skills: None,
+        skill_install_roots: &[],
+        default_account_directory: None,
+        registered_account: false,
+        account_config_dir: false,
+        account_directory_prefix: None,
+        shared_account_settings: false,
+        isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::None,
+        local_login: true,
+        login_reprobe: LoginReprobe::None,
+        login_observation: LoginObservation::None,
+        login_check_names_account: false,
+        local_account: ("fixture", "work"),
+        argv_prompt: false,
+        authentication: None,
+        credential_files: &[],
+        credential_profile_sibling: false,
+        credential_host_keychain: false,
+        login_hint: "",
+        login_template: None,
+        auth_markers: &[],
+        shell_prefix: None,
+        context_directory_arg: None,
+        compaction_env: None,
+        allowance_prefix: None,
+        allowance_windows: &[],
+        namespaced_models: false,
+        catalogue_models_only: false,
+        require_catalogue_for_launch: false,
+        chair_switch: false,
+        local_offer_reader: false,
+        session_handoff: false,
+        launch_token_refresh: false,
+        deduplicate_result: false,
+        result_event_usage: false,
+        exit_route: true,
+        stderr_quota: false,
+        model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::None,
+        user_sessions: false,
+        copy_sessions_only: false,
+        quota_probe: QuotaProbeKind::None,
+        quota_credits: false,
+        grouped_quota_pools: false,
+        retain_quota_accounts: false,
+        quota_identity_check: false,
+        peer_bootstrap: false,
+        quota_model_prefix: None,
+        free_account: None,
+        free_pool: None,
+        pacing_keys: None,
+        launch: LaunchCapabilities {
+            model: true,
+            default_network: NetworkAccess::Open,
+            effort: false,
+            resume: false,
+            control: ControlCapabilities {
+                lane: ControlSupport::Unsupported,
+                chair: ControlSupport::Unsupported,
+            },
+            network: ALL_NETWORK,
+            image_input: false,
+            write: false,
+        },
+    },
+}
 
 #[cfg(test)]
 mod tests {
@@ -865,6 +940,9 @@ mod tests {
     #[test]
     fn account_and_session_policies_preserve_adapter_behavior() {
         for spec in ADAPTER_SPECS {
+            if spec.name != "fixture-provider" {
+                assert!(spec.require_catalogue_for_launch, "{}", spec.name);
+            }
             assert_eq!(
                 spec.transcript_account_root,
                 spec.id == Harness::Claude,

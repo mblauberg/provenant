@@ -1334,6 +1334,10 @@ fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
 #[test]
 fn registry_only_provider_resolves_prepares_and_reports_quota()
 -> Result<(), Box<dyn std::error::Error>> {
+    let spec = provenant_records::AdapterSpec::get("fixture-provider")
+        .ok_or("fixture AdapterSpec is missing")?;
+    assert!(spec.local_login);
+    assert_eq!(spec.local_account, ("fixture", "work"));
     registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work")
 }
 
@@ -1374,12 +1378,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
                 );
                 return provenant_providers::cursor::Cursor.prepare(input);
             }
-            if self.0 == "fixture-provider" && input.account.is_none() {
-                return Err(ProviderError::UnknownIdentity);
-            }
-            if let Some(account) = input.account {
-                account.validate_route(input.route)?;
-            }
+            assert!(input.account.is_none(), "fixture uses its local login");
             let mut command_route = input.route.clone();
             command_route.adapter = "command".into();
             command_route.model.clear();
@@ -1519,17 +1518,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     let git_home = base.join("git-home");
     for path in [&home, &state, &project, &assets, &git_home] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
-    }
-    let account_dir = home.join("fixture-account");
-    std::fs::create_dir(&account_dir)?;
-    if adapter_name == "fixture-provider" {
-        std::fs::write(
-            state.join("config.toml"),
-            format!(
-                "schema_version=1\n[domains.accounts.entries.work]\nadapter='fixture-provider'\nlabel='work'\nkey='work'\ndirectory={:?}\n",
-                account_dir.to_str().ok_or("account path")?
-            ),
-        )?;
     }
     let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
