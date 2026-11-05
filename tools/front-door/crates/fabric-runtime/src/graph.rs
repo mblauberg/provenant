@@ -1193,7 +1193,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .composite
                             .as_ref()
                             .and_then(|spec| spec.min_successful),
-                                                source_binding: node.source.clone(),
+                        source_binding: node.source.clone(),
                         source_commit: match &node.source {
                             Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
                             _ => None,
@@ -2834,6 +2834,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &mut route.account,
                     ] {
                         clean(value);
+                    }
+                    // An applied route identifies one selection. Keep its concrete
+                    // model when present, otherwise retain the alias before a name.
+                    // This also bounds the retained selection to four fields.
+                    if route.model.is_some() {
+                        route.alias = None;
+                        route.name = None;
+                    } else if route.alias.is_some() {
+                        route.name = None;
                     }
                     route.extra.clear();
                     if let Some(manifest) = checkpoint.nodes[node_index]

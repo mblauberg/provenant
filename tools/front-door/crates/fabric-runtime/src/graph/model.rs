@@ -1149,7 +1149,6 @@ pub enum GraphStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphRun {
     pub status: GraphStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<GraphOutcome>,
     pub checkpoint: GraphCheckpoint,
     /// Why the last automatic advance failed, as recorded for `status`.
@@ -1159,9 +1158,13 @@ pub struct GraphRun {
 impl Serialize for GraphRun {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut state = serializer
-            .serialize_struct("GraphRun", if self.advance_error.is_some() { 4 } else { 3 })?;
+        let fields =
+            3 + usize::from(self.outcome.is_some()) + usize::from(self.advance_error.is_some());
+        let mut state = serializer.serialize_struct("GraphRun", fields)?;
         state.serialize_field("status", &self.status)?;
+        if let Some(outcome) = &self.outcome {
+            state.serialize_field("outcome", outcome)?;
+        }
         state.serialize_field("checkpoint", &self.checkpoint)?;
         if let Some(error) = &self.advance_error {
             state.serialize_field("advance_error", error)?;

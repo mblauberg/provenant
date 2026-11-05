@@ -567,7 +567,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 extra: Default::default(),
                 children: n.composite_members.clone(),
                 min_successful: n.composite.as_ref().and_then(|spec| spec.min_successful),
-                                source_binding: n.source.clone(),
+                source_binding: n.source.clone(),
                 source_commit: match &n.source {
                     Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
                     _ => None,

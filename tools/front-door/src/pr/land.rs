@@ -1948,9 +1948,10 @@ mod graph_land_tests {
                 false,
                 &provenant_confinement::worktrees::SystemWorkerObserver,
             );
-            assert!(
-                matches!(observed, LandObservation::Pending { reason } if reason.contains("#7 awaits"))
-            );
+            assert!(matches!(
+                observed,
+                LandObservation::Identified { pull_request: 7 }
+            ));
             let calls = std::fs::read_to_string(project.join("calls")).unwrap();
             assert!(rest_calls::rest_only(&calls), "{calls}");
             assert!(!rest_calls::rest_only(&format!(

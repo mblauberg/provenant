@@ -152,6 +152,7 @@ mod tests {
         assert_eq!(by_id("approval").wake_at, "unavailable");
         let run = GraphRun {
             status: GraphStatus::Pending,
+            outcome: None,
             checkpoint,
             advance_error: None,
         };

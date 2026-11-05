@@ -532,8 +532,19 @@ fn node_bound(
             .map(|input| input.outputs.len())
             .sum::<usize>()
             .min(MANIFEST_INPUT_LIMIT);
-        bytes +=
-            canonical_len(&attempt) + 2 * HOST_ID_BYTES + NOTE_BYTES + 1 + 4608 + selections * 768;
+        bytes += canonical_len(&attempt)
+            + 2 * HOST_ID_BYTES
+            + NOTE_BYTES
+            + 1
+            + 1536 // fixed manifest fields, graph OIDs and four applied-route fields
+            + if node.source.is_some() || plans::writer(node) { 512 } else { 0 }
+            + node
+                .depends_on
+                .iter()
+                .take(MANIFEST_INPUT_LIMIT)
+                .map(|id| canonical_len(id) + 1)
+                .sum::<usize>()
+            + selections * 768;
         // A resolved panel can also record this route as a substitution.
         if node.access == AccessMode::ReadOnly
             && node.role.as_deref().is_some_and(|role| {

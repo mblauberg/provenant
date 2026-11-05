@@ -378,19 +378,34 @@ fn checkpoint_collection_keeps_pending_and_recent_graphs() {
         FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
-    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
-    fixture.checkpoint.asks.clear();
+    // Bind the delivery document to its own journal: a resumed journal keeps
+    // the original execution rather than accepting a replacement document.
     let mut delivery = fixture.execution.clone();
+    delivery.document.graph_id = "g-delivery".into();
     delivery.document.delivery = Some(provenant_records::run::DeliveryMode::Pr);
+    let mut delivery_checkpoint = fixture.checkpoint.clone();
+    delivery_checkpoint.graph_id = "g-delivery".into();
+    delivery_checkpoint.asks.clear();
+    let mut journal =
+        FileJournal::open(&root, project, "g-delivery", budget, &cancel, &clock).unwrap();
     journal.bind(delivery).unwrap();
-    journal.save(&fixture.checkpoint).unwrap();
+    journal.save(&delivery_checkpoint).unwrap();
     drop(journal);
     assert_eq!(
         FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
+    let mut journal =
+        FileJournal::open(&root, project, "g-delivery", budget, &cancel, &clock).unwrap();
+    delivery_checkpoint.delivered = true;
+    journal.save(&delivery_checkpoint).unwrap();
+    drop(journal);
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        1
+    );
+    fixture.checkpoint.asks.clear();
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
-    journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(

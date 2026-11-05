@@ -2328,13 +2328,13 @@ pub(crate) mod peer_tests {
                 {"id":"writer", "prompt":"write", "access":"worktree_write", "worktree":fixture.worktree,
                     "route":{"adapter":"codex","model":"gpt-6-luna"}},
                 {"id":"one", "prompt":"review", "access":"read_only", "depends_on":["writer"],
-                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "distinct_from":"dependencies", "distinct_strength":"require",
                     "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
                 {"id":"two", "prompt":"review", "access":"read_only", "depends_on":["writer","one"],
-                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "distinct_from":"dependencies", "distinct_strength":"require",
                     "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
                 {"id":"three", "prompt":"review", "access":"read_only", "depends_on":["writer","two"],
-                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "distinct_from":"dependencies", "distinct_strength":"require",
                     "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
                 {"id":"synthesis", "prompt":"synthesise", "access":"read_only", "depends_on":["one","two","three"],
                     "route":{"adapter":"codex","model":"gpt-6-luna"}}
@@ -2379,10 +2379,15 @@ pub(crate) mod peer_tests {
                     RequestedRoute::Model { model, .. } => model.clone(),
                     RequestedRoute::Review { name, effort, excluded_families, preferred_families, require_distinct, distinct_families, .. } => {
                         assert!(*require_distinct && *distinct_families);
-                        assert_eq!(excluded_families, &["openai"]);
                         let peers: Vec<_> = ["one", "two", "three"].into_iter().take_while(|id| *id != node.id)
                             .flat_map(|id| picked.get(id).into_iter().flatten().map(|(family, _)| family.clone()))
                             .fold(Vec::new(), |mut out, family| { if !out.contains(&family) { out.push(family); } out });
+                        let mut expected = vec!["openai".to_owned()];
+                        expected.extend(peers.iter().cloned());
+                        expected.sort();
+                        let mut excluded = excluded_families.clone();
+                        excluded.sort();
+                        assert_eq!(excluded, expected);
                         assert_eq!(preferred_families, &peers);
                         let prior: Vec<String> = task.profile.overrides.iter().find_map(|value|
                             value.strip_prefix("routing.graph_exclude=")).map(serde_json::from_str).transpose()?.unwrap_or_default();
