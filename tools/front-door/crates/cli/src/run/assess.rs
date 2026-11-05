@@ -191,15 +191,20 @@ pub(super) fn assess_settlement_retry(
         && decoded.reason.as_deref().is_some_and(capacity_reason);
     let quota = decoded.outcome == run::Outcome::QuotaLimited;
     if !(capacity || quota) {
-        let cause = record.applied_route.as_ref().and_then(|route| {
-            let model = ModelId::parse(route.model.as_deref()?).ok()?;
-            let now = WallTime::from_unix_seconds(now_unix_seconds).ok()?;
-            let policy = config
-                .model_policy
-                .effective(&model, route.account_key.as_deref(), now)
-                .policy;
-            failed_result_check(&policy, decoded).then_some(run::PolicyCause::ResultCheck)
-        });
+        let cause = match decoded.outcome {
+            run::Outcome::AuthRequired => Some(run::PolicyCause::AuthRequired),
+            run::Outcome::ModelUnavailable => Some(run::PolicyCause::AdapterUnavailable),
+            run::Outcome::RateLimited => Some(run::PolicyCause::Quota),
+            _ => record.applied_route.as_ref().and_then(|route| {
+                let model = ModelId::parse(route.model.as_deref()?).ok()?;
+                let now = WallTime::from_unix_seconds(now_unix_seconds).ok()?;
+                let policy = config
+                    .model_policy
+                    .effective(&model, route.account_key.as_deref(), now)
+                    .policy;
+                failed_result_check(&policy, decoded).then_some(run::PolicyCause::ResultCheck)
+            }),
+        };
         return run::ResultAssessment {
             cause,
             ..Default::default()
