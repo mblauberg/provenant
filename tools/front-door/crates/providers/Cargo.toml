@@ -22,6 +22,7 @@ provenant-confinement = { workspace = true }
 provenant-quota = { workspace = true }
 
 [features]
+fixture = []
 # Enables the recorder example for collecting redacted replay fixtures.
 recording = ["provenant-os/fixture"]
 

@@ -2075,6 +2075,192 @@ fn user_skills_exposure(
 mod user_skills_tests {
     use super::*;
     #[test]
+    fn user_skills_receipt_matches_each_prepared_adapter() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use provenant_confinement::permissions::{
+            AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions,
+        };
+        use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+        use provenant_core::{AttemptId, ProjectId, WorkScope};
+        use provenant_providers::{LaneRuntime, PrepareInput, Prompt, SetupStep};
+        use provenant_records::{
+            ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness, UserSkillsMode,
+        };
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let token = provenant_providers::claude::OauthToken::fixture()?;
+        let prompt = Prompt::new("fixture".into());
+        for adapter in provenant_records::ADAPTER_SPECS
+            .iter()
+            .filter(|entry| entry.skills.is_some())
+        {
+            let root = base.join(adapter.name);
+            let home = root.join("home");
+            let skills = match adapter.name {
+                "claude" => home.join(".claude/skills"),
+                "codex" => home.join(".agents/skills"),
+                "cursor" => home.join(".cursor/skills"),
+                "agy" => home.join(".gemini/skills"),
+                "opencode" => home.join(".config/opencode/skills"),
+                other => panic!("missing skills fixture for {other}"),
+            };
+            std::fs::create_dir_all(&home)?;
+            let executable = base.join("package/bin/provider");
+            std::fs::create_dir_all(executable.parent().ok_or("package")?)?;
+            std::fs::write(&executable, b"fixture")?;
+            let grant = |path| PathGrant {
+                path,
+                scope: PathScope::Subtree,
+            };
+            let auth = match adapter.name {
+                "codex" | "cursor" => Some("login".into()),
+                "agy" => Some("keychain".into()),
+                _ => None,
+            };
+            let plan = ConfinedPlan::new(PlanRequest {
+                scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
+                codex: CodexPolicy::Clean,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+                permissions: PlanPermissions {
+                    mode: AccessMode::ReadOnly,
+                    read_only: None,
+                    scratch: grant(root.join("scratch")),
+                    private_state: Some(grant(root.join("state"))),
+                    read_roots: vec![grant(root.join("repo"))],
+                    protected_roots: vec![],
+                    secret_roots: vec![],
+                    selected_authentication: auth,
+                    include_continuation: false,
+                    write_roots: vec![],
+                    network: NetworkAccess::Provider,
+                    nested_confinement: false,
+                },
+            })?;
+            let mut route = ResolvedRoute {
+                extra: Default::default(),
+                adapter: adapter.name.into(),
+                model: "fixture".into(),
+                effort: None,
+                catalogue_revision: "fixture".into(),
+                account_key: None,
+                host: "fixture".into(),
+                alternatives: Default::default(),
+                exclusions: vec![],
+                eligibility: RouteEligibility::Eligible,
+                readiness: RouteReadiness::Ready {
+                    extra: Default::default(),
+                    availability_ref: "fixture".into(),
+                    expires_unix_seconds: 100,
+                },
+                confidentiality: RouteConfidentiality {
+                    extra: Default::default(),
+                    evidence_ref: "fixture".into(),
+                },
+                pool_selection: None,
+            };
+            let provider = provenant_providers::REGISTRY
+                .iter()
+                .find(|entry| entry.adapter.id() == adapter.name)
+                .ok_or("adapter")?
+                .adapter;
+            for writer in [false, true] {
+                let mut permissions = plan.permissions().clone();
+                if writer {
+                    permissions.mode = AccessMode::WorktreeWrite(Box::new(serde_json::from_value(
+                        serde_json::json!({
+                            "git_grants_digest": vec![0; 32], "publishing": false,
+                            "common_git_dir": root.join("repo/.git"),
+                            "cargo_cache": {"path": root.join("cache"), "scope": "subtree"}
+                        }),
+                    )?));
+                }
+                let plan = ConfinedPlan::new(PlanRequest {
+                    scope: plan.scope(),
+                    codex: CodexPolicy::Clean,
+                    extensions: ExtensionPolicy::Deny,
+                    agy_state: None,
+                    permissions,
+                })?;
+                for state in ["missing", "discover", "off"] {
+                    if state == "discover" {
+                        std::fs::create_dir_all(&skills)?;
+                        std::fs::write(skills.join("SKILL.md"), b"fixture")?;
+                    }
+                    route.set_user_skills(state != "off");
+                    let input = PrepareInput {
+                        route: &route,
+                        confined: &plan,
+                        prompt: &prompt,
+                        command: None,
+                        continuation: None,
+                        grant_digest: "fixture",
+                        executable: &executable,
+                        home: &home,
+                        user: "fixture".as_ref(),
+                        host_var: &|_| None,
+                        skill_stage_max_bytes: 16 * 1024 * 1024,
+                        account: None,
+                        token: Some(&token),
+                        cwd: &root.join("repo"),
+                        git_context: false,
+                        nonce: [9; 16],
+                        provenant: LaneRuntime {
+                            executable: &executable,
+                            git: &executable,
+                            state: &root,
+                            child_state: &root,
+                            home: &home,
+                            depth: 1,
+                            attempt: AttemptId::from_bytes([7; 16]),
+                            assets: &root,
+                        },
+                    };
+                    let spec = provider.prepare(input)?;
+                    let mode = if state == "off" {
+                        UserSkillsMode::Off
+                    } else {
+                        UserSkillsMode::Discover
+                    };
+                    let receipt =
+                        user_skills_exposure(mode, serde_json::Value::Null, &spec.user_skills);
+                    assert_eq!(
+                        receipt["exposed"],
+                        state == "discover",
+                        "{} {state}",
+                        adapter.name
+                    );
+                    if let Some(stage) = &spec.user_skills.root {
+                        assert!(
+                            spec.profile
+                                .spec
+                                .runtime_reads
+                                .contains(&grant(stage.clone()))
+                        );
+                        assert!(
+                            spec.profile
+                                .spec
+                                .runtime_reads
+                                .iter()
+                                .all(|read| read.path != skills
+                                    && (read.scope != PathScope::Subtree
+                                        || !skills.starts_with(&read.path))),
+                            "{}: {:?}",
+                            adapter.name,
+                            spec.profile.spec.runtime_reads
+                        );
+                        assert!(spec.setup.iter().any(
+                        |step| matches!(step, SetupStep::Symlink { target, .. } if target == stage)
+                    ));
+                    }
+                }
+                std::fs::remove_dir_all(&skills)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn staging_setup_failure_continues_without_skills() {
         let mut staged = provenant_providers::StagedUserSkills::default();
         staged.root = Some(PathBuf::from("/attempt/skills"));

@@ -62,6 +62,12 @@ impl std::fmt::Debug for OauthToken {
 }
 
 impl OauthToken {
+    /// Construct an in-memory token for cross-crate fixtures.
+    #[cfg(feature = "fixture")]
+    pub fn fixture() -> Result<Self, ProviderError> {
+        Self::parse(br#"{"claudeAiOauth":{"accessToken":"fixture","refreshToken":"fixture","expiresAt":4000000000000}}"#, 1)
+    }
+
     #[cfg(test)]
     pub(crate) fn for_account(mut self, key: &str, dir: &Path) -> Self {
         self.account = Some((key.into(), dir.to_owned()));
