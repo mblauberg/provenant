@@ -113,8 +113,9 @@ impl CloudJobStore for AttemptCloudStore<'_> {
 
     fn save(&mut self, job: &RemoteJob) -> Result<(), Error> {
         validate_result(job)?;
-        let previous = self.record()?;
-        if let Some(record) = &previous {
+        let previous = self.record()?.ok_or(Error::Identity)?;
+        {
+            let record = &previous;
             let old = &record.job;
             // Once terminal evidence is durable, a stale observer must not
             // replace it with a later sample or a different terminal result.
@@ -144,6 +145,12 @@ impl CloudJobStore for AttemptCloudStore<'_> {
             ) {
                 return Err(Error::Identity);
             }
+            if old.state == RemoteState::Submitting
+                && !(job.state == RemoteState::Submitting && job.remote_id.is_empty()
+                    || job.state == RemoteState::Running && !job.remote_id.trim().is_empty())
+            {
+                return Err(Error::Identity);
+            }
             if old.remote_id != job.remote_id
                 && !(old.state == RemoteState::Submitting
                     && old.remote_id.is_empty()
@@ -153,22 +160,22 @@ impl CloudJobStore for AttemptCloudStore<'_> {
                 return Err(Error::Identity);
             }
         }
-        let mode = if previous.is_some() {
-            PublishMode::Replace
-        } else {
-            PublishMode::NoReplace
-        };
         let record = Record {
             schema_version: 2,
             job: job.clone(),
-            extra: previous.map(|record| record.extra).unwrap_or_default(),
+            extra: previous.extra,
         };
         let bytes = serde_json::to_vec(&record)?;
         if bytes.len() as u64 > LIMIT {
             return Err(FsError::TooLarge { limit: LIMIT }.into());
         }
         self.directory
-            .atomic_write(OsStr::new(FILE), ".cloud-job-", &bytes, mode)?
+            .atomic_write(
+                OsStr::new(FILE),
+                ".cloud-job-",
+                &bytes,
+                PublishMode::Replace,
+            )?
             .require_durable()?;
         Ok(())
     }
@@ -200,6 +207,14 @@ mod tests {
         let mut store = AttemptCloudStore::new(&directory);
         assert_eq!(store.load()?, None);
         let mut original = job();
+        assert!(matches!(store.save(&original), Err(Error::Identity)));
+        let mut intent = original.clone();
+        intent.remote_id.clear();
+        intent.state = RemoteState::Submitting;
+        store.begin(&intent)?;
+        let mut missing_id = intent.clone();
+        missing_id.state = RemoteState::Running;
+        assert!(matches!(store.save(&missing_id), Err(Error::Identity)));
         store.save(&original)?;
         drop(store);
         let reopened_directory = Directory::open_anchor(temp.path())?;
