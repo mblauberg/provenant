@@ -17,6 +17,7 @@ const CLAIM_BACKOFF: Backoff = Backoff::new(Duration::from_secs(5), 6, Duration:
 
 #[cfg(test)]
 thread_local! {
+    static TEST_FAIL_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TEST_PROCESS_STATE: std::cell::Cell<Option<std::result::Result<provenant_os::pid::ProcessState, std::io::ErrorKind>>> = const { std::cell::Cell::new(None) };
 }
 
@@ -45,6 +46,8 @@ pub(crate) enum Phase {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Journal {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     schema_version: u64,
     scope: Scope,
     phase: Phase,
@@ -66,6 +69,8 @@ struct Journal {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Abandonment {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     reason: String,
     actor: provenant_core::ActorId,
     at: provenant_core::WallTime,
@@ -76,6 +81,7 @@ fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
     let journal = match read_sealed(attempt, FILE, RECORD_LIMIT)? {
         Some(raw) => crate::db::decode::<Journal>(&raw)?,
         None => Journal {
+            extra: Default::default(),
             schema_version: 1,
             scope,
             phase: Phase::Import,
@@ -99,6 +105,10 @@ fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
 }
 
 fn write(attempt: &Directory, journal: &Journal) -> Result<()> {
+    #[cfg(test)]
+    if TEST_FAIL_WRITE.with(|flag| flag.get()) {
+        return Err(std::io::Error::other("injected settlement write failure").into());
+    }
     attempt
         .atomic_write(
             OsStr::new(FILE),
@@ -1560,6 +1570,24 @@ mod tests {
     }
 
     #[test]
+    fn failed_settlement_advance_keeps_lease_and_prior_progress() -> TestResult {
+        let clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let mut driver = Guard::claim(&attempt, scope(), &clock)?.ok_or("initial claim")?;
+        let before = attempt.read_stable(OsStr::new(FILE), RECORD_LIMIT)?;
+        TEST_FAIL_WRITE.with(|flag| flag.set(true));
+        let result = driver.advance(Phase::Publish);
+        TEST_FAIL_WRITE.with(|flag| flag.set(false));
+        assert!(matches!(result, Err(RunError::Io(_))));
+        assert_eq!(driver.phase(), Phase::Import);
+        assert_eq!(attempt.read_stable(OsStr::new(FILE), RECORD_LIMIT)?, before);
+        assert_eq!(read(&attempt, scope())?.phase, Phase::Import);
+        assert!(Guard::claim(&attempt, scope(), &clock)?.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn persisted_settlement_accepts_future_fields_and_still_checks_scope_and_version() -> TestResult
     {
         let temp = tempfile::tempdir()?;
@@ -1586,7 +1614,12 @@ mod tests {
             Ok(())
         };
         persist(&record)?;
-        assert_eq!(read(&attempt, scope())?.phase, Phase::Import);
+        let journal = read(&attempt, scope())?;
+        assert_eq!(journal.phase, Phase::Import);
+        write(&attempt, &journal)?;
+        let round_trip: serde_json::Value =
+            serde_json::from_slice(&attempt.read_stable(OsStr::new(FILE), RECORD_LIMIT)?)?;
+        assert_eq!(round_trip["future_progress"]["value"], true);
         let mut other = scope();
         other.generation += 1;
         assert!(read(&attempt, other).is_err());
@@ -1934,6 +1967,7 @@ impl crate::RunStore {
                     return Err(RunError::Validation("settlement already complete"));
                 }
                 journal.abandonment = Some(Abandonment {
+                    extra: Default::default(),
                     reason: reason.clone(),
                     actor: self.context.actor_id,
                     at: call
