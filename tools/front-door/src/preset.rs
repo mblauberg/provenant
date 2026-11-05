@@ -1629,14 +1629,6 @@ fn interpolate_inner(
     }
 }
 
-fn selected_inputs(deps: &[String], outputs: &Value) -> Value {
-    json!(
-        deps.iter()
-            .map(|node| json!({"node":node,"outputs":outputs}))
-            .collect::<Vec<_>>()
-    )
-}
-
 /// Construct graph selectors from typed output kinds. Serialization happens at
 /// the legacy stage-builder boundary until the builder itself holds nodes.
 fn select_graph_inputs(
@@ -2971,7 +2963,7 @@ impl StageBuilder<'_> {
                 &boundary_deps,
                 &outputs,
                 Some(minimum),
-            ));
+            )?);
             return Ok(vec![id.to_owned()]);
         }
         let items: Vec<Option<Value>> = if let Some(list) = object.get("for_each") {
@@ -3252,7 +3244,7 @@ impl StageBuilder<'_> {
                     .map_err(|error| format!("stage {id}: exports: {error}"))?,
                 };
                 (
-                    composite(&id, children, exports, deps, &outputs, None),
+                    composite(&id, children, exports, deps, &outputs, None)?,
                     true,
                 )
             } else if let Some(parallel) = object.remove("parallel") {
@@ -3356,7 +3348,7 @@ impl StageBuilder<'_> {
                         .transpose()?
                         .unwrap_or(false);
                     let mut group =
-                        composite(&id, children, exports, deps, &outputs, min_successful);
+                        composite(&id, children, exports, deps, &outputs, min_successful)?;
                     if reduce_verdict {
                         group["composite"]["reduce_verdict"] = json!(true);
                     }
@@ -3380,7 +3372,7 @@ impl StageBuilder<'_> {
                     .map_err(|error| format!("stage {id}: exports: {error}"))?,
                 };
                 (
-                    composite(&id, children, exports, deps, &outputs, None),
+                    composite(&id, children, exports, deps, &outputs, None)?,
                     true,
                 )
             } else {
@@ -3478,6 +3470,8 @@ impl StageBuilder<'_> {
                     self.prompt,
                     index as usize,
                 )?;
+                let fallback_kinds =
+                    stage_output_kinds(&format!("{id}.fallback"), &fallback_outputs)?;
                 let mut fallback_dependencies = deps.to_vec();
                 if let Some(extra) = fallback_stage.get("depends_on") {
                     let extra = interpolate(extra, &self.parameters, self.prompt, index as usize)?;
@@ -3498,7 +3492,11 @@ impl StageBuilder<'_> {
                     Some(inputs) => {
                         interpolate(inputs, &self.parameters, self.prompt, index as usize)?
                     }
-                    None => selected_inputs(&fallback_dependencies, &fallback_outputs),
+                    None => serde_json::to_value(select_graph_inputs(
+                        &fallback_dependencies,
+                        &fallback_kinds,
+                    ))
+                    .map_err(|error| format!("node {id}.fallback: inputs: {error}"))?,
                 };
                 let mut fallback_nodes = Vec::new();
                 let ends = self.entry(
@@ -3510,7 +3508,7 @@ impl StageBuilder<'_> {
                 )?;
                 node["fallback_stage"] = json!({
                     "nodes": fallback_nodes,
-                    "exports": selected_inputs(&ends, &fallback_outputs),
+                    "exports": select_graph_inputs(&ends, &fallback_kinds),
                     "depends_on": fallback_dependencies,
                     "inputs": fallback_inputs,
                     "source": fallback_stage.get("source").map(|source| interpolate(source, &self.parameters, self.prompt, index as usize)).transpose()?,
@@ -3580,7 +3578,7 @@ fn composite(
     deps: &[String],
     outputs: &Value,
     min_successful: Option<u64>,
-) -> Value {
+) -> Result<Value, String> {
     let mut spec = json!({"nodes":nodes,"exports":exports});
     if let Some(minimum) = min_successful {
         spec["min_successful"] = json!(minimum);
@@ -3588,9 +3586,11 @@ fn composite(
     let mut node =
         json!({"id":id,"kind":"composite","access":"read_only","depends_on":deps,"composite":spec});
     if !deps.is_empty() {
-        node["inputs"] = selected_inputs(deps, outputs);
+        let kinds = stage_output_kinds(id, outputs)?;
+        node["inputs"] = serde_json::to_value(select_graph_inputs(deps, &kinds))
+            .map_err(|error| format!("node {id}: inputs: {error}"))?;
     }
-    node
+    Ok(node)
 }
 
 fn configured(globals: &provenant_cli::Globals) -> Result<Layers, String> {

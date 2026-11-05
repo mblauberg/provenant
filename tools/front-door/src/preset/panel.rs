@@ -720,7 +720,9 @@ impl StageBuilder<'_> {
             "lens_templates": templates,
         });
         if !deps.is_empty() {
-            node["inputs"] = super::selected_inputs(deps, outputs);
+            let kinds = super::stage_output_kinds(id, outputs)?;
+            node["inputs"] = serde_json::to_value(super::select_graph_inputs(deps, &kinds))
+                .map_err(|error| format!("node {id}: inputs: {error}"))?;
         }
         if let Some(roots) = read_roots {
             node["read_roots"] = roots;
