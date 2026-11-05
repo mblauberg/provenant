@@ -7889,3 +7889,39 @@ fn claude_writer_uses_scratch_when_private_state_is_absent() -> Result<(), Provi
     assert!(launch.setup.contains(&SetupStep::CreateDir(config)));
     Ok(())
 }
+
+#[test]
+fn opencode_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let route = route("opencode", "fixture-model");
+    let prompt = Prompt::new("fixture".into());
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let original = fixture_access_plan(access, None, false);
+        let mut permissions = original.permissions().clone();
+        permissions.private_state = None;
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: original.scope(),
+            permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+        .expect("fixture plan");
+        let launch = opencode::OpenCode.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        let scratch = &plan.permissions().scratch.path;
+        for (key, relative) in [
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_STATE_HOME", "state"),
+        ] {
+            assert!(launch.env.iter().any(|(name, value)| name == key && value == scratch.join(relative).as_os_str()));
+        }
+    }
+    Ok(())
+}

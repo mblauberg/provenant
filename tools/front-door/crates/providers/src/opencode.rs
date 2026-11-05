@@ -137,11 +137,14 @@ fn prepare(
     if plan.selected_authentication.is_some() {
         return Err(ProviderError::UnsupportedPolicy);
     }
-    let private = &plan
-        .private_state
-        .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
-        .path;
+    let private = plan.private_state.as_ref().map_or_else(
+        || {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: OpenCode private state is unavailable; using the attempt scratch directory");
+            &plan.scratch.path
+        },
+        |state| &state.path,
+    );
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "run".as_ref(),

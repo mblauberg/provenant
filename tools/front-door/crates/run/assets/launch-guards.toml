@@ -192,6 +192,11 @@ reason = "A resumed invocation requires its validated continuation identity."
 
 [[guard]]
 site = "providers/src/opencode.rs#prepare"
+boundary = "warning"
+reason = "Absent separate private state warns and uses the already-confined attempt scratch directory for OpenCode configuration."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
 boundary = "unclassified"
 reason = "JSON path conversion and search-path construction still need a tolerant fallback."
 
