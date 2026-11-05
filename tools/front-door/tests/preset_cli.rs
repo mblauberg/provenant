@@ -1795,17 +1795,20 @@ fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
 
 #[test]
 fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
-    golden(
-        "scout-swarm.explain.txt",
-        &explain_text("scout-swarm", &["--plan", "off"])?,
-    )?;
-    golden(
-        "generator-evaluator.explain.txt",
-        &explain_text(
-            "generator-evaluator",
-            &["--set", "parameters.worktree=\".\""],
-        )?,
-    )?;
+    for (name, args, nodes, edges, max_attempts) in [
+        ("scout-swarm", &["--plan", "off"][..], 7, 6, 12),
+        ("generator-evaluator", &["--set", "parameters.worktree=\".\""][..], 3, 3, 3),
+    ] {
+        let text = explain_text(name, args)?;
+        let field = |prefix: &str| text.lines().find_map(|line| line.strip_prefix(prefix));
+        let admission: serde_json::Value = serde_json::from_str(field("Admission: ").ok_or("missing admission")?)?;
+        let inspection: serde_json::Value = serde_json::from_str(field("Inspection: ").ok_or("missing inspection")?)?;
+        assert_eq!(admission["status"], "admitted", "{text}");
+        assert!(text.contains(&format!("Preset selection: {name} (override)")), "{text}");
+        assert_eq!(inspection["nodes"], nodes, "{text}");
+        assert_eq!(inspection["edges"], edges, "{text}");
+        assert_eq!(inspection["max_attempts"], max_attempts, "{text}");
+    }
     Ok(())
 }
 
