@@ -342,6 +342,15 @@ impl GraphLimits {
         }
     }
 
+    /// Maximum number of extension rounds a loop may request at once.
+    pub fn loop_extension_rounds_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "loop_extension_rounds",
+            maximum: 1024,
+            owner: "internal loop expansion safety",
+        }
+    }
+
     /// Bound for transient construction using an internal safety minimum.
     fn composite_bound(name: &'static str, maximum: usize) -> GraphBound<'static> {
         GraphBound {

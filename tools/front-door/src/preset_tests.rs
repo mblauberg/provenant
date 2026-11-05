@@ -2943,6 +2943,36 @@ fn loop_safety_bound_is_shared_by_preset_compile_and_admission() {
 }
 
 #[test]
+fn invalid_loop_round_settings_fail_at_compile_and_admission() {
+    let preset = |rounds, extension| {
+        format!(
+            "stages = [{{ id = 'repair', loop = {{ max_rounds = {rounds}, max_extension_rounds = {extension}, until = 'check', stages = [{{ id = 'check', kind = 'gate', condition = {{ type = 'budget' }} }}] }} }}]\n"
+        )
+    };
+    let mut layers = Layers::empty();
+    layers.insert("test", "valid-loop", &preset(1, 1)).unwrap();
+    let valid = expand(&layers, "valid-loop", "brief", &[])
+        .unwrap()
+        .document;
+    for (name, field, rounds, extension, invalid) in [
+        ("zero-rounds", "max_rounds", 0, 1, 0),
+        ("zero-extension", "max_extension_rounds", 1, 0, 0),
+        ("large-extension", "max_extension_rounds", 1, 1025, 1025),
+    ] {
+        layers
+            .insert("test", name, &preset(rounds, extension))
+            .unwrap();
+        let error = expand(&layers, name, "brief", &[]).unwrap_err();
+        assert!(error.contains("repair") && error.contains(field), "{error}");
+        let mut document = valid.clone();
+        document["nodes"][0]["loop"][field] = json!(invalid);
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(document).unwrap();
+        assert_eq!(document.admit(&layers.graph_limits).unwrap_err(), error);
+    }
+}
+
+#[test]
 fn preset_node_limit_uses_the_host_admission_bound() {
     let mut layers = Layers::empty();
     layers.graph_limits.nodes = 1;

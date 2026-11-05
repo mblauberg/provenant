@@ -1,4 +1,4 @@
 ## Fixes
 ### Pipelines and graphs
 
-- Loop expansion safety refusals now name the bound and its owner consistently before launch (#2878).
+- Invalid loop round settings fail during preset compilation, and loop safety refusals name their bound and owner (#2878).

@@ -101,11 +101,30 @@ pub(super) fn expanded_node_count(
     document: &GraphDocument,
     extensions: &[String],
 ) -> Result<usize, String> {
-    for node in document
-        .nodes
-        .iter()
-        .filter(|node| node.loop_body.is_some())
-    {
+    for node in &document.nodes {
+        let Some(spec) = &node.loop_body else {
+            continue;
+        };
+        if spec.max_rounds == 0 {
+            return Err(format!(
+                "node {}: loop.max_rounds must be positive",
+                node.id
+            ));
+        }
+        if spec.max_extension_rounds == 0 {
+            return Err(format!(
+                "node {}: loop.max_extension_rounds must be positive",
+                node.id
+            ));
+        }
+        if let Some(reason) = crate::config::GraphLimits::loop_extension_rounds_bound()
+            .refusal(spec.max_extension_rounds)
+        {
+            return Err(format!(
+                "node {}: loop.max_extension_rounds: {reason}",
+                node.id
+            ));
+        }
         if let Some(reason) = crate::config::GraphLimits::loop_expansion_rounds_bound()
             .refusal(allowance(node, extensions))
         {
@@ -288,10 +307,6 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             || !node.prompt.is_empty()
             || node.required_verdict.is_some()
             || spec.body.is_empty()
-            || spec.max_rounds == 0
-            || spec.max_rounds > 1024
-            || spec.max_extension_rounds == 0
-            || spec.max_extension_rounds > 1024
             || spec
                 .decision_session
                 .as_ref()

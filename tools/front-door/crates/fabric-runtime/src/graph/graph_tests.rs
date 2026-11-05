@@ -4098,6 +4098,24 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
     );
     assert!(matches!(result, Err(GraphError::Invalid(ref actual)) if actual == &reason));
     assert!(owner.calls.is_empty());
+
+    let mut zero_rounds = document.clone();
+    zero_rounds.nodes[0].loop_body.as_mut().unwrap().max_rounds = 0;
+    let reason = zero_rounds.check_composites(&limits).unwrap_err();
+    assert!(
+        reason.contains("repair") && reason.contains("loop.max_rounds"),
+        "{reason}"
+    );
+    assert_eq!(zero_rounds.admit(&limits).unwrap_err(), reason);
+    let result = advance_with_budget(
+        &zero_rounds,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    );
+    assert!(matches!(result, Err(GraphError::Invalid(ref actual)) if actual == &reason));
+    assert!(owner.calls.is_empty());
 }
 
 #[test]
