@@ -1351,7 +1351,26 @@ mod tests {
         // Its tracking ref exists, but the commit the remote now advertises
         // has never been fetched here.
         run(&["update-ref", "refs/remotes/origin/main", &local.base])?;
+        git(
+            &upstream.executor,
+            &upstream.binary,
+            &upstream.root,
+            &[
+                "-c",
+                "user.name=Moved",
+                "-c",
+                "user.email=moved@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "moved",
+            ],
+        )?;
         let moved = resolve_git_base(&upstream.binary, &upstream.root, "HEAD")?;
+        assert!(run(&["cat-file", "-e", &moved]).is_err());
         let env = repository_environment(&executor, &local.binary, &local.root)?;
         let resolve_base =
             |base: &str| resolve_fetching(&executor, &local.binary, &local.root, base, &env);

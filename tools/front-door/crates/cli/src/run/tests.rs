@@ -6219,6 +6219,34 @@ fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
 }
 
 #[test]
+fn streamed_deltas_stay_joined_without_a_message_boundary() {
+    let route = run::RouteRecord {
+        provider: Some("agy".into()),
+        ..Default::default()
+    };
+    let delta = |text: &str| {
+        json!({"event":"step_update","step_update":{"conversation_id":"s","step_type":"agent_response","text_delta":text}})
+            .to_string()
+    };
+    let stream = [
+        json!({"event":"init","conversation_id":"s","init":{"model":"m"}}).to_string(),
+        delta("VERDICT"),
+        delta(": PA"),
+        delta("SS"),
+    ]
+    .join("\n");
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/unused"),
+        )
+        .unwrap();
+    assert_eq!(decoded.result, "VERDICT: PASS");
+}
+
+#[test]
 fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
     let route = run::RouteRecord {
         provider: Some("codex".into()),

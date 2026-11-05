@@ -174,6 +174,22 @@ pub(super) fn make_outputs_with_upstream(
 }
 
 /// Parse entries individually so the first failure retains its identity and field.
+/// Whether `id` names `finding` in another form: a suffix of its qualified
+/// id, the qualified form of its short id, or the finding it carries forward.
+fn names_finding(finding: &Finding, id: &str) -> bool {
+    let qualifies = |long: &str, short: &str| {
+        long.strip_suffix(short)
+            .is_some_and(|prefix| prefix.ends_with(':'))
+    };
+    qualifies(&finding.id, id)
+        || qualifies(id, &finding.id)
+        || finding
+            .extra
+            .get("propagates")
+            .and_then(serde_json::Value::as_str)
+            == Some(id)
+}
+
 fn parse_findings(
     block: &str,
     upstream: &[Finding],
@@ -237,12 +253,9 @@ fn parse_findings(
         let source = if let Some(exact) = upstream.iter().find(|finding| finding.id == id) {
             Some(exact)
         } else {
-            let mut matches = upstream.iter().filter(|finding| {
-                finding
-                    .id
-                    .strip_suffix(&id)
-                    .is_some_and(|prefix| prefix.ends_with(':'))
-            });
+            let mut matches = upstream
+                .iter()
+                .filter(|finding| names_finding(finding, &id));
             let source = matches.next();
             if matches.any(|finding| Some(&finding.id) != source.map(|item| &item.id)) {
                 return Err(fail(
@@ -1388,6 +1401,22 @@ mod alias_tests {
                     .and_then(|value| value.as_str()),
                 Some("review:F1")
             );
+        }
+    }
+
+    #[test]
+    fn a_disposition_may_name_a_verified_finding_by_the_lens_finding_it_carries() {
+        let verified = serde_json::from_value::<Finding>(serde_json::json!({
+            "id": "F1", "severity": "high", "file": "a.rs", "summary": "s", "status": "open",
+            "propagates": "lenses--spec:F7"
+        }))
+        .unwrap();
+        for named in ["lenses--spec:F1", "lenses--spec:F7"] {
+            let block = format!(
+                r#"{{"schema_version":1,"findings":[{{"id":"{named}","disposition":"rejected","reason":"no"}}]}}"#
+            );
+            let (findings, _, _) = parse_findings(&block, std::slice::from_ref(&verified)).unwrap();
+            assert_eq!(findings[0].id, "F1", "{named}");
         }
     }
 
