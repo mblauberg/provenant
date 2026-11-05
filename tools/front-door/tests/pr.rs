@@ -33,6 +33,43 @@ fn rig() -> Result<TestRig> {
     )?;
     Ok(rig)
 }
+// The fake records argv without the executable. Restrict landing to repository
+// REST endpoints, including when gh options precede the endpoint.
+fn rest_only(calls: &str) -> bool {
+    calls.lines().all(|line| {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("api") {
+            return false;
+        }
+        let mut endpoint = None;
+        while let Some(word) = words.next() {
+            match word {
+                "--include" | "--paginate" | "--slurp" => {}
+                "--method" | "-X" | "-f" | "-F" | "-H" | "--header" => {
+                    if words.next().is_none() {
+                        return false;
+                    }
+                }
+                _ if endpoint.is_none()
+                    && word.strip_prefix("repos/").is_some_and(|path| {
+                        let mut parts = path.split('/');
+                        parts.next().is_some_and(|owner| !owner.is_empty())
+                            && parts.next().is_some_and(|repo| !repo.is_empty())
+                    }) =>
+                {
+                    endpoint = Some(word)
+                }
+                _ => return false,
+            }
+        }
+        endpoint.is_some()
+    })
+}
+fn assert_rest_only(rig: &TestRig) -> Result {
+    let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    assert!(!calls.is_empty() && rest_only(&calls), "{calls}");
+    Ok(())
+}
 fn merge(rig: &TestRig) -> Result<provenant_os::exec::ExecOutcome> {
     rig.command(&["land", "1668", "--head", HEAD, "--json"])
 }
@@ -130,6 +167,7 @@ fn land_reports_a_queued_merge_as_pending_with_its_own_exit_code() -> Result {
     assert_eq!(report["status"], "pending", "{report}");
     assert_eq!(report["data"]["result"], "pending");
     assert_eq!(report["data"]["merged"], false);
+    assert_rest_only(&rig)?;
     Ok(())
 }
 
@@ -207,6 +245,7 @@ fn land_retries_a_rate_limited_merge() -> Result {
     assert_eq!(code(&output), 0, "{report}");
     assert_eq!(report["data"]["merged"], true, "{report}");
     assert_eq!(merge_calls(&rig)?, 2);
+    assert_rest_only(&rig)?;
     Ok(())
 }
 
@@ -227,6 +266,7 @@ fn land_reports_reset_and_exact_retry_when_merge_rate_limit_exhausts_budget() ->
     assert_eq!(report["data"]["merged"], false, "{report}");
     assert_eq!(report["data"]["steps"], serde_json::json!([]));
     assert!(!rig.project.join("merged").exists());
+    assert_rest_only(&rig)?;
     Ok(())
 }
 
@@ -575,7 +615,13 @@ fn land_guards_head_and_uses_rest_merge() -> Result {
         assert!(args.contains("merge_method=merge"), "{args}");
         assert!(!args.contains("author-email"), "{args}");
         assert!(!rig.project.join("watched").exists());
+        assert_rest_only(&rig)?;
     }
+    assert!(!rest_only("pr list --head branch"));
+    assert!(!rest_only("api graphql -f query=x"));
+    assert!(!rest_only(
+        "api repos/{owner}/{repo}/pulls -f query=x graphql"
+    ));
     Ok(())
 }
 

@@ -200,33 +200,44 @@ fn pull_for_branch_with(
     struct PullRequest {
         number: u64,
         state: String,
-        #[serde(rename = "headRefOid")]
-        head: GitOid,
-        #[serde(rename = "isCrossRepository")]
-        cross_repository: bool,
+        merged_at: Option<String>,
+        head: RestBranch,
+        base: RestBranch,
     }
     let bytes = read(&[
         "gh",
-        "pr",
-        "list",
-        "--head",
-        branch,
-        "--state",
-        "all",
-        "--json",
-        "number,state,headRefOid,isCrossRepository",
+        "api",
+        "--paginate",
+        "--slurp",
+        "repos/{owner}/{repo}/pulls?state=all&per_page=100",
     ])?;
-    let mut matching: Vec<PullRequest> = serde_json::from_slice::<Vec<PullRequest>>(&bytes)?
+    let mut matching: Vec<PullRequest> = serde_json::from_slice::<Vec<Vec<PullRequest>>>(&bytes)?
         .into_iter()
-        .filter(|pull| !pull.cross_repository && (pull.state == "OPEN" || pull.head == head))
+        .flatten()
+        .filter(|pull| {
+            pull.head.branch == branch
+                && pull
+                    .head
+                    .repo
+                    .as_ref()
+                    .zip(pull.base.repo.as_ref())
+                    .is_some_and(|(head, base)| {
+                        head.full_name.eq_ignore_ascii_case(&base.full_name)
+                    })
+                && (pull.state == "open" || pull.head.sha == head)
+        })
         .collect();
     match matching.len() {
         1 => {
             let pull = matching.remove(0);
             Ok(BranchPull {
                 number: pull.number,
-                state: pull.state,
-                head: pull.head,
+                state: if pull.merged_at.is_some() {
+                    "MERGED".into()
+                } else {
+                    pull.state.to_uppercase()
+                },
+                head: pull.head.sha,
             })
         }
         0 => Err(format!("no same-repository pull request has head branch {branch}").into()),
@@ -403,13 +414,22 @@ mod branch_pull_tests {
     fn select(pulls: serde_json::Value) -> Result<BranchPull> {
         pull_for_branch_with("123", HEAD.parse().unwrap(), &|argv| {
             // `gh pr view 123` would select pull request #123, not branch 123.
-            assert_eq!(&argv[..5], ["gh", "pr", "list", "--head", "123"]);
-            Ok(serde_json::to_vec(&pulls)?)
+            assert_eq!(
+                argv,
+                [
+                    "gh",
+                    "api",
+                    "--paginate",
+                    "--slurp",
+                    "repos/{owner}/{repo}/pulls?state=all&per_page=100"
+                ]
+            );
+            Ok(serde_json::to_vec(&serde_json::json!([pulls]))?)
         })
     }
 
     fn pull(number: u64, state: &str, head: &str, cross: bool) -> serde_json::Value {
-        serde_json::json!({"number":number, "state":state, "headRefOid":head, "isCrossRepository":cross})
+        serde_json::json!({"number":number, "state":if state == "OPEN" { "open" } else { "closed" }, "merged_at":if state == "MERGED" { Some("2020") } else { None }, "head":{"sha":head,"ref":"123","repo":{"full_name":if cross { "fork/repo" } else { "owner/repo" }}}, "base":{"sha":head,"ref":"main","repo":{"full_name":"owner/repo"}}})
     }
 
     #[test]

@@ -479,8 +479,8 @@ call errors but the PR is merged, the report is landed. With no required
 check, landing also waits 60 seconds after the newest check registers. If
 `land` reports `CI_PENDING`, rerun it with `--wait`.
 
-Landing reads pull request and check data over REST and sends a merge request
-pinned to the verified SHA. Pending checks are sampled initially after 30
+Landing uses REST for pull request resolution, checks and merge requests, which
+are pinned to the verified SHA. Pending checks are sampled initially after 30
 seconds, then with backoff up to four times that interval. Set the host default
 with `domains.pr.land.poll_seconds` in the state-root `config.toml`, or pass
 `--poll SECONDS` for one invocation. `land --explain --json` reports the
