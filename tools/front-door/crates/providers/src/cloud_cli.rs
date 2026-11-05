@@ -208,10 +208,9 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
     }
 }
 
-/// Codex cloud transport. `branch` identifies the repository ref available in the environment.
+/// Codex cloud transport.
 pub struct CodexCloud<C> {
     pub cli: C,
-    pub branch: String,
 }
 
 impl<C: CloudCli> CodexCloud<C> {
@@ -278,7 +277,7 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
                 "--env",
                 &request.job.environment,
                 "--branch",
-                &self.branch,
+                &request.job.branch,
             ],
             Some(&prompt),
         )?;
@@ -354,6 +353,7 @@ mod adapter_tests {
             target: "target".into(),
             environment: "env".into(),
             repository: "repo".into(),
+            branch: "main".into(),
             remote_id: "remote".into(),
             commit: "a".repeat(40),
             requested_model: "model".into(),
@@ -449,7 +449,6 @@ mod adapter_tests {
                 response: "{\"id\":\"task-1\"}".into(),
                 ..Default::default()
             },
-            branch: "main".into(),
         };
         assert_eq!(
             codex

@@ -3282,8 +3282,8 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
             }
             Ok(RemoteState::Finished {
                 result: CloudResult {
-                    job_id: "job".into(),
-                    nonce: "nonce".into(),
+                    job_id: job.job_id.clone(),
+                    nonce: job.nonce.clone(),
                     commit: "a".repeat(40),
                     exit_status: 0,
                     tests_run: vec!["targeted".into()],
@@ -3311,20 +3311,22 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
     input.request.parent_attempt = None;
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
-    let job = RemoteJob {
-        job_id: "job".into(),
-        nonce: "nonce".into(),
-        deadline_unix_seconds: u64::MAX,
+    let target = provenant_confinement::run_config::CloudTarget {
         provider: "fake".into(),
-        target: "target".into(),
         environment: "env".into(),
+        model: "small".into(),
+        effort: None,
         repository: "repository".into(),
-        remote_id: String::new(),
-        commit: "a".repeat(40),
-        requested_model: "small".into(),
-        requested_effort: None,
-        state: RemoteState::Submitting,
+        branch: "main".into(),
+        deadline_seconds: 3600,
     };
+    let job = cloud_owner::prepare_job(id, "target", &target, &"a".repeat(40), &clock)?;
+    assert_eq!(job.job_id, id.to_string());
+    assert_eq!(job.nonce.len(), 32);
+    assert_ne!(
+        job.nonce,
+        cloud_owner::prepare_job(id, "target", &target, &"a".repeat(40), &clock)?.nonce
+    );
     let submitted =
         cloud_store::AttemptCloudStore::with_attempt(&store, id, true, &call, |cloud_store| {
             cloud::submit(&mut Fake { running: true }, cloud_store, job, "run tests")
