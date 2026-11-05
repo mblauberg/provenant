@@ -24,7 +24,8 @@ pub(super) fn expand(
     limits: &crate::config::GraphLimits,
 ) -> Result<GraphDocument, String> {
     let mut expanded = document.clone();
-    let (max_depth, max_nodes) = (limits.expansion_depth, limits.nodes);
+    let depth_bound = crate::config::GraphLimits::composite_depth_bound(limits.expansion_depth);
+    let nodes_bound = crate::config::GraphLimits::composite_nodes_bound(limits.nodes);
     expanded.nodes = children(
         &document.nodes,
         "",
@@ -34,13 +35,13 @@ pub(super) fn expand(
         None,
         &[],
         0,
-        max_depth,
-        max_nodes,
+        &depth_bound,
+        &nodes_bound,
     )?;
     if expanded.nodes.iter().any(|node| node.composite.is_some())
-        && expanded.nodes.len() > max_nodes
+        && let Some(reason) = nodes_bound.refusal(expanded.nodes.len())
     {
-        return Err(format!("composite expansion exceeds {max_nodes} nodes"));
+        return Err(reason);
     }
     Ok(expanded)
 }
@@ -84,11 +85,11 @@ fn children(
     source: Option<&SourceBinding>,
     read_roots: &[String],
     depth: usize,
-    max_depth: usize,
-    max_nodes: usize,
+    depth_bound: &crate::config::GraphBound<'_>,
+    nodes_bound: &crate::config::GraphBound<'_>,
 ) -> Result<Vec<GraphNode>, String> {
-    if depth > max_depth {
-        return Err("composite expansion depth exceeds the limit".into());
+    if let Some(reason) = depth_bound.refusal(depth) {
+        return Err(reason);
     }
     let mut locals = BTreeSet::new();
     for node in nodes {
@@ -231,8 +232,8 @@ fn children(
                 None,
                 &[],
                 depth,
-                max_depth,
-                max_nodes,
+                depth_bound,
+                nodes_bound,
             )?;
         }
         if (node.kind == Some(NodeKind::Composite)) != node.composite.is_some() {
@@ -296,8 +297,8 @@ fn children(
                 node.source.as_ref(),
                 &node.read_roots,
                 depth + 1,
-                max_depth,
-                max_nodes,
+                depth_bound,
+                nodes_bound,
             )?;
             node.composite_members = spec
                 .nodes
@@ -324,8 +325,8 @@ fn children(
             expanded.extend(body);
         }
         expanded.push(node);
-        if composite_bound && expanded.len() > max_nodes {
-            return Err(format!("composite expansion exceeds {max_nodes} nodes"));
+        if composite_bound && let Some(reason) = nodes_bound.refusal(expanded.len()) {
+            return Err(reason);
         }
     }
     Ok(expanded)

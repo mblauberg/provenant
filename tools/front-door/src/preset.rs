@@ -2405,8 +2405,13 @@ impl StageBuilder<'_> {
         nodes: &mut Vec<Value>,
         depth: usize,
     ) -> Result<Vec<String>, String> {
-        if depth > self.layers.graph_limits.composite_expansion_safety_depth() {
-            return Err("composite expansion depth exceeds the limit".into());
+        if let Some(reason) = self
+            .layers
+            .graph_limits
+            .composite_safety_depth_bound()
+            .refusal(depth)
+        {
+            return Err(reason);
         }
         let object = entry.as_object().ok_or("stage entries must be tables")?;
         if object.contains_key("reduce_verdict") && !object.contains_key("parallel") {
@@ -2901,9 +2906,13 @@ impl StageBuilder<'_> {
                 parameters.remove("item");
             }
             let count = self.layers.built_nodes.get().saturating_add(1);
-            let maximum = self.layers.graph_limits.composite_expansion_safety_nodes();
-            if count > maximum {
-                return Err(format!("composite expansion exceeds {maximum} nodes"));
+            if let Some(reason) = self
+                .layers
+                .graph_limits
+                .composite_safety_nodes_bound()
+                .refusal(count)
+            {
+                return Err(reason);
             }
             self.layers.built_nodes.set(count);
             nodes.push(node);

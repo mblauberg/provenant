@@ -2373,7 +2373,7 @@ fn preset_construction_stops_at_the_shared_expansion_safety_bound() {
     layers.insert("test", "wide-composites", "stages=[{id='a',count=32,stages=[{id='b',count=32,stages=[{id='c',count=32,prompt='work'}]}]}]\n").unwrap();
     let error = expand(&layers, "wide-composites", "brief", &[]).unwrap_err();
     assert!(
-        error.contains("composite expansion exceeds 16384 nodes"),
+        error.contains("limits.nodes") && error.contains("composite expansion"),
         "{error}"
     );
 }

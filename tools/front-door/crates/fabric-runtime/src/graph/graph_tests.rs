@@ -3140,6 +3140,27 @@ fn composite_running_status_does_not_consume_an_attempt_slot() {
 }
 
 #[test]
+fn composite_expansion_reports_the_bound_and_owner() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "composite-bound", "nodes": [{
+            "id": "group", "kind": "composite", "access": "read_only",
+            "composite": {"nodes": [
+                {"id": "a", "access": "read_only", "prompt": "a", "route": {"alias": "fixture"}},
+                {"id": "b", "access": "read_only", "prompt": "b", "route": {"alias": "fixture"}}
+            ], "exports": []}
+        }]
+    }))
+    .unwrap();
+    let limits = crate::config::GraphLimits {
+        nodes: 1,
+        ..Default::default()
+    };
+    let reason = composites::expand(&document, &limits).unwrap_err();
+    assert!(reason.contains("limits.nodes"), "{reason}");
+    assert!(reason.contains("composite expansion"), "{reason}");
+}
+
+#[test]
 fn composite_expansion_identifies_duplicate_and_invalid_child_ids() {
     let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"composite-identifiers","nodes":[{

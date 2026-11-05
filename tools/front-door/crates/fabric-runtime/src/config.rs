@@ -317,6 +317,32 @@ impl GraphLimits {
     pub fn nodes_bound(&self) -> GraphBound<'static> {
         self.bound("nodes", self.nodes)
     }
+
+    /// Bounds for the transient composite expansion, including the safety
+    /// minima used before admission checks the configured graph limits.
+    fn composite_bound(name: &'static str, maximum: usize) -> GraphBound<'static> {
+        GraphBound {
+            name,
+            maximum,
+            owner: "composite expansion (domains.fabric.graph.limits and internal safety minima)",
+        }
+    }
+
+    pub fn composite_nodes_bound(maximum: usize) -> GraphBound<'static> {
+        Self::composite_bound("nodes", maximum)
+    }
+
+    pub fn composite_depth_bound(maximum: usize) -> GraphBound<'static> {
+        Self::composite_bound("expansion_depth", maximum)
+    }
+
+    pub fn composite_safety_nodes_bound(&self) -> GraphBound<'static> {
+        Self::composite_nodes_bound(self.composite_expansion_safety_nodes())
+    }
+
+    pub fn composite_safety_depth_bound(&self) -> GraphBound<'static> {
+        Self::composite_depth_bound(self.composite_expansion_safety_depth())
+    }
 }
 fn serialise_concurrency<S: serde::Serializer>(
     value: &Option<usize>,
