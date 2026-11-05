@@ -8,10 +8,11 @@ use crate::claude::Raw;
 use provenant_core::Roots;
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Instant, SystemTime},
 };
@@ -22,6 +23,8 @@ pub const ROW_SCHEMA_VERSION: u64 = 1;
 pub const PROVIDER: &str = "claude";
 const STORE: &str = "ingest.jsonl";
 const LOCK: &str = "ingest.lock";
+const CURSORS: &str = "ingest-cursors.json";
+const CURSOR_CAP: u64 = 32 << 20;
 /// Largest store read or grown. At about 250 bytes a row this is roughly
 /// half a million messages; ingest stops adding rows and says so.
 const STORE_CAP: u64 = 128 << 20;
@@ -166,6 +169,8 @@ pub struct Request<'a> {
     pub since: Option<jiff::Timestamp>,
     /// Stop reading at this instant. Rows read before it are still written.
     pub deadline: Option<Instant>,
+    /// Resume complete transcript lines from durable cursors.
+    pub incremental: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -178,6 +183,8 @@ pub struct AccountCount {
 pub struct Report {
     pub directories: u64,
     pub files: u64,
+    /// Transcript bytes read during this invocation.
+    pub bytes_read: u64,
     pub messages: u64,
     pub added: u64,
     pub already_present: u64,
@@ -337,6 +344,62 @@ fn locate(
     Ok(())
 }
 
+/// Cursors contain only an irreversible path digest, file identity and a digest
+/// of the bytes immediately before the offset. No transcript text is stored.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Cursor {
+    device: u64,
+    inode: u64,
+    offset: u64,
+    tail: String,
+}
+
+fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.dev(), meta.ino())
+}
+
+fn digest(bytes: &[u8]) -> String {
+    provenant_core::hex(&Sha256::digest(bytes))
+}
+
+fn cursor_key(transcript: &Transcript) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    digest(transcript.path.as_os_str().as_bytes())
+}
+
+fn tail_digest(file: &mut std::fs::File, offset: u64) -> std::io::Result<String> {
+    let length = offset.min(128) as usize;
+    file.seek(SeekFrom::Start(offset - length as u64))?;
+    let mut bytes = vec![0; length];
+    file.read_exact(&mut bytes)?;
+    Ok(digest(&bytes))
+}
+
+#[derive(Serialize, Deserialize)]
+struct CursorStore {
+    store_digest: String,
+    files: BTreeMap<String, Cursor>,
+}
+
+fn read_cursors(directory: &Directory, store: &[u8]) -> BTreeMap<String, Cursor> {
+    let Ok(file) = directory.open_read(OsStr::new(CURSORS)) else {
+        return BTreeMap::new();
+    };
+    let mut bytes = Vec::new();
+    if file.metadata().map_or(true, |meta| meta.size > CURSOR_CAP)
+        || file.take(CURSOR_CAP + 1).read_to_end(&mut bytes).is_err()
+        || bytes.len() as u64 > CURSOR_CAP
+    {
+        return BTreeMap::new();
+    }
+    serde_json::from_slice::<CursorStore>(&bytes)
+        .ok()
+        .filter(|cursor| cursor.store_digest == digest(store))
+        .map(|cursor| cursor.files)
+        .unwrap_or_default()
+}
+
 /// Real time is sampled only here, for a request's wall budget.
 #[allow(clippy::disallowed_methods)]
 fn expired(deadline: Option<Instant>) -> bool {
@@ -349,7 +412,9 @@ fn read_transcript(
     deadline: Option<Instant>,
     messages: &mut BTreeMap<(String, String), Pending>,
     report: &mut Report,
-) -> Result<(), ()> {
+    cursor: Option<&Cursor>,
+    incremental: bool,
+) -> Result<Cursor, ()> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -357,21 +422,38 @@ fn read_transcript(
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let file = options.open(&transcript.path).map_err(|_| ())?;
+    let mut file = options.open(&transcript.path).map_err(|_| ())?;
     let meta = file.metadata().map_err(|_| ())?;
     if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
         return Err(());
     }
+    let (device, inode) = identity(&meta);
+    let start = cursor
+        .filter(|cursor| {
+            cursor.device == device
+                && cursor.inode == inode
+                && cursor.offset <= meta.len()
+                && tail_digest(&mut file, cursor.offset).ok().as_ref() == Some(&cursor.tail)
+        })
+        .map_or(0, |cursor| cursor.offset);
+    file.seek(SeekFrom::Start(start)).map_err(|_| ())?;
     // The file can grow while read; bound the bytes taken, not only its size.
     let mut reader = BufReader::with_capacity(
         1 << 20,
-        file.take(meta.len().saturating_add(1 << 20).min(MAX_FILE_BYTES)),
+        file.take(
+            meta.len()
+                .saturating_add(1 << 20)
+                .min(MAX_FILE_BYTES)
+                .saturating_sub(start),
+        ),
     );
+    let mut offset = start;
+    let mut complete = start;
     let mut line = Vec::new();
-    loop {
+    'read_loop: loop {
         if expired(deadline) {
             report.deadline_reached = true;
-            return Ok(());
+            break;
         }
         line.clear();
         let read = (&mut reader)
@@ -379,22 +461,38 @@ fn read_transcript(
             .read_until(b'\n', &mut line)
             .map_err(|_| ())?;
         if read == 0 {
-            return Ok(());
+            break;
         }
+        offset += read as u64;
+        report.bytes_read += read as u64;
         if line.len() > MAX_LINE_BYTES && line.last() != Some(&b'\n') {
             // Drain the rest of an oversized line without keeping it.
             let mut sink = Vec::new();
             loop {
+                if expired(deadline) {
+                    report.deadline_reached = true;
+                    break 'read_loop;
+                }
                 sink.clear();
                 let drained = (&mut reader)
                     .take(1 << 20)
                     .read_until(b'\n', &mut sink)
                     .map_err(|_| ())?;
+                offset += drained as u64;
+                report.bytes_read += drained as u64;
                 if drained == 0 || sink.last() == Some(&b'\n') {
+                    if sink.last() == Some(&b'\n') {
+                        complete = offset;
+                    }
                     break;
                 }
             }
             continue;
+        }
+        if line.last() == Some(&b'\n') {
+            complete = offset;
+        } else if incremental {
+            break;
         }
         // Most lines are prompts and tool results; only an assistant record
         // carries a `usage` object.
@@ -459,6 +557,14 @@ fn read_transcript(
             },
         );
     }
+    let mut file = reader.into_inner().into_inner();
+    let tail = tail_digest(&mut file, complete).map_err(|_| ())?;
+    Ok(Cursor {
+        device,
+        inode,
+        offset: complete,
+        tail,
+    })
 }
 
 fn row(session: String, message: String, pending: Pending) -> Row {
@@ -529,6 +635,19 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     if request.provider.is_some_and(|p| p != PROVIDER) {
         return Ok(report);
     }
+    let directory = Directory::open_anchor(roots.state.as_path())?;
+    let _lock = directory
+        .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => IngestError::Busy,
+            other => other.into(),
+        })?;
+    let existing = read_store(&directory)?;
+    let mut cursors = if request.incremental {
+        read_cursors(&directory, &existing)
+    } else {
+        BTreeMap::new()
+    };
     let cutoff = request.since.map(|since| {
         SystemTime::UNIX_EPOCH
             + std::time::Duration::from_secs(since.as_second().max(0).unsigned_abs())
@@ -559,28 +678,29 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             break;
         }
         report.files += 1;
-        if read_transcript(
+        let key = cursor_key(transcript);
+        match read_transcript(
             transcript,
-            request.since,
+            if request.incremental {
+                None
+            } else {
+                request.since
+            },
             request.deadline,
             &mut messages,
             &mut report,
-        )
-        .is_err()
-        {
-            report.unreadable_files += 1;
+            cursors.get(&key),
+            request.incremental,
+        ) {
+            Ok(cursor) if request.incremental => {
+                cursors.insert(key, cursor);
+            }
+            Ok(_) => {}
+            Err(()) => report.unreadable_files += 1,
         }
     }
     report.messages = messages.len() as u64;
 
-    let directory = Directory::open_anchor(roots.state.as_path())?;
-    let _lock = directory
-        .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
-        .map_err(|error| match error {
-            FsError::LockTimeout { .. } => IngestError::Busy,
-            other => other.into(),
-        })?;
-    let existing = read_store(&directory)?;
     let (current, kept) = split(&existing);
     let mut known: BTreeMap<(String, String), Row> = current
         .into_iter()
@@ -588,6 +708,12 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         .collect();
     let mut fresh: Vec<Row> = Vec::new();
     let mut changed = false;
+    for row in known.values_mut() {
+        if row.source == Source::Lane && request.chair_sessions.contains(&row.session) {
+            row.source = Source::Chair;
+            changed = true;
+        }
+    }
     for ((session, message), pending) in messages {
         let account = report.accounts.entry(pending.account.clone()).or_default();
         if let Some(previous) = known.get_mut(&(session.clone(), message.clone())) {
@@ -647,6 +773,23 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         directory
             .atomic_write(OsStr::new(STORE), ".ingest-", &out, PublishMode::Replace)?
             .require_durable()?;
+    }
+    if request.incremental && !report.store_full {
+        let bytes = serde_json::to_vec(&CursorStore {
+            store_digest: digest(if changed { &out } else { &existing }),
+            files: cursors,
+        })
+        .map_err(std::io::Error::other)?;
+        if bytes.len() as u64 <= CURSOR_CAP {
+            directory
+                .atomic_write(
+                    OsStr::new(CURSORS),
+                    ".ingest-cursors-",
+                    &bytes,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+        }
     }
     Ok(report)
 }

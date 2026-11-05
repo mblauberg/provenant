@@ -142,6 +142,7 @@ pub fn ingest_native(
             provider,
             since,
             deadline,
+            incremental: deadline.is_some(),
         },
     )
     .map_err(|error| error.to_string())
@@ -152,7 +153,7 @@ pub fn ingest_native(
 const HOOK_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Best-effort ingest at chair session start and turn end.
-/// The hook has a five-second host timeout, so only the last day is read, the
+/// The hook has a five-second host timeout, so only files modified in the last day are read; the
 /// read stops at a three-second wall deadline, and the rows read so far are
 /// still written. Every failure is ignored: a slow transcript must never stop
 /// the chair.

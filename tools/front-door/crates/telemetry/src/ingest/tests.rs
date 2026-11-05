@@ -60,6 +60,7 @@ impl Fixture {
                 provider: None,
                 since: since.map(str::parse).transpose()?,
                 deadline: None,
+                incremental: false,
             },
         )?)
     }
@@ -227,6 +228,7 @@ fn since_and_provider_narrow_the_import() -> Result {
             provider: Some("codex"),
             since: None,
             deadline: None,
+            incremental: false,
         },
     )?;
     assert_eq!(none.added, 0);
@@ -427,10 +429,105 @@ fn an_expired_deadline_reads_nothing_and_keeps_the_store() -> Result {
             provider: None,
             since: None,
             deadline: Some(Instant::now()),
+            incremental: false,
         },
     )?;
     assert!(report.deadline_reached);
     assert_eq!((report.files, report.added), (0, 0));
     assert_eq!(std::fs::read(&store)?, before);
+    Ok(())
+}
+
+#[test]
+fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Result {
+    use std::io::Write;
+    let f = Fixture::new()?;
+    let at = "2026-10-01T00:00:00Z";
+    let path = "projects/p/s1.jsonl";
+    let first = message("m1", at, 10, 0, 0, 1);
+    f.write("claude", path, &first)?;
+    let dirs = [ConfigDir {
+        account: "unattributed".into(),
+        path: f.dir("claude"),
+    }];
+    let chairs = BTreeSet::new();
+    // A recently modified long session may contain messages older than the
+    // hook's file cutoff; its cursor must not discard them.
+    let since = "2026-10-02T00:00:00Z".parse()?;
+    let run = || {
+        ingest(
+            &f.roots,
+            &Request {
+                dirs: &dirs,
+                chair_sessions: &chairs,
+                provider: None,
+                since: Some(since),
+                deadline: None,
+                incremental: true,
+            },
+        )
+    };
+    assert_eq!(run()?.added, 1);
+    assert_eq!(run()?.bytes_read, 0);
+    let update = message("m1", at, 10, 0, 0, 9);
+    let second = message("m2", at, 2, 0, 0, 3);
+    let split = second.len() / 2;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(f.dir("claude").join(path))?;
+    file.write_all(update.as_bytes())?;
+    file.write_all(&second.as_bytes()[..split])?;
+    let partial = run()?;
+    assert_eq!((partial.added, partial.already_present), (0, 1));
+    assert_eq!(read_rows(&f.roots, &RowFilter::default())?[0].output, 9);
+    file.write_all(&second.as_bytes()[split..])?;
+    let appended = run()?;
+    assert_eq!(appended.added, 1);
+    assert_eq!(appended.bytes_read, second.len() as u64);
+    assert_eq!(run()?.bytes_read, 0);
+    drop(file);
+    // Replacing a transcript invalidates its cursor, even when it grows.
+    let replacement = message("m3", at, 5, 0, 0, 7);
+    std::fs::remove_file(f.dir("claude").join(path))?;
+    f.write("claude", path, &replacement)?;
+    assert_eq!(run()?.added, 1);
+    assert_eq!(read_rows(&f.roots, &RowFilter::default())?.len(), 3);
+    // A removed store must not leave valid cursors pointing past its contents.
+    std::fs::remove_file(f.base.join("state/ingest.jsonl"))?;
+    assert_eq!(run()?.added, 1);
+    let cursor = std::fs::read_to_string(f.base.join("state/ingest-cursors.json"))?;
+    assert!(!cursor.contains("private"));
+    assert!(!cursor.contains("projects"));
+    Ok(())
+}
+
+#[test]
+fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", "2026-10-01T00:00:00Z", 1, 0, 0, 1),
+    )?;
+    let dirs = [ConfigDir {
+        account: "a".into(),
+        path: f.dir("claude"),
+    }];
+    let chairs = BTreeSet::new();
+    let recorded_chairs = BTreeSet::from(["s1".to_owned()]);
+    let request = |chairs| Request {
+        dirs: &dirs,
+        chair_sessions: chairs,
+        provider: None,
+        since: None,
+        deadline: None,
+        incremental: true,
+    };
+    ingest(&f.roots, &request(&chairs))?;
+    assert_eq!(ingest(&f.roots, &request(&recorded_chairs))?.bytes_read, 0);
+    assert_eq!(
+        read_rows(&f.roots, &RowFilter::default())?[0].source,
+        Source::Chair
+    );
     Ok(())
 }
