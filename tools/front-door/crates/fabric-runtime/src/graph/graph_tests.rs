@@ -4038,6 +4038,50 @@ fn composite_expansion_reports_the_bound_and_owner() {
 }
 
 #[test]
+fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "composite-depth", "nodes": [{
+            "id": "outer", "kind": "composite", "access": "read_only",
+            "composite": {"nodes": [{
+                "id": "inner", "kind": "composite", "access": "read_only",
+                "composite": {"nodes": [{
+                    "id": "member", "access": "read_only", "prompt": "work",
+                    "route": {"alias": "fixture"}
+                }], "exports": []}
+            }], "exports": []}
+        }]
+    }))
+    .unwrap();
+    let limits = crate::config::GraphLimits {
+        expansion_depth: 1,
+        ..Default::default()
+    };
+    let boundary = crate::config::GraphLimits {
+        expansion_depth: 2,
+        ..limits.clone()
+    };
+    assert!(document.check_composites(&boundary).is_ok());
+    assert!(document.admit(&boundary).is_ok());
+    let reason = limits.expansion_depth_bound().refusal(2).unwrap();
+    assert_eq!(document.check_composites(&limits).unwrap_err(), reason);
+    assert_eq!(document.admit(&limits).unwrap_err(), reason);
+    let mut owner = FakeOwner::default();
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.pause_reason.as_deref(),
+        Some(reason.as_str())
+    );
+    assert!(owner.calls.is_empty());
+}
+
+#[test]
 fn composite_expansion_identifies_duplicate_and_invalid_child_ids() {
     let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"composite-identifiers","nodes":[{

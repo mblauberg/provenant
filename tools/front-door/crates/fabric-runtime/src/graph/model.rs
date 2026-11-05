@@ -345,7 +345,9 @@ pub(super) fn expansion_safety_limits(
 ) -> crate::config::GraphLimits {
     crate::config::GraphLimits {
         nodes: limits.composite_expansion_safety_nodes(),
-        expansion_depth: limits.composite_expansion_safety_depth(),
+        // Composite nesting is itself governed by the host's configured
+        // expansion depth. Only the construction guard uses a safety floor.
+        expansion_depth: limits.expansion_depth,
         edges: usize::MAX,
         routes_per_node: u16::MAX as usize,
         node_prompt_bytes: usize::MAX,

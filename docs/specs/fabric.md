@@ -470,7 +470,7 @@ Parallel groups may declare `min_successful`, `zero_minimum`, `reduce_verdict`
 and `export_first` on the group; the [preset runbook](../runbooks/presets.md#composition-rules)
 describes their accepted values.
 Preset compilation uses the runtime's composite expansion and loop count when
-it checks the host node bound, so admission counts the same graph.
+it checks the host depth and node bounds, so admission checks the same graph.
 
 Bundled `scout-swarm`, `generator-evaluator`, `review`, `big-batch`,
 `scope-then-run` and `deliver` express scouting, implementation with

@@ -67,9 +67,9 @@ source `parameter`, an `equals_any` list, a `value` and an `otherwise` value.
 Interpolation uses the matching value when the destination parameter is absent;
 an explicitly supplied parameter takes precedence.
 
-Preset compilation expands composites and counts loop rounds using the runtime's
-calculation before checking the configured host graph node limit. A refusal names
-the limit and its configuration owner.
+Preset compilation checks composite nesting against the configured host depth
+limit, then counts expanded composites and loop rounds against the node limit.
+It uses the runtime's calculations; a refusal names the limit and its owner.
 
 Typed parameters without defaults are required. Missing-value errors name the
 parameter; `--set` and parameter files satisfy it and retain type validation.

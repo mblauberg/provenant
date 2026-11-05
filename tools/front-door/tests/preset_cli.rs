@@ -1616,7 +1616,7 @@ stages = [
     std::fs::write(
         presets.join("limits.toml"),
         format!(
-            "stages = [{{ id = 'group', stages = [{{ id = '{member}', prompt = 'work' }}], exports = [{{ node = '{member}', outputs = ['result'] }}] }}]\n"
+            "stages = [{{ id = 'group', stages = [{{ id = 'inner', stages = [{{ id = '{member}', prompt = 'work' }}] }}] }}]\n"
         ),
     )?;
     std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
@@ -1624,7 +1624,7 @@ stages = [
     assert!(valid.status.success());
     let valid: serde_json::Value = serde_json::from_slice(&valid.stdout)?;
     let graph = valid["data"]["graph"].clone();
-    for case in ["nodes", "id"] {
+    for case in ["nodes", "depth", "id"] {
         let mut candidate = graph.clone();
         let mut limits = provenant_fabric_runtime::config::GraphLimits::default();
         if case == "nodes" {
@@ -1633,6 +1633,12 @@ stages = [
                 state.join("config.toml"),
                 "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 1\n",
             )?;
+        } else if case == "depth" {
+            limits.expansion_depth = 1;
+            std::fs::write(
+                state.join("config.toml"),
+                "schema_version = 1\n[domains.fabric.graph.limits]\nexpansion_depth = 1\n",
+            )?;
         } else {
             std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
             let parent = "a".repeat(32);
@@ -1640,7 +1646,7 @@ stages = [
             std::fs::write(
                 presets.join("limits.toml"),
                 format!(
-                    "stages = [{{ id = '{parent}', stages = [{{ id = '{member}', prompt = 'work' }}], exports = [{{ node = '{member}', outputs = ['result'] }}] }}]\n"
+                    "stages = [{{ id = '{parent}', stages = [{{ id = 'inner', stages = [{{ id = '{member}', prompt = 'work' }}] }}] }}]\n"
                 ),
             )?;
         }
