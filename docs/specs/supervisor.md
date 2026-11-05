@@ -43,7 +43,8 @@ is preserved without accepting worktree-level configuration overrides. Batch
 landing passes its facts session into local follow-up and discards verified
 checkout handles around command-controlled mutations. Landing revalidates those
 handles before reading their common or private Git paths instead of rediscovering
-the paths with separate Git commands.
+the paths with separate Git commands. Target-seed builds resolve their pinned
+remote-tracking commit through the same bounded read-only facts boundary.
 
 ### Worktree census sessions
 

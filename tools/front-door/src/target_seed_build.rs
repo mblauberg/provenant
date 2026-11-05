@@ -117,19 +117,23 @@ fn checkout_commit(project: &Path, checkout: &Path, commit: &str) -> Result<()> 
 
 /// The pinned remote-tracking commit every seed build starts from.
 fn origin_main(project: &Path) -> Result<String> {
-    let output = git(
-        project,
-        &[
-            "rev-parse".into(),
-            "--verify".into(),
-            "refs/remotes/origin/main^{commit}".into(),
-        ],
-    )?;
-    let commit = String::from_utf8(output)?.trim().to_owned();
-    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(io::Error::other("invalid origin/main commit").into());
-    }
-    Ok(commit)
+    use provenant_confinement::{
+        repo::GitRefName,
+        utility::{UtilityBudget, UtilityRuntime},
+        worktrees::RepoFacts,
+    };
+    let executable =
+        provenant_os::git::git_executable().ok_or_else(|| io::Error::other("git unavailable"))?;
+    let utility = UtilityRuntime::read_only(executable)?;
+    let executor = SystemExecutor::new(1)?;
+    let budget = UtilityBudget::bounded(Duration::from_secs(4 * 60 * 60))?;
+    let cancel = provenant_core::CancelToken::new();
+    let repo = utility.open_read_repo(&executor, project, budget, &cancel)?;
+    let facts = RepoFacts::default();
+    let reference = GitRefName::remote_tracking("origin/main")?;
+    Ok(facts
+        .resolve_read_commit(&repo, &executor, &utility, budget, reference, &cancel)?
+        .to_string())
 }
 
 /// What a refresh did.
@@ -447,6 +451,7 @@ mod checkout_tests {
         let local = String::from_utf8(git(&project, &["rev-parse".into(), "main".into()]).unwrap())
             .unwrap();
         assert_ne!(pinned, local.trim());
+        assert_eq!(origin_main(&project).unwrap(), pinned);
         checkout_commit(&project, &checkout, pinned).unwrap();
         assert_eq!(fs::read_to_string(checkout.join("file")).unwrap(), "second");
         let actual =
