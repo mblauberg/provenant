@@ -341,6 +341,29 @@ fn launches(cause: PolicyCause) -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let cleanup =
         provenant_supervisor::fixture::ProcessCleanupGuard::new(context.state_root.as_path());
+    let mut owner_context = context.clone();
+    owner_context.project_id = provenant_core::ProjectId::from_bytes([112; 16]);
+    let owner_store =
+        RunStore::open(&owner_context, &call).map_err(|e| format!("open owner: {e}"))?;
+    let mut owner = crate::tests::input();
+    owner.run_id = provenant_core::RunId::from_bytes([111; 16]);
+    owner.operation_id = "settled-owner".parse()?;
+    owner.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([110; 16]);
+    owner_store
+        .create(&owner, &call)
+        .map_err(|e| format!("create owner: {e}"))?;
+    owner_store
+        .withdraw(
+            owner.attempts[0].attempt_id,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
+            Outcome::Cancelled,
+            "fixture",
+            clock.wall_now()?,
+            &call,
+        )
+        .map_err(|e| format!("withdraw owner: {e}"))?;
     let mut input = crate::tests::input();
     input.created_at = clock.wall_now()?;
     input.request.tasks[0].writer = Some(WriterRequest {
@@ -390,6 +413,11 @@ fn launches(cause: PolicyCause) -> TestResult {
         &call,
     )?;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
+    launch.snapshot(
+        context.state_root.as_path(),
+        &attempt,
+        RunStore::scope(&old),
+    )?;
     // A launched predecessor's guardian leaves a custody lock after release.
     let custody = attempt.try_lock(
         std::ffi::OsStr::new("custody.lock"),
