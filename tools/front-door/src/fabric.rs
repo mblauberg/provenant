@@ -5666,12 +5666,53 @@ fn exact_route_refused(model: &str, excluded_families: &[String], require_distin
             .is_none_or(|family| excluded_families.contains(&family))
 }
 
+fn restore_scratch_source(
+    directory: &Path,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> Result<(), FacadeError> {
+    let directory = provenant_os::fs::Directory::open_anchor(directory)
+        .map_err(|_| FacadeError::io("access graph scratch"))?;
+    match directory.metadata_at(name, false) {
+        Ok(_) => Ok(()),
+        Err(error) if error.is_not_found() => {
+            match directory.atomic_write(
+                name,
+                ".graph-recover.",
+                bytes,
+                provenant_os::fs::PublishMode::NoReplace,
+            ) {
+                Ok(publication) => publication
+                    .require_durable()
+                    .map_err(|_| FacadeError::io("restore graph scratch")),
+                Err(error) if error.is_exists() => Ok(()),
+                Err(_) => Err(FacadeError::io("restore graph scratch")),
+            }
+        }
+        Err(_) => Err(FacadeError::io("access graph scratch")),
+    }
+}
+
 impl Factory {
     /// Read a project-local graph document through the confined, bounded helpers.
     fn read_graph_document(
         &self,
         path: &Path,
     ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
+        Ok(self.read_graph_document_bytes(path)?.0)
+    }
+
+    fn read_graph_document_bytes(
+        &self,
+        path: &Path,
+    ) -> Result<
+        (
+            provenant_fabric_runtime::graph::GraphDocument,
+            PathBuf,
+            Vec<u8>,
+        ),
+        FacadeError,
+    > {
         let path = provenant_os::fs::canonicalize(path)
             .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
         if !path.starts_with(&self.cwd) {
@@ -5680,7 +5721,8 @@ impl Factory {
         let bytes = provenant_os::fs::FileHandle::open_source(&path)
             .and_then(|mut file| file.read_bounded(8_388_608))
             .map_err(|_| FacadeError::io("access graph journal"))?;
-        decode_graph_document(&bytes)
+        let document = decode_graph_document(&bytes)?;
+        Ok((document, path, bytes))
     }
 
     /// The one selector resolver for graph status, cancel and resume: a graph
@@ -5822,6 +5864,7 @@ impl Factory {
             .validate_input(provenant_core::WaitTransport::Cli)
             .map_err(|error| FacadeError::invalid(error.to_string()))?;
         let resume = matches!(&input, GraphInput::Resume { .. });
+        let mut scratch_source = None;
         let document = match &input {
             GraphInput::Run { document, .. } | GraphInput::Resume { document, .. } => {
                 let scratch = match prepared_scratch {
@@ -5852,7 +5895,14 @@ impl Factory {
                     } else {
                         self.cwd.join(document)
                     };
-                    self.read_graph_document(&path)?
+                    let (document, source, bytes) = self.read_graph_document_bytes(&path)?;
+                    if let Ok(graphs) = provenant_os::fs::canonicalize(&scratch.join("graphs"))
+                        && source.parent() == Some(graphs.as_path())
+                        && let Some(name) = source.file_name()
+                    {
+                        scratch_source = Some((graphs, name.to_owned(), bytes));
+                    }
+                    document
                 };
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
@@ -6044,6 +6094,12 @@ impl Factory {
         )
         .map_err(|_| FacadeError::io("access graph journal"))?;
         if let Some(document) = &document {
+            // GC and admission hold this graph's lock. If collection removed
+            // the source after it was read, restore the exact bytes before
+            // publishing a new pending checkpoint or launching a node.
+            if let Some((directory, name, bytes)) = &scratch_source {
+                restore_scratch_source(directory, name, bytes)?;
+            }
             let integration_base = if journal.load(id).map_err(graph_journal_error)?.is_some() {
                 journal.integration_base()
             } else if let Some(branch) = &document.integration_branch {

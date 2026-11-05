@@ -1573,9 +1573,9 @@ checkout's scratch root (never a symlink), so briefs there stay readable from a
 linked worktree. The graph path error and CLI help name
 `.provenant/scratch/graphs`. Scratch is disposable operator data, separate from
 authoritative run state; expiry is owned by GC rather than graph execution.
-When terminal checkpoint retention expires, GC also removes matching
-content-addressed preset documents. Operator-named documents are retained.
-A preset republishes its document if collection races with admission.
+When terminal checkpoint retention expires, GC also removes matching scratch
+graph documents. Changed and unrelated documents are retained. A preset
+republishes its document if collection races with admission.
 
 Foreground preset waits prepare scratch and retain the graph document once
 before the first poll. A setup failure before graph admission fails the command

@@ -365,7 +365,7 @@ fn checkpoint_collection_keeps_pending_and_recent_graphs() {
 }
 
 #[test]
-fn checkpoint_collection_removes_only_its_generated_scratch_document() {
+fn checkpoint_collection_removes_matching_scratch_documents() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
@@ -393,6 +393,8 @@ fn checkpoint_collection_removes_only_its_generated_scratch_document() {
     std::fs::set_permissions(&generated, std::fs::Permissions::from_mode(0o600)).unwrap();
     let operator = scratch.join("operator.json");
     std::fs::write(&operator, &bytes).unwrap();
+    let revised = scratch.join("revised.json");
+    std::fs::write(&revised, b"operator updated this file").unwrap();
     let mut other = fixture.execution.document.clone();
     other.graph_id = "another".into();
     let other_bytes = serde_json::to_vec(&other).unwrap();
@@ -422,7 +424,8 @@ fn checkpoint_collection_removes_only_its_generated_scratch_document() {
         1
     );
     assert!(!generated.exists());
-    assert!(operator.exists());
+    assert!(!operator.exists());
+    assert!(revised.exists());
     assert!(other_path.exists());
 }
 

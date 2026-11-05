@@ -18,6 +18,20 @@ fn scratch_prepare_io_error_retains_its_cause() {
 }
 
 #[test]
+fn scratch_source_removed_during_admission_is_restored_without_overwrite()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let name = std::ffi::OsStr::new("graph.json");
+    let path = temp.path().join(name);
+    restore_scratch_source(temp.path(), name, b"original")?;
+    assert_eq!(std::fs::read(&path)?, b"original");
+    std::fs::write(&path, b"newer")?;
+    restore_scratch_source(temp.path(), name, b"original")?;
+    assert_eq!(std::fs::read(&path)?, b"newer");
+    Ok(())
+}
+
+#[test]
 fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
