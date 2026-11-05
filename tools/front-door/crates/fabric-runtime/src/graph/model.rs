@@ -855,7 +855,13 @@ pub struct AttemptInputManifest {
     pub schema_version: u64,
     pub source_commit: Option<String>,
     pub review_base: Option<String>,
+    /// Graph-wide bases are distinct from a node's review base and source.
+    #[serde(default)]
+    pub graph_review_base: Option<String>,
     pub integration_base: Option<String>,
+    /// The integration head selected as an upstream source, if any.
+    #[serde(default)]
+    pub integration_source: Option<String>,
     pub applied_route: Option<GraphRoute>,
     pub inputs: Vec<AttemptInputEvidence>,
     pub omitted: usize,

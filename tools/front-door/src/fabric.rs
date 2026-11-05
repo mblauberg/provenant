@@ -4703,6 +4703,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.prior_models(attempts)
     }
 
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        self.integration_base
+            .map_or((None, None), |bases| (bases.review, bases.integration))
+    }
+
     fn applied_route(
         &mut self,
         reference: &str,

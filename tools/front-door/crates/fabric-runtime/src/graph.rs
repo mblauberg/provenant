@@ -298,6 +298,16 @@ pub trait AttemptOwner {
         Ok(Vec::new())
     }
 
+    /// Graph-wide review and integration bases bound by the execution owner.
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        (None, None)
+    }
+
     /// The route recorded by the host for an accepted attempt, when known.
     fn applied_route(&mut self, _attempt: &str) -> Result<Option<GraphRoute>, Self::Error> {
         Ok(None)
@@ -1862,6 +1872,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                     }
                 }
+                let graph_bases = owner.bound_graph_bases();
                 let needs_record = checkpoint.nodes[node_index]
                     .attempts
                     .last()
@@ -2090,8 +2101,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         break;
                     }
                     prepared_inputs = Some((requests, materialised));
-                    let mut initial_manifest =
-                        attempt_input_manifest(node, &plan, &checkpoint, &positions, &[], None);
+                    let mut initial_manifest = attempt_input_manifest(
+                        node,
+                        &plan,
+                        &checkpoint,
+                        &positions,
+                        graph_bases,
+                        &[],
+                        None,
+                    );
                     for input in &mut initial_manifest.inputs {
                         if matches!(input.kind, OutputKind::Result | OutputKind::Findings) {
                             input.file_delivery = InputDelivery::Pending;
@@ -2194,6 +2212,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &plan,
                         &checkpoint,
                         &positions,
+                        graph_bases,
                         &requests,
                         materialised.as_ref(),
                     );

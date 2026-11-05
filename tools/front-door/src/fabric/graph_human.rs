@@ -130,7 +130,7 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
                 if let Some(manifest) = &attempt.input_manifest {
                     let route = manifest.applied_route.as_ref();
                     human.push_str(&format!(
-                        "    attempt route_index={} state={:?} outcome={:?} applied_adapter={} applied_model={} applied_effort={} applied_account={} source={} review_base={} integration_base={} input_limit={} omitted={}\n",
+                        "    attempt route_index={} state={:?} outcome={:?} applied_adapter={} applied_model={} applied_effort={} applied_account={} source={} review_base={} graph_review_base={} integration_base={} integration_source={} input_limit={} omitted={}\n",
                         attempt.key.route_index, attempt.state, attempt.outcome,
                         route.and_then(|route| route.adapter.as_deref()).unwrap_or("unavailable"),
                         route.and_then(|route| route.model.as_deref()).unwrap_or("unavailable"),
@@ -138,7 +138,9 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
                         route.and_then(|route| route.account.as_deref()).unwrap_or("unavailable"),
                         manifest.source_commit.as_deref().unwrap_or("unavailable"),
                         manifest.review_base.as_deref().unwrap_or("unavailable"),
+                        manifest.graph_review_base.as_deref().unwrap_or("unavailable"),
                         manifest.integration_base.as_deref().unwrap_or("unavailable"),
+                        manifest.integration_source.as_deref().unwrap_or("unavailable"),
                         attempt.input_cap.map_or_else(|| "unavailable".into(), |cap| cap.to_string()),
                         manifest.omitted,
                     ));

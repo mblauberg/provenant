@@ -1370,6 +1370,10 @@ pub(super) fn attempt_input_manifest(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
+    graph_bases: (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ),
     requests: &[InputRequest],
     materialised: Option<&MaterialisedInputs>,
 ) -> AttemptInputManifest {
@@ -1379,7 +1383,9 @@ pub(super) fn attempt_input_manifest(
         schema_version: 1,
         source_commit: progress.source_commit.clone(),
         review_base: progress.review_base.clone(),
-        integration_base: checkpoint.integration_pin.clone(),
+        graph_review_base: graph_bases.0.map(|oid| oid.to_string()),
+        integration_base: graph_bases.1.map(|oid| oid.to_string()),
+        integration_source: checkpoint.integration_pin.clone(),
         applied_route: None,
         inputs: Vec::new(),
         omitted: 0,

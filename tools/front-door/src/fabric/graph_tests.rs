@@ -954,7 +954,7 @@ mod result_tests {
         node.attempts[1].input_cap = Some(262144);
         node.attempts[1].input_manifest = Some(serde_json::from_value(serde_json::json!({
             "schema_version":1, "source_commit":"1111111111111111111111111111111111111111",
-            "review_base":"2222222222222222222222222222222222222222", "integration_base":null,
+            "review_base":"2222222222222222222222222222222222222222", "graph_review_base":"3333333333333333333333333333333333333333", "integration_base":"4444444444444444444444444444444444444444",
             "applied_route":{"adapter":"fixture", "model":"fixture/model"}, "omitted":0,
             "inputs":[{"producer_node":"producer", "producer_attempt":{"graph_id":"fixture", "node_id":"producer", "route_index":0},
                 "kind":"commit", "required":true, "producer_result_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -969,6 +969,8 @@ mod result_tests {
         assert_eq!(attempt["input_manifest"]["applied_route"]["model"], "fixture/model");
         assert_eq!(attempt["input_manifest"]["inputs"][0]["producer_attempt"]["node_id"], "producer");
         assert_eq!(attempt["input_manifest"]["inputs"][0]["delivery"], "delivered");
+        assert_eq!(attempt["input_manifest"]["graph_review_base"], "3333333333333333333333333333333333333333");
+        assert_eq!(attempt["input_manifest"]["integration_base"], "4444444444444444444444444444444444444444");
         assert_eq!(attempt["outcome"], "task_failed");
         let text = super::graph_human::graph_human_full(&run);
         for fact in ["fixture/model", "producer", "selected_input", "required=true", "delivery=Delivered", "file=Omitted", "source=111111", "review_base=222222", "input_limit=262144", "TaskFailed", "outputs digest="] {

@@ -59,6 +59,10 @@ struct FakeOwner {
     refuse_expansion_target: bool,
     expansion_validations: usize,
     integration_heads: VecDeque<String>,
+    graph_bases: (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ),
     source_commits: Vec<Option<String>>,
     resolved_review_base: Option<String>,
     review_base_resolutions: usize,
@@ -150,6 +154,14 @@ impl AttemptOwner for FakeOwner {
         self.review_expansion
             .clone()
             .ok_or(ReviewResolveError::Unsupported)
+    }
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        self.graph_bases
     }
     fn applied_route(&mut self, attempt: &str) -> Result<Option<GraphRoute>, Self::Error> {
         Ok(self.models.get(attempt).map(|model| GraphRoute {
@@ -5129,6 +5141,10 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
             terminal_from("done", "host/second"),
         ]),
         resolved_review_base: Some(base.clone()),
+        graph_bases: (
+            Some("3".repeat(40).parse().unwrap()),
+            Some("4".repeat(40).parse().unwrap()),
+        ),
         models: [("host/second".into(), "fixture/model".into())].into(),
         materialise: Some(|requests| MaterialisedInputs {
             directory: Some("/private/inputs".into()),
@@ -5159,6 +5175,15 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.source_commit.as_deref(), Some(source.as_str()));
         assert_eq!(manifest.review_base.as_deref(), Some(base.as_str()));
+        assert_eq!(
+            manifest.graph_review_base.as_deref(),
+            Some("3333333333333333333333333333333333333333")
+        );
+        assert_eq!(
+            manifest.integration_base.as_deref(),
+            Some("4444444444444444444444444444444444444444")
+        );
+        assert_eq!(manifest.integration_source, None);
         assert_eq!(manifest.inputs.len(), 2);
         let input = &manifest.inputs[0];
         assert_eq!(input.producer_attempt.as_ref().unwrap().node_id, "parent");
