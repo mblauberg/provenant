@@ -287,6 +287,11 @@ boundary = "credentials"
 reason = "The publishing wrapper must preserve the selected GitHub credential policy and avoid exposing it to other lanes."
 
 [[guard]]
+site = "providers/src/lane.rs#install_git"
+boundary = "warning"
+reason = "A missing PATH warns and uses system defaults with the private Git launcher first."
+
+[[guard]]
 site = "providers/src/lane.rs#LaneRuntime::environment"
 boundary = "unclassified"
 reason = "Private Git wrapper and runtime setup can reject paths or unavailable configuration."

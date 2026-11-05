@@ -236,7 +236,7 @@ fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderErro
 fn install_git(
     bin: &Path,
     git: &Path,
-    env: &mut [(OsString, OsString)],
+    env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
     options: &GitWrapper,
     wrapper: bool,
@@ -258,10 +258,19 @@ fn install_git(
         setup.push(SetupStep::CreateDir(bin.to_owned()));
     }
     setup.push(step);
-    let (_, search_path) = env
-        .iter_mut()
-        .find(|(key, _)| key == "PATH")
-        .ok_or(ProviderError::InvalidPath)?;
+    let index = match env.iter().position(|(key, _)| key == "PATH") {
+        Some(index) => index,
+        None => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: lane PATH is missing; using system defaults"
+            );
+            env.push(("PATH".into(), "/usr/bin:/bin".into()));
+            env.len() - 1
+        }
+    };
+    let search_path = &mut env[index].1;
     if std::env::split_paths(search_path).next().as_deref() != Some(bin) {
         *search_path = std::env::join_paths(
             std::iter::once(bin.to_owned()).chain(std::env::split_paths(search_path)),
@@ -628,6 +637,35 @@ const UNBOUND: [&str; 9] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_search_path_uses_git_wrapper_and_system_defaults() {
+        let mut env = Vec::new();
+        let mut setup = Vec::new();
+        let bin = Path::new("/fixture/scratch/bin");
+        install_git(
+            bin,
+            Path::new("/fixture/git"),
+            &mut env,
+            &mut setup,
+            &GitWrapper::default(),
+            false,
+        )
+        .unwrap();
+        let path = env.iter().find(|(key, _)| key == "PATH").unwrap();
+        assert_eq!(
+            std::env::split_paths(&path.1).collect::<Vec<_>>(),
+            vec![
+                bin.to_owned(),
+                Path::new("/usr/bin").to_owned(),
+                Path::new("/bin").to_owned()
+            ]
+        );
+        assert!(setup.contains(&SetupStep::Symlink {
+            link: bin.join("git"),
+            target: "/fixture/git".into()
+        }));
+    }
 
     #[allow(clippy::disallowed_methods)] // Exercise real subprocess environment clearing.
     fn adapter_private_git(adapter: &str) -> Result<(), Box<dyn std::error::Error>> {
