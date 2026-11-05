@@ -212,7 +212,11 @@ jobs:
           QUARANTINE_FILTER_FILE: ${{ runner.temp }}/quarantine-filter
         run: |
           QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
-          filter="$NEXTTEST_FILTER"
+          # The Claude read-only case and real Swift writer build run nightly.
+          filter="not (test(=lane_prepare_isolates_nested_claude_state) | test(=lane_builds_and_tests_swift_in_a_registered_worktree))"
+          if [ -n "$NEXTTEST_FILTER" ]; then
+            filter="($NEXTTEST_FILTER) & ($filter)"
+          fi
           if [ -n "$QUARANTINE_FILTER" ]; then
             if [ -n "$filter" ]; then
               filter="($filter) & not ($QUARANTINE_FILTER)"
@@ -364,7 +368,6 @@ jobs:
         run: >-
           ../../scripts/run-native-test-group dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --test-threads 1
           -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state) | test(=lane_prepare_isolates_nested_publishing_state)
-          | test(=lane_builds_and_tests_swift_in_a_registered_worktree)
           | test(=read_only_lane_builds_and_tests_swift_in_scratch)
           | test(=read_only_lane_builds_and_tests_cargo_in_scratch)
           | test(=read_only_dispatch_applies_bound_git_and_project_writes)
