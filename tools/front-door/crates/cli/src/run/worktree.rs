@@ -242,19 +242,15 @@ pub(super) fn own_worktree(
                     label: None,
                 },
             };
-            if created.as_ref().is_some_and(|(path, _)| path == &info.path) {
-                worktrees::save_owner(&verified, &owner)?;
-            } else {
-                worktrees::save_lane_owner_when_free(
-                    context,
-                    &verified,
-                    &owner,
-                    info.head,
-                    expected_prior.as_ref(),
-                    terminal_prior,
-                    cancel,
-                )?;
-            }
+            worktrees::save_lane_owner_when_free(
+                context,
+                &verified,
+                &owner,
+                info.head,
+                expected_prior.as_ref(),
+                terminal_prior,
+                cancel,
+            )?;
             let base = provenant_core::GitOid::parse(&owner.base)
                 .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
             Ok((info, base))

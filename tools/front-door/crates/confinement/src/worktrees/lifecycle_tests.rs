@@ -1098,6 +1098,10 @@ fn batch_worktree_on_a_private_branch_follows_an_integration_ref_by_fast_forward
     assert_eq!(before.head, start);
     assert_eq!(before.dirty, WorktreeCondition::Clean);
     fast_forward(&context, &batch.path, lane_head, &cancel())?;
+    assert!(
+        context.facts.take_inventory(&context).is_none(),
+        "a Git mutation must not leave the earlier inventory snapshot reusable"
+    );
     let after = entry(&batch.path)?;
     assert_eq!(after.head, lane_head);
     assert_eq!(after.dirty, WorktreeCondition::Clean);
@@ -1466,6 +1470,23 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
         label: None,
     };
     save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
+    let competing = WorktreeOwner {
+        operation_id: Some("competing-owner".parse()?),
+        ..owner.clone()
+    };
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &competing,
+            info.head,
+            None,
+            false,
+            &cancel()
+        ),
+        Err(WorktreeError::IdentityChanged)
+    ));
+    assert_eq!(load_owner(&tree)?, Some(owner.clone()));
     let state = context
         .project_state
         .open_verified_directory(&state_dir_name(&info.path))?;
