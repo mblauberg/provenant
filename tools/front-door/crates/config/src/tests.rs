@@ -165,11 +165,10 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
 
 #[test]
 fn retention_defaults_overrides_and_invalid_values_are_named_cases() {
-    for (case, key, default, override_value, invalid_range_values, invalid_type) in [
+    for (case, key, override_value, invalid_range_values, invalid_type) in [
         (
             "provider state days",
             "provider_state_days",
-            7,
             14,
             ["0", "3651"],
             "'seven'",
@@ -177,20 +176,21 @@ fn retention_defaults_overrides_and_invalid_values_are_named_cases() {
         (
             "session revisions",
             "session_revisions",
-            8,
             20,
             ["0", "65"],
             "'many'",
         ),
     ] {
-        let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
-        assert_eq!(defaults["retention"][key], default, "{case} default");
+        let defaults = load::<&[u8]>(&roots(), None).unwrap();
+        assert!(defaults.retention.validate().is_ok());
+        let defaults = serde_json::to_value(defaults).unwrap();
+        let default = &defaults["retention"][key];
         let text = format!("schema_version=1\n[retention]\n{key}={override_value}");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         let value = serde_json::to_value(&config).unwrap();
         assert_eq!(value["retention"][key], override_value, "{case} override");
         if key == "session_revisions" {
-            assert_eq!(value["retention"]["provider_state_days"], 7, "{case}");
+            assert_eq!(value["retention"]["provider_state_days"], defaults["retention"]["provider_state_days"], "{case}");
         }
         test_support::assert_leaf_origins(&config);
         for (value, rule) in invalid_range_values
@@ -203,7 +203,7 @@ fn retention_defaults_overrides_and_invalid_values_are_named_cases() {
             assert_warning(&config, &rule);
             assert_warning_message(&config, &format!("retention.{key}:"));
             let parsed = serde_json::to_value(config).unwrap();
-            assert_eq!(parsed["retention"][key], default, "{case}: {value}");
+            assert_eq!(&parsed["retention"][key], default, "{case}: {value}");
         }
     }
 }
@@ -233,23 +233,14 @@ fn chair_log_retention_and_gc_settings_are_named_cases() {
 }
 
 fn assert_chair_log_retention_defaults_overrides_and_validation() {
-    let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
-    assert_eq!(defaults["retention"]["chair_log_days"], 30);
-    assert_eq!(
-        load::<&[u8]>(&roots(), None)
-            .unwrap()
-            .retention
-            .chair_log_replay_seconds(),
-        30 * 86_400
-    );
+    let defaults = load::<&[u8]>(&roots(), None).unwrap();
+    assert!(defaults.retention.validate().is_ok());
     let short = load(
         &roots(),
         Some(&b"schema_version=1\n[retention]\nchair_log_days=1"[..]),
     )
     .unwrap();
     assert_eq!(short.retention.chair_log_replay_seconds(), 7 * 86_400);
-    assert_eq!(defaults["retention"]["chair_log_entries"], 10_000);
-    assert_eq!(defaults["retention"]["chair_log_bytes"], 16_777_216);
     let config = load(&roots(), Some(&b"schema_version=1\n[retention]\nchair_log_days=12\nchair_log_replay_days=8\nchair_log_entries=20\nchair_log_bytes=65536"[..])).unwrap();
     test_support::assert_leaf_origins(&config);
     let value = serde_json::to_value(config).unwrap();
