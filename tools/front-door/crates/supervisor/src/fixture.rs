@@ -772,7 +772,7 @@ pub fn dispatch() -> io::Result<bool> {
             let mut byte = [0];
             loop {
                 if io::stdin().read(&mut byte)? == 0 {
-                    std::thread::park_timeout(std::time::Duration::from_secs(1));
+                    std::thread::park();
                 }
             }
         }

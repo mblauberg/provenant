@@ -111,9 +111,12 @@ fn fake_gh(rig: &mut TestRig, blocking: bool) -> Result {
     let bin = rig.root.join("bin");
     fs::create_dir_all(&bin)?;
     let script = if blocking {
+        let fifo = rig.root.join("gh-release");
+        assert!(Command::new("mkfifo").arg(&fifo).status()?.success());
         format!(
-            "#!/bin/sh\ntouch '{}'\nexec /bin/sleep 30\n",
-            rig.root.join("gh-started").display()
+            "#!/bin/sh\ntouch '{}'\nexec /bin/cat '{}'\n",
+            rig.root.join("gh-started").display(),
+            fifo.display()
         )
     } else {
         format!(
@@ -172,10 +175,12 @@ fn mixed_status_wait_returns_on_fake_lane_while_pr_read_is_blocked() -> Result {
             "--json",
         ],
     )?;
-    assert!(support::eventually(Duration::from_secs(5), || rig
-        .root
-        .join("gh-started")
-        .exists()));
+    provenant_test_support::wait_for(
+        "PR fixture readiness",
+        Duration::from_secs(5),
+        || rig.root.join("gh-started").exists(),
+        |ready| *ready,
+    )?;
     let started = Instant::now();
     finish(&store, attempt)?;
     let output = child.wait_with_output()?;

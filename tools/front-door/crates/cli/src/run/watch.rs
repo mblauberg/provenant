@@ -1068,33 +1068,24 @@ mod tests {
     }
 
     #[test]
-    // The deadline under test is a real-time reader boundary.
-    #[allow(clippy::disallowed_methods)]
     fn arming_stops_retrying_at_the_deadline_with_the_last_cause() {
-        let mut starts = Vec::new();
-        let begun = Instant::now();
+        let mut starts = 0;
         let refused = wait(
             |_| {
-                starts.push(Instant::now());
-                std::thread::sleep(Duration::from_millis(25));
+                starts += 1;
                 Err(Fail::new(
                     Status::Unavailable,
                     ErrorKind::PeerUnavailable,
-                    format!("workshop: attempt {}", starts.len()),
+                    format!("workshop: attempt {starts}"),
                 ))
             },
             scope(&[], None, true),
             Condition::All,
-            Duration::from_millis(40),
+            Duration::ZERO,
             Duration::from_millis(100),
         );
         let message = refused.err().map(|fail| fail.message).unwrap_or_default();
         assert!(message.contains("workshop: attempt"), "{message}");
-        assert!(
-            starts
-                .iter()
-                .all(|start| *start < begun + Duration::from_millis(40)),
-            "a fetch began after the deadline"
-        );
+        assert_eq!(starts, 1, "an expired wait must not retry");
     }
 }

@@ -24,6 +24,7 @@ toml_edit = { workspace = true }
 retained-seed = []
 
 [dev-dependencies]
+provenant-test-support = { path = "../test-support" }
 rusqlite = { workspace = true }
 provenant-os = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }

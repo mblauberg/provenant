@@ -11,6 +11,67 @@ use provenant_supervisor::custody::{
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+/// Synthetic admission facts, including a process table independent of the host.
+pub(super) struct HostFacts {
+    available: u64,
+    observations: std::cell::Cell<usize>,
+}
+impl HostFacts {
+    pub(super) fn new(available: u64) -> Self {
+        Self {
+            available,
+            observations: std::cell::Cell::new(0),
+        }
+    }
+    pub(super) fn observations(&self) -> usize {
+        self.observations.get()
+    }
+    fn identity() -> provenant_supervisor::census::ProcessIdentity {
+        provenant_supervisor::census::ProcessIdentity {
+            boot: "test-boot".into(),
+            pid: 42,
+            native_start: 1,
+            group_id: 42,
+            session_id: 42,
+        }
+    }
+}
+impl Resources for HostFacts {
+    fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
+        Ok(provenant_os::sys::resources::MemorySample {
+            available_bytes: self.available,
+            total_bytes: 100,
+        })
+    }
+    fn disk(&self, _: &provenant_os::fs::Directory) -> std::io::Result<u64> {
+        Ok(u64::MAX)
+    }
+    fn process_budget(&self) -> std::io::Result<provenant_os::sys::resources::ProcessBudget> {
+        Ok(provenant_os::sys::resources::ProcessBudget {
+            used: 1,
+            limit: 100,
+        })
+    }
+    fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+        Some(Self::identity())
+    }
+    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+        use provenant_supervisor::census::{ProcessFact, ProcessObservation};
+        self.observations.set(self.observations.get() + 1);
+        if pid == Self::identity().pid {
+            ProcessObservation::Present(ProcessFact {
+                identity: Self::identity(),
+                parent_pid: 1,
+                zombie: false,
+                cpu_micros: None,
+                command: None,
+            })
+        } else {
+            ProcessObservation::Absent
+        }
+    }
+}
+
 #[test]
 fn command_identity_is_verified_without_manufacturing_model_evidence() {
     let route = RouteRecord {

@@ -561,10 +561,23 @@ mod tests {
             return updater_runner_fixture();
         }
 
-        use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
+        use provenant_core::{CancelToken, Clock, WaitBudget};
+        use std::io::Write;
         let temp = tempfile::tempdir()?;
         let executable = temp.path().join("provider");
-        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n(while [ ! -e release ]; do /bin/sleep 0.05; done) &\necho ready > ready\nwait\n")?;
+        let fifo = temp.path().join("release");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()?
+                .success()
+        );
+        // Holding both ends keeps the writer available even if readiness fails.
+        let mut release = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo)?;
+        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n(IFS= read -r release < release) &\necho ready > ready\nwait\n")?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
         let mut runner = std::process::Command::new(std::env::current_exe()?)
             .args([
@@ -575,22 +588,18 @@ mod tests {
             .env("PROVENANT_TEST_UPDATER_STATE", temp.path())
             .spawn()?;
         let clock = provenant_os::clock::SystemClock::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
-        while !temp.path().join("ready").exists()
-            && budget.remaining(clock.mono_now()).as_micros() != 0
-        {
-            clock.wait_until(
-                clock
-                    .mono_now()
-                    .checked_add(DurationMicros::from_micros(10_000))?,
-            )?;
-        }
+        let ready = provenant_test_support::wait_for(
+            "provider updater readiness",
+            std::time::Duration::from_secs(5),
+            || temp.path().join("ready").exists(),
+            |ready| *ready,
+        );
         runner.kill()?;
         runner.wait()?;
         let busy = provenant_os::provider_fence::acquire(temp.path(), "claude", LockMode::Shared);
         // Always release the fixture even if the regression assertion fails.
-        std::fs::write(temp.path().join("release"), b"exit")?;
-        assert!(temp.path().join("ready").exists(), "updater did not start");
+        writeln!(release, "exit")?;
+        ready?;
         assert!(matches!(
             busy,
             Err(provenant_os::fs::FsError::LockTimeout { .. })

@@ -2887,12 +2887,13 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
             store.writer_registry.join("config.toml"),
             format!("schema_version=1\n[domains.fabric.lanes]\n{config}\n"),
         )?;
+        let facts = super::tests::HostFacts::new(100);
         let mut last = None;
         for seed in 80..84 {
             let run = lane(seed, true);
             let id = starting(&store, &run, &call)?;
             let dir = store.attempt_dir(run.run_id, id, false)?;
-            last = Some(store.admit(id, &dir, &Host { available: 100 }, &clock, &cancel));
+            last = Some(store.admit(id, &dir, &facts, &clock, &cancel));
             if seed < 83 {
                 assert_eq!(
                     last.take().ok_or("admitted")??.state,
@@ -2923,6 +2924,10 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
             }
             other => return Err(format!("the fourth writer is refused: {other:?}").into()),
         }
+        assert!(
+            facts.observations() > 0,
+            "cap checks use the injected process table"
+        );
     }
     Ok(())
 }
@@ -4746,37 +4751,6 @@ fn memory_floor_refuses_both_lane_classes() -> TestResult {
 
 #[test]
 fn admission_uses_injected_memory_floor_and_host_facts() -> TestResult {
-    use provenant_os::sys::resources::ProcessBudget;
-    use provenant_supervisor::census::ProcessIdentity;
-
-    struct HostFacts(u64);
-    impl Resources for HostFacts {
-        fn memory(&self) -> std::io::Result<MemorySample> {
-            Ok(MemorySample {
-                available_bytes: self.0,
-                total_bytes: 100,
-            })
-        }
-        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
-            Ok(u64::MAX)
-        }
-        fn process_budget(&self) -> std::io::Result<ProcessBudget> {
-            Ok(ProcessBudget {
-                used: 1,
-                limit: 100,
-            })
-        }
-        fn guardian_identity(&self) -> Option<ProcessIdentity> {
-            Some(ProcessIdentity {
-                boot: "test-boot".into(),
-                pid: 42,
-                native_start: 1,
-                group_id: 42,
-                session_id: 42,
-            })
-        }
-    }
-
     // Exercise both sides of the injected 1% floor. No host memory or process
     // table is consulted, and the virtual clock supplies the admission time.
     for (available, fits) in [(0, false), (1, true), (2, true), (100, true)] {
@@ -4792,7 +4766,13 @@ fn admission_uses_injected_memory_floor_and_host_facts() -> TestResult {
         let run = lane(60, false);
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
-        let admitted = store.admit(id, &attempt, &HostFacts(available), &clock, &cancel);
+        let admitted = store.admit(
+            id,
+            &attempt,
+            &super::tests::HostFacts::new(available),
+            &clock,
+            &cancel,
+        );
         if fits {
             let admitted = admitted?;
             assert!(matches!(admitted.state, AttemptState::Running { .. }));
@@ -8148,12 +8128,8 @@ fn lane_waits_report_only_the_running_lanes_own_disk_pause() -> TestResult {
         .join("attempts")
         .join(id.to_string())
         .join("process.json");
-    let guardian = match provenant_supervisor::census::SystemProcessObserver
-        .observe(i64::from(std::process::id()))
-    {
-        provenant_supervisor::census::ProcessObservation::Present(fact) => fact.identity,
-        _ => return Err("test guardian identity unavailable".into()),
-    };
+    let facts = super::tests::HostFacts::new(100);
+    let guardian = facts.guardian_identity().ok_or("fixture guardian")?;
     std::fs::write(
         &marker,
         serde_json::to_vec(&serde_json::json!({
@@ -8161,7 +8137,7 @@ fn lane_waits_report_only_the_running_lanes_own_disk_pause() -> TestResult {
         }))?,
     )?;
     let records = [running, other];
-    let waits = store.lane_waits(&records, &call);
+    let waits = store.lane_waits_with_resources(&records, &call, &facts);
     assert_eq!(waits.len(), 1);
     assert_eq!(waits[0].attempt_id, id);
     assert_eq!(
@@ -8171,7 +8147,9 @@ fn lane_waits_report_only_the_running_lanes_own_disk_pause() -> TestResult {
     let exit_path = marker.with_file_name("process-exit.json");
     std::fs::write(&exit_path, br#"{"unresolved_cleanup":true}"#)?;
     assert!(
-        store.lane_waits(&records, &call).is_empty(),
+        store
+            .lane_waits_with_resources(&records, &call, &facts)
+            .is_empty(),
         "an exited provider cannot remain disk-paused while its guardian settles cleanup"
     );
     std::fs::remove_file(exit_path)?;
@@ -8184,7 +8162,9 @@ fn lane_waits_report_only_the_running_lanes_own_disk_pause() -> TestResult {
         }))?,
     )?;
     assert!(
-        store.lane_waits(&records, &call).is_empty(),
+        store
+            .lane_waits_with_resources(&records, &call, &facts)
+            .is_empty(),
         "a dead guardian's checkpoint must not report a current disk pause"
     );
     Ok(())

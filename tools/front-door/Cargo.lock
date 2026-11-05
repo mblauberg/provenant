@@ -609,6 +609,7 @@ dependencies = [
  "provenant-fabric-store",
  "provenant-os",
  "provenant-records",
+ "provenant-test-support",
  "regex",
  "serde",
  "serde_json",
@@ -626,6 +627,7 @@ dependencies = [
  "provenant-os",
  "provenant-records",
  "provenant-routing",
+ "provenant-test-support",
  "rusqlite",
  "serde",
  "serde_json",
@@ -657,6 +659,7 @@ dependencies = [
  "jiff",
  "libc",
  "provenant-core",
+ "provenant-test-support",
  "serde",
  "serde_json",
  "tempfile",
@@ -729,6 +732,7 @@ dependencies = [
 name = "provenant-run"
 version = "1.6.0"
 dependencies = [
+ "libc",
  "provenant-config",
  "provenant-confinement",
  "provenant-core",
@@ -764,6 +768,7 @@ dependencies = [
  "provenant-os",
  "provenant-records",
  "provenant-supervisor",
+ "provenant-test-support",
  "serde",
  "serde_json",
  "tempfile",

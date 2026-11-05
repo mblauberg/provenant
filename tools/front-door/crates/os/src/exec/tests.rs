@@ -360,7 +360,14 @@ fn timeout_and_cancel_kill_the_whole_process_group() -> Result<(), Box<dyn std::
     let temp = tempfile::tempdir()?;
     for cancel in [false, true] {
         let pid_file = temp.path().join(format!("grandchild-{cancel}.pid"));
-        let script = format!("/bin/sleep 60 & echo $! > '{}'; wait", pid_file.display());
+        let fifo = temp.path().join(format!("grandchild-{cancel}.fifo"));
+        let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+        let script = format!(
+            "mkfifo {} || exit 91; /bin/cat {} >/dev/null & echo $! > {}; wait",
+            quote(&fifo),
+            quote(&fifo),
+            quote(&pid_file)
+        );
         let argv = [
             OsString::from("/bin/sh"),
             OsString::from("-c"),
@@ -375,10 +382,12 @@ fn timeout_and_cancel_kill_the_whole_process_group() -> Result<(), Box<dyn std::
         let outcome = std::thread::scope(|scope| {
             if cancel {
                 scope.spawn(|| {
-                    let stop = Instant::now() + Duration::from_secs(10);
-                    while !pid_file.exists() && Instant::now() < stop {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
+                    let _ = provenant_test_support::wait_for(
+                        "child PID file",
+                        Duration::from_secs(10),
+                        || pid_file.exists(),
+                        |ready| *ready,
+                    );
                     canceller.cancel();
                 });
             }
@@ -391,11 +400,12 @@ fn timeout_and_cancel_kill_the_whole_process_group() -> Result<(), Box<dyn std::
         }
         let pid: u32 = std::fs::read_to_string(&pid_file)?.trim().parse()?;
         // The grandchild is reparented and reaped asynchronously after the group dies.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !pid_is_absent_for_test(pid)? {
-            assert!(Instant::now() < deadline, "grandchild {pid} survived");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        provenant_test_support::wait_for(
+            &format!("grandchild {pid} to exit"),
+            Duration::from_secs(5),
+            || pid_is_absent_for_test(pid),
+            |result| !matches!(result, Ok(false)),
+        )??;
     }
     Ok(())
 }
@@ -410,9 +420,14 @@ fn normal_and_failed_exit_clean_the_process_group_before_reaping()
     for (code, leftover) in [(0, true), (7, true), (0, false), (7, false)] {
         let pid_file = temp.path().join(format!("leftover-{code}-{leftover}.pid"));
         let script = if leftover {
+            let fifo = temp.path().join(format!("leftover-{code}.fifo"));
+            let quote =
+                |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
             format!(
-                "/bin/sleep 60 & echo $! > '{}'; exit {code}",
-                pid_file.display()
+                "mkfifo {} || exit 91; /bin/cat {} >/dev/null & echo $! > {}; exit {code}",
+                quote(&fifo),
+                quote(&fifo),
+                quote(&pid_file)
             )
         } else {
             format!("exit {code}")
@@ -427,14 +442,12 @@ fn normal_and_failed_exit_clean_the_process_group_before_reaping()
             continue;
         }
         let pid = std::fs::read_to_string(pid_file)?.trim().parse()?;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !pid_is_absent_for_test(pid)? {
-            assert!(
-                Instant::now() < deadline,
-                "group member survived normal exit"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        provenant_test_support::wait_for(
+            "group member to exit",
+            Duration::from_secs(5),
+            || pid_is_absent_for_test(pid),
+            |result| !matches!(result, Ok(false)),
+        )??;
     }
     Ok(())
 }

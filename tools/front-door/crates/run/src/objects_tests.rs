@@ -989,12 +989,16 @@ fn cancellation_kills_a_blocking_import_within_two_seconds() -> TestResult {
     let clock = provenant_os::clock::SystemClock::new();
     let wrapper = fixture.root.join("blocking-git");
     let entered = fixture.root.join("entered");
+    let fifo = fixture.root.join("import.fifo");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nfor arg do\ncase \"$arg\" in push) : > '{}'; /bin/sleep 30;; esac\ndone\nexec '{}' \"$@\"\n",
-            entered.display(),
-            fixture.git.display()
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in push) mkfifo {} || exit 91; : > {}; exec /bin/cat {};; esac\ndone\nexec {} \"$@\"\n",
+            quote(&fifo),
+            quote(&entered),
+            quote(&fifo),
+            quote(&fixture.git)
         ),
     )?;
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;

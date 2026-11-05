@@ -847,10 +847,12 @@ fn drain_write_failure_stops_writes_and_cancels_remaining_jobs() {
         let send = send.clone();
         workers.push(thread::spawn(move || {
             let _exit = WorkerExitGuard(send.clone());
-            let deadline = Instant::now() + TEST_WAIT;
-            while !cancel.is_cancelled() && Instant::now() < deadline {
-                thread::park_timeout(Duration::from_millis(1));
-            }
+            let _ = provenant_test_support::wait_for(
+                "worker cancellation",
+                TEST_WAIT,
+                || cancel.is_cancelled(),
+                |cancelled| *cancelled,
+            );
             send.send(completed(&id)).unwrap();
         }));
     }

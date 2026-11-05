@@ -336,18 +336,45 @@ fn check_fixture_git_sources(path: &Path, pattern: &regex::Regex) -> Result<(), 
     Ok(())
 }
 
-// The test code in a source: the whole file for a test file, else each
-// `#[cfg(test)]` item up to its closing brace. Production code around it is not.
+// A test source in full, or the bodies of its test-only items.
 fn test_scopes(source: &str, test_file: bool) -> Vec<&str> {
+    selected_test_scopes(source, test_file, false)
+}
+
+// Fixture-only items include test-and-platform combinations and the fixture
+// feature. `any(test, platform)` also applies in production, so leave it out.
+fn selected_test_scopes(source: &str, test_file: bool, fixtures: bool) -> Vec<&str> {
     let tokens = rust_tokens(source);
     let offset = |token: &str| token.as_ptr() as usize - source.as_ptr() as usize;
     let mut scopes = vec![source; usize::from(test_file)];
-    for (index, attribute) in tokens.windows(7).enumerate() {
-        if test_file || attribute != ["#", "[", "cfg", "(", "test", ")", "]"] {
+    for index in 0..tokens.len() {
+        if test_file || !tokens[index..].starts_with(&["#", "[", "cfg", "("]) {
+            continue;
+        }
+        let Some(end) = tokens[index..]
+            .iter()
+            .position(|token| *token == "]")
+            .map(|end| index + end)
+        else {
+            continue;
+        };
+        let attribute = &tokens[index..=end];
+        let attribute_text = &source[offset(attribute[0])..=offset(attribute[attribute.len() - 1])];
+        let test_only = attribute == ["#", "[", "cfg", "(", "test", ")", "]"]
+            || (fixtures
+                && attribute.starts_with(&["#", "[", "cfg", "(", "all", "("])
+                && attribute.contains(&"test")
+                && !attribute.contains(&"not"))
+            || (fixtures
+                && attribute_text.contains("\"fixture\"")
+                && attribute.contains(&"feature")
+                && !attribute.contains(&"not")
+                && (!attribute.contains(&"any") || !attribute.contains(&"target_os")));
+        if !test_only {
             continue;
         }
         let (mut nesting, mut depth) = (0usize, 0usize);
-        for token in &tokens[index + 7..] {
+        for token in &tokens[end + 1..] {
             match *token {
                 "(" | "[" => nesting += 1,
                 // Leaving the enclosing group (a parameter or field attribute) ends the item.
@@ -387,6 +414,105 @@ fn is_test_source(name: &str) -> bool {
         || stem == "tests"
         || stem.ends_with("_test")
         || stem.ends_with("_tests")
+}
+
+// Test waits use the shared bounded helper, an injected clock, or an explicit
+// synchronization primitive. Tokenise first so examples and comments do not
+// count; also catch imported and renamed sleep functions.
+fn fixture_sleep_violation(source: &str, test_file: bool) -> bool {
+    selected_test_scopes(source, test_file, true)
+        .iter()
+        .any(|scope| {
+            let tokens = rust_tokens(scope);
+            for (index, token) in tokens.iter().enumerate() {
+                if *token == "use" {
+                    let end = tokens[index..]
+                        .iter()
+                        .position(|token| *token == ";")
+                        .map_or(tokens.len(), |offset| index + offset);
+                    let import = &tokens[index..end];
+                    if import.contains(&"sleep")
+                        && (import.contains(&"thread") || import.contains(&"time"))
+                    {
+                        return true;
+                    }
+                }
+                if *token == "sleep" && tokens.get(index + 1) == Some(&"(") {
+                    let previous = index.checked_sub(1).and_then(|i| tokens.get(i));
+                    if previous != Some(&".") && previous != Some(&"fn") {
+                        return true;
+                    }
+                }
+                if *token == "sleep" && index >= 2 && tokens[index - 2..index] == [":", ":"] {
+                    return true;
+                }
+            }
+            false
+        })
+}
+
+fn is_fixture_source(name: &str) -> bool {
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    is_test_source(name)
+        || matches!(stem, "fixture" | "fixtures" | "test_support")
+        || stem.starts_with("fixture_")
+        || name.contains("/fixtures/")
+}
+
+#[test]
+fn fixtures_do_not_call_direct_sleep() -> Result<(), Box<dyn Error>> {
+    for (source, expected) in [
+        ("std::thread::sleep(delay);", true),
+        ("use std::thread::{sleep as pause}; pause(delay);", true),
+        ("use std::thread::sleep; sleep(delay);", true),
+        ("clock.sleep(delay);", false),
+        (
+            "// std::thread::sleep(delay);\nlet example = \"sleep()\";",
+            false,
+        ),
+    ] {
+        assert_eq!(fixture_sleep_violation(source, true), expected, "{source}");
+    }
+    assert!(is_fixture_source("crates/os/src/fixture_git.rs"));
+    assert!(is_fixture_source("crates/run/src/test_support.rs"));
+    assert!(!fixture_sleep_violation(
+        "fn production() { std::thread::sleep(delay); }",
+        false
+    ));
+    assert!(fixture_sleep_violation(
+        "#[cfg(test)] mod tests { fn fixture() { std::thread::sleep(delay); } }",
+        false
+    ));
+    assert!(fixture_sleep_violation(
+        "#[cfg(all(test, unix))] fn fixture() { std::thread::sleep(delay); }",
+        false
+    ));
+    assert!(fixture_sleep_violation(
+        "#[cfg(feature = \"fixture\")] fn fixture() { std::thread::sleep(delay); }",
+        false
+    ));
+    assert!(!fixture_sleep_violation(
+        "#[cfg(any(test, unix))] fn production() { std::thread::sleep(delay); }",
+        false
+    ));
+    let mut sources = Vec::new();
+    for root in source_roots() {
+        rust_sources(&root, &mut sources)?;
+    }
+    for path in sources {
+        let source = fs::read_to_string(&path)?;
+        if fixture_sleep_violation(&source, is_fixture_source(&path.to_string_lossy())) {
+            return Err(format!(
+                "{} calls or imports direct sleep in a fixture",
+                path.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 // Counts for the tokens owned by one function body (innermost function wins).

@@ -303,8 +303,17 @@ fn serve_listener(
     state: &Path,
     cwd: &Path,
 ) -> Result<(), AgentError> {
+    serve_listener_with_slots(listener, program, state, cwd, ConnectionSlots::default())
+}
+
+fn serve_listener_with_slots(
+    listener: UnixListener,
+    program: &Path,
+    state: &Path,
+    cwd: &Path,
+    slots: ConnectionSlots,
+) -> Result<(), AgentError> {
     let mut failures = 0;
-    let slots = ConnectionSlots::default();
     loop {
         let Some((stream, _)) = accepted(listener.accept(), &mut failures, ACCEPT_PAUSE)? else {
             continue;
@@ -1540,8 +1549,16 @@ mod tests {
         fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
         let listener = listen(&state).unwrap();
         let server_state = state.clone();
+        let slots = ConnectionSlots::default();
+        let server_slots = slots.clone();
         std::thread::spawn(move || {
-            let _ = serve_listener(listener, &program, &server_state, &server_state);
+            let _ = serve_listener_with_slots(
+                listener,
+                &program,
+                &server_state,
+                &server_state,
+                server_slots,
+            );
         });
         // Keep accepted requests open until every slot is occupied.
         let socket = directory(&state).join(SOCKET);
@@ -1552,13 +1569,25 @@ mod tests {
             .into_iter()
             .chain((0..MAX_CONNECTIONS - 32).map(|_| UnixStream::connect(&socket).unwrap()))
             .collect();
-        std::thread::sleep(Duration::from_millis(100));
+        provenant_test_support::wait_for(
+            "peer slots full",
+            Duration::from_secs(5),
+            || slots.0.load(Ordering::Acquire),
+            |count| *count == MAX_CONNECTIONS,
+        )
+        .unwrap();
         assert!(matches!(
             forward(&state, b"request"),
             Err(AgentError::NoReply(_))
         ));
         drop(held);
-        std::thread::sleep(Duration::from_millis(100));
+        provenant_test_support::wait_for(
+            "peer slots released",
+            Duration::from_secs(5),
+            || slots.0.load(Ordering::Acquire),
+            |count| *count == 0,
+        )
+        .unwrap();
         assert_eq!(
             forward(&state, b"request").unwrap(),
             Forward::Replied(b"request".to_vec())

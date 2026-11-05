@@ -240,8 +240,9 @@ fn fixture() -> Result {
         io::stdin().read_to_string(&mut prompt)?;
         if prompt.contains("fixture owner lifetime probe") {
             // Keep the synthetic provider alive while its owner's lifetime is tested.
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            return Ok(());
+            loop {
+                std::thread::park();
+            }
         }
         let frames = if prompt.contains("free limit") {
             include_str!("fixtures/providers/opencode/v2.2.0-free-limit.jsonl")
@@ -4710,7 +4711,7 @@ fn fixture_owner_repro(ready_path: &std::path::Path) -> Result {
     )?;
     loop {
         // Keep the owner alive until the parent kills it to test guardian cleanup.
-        std::thread::sleep(std::time::Duration::from_secs(60));
+        std::thread::park();
     }
 }
 

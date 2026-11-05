@@ -12,7 +12,7 @@ use crate::{
     *,
 };
 use provenant_core::{Clock, ProjectId, WallTime};
-use provenant_supervisor::census::{ProcessIdentity, ProcessObservation, SystemProcessObserver};
+use provenant_supervisor::census::{ProcessIdentity, ProcessObservation};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     ffi::OsStr,
@@ -160,7 +160,7 @@ pub(crate) fn lease(
     caps: LaneCaps,
     time: &dyn Clock,
     request: &Request<'_>,
-    observe: &dyn Fn() -> Option<ProcessIdentity>,
+    resources: &dyn Resources,
 ) -> Result<Option<WallTime>> {
     let (project, class) = (ticket.project_id, ticket.lane_class);
     let spacing = spacing_micros(ticket.startup_spacing_ms)?;
@@ -177,7 +177,7 @@ pub(crate) fn lease(
         if held {
             // A retry must not preserve a malformed lease merely because its
             // attempt key matches. Recheck it through the same pruning rules.
-            prune(tx, time)?;
+            prune(tx, time, resources)?;
             let still_held: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM leases WHERE attempt=?1)",
                 [&id],
@@ -188,7 +188,7 @@ pub(crate) fn lease(
             }
         }
         if cap_hit(tx, project, class, caps)?.is_some() {
-            prune(tx, time)?;
+            prune(tx, time, resources)?;
             if cap_hit(tx, project, class, caps)?.is_some() {
                 return Ok(None);
             }
@@ -202,7 +202,9 @@ pub(crate) fn lease(
             "INSERT INTO spacing(class,boot,last_start) VALUES (?1,?2,?3) ON CONFLICT(class) DO UPDATE SET boot=excluded.boot, last_start=excluded.last_start",
             params![class.as_str(), &host.boot, sql_int(host.micros)?],
         )?;
-        let identity = observe().ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
+        let identity = resources
+            .guardian_identity()
+            .ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
         let identity = serde_json::to_string(&identity).map_err(|_| RunError::Refused)?;
         let owner_id = store_identity(&store.join("run.sqlite3"))
             .ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
@@ -340,7 +342,7 @@ pub(crate) fn cap_hit(
 }
 /// Inspect at most 256 of the oldest existing leases. Normal admission caps
 /// the ledger at 64, so every lease is covered without an unbounded scan.
-fn prune(tx: &Connection, time: &dyn Clock) -> Result<()> {
+fn prune(tx: &Connection, time: &dyn Clock, resources: &dyn Resources) -> Result<()> {
     let boot = time
         .boot_identity()
         .map_err(|_| RunError::Admission(AdmissionError::Clock))?;
@@ -375,6 +377,7 @@ fn prune(tx: &Connection, time: &dyn Clock) -> Result<()> {
                 lease_boot.as_deref(),
                 guardian.as_deref(),
                 &boot,
+                resources,
             ) {
                 tx.execute("DELETE FROM leases WHERE rowid=?1", [rowid])?;
             }
@@ -390,6 +393,7 @@ fn prune(tx: &Connection, time: &dyn Clock) -> Result<()> {
             lease_boot.as_deref(),
             guardian.as_deref(),
             &boot,
+            resources,
         ) {
             tx.execute("DELETE FROM leases WHERE rowid=?1", [rowid])?;
         }
@@ -407,6 +411,7 @@ fn released(
     lease_boot: Option<&str>,
     guardian: Option<&str>,
     boot: &str,
+    resources: &dyn Resources,
 ) -> bool {
     if lease_boot.is_some_and(|lease_boot| !lease_boot.is_empty() && lease_boot != boot) {
         return true;
@@ -415,13 +420,11 @@ fn released(
         .and_then(|raw| serde_json::from_str::<ProcessIdentity>(raw).ok())
         .filter(|value| !value.boot.is_empty() && value.pid > 0 && value.native_start > 0);
     let guardian_gone =
-        identity.is_some_and(
-            |identity| match SystemProcessObserver.observe(identity.pid) {
-                ProcessObservation::Absent => true,
-                ProcessObservation::Present(fact) => fact.identity != identity || fact.zombie,
-                ProcessObservation::Unknown(_) => false,
-            },
-        );
+        identity.is_some_and(|identity| match resources.observe_process(identity.pid) {
+            ProcessObservation::Absent => true,
+            ProcessObservation::Present(fact) => fact.identity != identity || fact.zombie,
+            ProcessObservation::Unknown(_) => false,
+        });
     guardian_gone || owner.released(attempt)
 }
 /// Store file identity fences replacements before trusting row absence.
@@ -478,6 +481,62 @@ impl Owner {
 mod tests {
     use super::*;
     use provenant_core::{MonoTime, TestClock};
+    use provenant_supervisor::census::SystemProcessObserver;
+
+    #[test]
+    fn injected_process_observation_fences_live_and_unknown_guardians() {
+        use provenant_supervisor::census::{ObservationIssue, ProcessFact};
+        struct Facts(ProcessObservation);
+        impl Resources for Facts {
+            fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
+                unreachable!("lease pruning does not sample memory")
+            }
+            fn disk(&self, _: &provenant_os::fs::Directory) -> std::io::Result<u64> {
+                unreachable!("lease pruning does not sample disk")
+            }
+            fn observe_process(&self, _: i64) -> ProcessObservation {
+                self.0.clone()
+            }
+        }
+        let identity = ProcessIdentity {
+            boot: "fixture-boot".into(),
+            pid: 42,
+            native_start: 7,
+            group_id: 42,
+            session_id: 42,
+        };
+        let fact = ProcessFact {
+            identity: identity.clone(),
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let mut reused = fact.clone();
+        reused.identity.native_start += 1;
+        let mut zombie = fact.clone();
+        zombie.zombie = true;
+        let guardian = serde_json::to_string(&identity).unwrap();
+        for (observation, expected) in [
+            (ProcessObservation::Present(fact), false),
+            (ProcessObservation::Unknown(ObservationIssue::Io), false),
+            (ProcessObservation::Absent, true),
+            (ProcessObservation::Present(reused), true),
+            (ProcessObservation::Present(zombie), true),
+        ] {
+            assert_eq!(
+                released(
+                    &Owner::Unreadable,
+                    "attempt",
+                    Some("fixture-boot"),
+                    Some(&guardian),
+                    "fixture-boot",
+                    &Facts(observation)
+                ),
+                expected
+            );
+        }
+    }
 
     /// Whether `max` or more leases remain, as the removed writer cap counted.
     fn writers_full(tx: &Connection, max: i64) -> Result<bool> {
@@ -512,7 +571,7 @@ mod tests {
             )
             .unwrap();
             original.execute_batch("BEGIN EXCLUSIVE").unwrap();
-            prune(&db, &clock).unwrap();
+            prune(&db, &clock, &SystemResources).unwrap();
             assert!(
                 writers_full(&db, 1).unwrap(),
                 "busy store retains a live lease"
@@ -520,13 +579,13 @@ mod tests {
             original.execute_batch("ROLLBACK").unwrap();
             drop(original);
             std::fs::write(&path, b"corrupt").unwrap();
-            prune(&db, &clock).unwrap();
+            prune(&db, &clock, &SystemResources).unwrap();
             assert!(
                 writers_full(&db, 1).unwrap(),
                 "corrupt original store retains a live lease"
             );
             std::fs::rename(&path, dir.path().join("original.sqlite3")).unwrap();
-            prune(&db, &clock).unwrap();
+            prune(&db, &clock, &SystemResources).unwrap();
             assert!(
                 writers_full(&db, 1).unwrap(),
                 "missing store retains a live lease"
@@ -536,7 +595,7 @@ mod tests {
                 .execute_batch("CREATE TABLE admission (attempt TEXT)")
                 .unwrap();
             drop(replacement);
-            prune(&db, &clock).unwrap();
+            prune(&db, &clock, &SystemResources).unwrap();
             assert!(
                 writers_full(&db, 1).unwrap(),
                 "replacement cannot prove row removal"
@@ -548,7 +607,7 @@ mod tests {
                 [serde_json::to_string(&dead).unwrap()],
             )
             .unwrap();
-            prune(&db, &clock).unwrap();
+            prune(&db, &clock, &SystemResources).unwrap();
             assert!(
                 !writers_full(&db, 1).unwrap(),
                 "absent guardian releases the lease"
@@ -588,13 +647,13 @@ mod tests {
             params![store, boot, owner_id],
         )
         .unwrap();
-        prune(&db, &clock).unwrap();
+        prune(&db, &clock, &SystemResources).unwrap();
         assert!(writers_full(&db, 1).unwrap());
         assert!(!writers_full(&db, 2).unwrap());
         owner
             .execute("DELETE FROM admission WHERE attempt='live'", [])
             .unwrap();
-        prune(&db, &clock).unwrap();
+        prune(&db, &clock, &SystemResources).unwrap();
         assert!(!writers_full(&db, 1).unwrap());
     }
 }

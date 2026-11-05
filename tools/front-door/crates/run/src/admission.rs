@@ -88,10 +88,12 @@ pub use provenant_records::run::LaneWait;
 /// Resource probes. A failed probe queues; it never admits unchecked.
 pub trait Resources {
     fn memory(&self) -> std::io::Result<MemorySample>;
+    /// Observe one process when deciding whether a recorded guardian is gone.
+    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+        provenant_supervisor::census::SystemProcessObserver.observe(pid)
+    }
     fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
-        match provenant_supervisor::census::SystemProcessObserver
-            .observe(i64::from(std::process::id()))
-        {
+        match self.observe_process(i64::from(std::process::id())) {
             provenant_supervisor::census::ProcessObservation::Present(fact) if !fact.zombie => {
                 Some(fact.identity)
             }
@@ -249,7 +251,7 @@ impl RunStore {
                 let waiting_for = if stalled {
                     "host_stalled: supervisor is in uninterruptible sleep".to_owned()
                 } else if matches!(lane.state, AttemptState::Running { .. }) {
-                    self.disk_pause_wait(lane)
+                    self.disk_pause_wait(lane, resources)
                         .or_else(|| self.build_slot_wait(lane, call, &slot_queue))
                         .or_else(|| {
                             lane.provider_silent_for_ms.0
@@ -446,7 +448,7 @@ impl RunStore {
         }
     }
     /// The running guardian publishes this lane's pause in its checkpoint.
-    fn disk_pause_wait(&self, lane: &AttemptRecord) -> Option<String> {
+    fn disk_pause_wait(&self, lane: &AttemptRecord, resources: &dyn Resources) -> Option<String> {
         let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
         // The periodic checkpoint may predate provider exit while a living
         // guardian retains unresolved cleanup. Exit publication ends pausing.
@@ -461,7 +463,7 @@ impl RunStore {
         let guardian: provenant_supervisor::census::ProcessIdentity =
             serde_json::from_value(state.get("guardian")?.clone()).ok()?;
         if !matches!(
-            provenant_supervisor::census::SystemProcessObserver.observe(guardian.pid),
+            resources.observe_process(guardian.pid),
             provenant_supervisor::census::ProcessObservation::Present(fact)
                 if fact.identity == guardian && !fact.zombie
         ) {
@@ -737,7 +739,7 @@ impl RunStore {
                 }
             };
             if fits {
-                match self.claim_observed(id, clock, &call, &|| resources.guardian_identity()) {
+                match self.claim_observed(id, clock, &call, resources) {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
                     Ok(None) => {
@@ -789,7 +791,7 @@ impl RunStore {
         clock: &dyn Clock,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
-        self.claim_observed(id, clock, call, &|| SystemResources.guardian_identity())
+        self.claim_observed(id, clock, call, &SystemResources)
     }
     fn lane_caps(&self) -> crate::ledger::LaneCaps {
         crate::ledger::LaneCaps::of(
@@ -815,7 +817,7 @@ impl RunStore {
         id: AttemptId,
         clock: &dyn Clock,
         call: &Request<'_>,
-        observe: &dyn Fn() -> Option<provenant_supervisor::census::ProcessIdentity>,
+        resources: &dyn Resources,
     ) -> Result<Option<AttemptRecord>> {
         // Avoid the ledger and store write locks when this run is already full.
         // The transaction below repeats the count to decide the claim.
@@ -857,7 +859,7 @@ impl RunStore {
                 caps,
                 clock,
                 call,
-                observe,
+                resources,
             )?
             else {
                 return Ok(None);
