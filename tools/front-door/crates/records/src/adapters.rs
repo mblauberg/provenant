@@ -78,6 +78,8 @@ pub struct AdapterSpec {
     pub account_config_dir: bool,
     /// Fixed home-relative prefix for registered account directories, if required.
     pub account_directory_prefix: Option<&'static str>,
+    /// Registered account configuration supports shared settings overlays.
+    pub shared_account_settings: bool,
     pub local_login: bool,
     pub login_reprobe: LoginReprobe,
     pub login_observation: LoginObservation,
@@ -281,6 +283,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: true,
         account_config_dir: true,
         account_directory_prefix: Some(".claude-"),
+        shared_account_settings: true,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::AccountAvailability,
@@ -341,6 +344,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: true,
         account_config_dir: true,
         account_directory_prefix: None,
+        shared_account_settings: false,
         local_login: false,
         login_reprobe: LoginReprobe::Codex,
         login_observation: LoginObservation::Reprobe,
@@ -405,6 +409,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
+        shared_account_settings: false,
         local_login: true,
         login_reprobe: LoginReprobe::Cursor,
         login_observation: LoginObservation::Reprobe,
@@ -468,6 +473,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: true,
         account_config_dir: false,
         account_directory_prefix: None,
+        shared_account_settings: false,
         local_login: true,
         login_reprobe: LoginReprobe::AccountIdentity,
         login_observation: LoginObservation::Reprobe,
@@ -535,6 +541,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
+        shared_account_settings: false,
         local_login: true,
         login_reprobe: LoginReprobe::ExecutableOnly,
         login_observation: LoginObservation::ExecutableOnly,
@@ -596,6 +603,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
+        shared_account_settings: false,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
@@ -654,6 +662,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
+        shared_account_settings: false,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
@@ -710,6 +719,12 @@ mod tests {
     #[test]
     fn account_and_session_policies_preserve_adapter_behavior() {
         for spec in ADAPTER_SPECS {
+            assert_eq!(
+                spec.shared_account_settings,
+                spec.id == Harness::Claude,
+                "{}",
+                spec.name
+            );
             assert_eq!(
                 spec.account_directory_prefix,
                 (spec.id == Harness::Claude).then_some(".claude-"),

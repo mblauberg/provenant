@@ -188,7 +188,11 @@ pub(crate) fn shared_settings(
     let overrides: std::collections::BTreeMap<_, _> = accounts
         .entries
         .values()
-        .filter(|entry| entry.adapter == "claude" && !entry.settings.is_empty())
+        .filter(|entry| {
+            !entry.settings.is_empty()
+                && provenant_records::AdapterSpec::get(&entry.adapter)
+                    .is_some_and(|spec| spec.shared_account_settings)
+        })
         .map(|entry| {
             (
                 provenant_config::shared_settings::canonical(&entry.directory),
@@ -1086,7 +1090,9 @@ fn adopt_settings(globals: &cli::Globals, account: &str) -> Result<Vec<String>, 
     let accounts = &config.domains.accounts;
     let id = cli::accounts::resolve(accounts, account)?;
     let entry = accounts.entries.get(&id).ok_or("unknown account")?;
-    if entry.adapter != "claude" {
+    if !provenant_records::AdapterSpec::get(&entry.adapter)
+        .is_some_and(|spec| spec.shared_account_settings)
+    {
         return Err("only Claude accounts have shared settings".into());
     }
     let canonical = |path: &Path| provenant_config::shared_settings::canonical(path);
