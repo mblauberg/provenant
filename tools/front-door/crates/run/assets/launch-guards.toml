@@ -315,8 +315,13 @@ reason = "A configured command cannot silently ignore a requested continuation, 
 
 [[guard]]
 site = "providers/src/command.rs#prepare"
+boundary = "authority"
+reason = "A configured command must have non-empty argv and an absolute host-resolved executable to launch the selected invocation."
+
+[[guard]]
+site = "providers/src/command.rs#prepare"
 boundary = "unclassified"
-reason = "Writer capability and missing or invalid command invocation still refuse preparation; capability eligibility is tracked separately."
+reason = "Writer capability still refuses preparation; capability eligibility is tracked separately."
 
 [[guard]]
 site = "providers/src/cursor.rs#prepare"
