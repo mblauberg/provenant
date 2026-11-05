@@ -166,9 +166,9 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 None,
                 &successors,
             );
-            data.as_object_mut()
-                .expect("lane projection is an object")
-                .remove("capacity_cooldowns");
+            if let Some(object) = data.as_object_mut() {
+                object.remove("capacity_cooldowns");
+            }
             data["review_exempt"] = exempt;
             Ok((data, human))
         })(),
