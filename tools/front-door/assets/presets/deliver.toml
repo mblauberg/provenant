@@ -15,7 +15,7 @@ stages = [
   ] },
   # Reviewers pin the newest head of the writer's chain, so a repaired head is
   # the one reviewed and the one landed.
-  { id = "review", preset = "review-council", depends_on = ["write"], inputs = [{ node = "write", outputs = ["result"] }], parameters = { subject = { type = "head", node = "write" }, worktree = "${worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
+  { id = "review", preset = "review", depends_on = ["write"], inputs = [{ node = "write", outputs = ["result"] }], parameters = { subject = { type = "head", node = "write" }, worktree = "${worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
   { id = "accept", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
   { id = "land", kind = "land", count = "${land}", land = { node = "write", tier = "${land_tier}", session = "${decision_session}" } },
 ]
@@ -28,7 +28,7 @@ exports = [
 level = "recommended"
 summary = "A writer opens a pull request; a CI gate waits on its pushed head with no model running; fresh repair agents fix failing checks on the same branch until CI is green; a review council judges that head; land merges it under the host's tier policy."
 citations = ["GitHub Copilot coding agent and Cursor background agents, CI-fix on the pull request branch (vendor-reported)"]
-cost = "1 writer + up to max_iterations repairs + review-council; no model runs while CI is pending"
+cost = "1 writer + up to max_iterations repairs + review; no model runs while CI is pending"
 select_when = "An approved slice should go from implementation to a merged pull request without a chair watching CI."
 tags = ["write", "review", "deliver"]
 

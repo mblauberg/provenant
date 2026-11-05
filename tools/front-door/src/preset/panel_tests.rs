@@ -27,7 +27,7 @@ fn select(parameters: Value, list: Vec<Value>, caller_supplied: bool) -> Vec<Val
     }
     StageBuilder {
         layers: &layers,
-        name: "review-council",
+        name: "review",
         prompt: "",
         parameters,
         roles: None,
@@ -138,7 +138,7 @@ fn review_spec_states_only_what_the_stage_sets() {
         let (mut stack, mut origins, mut repo_files) = (Vec::new(), BTreeMap::new(), Vec::new());
         StageBuilder {
             layers: &layers,
-            name: "review-council",
+            name: "review",
             prompt: "",
             parameters,
             roles: None,

@@ -106,10 +106,7 @@ impl Layers {
                 "generator-evaluator",
                 include_str!("../assets/presets/generator-evaluator.toml"),
             ),
-            (
-                "review-council",
-                include_str!("../assets/presets/review-council.toml"),
-            ),
+            ("review", include_str!("../assets/presets/review.toml")),
             (
                 "big-batch",
                 include_str!("../assets/presets/big-batch.toml"),

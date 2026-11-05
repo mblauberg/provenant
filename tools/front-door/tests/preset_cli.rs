@@ -14,13 +14,7 @@ fn preset_explain_warns_about_every_omitted_lens() -> Result<(), Box<dyn std::er
         .current_dir(&root)
         .env("PROVENANT_ROOT", &root)
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .args([
-            "--json",
-            "run",
-            "--preset",
-            "review-council",
-            "--prompt-file",
-        ])
+        .args(["--json", "run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .args(["--explain", "--set", "parameters.risk_tier='routine'"])
         .output()?;
@@ -244,13 +238,7 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .arg("--state-dir")
         .arg(temp.path().join("state"))
-        .args([
-            "--json",
-            "run",
-            "--preset",
-            "review-council",
-            "--prompt-file",
-        ])
+        .args(["--json", "run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .arg("--read-root")
         .arg(&invoking)
@@ -288,13 +276,7 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .arg("--state-dir")
         .arg(temp.path().join("state"))
-        .args([
-            "--json",
-            "run",
-            "--preset",
-            "review-council",
-            "--prompt-file",
-        ])
+        .args(["--json", "run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .arg("--read-root")
         .arg(&invoking)
@@ -338,7 +320,7 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .arg("--state-dir")
         .arg(temp.path().join("state"))
-        .args(["run", "--preset", "review-council", "--prompt-file"])
+        .args(["run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .arg("--read-root")
         .arg(&invoking)
@@ -401,7 +383,7 @@ fn review_council_with_a_base_is_admitted_on_submit() -> Result<(), Box<dyn std:
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .args(["--json", "--state-dir"])
         .arg(temp.path().join("state"))
-        .args(["run", "--preset", "review-council", "--prompt-file"])
+        .args(["run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .args([
             "--set",
@@ -977,7 +959,7 @@ fn explain_pins_source_refs_before_hashing_without_creating_state()
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
             .args(["--json", "--state-dir"])
             .arg(temp.path().join("state"))
-            .args(["run", "--preset", "review-council", "--prompt-file"])
+            .args(["run", "--preset", "review", "--prompt-file"])
             .arg(&prompt)
             .arg("--explain")
             .output()?;
@@ -1567,7 +1549,7 @@ fn preset_explain_describes_the_pattern_and_creates_no_state()
         .env("XDG_CONFIG_HOME", temp.path())
         .args(["--json", "--state-dir"])
         .arg(&state)
-        .args(["preset", "explain", "review-council"])
+        .args(["preset", "explain", "review"])
         .output()?;
     assert!(
         output.status.success(),
@@ -1784,7 +1766,7 @@ fn preset_list_and_show_human_output_match_goldens() -> Result<(), Box<dyn std::
 fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
 -> Result<(), Box<dyn std::error::Error>> {
     let text = explain_text(
-        "review-council",
+        "review",
         &[
             "--set",
             "parameters.worktree=\".\"",
@@ -1802,7 +1784,7 @@ fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
     assert!(lens < verify && verify < synthesis, "{text}");
     assert!(text.contains("family=cross_preferred"), "{text}");
     assert!(text.contains("family=distinct_from_writer"), "{text}");
-    golden("review-council.explain.txt", &text)?;
+    golden("review.explain.txt", &text)?;
     Ok(())
 }
 
@@ -2820,13 +2802,7 @@ fn preset_file_spec_resolves_from_checkout_subdirectory() -> Result<(), Box<dyn 
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .arg("--state-dir")
         .arg(temp.path().join("state"))
-        .args([
-            "--json",
-            "run",
-            "--preset",
-            "review-council",
-            "--prompt-file",
-        ])
+        .args(["--json", "run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .args(["--explain", "--set", "parameters.spec='spec.md'"])
         .output()?;
@@ -2885,8 +2861,8 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
     std::fs::write(&prompt, "review")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for (preset, explain) in [
-        ("review-council", true),
-        ("review-council", false),
+        ("review", true),
+        ("review", false),
         ("big-batch", true),
         ("big-batch", false),
     ] {

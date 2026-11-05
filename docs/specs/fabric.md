@@ -431,7 +431,7 @@ declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
 roles and presets inside bounded repair. Existing `loop.body` configuration
 also remains available. Planner fragments do not resolve named presets.
 
-Bundled `scout-swarm`, `generator-evaluator`, `review-council`, `big-batch`,
+Bundled `scout-swarm`, `generator-evaluator`, `review`, `big-batch`,
 `scope-then-run` and `deliver` express scouting, implementation with
 evaluating lenses, combined review, a full batch, scouting and scoping before
 a run, and delivery through CI to land respectively. Scouts use junior tiers and remain read-only;
@@ -451,7 +451,7 @@ gate's findings (check names with log excerpts), the writer's `result` and
 `remaining` handoff items in every round and the previous repair's, never a
 transcript,
 followed by the CI gate again. The composite
-succeeds on either path. A `review-council` then reviews a `head` source
+succeeds on either path. A `review` then reviews a `head` source
 binding to the writer, so it judges the newest repaired head; a verdict gate
 and a `land` node merge that head under the host's tier policy. No model runs
 while a gate is pending. `max_iterations` bounds the rounds; exhaustion raises
@@ -1622,7 +1622,7 @@ publication ref at that same head. A different marker, a different ref head or
 a symbolic ref refuses. Alternatively,
 the graph uses its existing remote integration branch, and opens one PR. Its body
 contains bounded commit messages, run and attempt IDs, gate decisions and skipped nodes.
-Graph review-council attempts render as the same `Independent review` rows used
+Graph review attempts render as the same `Independent review` rows used
 by `pr open`, with each review role, model family and recorded verdict. The rows
 include lens, verification and synthesis attempts, including retries, while
 subject-framing tasks remain ordinary node evidence. The checkpoint

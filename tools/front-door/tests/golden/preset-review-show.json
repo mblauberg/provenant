@@ -1,7 +1,7 @@
 {
   "command": "preset",
   "data": {
-    "name": "review-council",
+    "name": "review",
     "origins": {
       "exports": "bundled",
       "parameters.base.default": "bundled",

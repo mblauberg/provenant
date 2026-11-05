@@ -2375,9 +2375,9 @@
     },
     "substitutions": [],
     "warnings": [
-      "preset review-council: omitted lens \"security-privacy\": requires risk tag security",
-      "preset review-council: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
-      "preset review-council: omitted lens \"adversarial\": requires risk tag terminal"
+      "preset review: omitted lens \"security-privacy\": requires risk tag security",
+      "preset review: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
+      "preset review: omitted lens \"adversarial\": requires risk tag terminal"
     ]
   },
   "schema_version": 2

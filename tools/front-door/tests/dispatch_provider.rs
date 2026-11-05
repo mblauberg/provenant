@@ -1206,7 +1206,7 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
         .command(&[
             "run",
             "--preset",
-            "review-council",
+            "review",
             "--prompt-file",
             brief.to_str().ok_or("brief")?,
             "--set",
@@ -3079,7 +3079,7 @@ fn review_council_overcap_runs_through_fake_providers() -> Result {
         .command(&[
             "run",
             "--preset",
-            "review-council",
+            "review",
             "--prompt-file",
             prompt.to_str().ok_or("brief")?,
             "--set",

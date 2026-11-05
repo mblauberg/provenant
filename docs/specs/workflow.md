@@ -566,7 +566,7 @@ to the lane's run deadline. When omitted, a node uses the graph timeout.
 ### Preset planner front-end
 
 `provenant run --preset P --plan auto|on|off` puts a principal planner in front
-of a preset that declares a `[plan]` table: `big-batch`, `review-council`,
+of a preset that declares a `[plan]` table: `big-batch`, `review`,
 `scout-swarm`, `fan-out`, `fan-out-synthesise` and `scope-then-run`. The default is
 `[domains.fabric.plan] mode`, `auto`. `on` replaces the preset's named stage
 with a read-only `plan` node (role `plan.shape`, route `principal`) that carries
@@ -594,19 +594,19 @@ scouts, so scoping works from reconciled evidence as before. A catalogue entry
 with `enabled_by = "external"` is offered only while that parameter is
 non-zero, so `external = 0` removes the external scout. Planned scouts keep the
 caller's `read_roots`, and the planner holds the same roots because a fragment
-cannot widen its planner. `review-council` offers one pattern per lens, and the
+cannot widen its planner. `review` offers one pattern per lens, and the
 catalogue is built by the routing review panel (#2527), not by the preset:
 the panel drops risk-gated lenses whose tag is absent, applies the review
 shape's slot limit and lens order, and sets each lens's default tier. The
 planner can only pick among those lenses and choose a tier from the closed
 list; it cannot name a lens the panel did not select. A lens leg pins the
-review commit itself, so a `review-council` whose `subject` is not a commit
+review commit itself, so a `review` whose `subject` is not a commit
 keeps its static lenses and records the reason. The council's verifier and
 synthesis still run after the planned lenses.
 
 `auto` decides in order: a shape parameter with any origin other than the
 bundled default (`--set`, `--params-file` or a project or user preset) stays
-off; a catalogue with `by_size` (`review-council`) plans only when the review
+off; a catalogue with `by_size` (`review`) plans only when the review
 panel sizes the subject `large`, so a small change keeps its fixed lenses;
 more than `auto.acceptance_items` acceptance items in the brief (nested
 sub-bullets are not counted), a write scope over `auto.write_crates` crates, or

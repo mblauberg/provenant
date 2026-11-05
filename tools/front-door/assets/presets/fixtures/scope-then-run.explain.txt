@@ -1,6 +1,6 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":9,"edges":19,"limit_reason":null,"max_attempts":15,"nodes":13,"prompt_bytes":9440}
+Inspection: {"dependency_depth":9,"edges":19,"limit_reason":null,"max_attempts":15,"nodes":13,"prompt_bytes":9468}
 Preset selection: scope-then-run (override)
 Review shape: standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: off -> off (planning turned off)

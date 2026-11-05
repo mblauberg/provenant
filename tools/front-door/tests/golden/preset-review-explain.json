@@ -8,10 +8,10 @@
       "origin": "bundled",
       "prompt": "Local check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test."
     },
-    "name": "review-council",
+    "name": "review",
     "next": [
-      "provenant run --preset review-council --prompt-file FILE --explain",
-      "provenant run --preset review-council --prompt-file FILE --set STAGE.PARAMETER=VALUE"
+      "provenant run --preset review --prompt-file FILE --explain",
+      "provenant run --preset review --prompt-file FILE --set STAGE.PARAMETER=VALUE"
     ],
     "parameters": [
       {

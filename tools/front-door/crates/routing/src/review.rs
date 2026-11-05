@@ -1655,7 +1655,7 @@ mod tests {
     fn generic_select_supports_size_and_readiness_rules() {
         let select = Select {
             default: "single".to_owned(),
-            by_risk: BTreeMap::from([("critical".into(), "review-council".into())]),
+            by_risk: BTreeMap::from([("critical".into(), "review".into())]),
             by_kind: BTreeMap::from([("docs".into(), "chain".into())]),
             by_paths: BTreeMap::from([("src/**".into(), "fan-out".into())]),
             by_size: BTreeMap::from([("large".into(), "big-batch".into())]),
@@ -1705,7 +1705,7 @@ mod tests {
                     Some(true)
                 )
                 .value,
-            "review-council"
+            "review"
         );
         assert_eq!(
             select

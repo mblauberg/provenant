@@ -1,7 +1,7 @@
 {
   "context": {
-    "pattern": "review-council",
-    "preset": "review-council"
+    "pattern": "review",
+    "preset": "review"
   },
   "graph_id": "preset-ab57d058c8884dce54244b5559adad4a",
   "nodes": [
@@ -843,7 +843,7 @@
       "requested": "on",
       "route": "principal"
     },
-    "preset": "review-council",
+    "preset": "review",
     "roles": {
       "lens.correctness-spec": {
         "digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
@@ -992,18 +992,18 @@
     },
     "substitutions": [],
     "warnings": [
-      "preset review-council: omitted lens conventions-readability: review shape has 5 slots",
-      "preset review-council: omitted lens refactor-cleanup: review shape has 5 slots",
-      "preset review-council: omitted lens flexibility: review shape has 5 slots",
-      "preset review-council: omitted lens \"security-privacy\": requires risk tag security",
-      "preset review-council: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
-      "preset review-council: omitted lens \"adversarial\": requires risk tag terminal",
-      "preset review-council: omitted lens conventions-readability: review shape has 5 slots",
-      "preset review-council: omitted lens refactor-cleanup: review shape has 5 slots",
-      "preset review-council: omitted lens flexibility: review shape has 5 slots",
-      "preset review-council: omitted lens \"security-privacy\": requires risk tag security",
-      "preset review-council: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
-      "preset review-council: omitted lens \"adversarial\": requires risk tag terminal"
+      "preset review: omitted lens conventions-readability: review shape has 5 slots",
+      "preset review: omitted lens refactor-cleanup: review shape has 5 slots",
+      "preset review: omitted lens flexibility: review shape has 5 slots",
+      "preset review: omitted lens \"security-privacy\": requires risk tag security",
+      "preset review: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
+      "preset review: omitted lens \"adversarial\": requires risk tag terminal",
+      "preset review: omitted lens conventions-readability: review shape has 5 slots",
+      "preset review: omitted lens refactor-cleanup: review shape has 5 slots",
+      "preset review: omitted lens flexibility: review shape has 5 slots",
+      "preset review: omitted lens \"security-privacy\": requires risk tag security",
+      "preset review: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
+      "preset review: omitted lens \"adversarial\": requires risk tag terminal"
     ]
   },
   "schema_version": 1

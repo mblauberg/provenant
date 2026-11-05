@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: "Use for independent read-only review of PRs, diffs, commits and refactors against the spec, through review-council or provenant review. Not for root cause (diagnose), fixes (implement) or rendered UI (ui-ux-design)."
+description: "Use for independent read-only review of PRs, diffs, commits and refactors against the spec, through review or provenant review. Not for root cause (diagnose), fixes (implement) or rendered UI (ui-ux-design)."
 ---
 
 # Code review
@@ -15,7 +15,7 @@ Conventions and the review ladder come from the repo's own `AGENTS.md`,
 ## How it runs
 
 ```sh
-provenant run --preset review-council --prompt-file BRIEF.md \
+provenant run --preset review --prompt-file BRIEF.md \
   --set 'parameters.subject.commit="SHA"' --set 'parameters.base="origin/main"' \
   --set 'parameters.spec="#N"' --set 'parameters.risk_tags=["security"]' --plan on --explain
 ```

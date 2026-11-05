@@ -1,6 +1,6 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":26,"edges":69,"limit_reason":null,"max_attempts":51,"nodes":38,"prompt_bytes":58536}
+Inspection: {"dependency_depth":26,"edges":69,"limit_reason":null,"max_attempts":51,"nodes":38,"prompt_bytes":58690}
 Preset selection: big-batch (override)
 Review shape: deep (by_kind; size=unknown; kind=integration; risk=unknown), standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: on -> on (planning requested)
@@ -172,6 +172,6 @@ Roles:
 Substituted external: web -> junior (route web is not defined in the routing configuration)
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
-Warning: preset review-council: omitted lens "security-privacy": requires risk tag security
-Warning: preset review-council: omitted lens "concurrency-data-errors": requires risk tag concurrency
-Warning: preset review-council: omitted lens "adversarial": requires risk tag terminal
+Warning: preset review: omitted lens "security-privacy": requires risk tag security
+Warning: preset review: omitted lens "concurrency-data-errors": requires risk tag concurrency
+Warning: preset review: omitted lens "adversarial": requires risk tag terminal

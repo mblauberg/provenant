@@ -1697,7 +1697,7 @@ fn planned_scout_swarm_expands_scouts_with_a_question_and_a_route() {
 
 #[test]
 fn planned_review_council_expands_only_the_lens_legs_the_catalogue_lists() {
-    let doc = planned_fixture("review-council");
+    let doc = planned_fixture("review");
     let leg = |lens: &str, tier: &str| {
         json!({"id":lens, "pattern":format!("lens-{lens}"), "parameters":{"tier":tier}})
     };

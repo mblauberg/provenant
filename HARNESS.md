@@ -135,7 +135,7 @@ found.
 ## Review ladder
 
 Lens coverage is the primary measure of a review: cover the questions the change
-needs before considering family spread. Use `review-council --plan on` by default.
+needs before considering family spread. Use `review --plan on` by default.
 The planner reads the pinned diff, acceptance criteria, dependency boundaries,
 reversibility and oracle strength;
 the planner picks lenses and their route tiers from the panel. The chair

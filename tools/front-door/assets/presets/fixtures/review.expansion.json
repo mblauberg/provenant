@@ -1,7 +1,7 @@
 {
   "context": {
-    "pattern": "review-council",
-    "preset": "review-council"
+    "pattern": "review",
+    "preset": "review"
   },
   "graph_id": "preset-50e6d3cea5cacae8263567ff4583e4f7",
   "nodes": [
@@ -526,7 +526,7 @@
       "roles.review.verify": "bundled",
       "stages": "bundled"
     },
-    "preset": "review-council",
+    "preset": "review",
     "roles": {
       "lens.conventions-readability": {
         "digest": "sha256:2a3ed542701c73aac20e2fcf061be84dc3ffe0eb7cae60b4d26d53a38bff2416",
@@ -726,9 +726,9 @@
     },
     "substitutions": [],
     "warnings": [
-      "preset review-council: omitted lens \"security-privacy\": requires risk tag security",
-      "preset review-council: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
-      "preset review-council: omitted lens \"adversarial\": requires risk tag terminal"
+      "preset review: omitted lens \"security-privacy\": requires risk tag security",
+      "preset review: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
+      "preset review: omitted lens \"adversarial\": requires risk tag terminal"
     ]
   },
   "schema_version": 1

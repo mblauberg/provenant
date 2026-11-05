@@ -164,7 +164,7 @@ fn omitted_lenses_are_recorded_in_explain_provenance() {
     layers.review = Some(shapes());
     let expanded = expand(
         &layers,
-        "review-council",
+        "review",
         "brief",
         &["parameters.risk_tier='routine'".into()],
     )
@@ -484,7 +484,7 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
     for name in [
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "big-batch",
         "scope-then-run",
         "deliver",
@@ -555,7 +555,7 @@ fn require_findings_nodes_instruct_a_findings_block() {
     for name in [
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "big-batch",
         "scope-then-run",
         "deliver",
@@ -605,7 +605,7 @@ fn admission_preset_version_follows_document() {
     for name in [
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "big-batch",
         "scope-then-run",
         "deliver",
@@ -690,7 +690,7 @@ fn implementer_and_scope_briefs_carry_the_authority_envelope() {
 
 fn bundled_fixture(name: &str) -> provenant_fabric_runtime::graph::GraphDocument {
     let overrides = match name {
-        "generator-evaluator" | "review-council" => vec!["parameters.worktree='/repo/lane'".into()],
+        "generator-evaluator" | "review" => vec!["parameters.worktree='/repo/lane'".into()],
         "scope-then-run" | "deliver" => vec!["parameters.worktree='/repo/lane'".into()],
         "big-batch" => vec![
             "parameters.lanes=[{name='one',worktree='/repo/one',scope=['.'],spec=''},{name='two',worktree='/repo/two',scope=['.'],spec=''}]".into(),
@@ -1076,7 +1076,7 @@ fn preset_wait_prepares_scratch_once_across_polls() {
 #[test]
 fn review_council_continues_when_lens_findings_exceed_the_cap() {
     use provenant_fabric_runtime::graph::{GraphStatus, NodeState, advance_with_budget};
-    let document = bundled_fixture("review-council");
+    let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner {
         many_findings: true,
@@ -1174,7 +1174,7 @@ fn review_council_continues_when_lens_findings_exceed_the_cap() {
 #[test]
 fn review_council_accepts_compact_overflow_dispositions() {
     use provenant_fabric_runtime::graph::{GraphStatus, advance_with_budget};
-    let document = bundled_fixture("review-council");
+    let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner {
         many_findings: true,
@@ -1201,7 +1201,7 @@ fn review_council_accepts_compact_overflow_dispositions() {
 #[test]
 fn review_council_refuses_a_missing_overflow_disposition() {
     use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
-    let document = bundled_fixture("review-council");
+    let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner {
         many_findings: true,
@@ -1233,7 +1233,7 @@ fn review_council_refuses_a_missing_overflow_disposition() {
 #[test]
 fn review_council_refuses_a_missing_overflow_verification() {
     use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
-    let document = bundled_fixture("review-council");
+    let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner {
         many_findings: true,
@@ -1274,7 +1274,7 @@ fn review_council_refuses_a_missing_overflow_verification() {
 #[test]
 fn review_council_refuses_conflicting_overflow_dispositions() {
     use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
-    let document = bundled_fixture("review-council");
+    let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner {
         many_findings: true,
@@ -1309,7 +1309,7 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
     for name in [
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "big-batch",
         "scope-then-run",
     ] {
@@ -1317,13 +1317,13 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
         let config = provenant_fabric_runtime::config::GraphConfig::default();
         let limits = config.limits.clone();
         let mut owner = PresetOwner {
-            council_findings: name == "review-council",
+            council_findings: name == "review",
             ..Default::default()
         };
         let mut journal = PresetJournal::default();
         let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &config.budget)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
-        if name == "review-council" {
+        if name == "review" {
             let synthesis = run
                 .checkpoint
                 .nodes
@@ -1506,7 +1506,7 @@ fn composite_bundled_expansions_match_golden_graphs() {
     for name in [
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "big-batch",
         "scope-then-run",
         "deliver",
@@ -1932,7 +1932,7 @@ fn council(overrides: &[&str], shaped: bool) -> Result<serde_json::Value, String
     let mut layers = Layers::empty();
     layers.review = shaped.then(shapes);
     let overrides: Vec<String> = overrides.iter().map(|s| (*s).to_owned()).collect();
-    expand(&layers, "review-council", "the change", &overrides).map(|e| e.document)
+    expand(&layers, "review", "the change", &overrides).map(|e| e.document)
 }
 
 #[test]
@@ -2249,7 +2249,7 @@ fn preset_local_check_policy_parameter_propagates_through_compositions() {
             "scope-then-run",
             vec!["write.implement", "lens.correctness-spec"],
         ),
-        ("review-council", vec!["review.verify", "lens.tests"]),
+        ("review", vec!["review.verify", "lens.tests"]),
     ] {
         let expanded = expand(
             &layers,
@@ -2545,7 +2545,7 @@ fn a_path_added_lens_survives_its_risk_tag_condition_without_duplicating() {
             lenses.to_owned(),
             format!("parameters.risk_tags={tags}"),
         ];
-        let document = expand(&layers, "review-council", "the change", &overrides)
+        let document = expand(&layers, "review", "the change", &overrides)
             .unwrap()
             .document;
         assert_eq!(
@@ -2558,7 +2558,7 @@ fn a_path_added_lens_survives_its_risk_tag_condition_without_duplicating() {
 
 #[test]
 fn the_council_lens_triggers_match_the_shared_risk_tag_table() {
-    let text = include_str!("../assets/presets/review-council.toml");
+    let text = include_str!("../assets/presets/review.toml");
     for (tag, lens) in provenant_routing::RISK_TAG_LENSES {
         assert!(
             text.contains(&format!(
@@ -2693,7 +2693,7 @@ fn each_review_stage_selects_its_shape_from_its_own_parameters() {
         .insert(
             "repo",
             "wrap",
-            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nrisk_tier = 'routine'\n",
+            "stages = [{ id = 'council', preset = 'review', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nrisk_tier = 'routine'\n",
         )
         .unwrap();
     let low = expand(&layers, "wrap", "brief", &[]).unwrap();
@@ -2806,7 +2806,7 @@ fn council_with_roles(roles: &str) -> Result<Expansion, String> {
     layers.roles.add("repo roles.toml", roles)?;
     expand(
         &layers,
-        "review-council",
+        "review",
         "the change",
         &[
             "parameters.worktree='/repo/lane'".into(),
@@ -2998,7 +2998,7 @@ fn opting_out_of_external_scouts_is_an_explicit_recorded_parameter() {
 fn review_council_verifies_between_the_lenses_and_the_synthesis() {
     let expanded = expand(
         &Layers::empty(),
-        "review-council",
+        "review",
         "the change",
         &["parameters.worktree='/repo/lane'".into()],
     )
@@ -3050,7 +3050,7 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
     );
     let skipped = expand(
         &Layers::empty(),
-        "review-council",
+        "review",
         "the change",
         &[
             "parameters.worktree='/repo/lane'".into(),
@@ -3076,7 +3076,7 @@ fn the_verifier_route_falls_back_to_senior_when_undefined() {
     layers.known_routes = Some(["senior".to_owned()].into());
     let expanded = expand(
         &layers,
-        "review-council",
+        "review",
         "the change",
         &["parameters.worktree='/repo/lane'".into()],
     )
@@ -3223,7 +3223,7 @@ const CATALOGUE: [&str; 9] = [
     "chain",
     "fan-out",
     "fan-out-synthesise",
-    "review-council",
+    "review",
     "generator-evaluator",
     "scout-swarm",
     "big-batch",
@@ -3361,7 +3361,7 @@ fn ambient_subject_and_risk_tier_flow_to_children_that_declare_them() {
         .insert(
             "repo",
             "wrap",
-            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nsubject = { type = 'integration' }\nrisk_tier = 'crucial'\n",
+            "stages = [{ id = 'council', preset = 'review', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nsubject = { type = 'integration' }\nrisk_tier = 'crucial'\n",
         )
         .unwrap();
     let result = expand(&layers, "wrap", "brief", &[]).unwrap();
@@ -3372,7 +3372,7 @@ fn ambient_subject_and_risk_tier_flow_to_children_that_declare_them() {
         .insert(
             "repo",
             "wrap",
-            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane', subject = { type = 'commit', commit = 'HEAD' } } }]\n",
+            "stages = [{ id = 'council', preset = 'review', parameters = { worktree = '/repo/lane', subject = { type = 'commit', commit = 'HEAD' } } }]\n",
         )
         .unwrap();
     let result = expand(&layers, "wrap", "brief", &[]).unwrap();
@@ -3592,7 +3592,7 @@ fn bundled_presets_fit_the_default_host_depth_limit() {
     // The documents' own `limits` are ignored by the host, so check against
     // the default host limits only.
     let limits = provenant_fabric_runtime::config::GraphConfig::default().limits;
-    for name in ["big-batch", "scope-then-run", "review-council"] {
+    for name in ["big-batch", "scope-then-run", "review"] {
         let document = bundled_fixture(name);
         let inspection = document.inspect(&limits).unwrap();
         assert_eq!(inspection.limit_reason, None, "{name}");
@@ -3603,7 +3603,7 @@ fn bundled_presets_fit_the_default_host_depth_limit() {
 fn cross_family_prefers_by_default_and_a_project_may_require_it() {
     let expanded = expand(
         &Layers::empty(),
-        "review-council",
+        "review",
         "the change",
         &["parameters.worktree='/repo/lane'".into()],
     )
@@ -3745,7 +3745,7 @@ stages = [
 fn synthesis_declares_and_requests_a_disposition_for_every_finding() {
     let expanded = expand(
         &Layers::empty(),
-        "review-council",
+        "review",
         "the change",
         &["parameters.worktree='/repo/lane'".into()],
     )
@@ -4208,7 +4208,7 @@ mod planner_front_end {
     }
 
     fn static_lenses(params: Vec<(String, Value)>) -> Vec<String> {
-        let plain = plain("review-council", params);
+        let plain = plain("review", params);
         plain.document["nodes"][1]["composite"]["nodes"]
             .as_array()
             .unwrap()
@@ -4231,7 +4231,7 @@ mod planner_front_end {
         for tags in [json!([]), json!(["security"])] {
             let mut params = base.clone();
             params.push(("risk_tags".into(), tags.clone()));
-            let planned = run(&on, "review-council", "brief", params.clone());
+            let planned = run(&on, "review", "brief", params.clone());
             // The catalogue is exactly the lens set the static stage would run.
             assert_eq!(lens_names(&planned), static_lenses(params), "{tags}");
             assert_eq!(ids(&planned), ["subject", "plan", "verify", "synthesis"]);
@@ -4240,12 +4240,12 @@ mod planner_front_end {
         let mut quiet = base.clone();
         quiet.push(("risk_tags".into(), json!([])));
         assert!(
-            !lens_names(&run(&on, "review-council", "brief", quiet))
+            !lens_names(&run(&on, "review", "brief", quiet))
                 .contains(&"security-privacy".to_owned())
         );
         let mut tagged = base.clone();
         tagged.push(("risk_tags".into(), json!(["security"])));
-        let planned = run(&on, "review-council", "brief", tagged);
+        let planned = run(&on, "review", "brief", tagged);
         assert!(lens_names(&planned).contains(&"security-privacy".to_owned()));
         // Each lens leg pins the commit itself and offers its panel tier.
         let leg = pattern(&planned, "lens-correctness-spec");
@@ -4264,15 +4264,13 @@ mod planner_front_end {
     #[test]
     fn review_council_with_a_non_commit_subject_keeps_its_static_lenses() {
         let mut configured = layers(PlanMode::On, None);
-        let original = include_str!("../assets/presets/review-council.toml");
+        let original = include_str!("../assets/presets/review.toml");
         let with_subject = original.replacen(
             "stages = [",
             "stages = [{ id = 'write', access = 'worktree_write', worktree = '/repo/lane', prompt = 'produce the subject' },",
             1,
         );
-        configured
-            .insert("test", "review-council", &with_subject)
-            .unwrap();
+        configured.insert("test", "review", &with_subject).unwrap();
         let params = vec![
             ("worktree".to_owned(), json!("/repo/lane")),
             (
@@ -4280,7 +4278,7 @@ mod planner_front_end {
                 json!({"type": "node", "node": "write"}),
             ),
         ];
-        let expansion = run(&configured, "review-council", "brief", params);
+        let expansion = run(&configured, "review", "brief", params);
         let decision = expansion.plan.as_ref().unwrap();
         assert!(!decision.applied);
         assert!(
@@ -4303,12 +4301,12 @@ mod planner_front_end {
             layers
         };
         let params = || vec![("worktree".to_owned(), json!("/repo/lane"))];
-        let large = run(&sized(Some("large")), "review-council", "brief", params());
+        let large = run(&sized(Some("large")), "review", "brief", params());
         let decision = large.plan.as_ref().unwrap();
         assert!(decision.applied, "{}", decision.reason);
         assert_eq!(decision.reason, "review subject is large");
         assert!(ids(&large).contains(&"plan".to_owned()));
-        let small = run(&sized(Some("small")), "review-council", "brief", params());
+        let small = run(&sized(Some("small")), "review", "brief", params());
         let decision = small.plan.as_ref().unwrap();
         assert!(!decision.applied);
         assert_eq!(decision.reason, "review subject is not large (size=small)");
@@ -4319,11 +4317,11 @@ mod planner_front_end {
             .collect::<Vec<_>>()
             .join("\n");
         let brief = format!("Review #1 #2 #3 #4 #5 #6\n## Acceptance\n{long}");
-        let small_long = run(&sized(Some("small")), "review-council", &brief, params());
+        let small_long = run(&sized(Some("small")), "review", &brief, params());
         let decision = small_long.plan.as_ref().unwrap();
         assert!(!decision.applied, "{}", decision.reason);
         assert_eq!(decision.reason, "review subject is not large (size=small)");
-        let unknown = run(&sized(None), "review-council", "brief", params());
+        let unknown = run(&sized(None), "review", "brief", params());
         assert!(
             unknown
                 .plan
@@ -4876,7 +4874,7 @@ mod planner_front_end {
         layers.project_dir = Some(temp.path().to_path_buf());
         let expansion = run(
             &layers,
-            "review-council",
+            "review",
             "brief",
             vec![("spec".into(), json!("spec.md"))],
         );
@@ -4891,7 +4889,7 @@ mod planner_front_end {
         let scoped = vec![("worktree".to_owned(), json!("/repo/lane"))];
         for (name, params) in [
             ("scout-swarm", roots),
-            ("review-council", council),
+            ("review", council),
             ("fan-out", Vec::new()),
             ("fan-out-synthesise", Vec::new()),
             ("scope-then-run", scoped),
@@ -4911,7 +4909,7 @@ mod planner_front_end {
 
     #[test]
     fn planned_prompts_use_the_effective_local_check_policy() {
-        for preset in ["big-batch", "review-council", "scope-then-run"] {
+        for preset in ["big-batch", "review", "scope-then-run"] {
             for (project_policy, parameter, expected) in [
                 (
                     None,
@@ -4941,7 +4939,7 @@ mod planner_front_end {
                 }
                 params.push(("local_check_policy".into(), json!(parameter)));
                 let expansion = run(&layers, preset, "brief", params);
-                let role = if preset == "review-council" {
+                let role = if preset == "review" {
                     "lens.correctness-spec"
                 } else {
                     "write.implement"
@@ -5237,7 +5235,7 @@ fn explicit_size_shape_and_commit_subjects_keep_the_static_v1_panel() {
     // The default council reviews a commit, which is already pinned.
     let document = expand(
         &layers,
-        "review-council",
+        "review",
         "brief",
         &["parameters.worktree='/repo/w'".into()],
     )
@@ -5264,8 +5262,8 @@ fn reviews_that_disagree_on_the_base_are_refused() {
             r#"
 stages = [
   { id = "a", role = "writer" },
-  { id = "first", preset = "review-council", depends_on = ["a"], parameters = { subject = { type = "head", node = "a" }, worktree = "/repo/w", base = "main" } },
-  { id = "second", preset = "review-council", depends_on = ["a"], parameters = { subject = { type = "head", node = "a" }, worktree = "/repo/w", base = "release" } },
+  { id = "first", preset = "review", depends_on = ["a"], parameters = { subject = { type = "head", node = "a" }, worktree = "/repo/w", base = "main" } },
+  { id = "second", preset = "review", depends_on = ["a"], parameters = { subject = { type = "head", node = "a" }, worktree = "/repo/w", base = "release" } },
 ]
 [parameters]
 worktree = { type = "string", default = "/repo/w" }
@@ -5413,8 +5411,8 @@ fn big_batch_without_scout_matches_golden() {
 #[test]
 fn compact_preset_show_lists_review_council_parameter_docs() {
     let layers = Layers::empty();
-    let (values, origins) = layers.resolve("review-council").unwrap();
-    let data = json!({"name": "review-council", "values": values, "origins": origins});
+    let (values, origins) = layers.resolve("review").unwrap();
+    let data = json!({"name": "review", "values": values, "origins": origins});
     let shown = super::preset::human_for_test(&data, false);
     for (name, value) in data["values"]["parameters"].as_object().unwrap() {
         assert!(shown.contains(name), "missing {name}");
@@ -5437,28 +5435,24 @@ fn compact_preset_explain_lists_parameter_names() {
 fn preset_show_and_explain_json_match_snapshots() {
     use provenant_records::{CommandResult, Outcome};
     let layers = Layers::empty();
-    let (values, mut origins) = layers.resolve("review-council").unwrap();
-    origins.extend(expand(&layers, "review-council", "", &[]).unwrap().origins);
+    let (values, mut origins) = layers.resolve("review").unwrap();
+    origins.extend(expand(&layers, "review", "", &[]).unwrap().origins);
     let show = CommandResult::new(
         "preset",
         Outcome::Ok,
-        json!({"name": "review-council", "values": values, "origins": origins}),
+        json!({"name": "review", "values": values, "origins": origins}),
     );
-    let explain = CommandResult::new(
-        "preset",
-        Outcome::Ok,
-        layers.explain("review-council").unwrap(),
-    );
+    let explain = CommandResult::new("preset", Outcome::Ok, layers.explain("review").unwrap());
     // `UPDATE_GOLDEN=1` rewrites the fixtures.
     let golden = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     for (actual, name) in [
         (
             serde_json::to_value(show).unwrap(),
-            "preset-review-council-show.json",
+            "preset-review-show.json",
         ),
         (
             serde_json::to_value(explain).unwrap(),
-            "preset-review-council-explain.json",
+            "preset-review-explain.json",
         ),
     ] {
         let path = golden.join(name);
@@ -5503,7 +5497,7 @@ fn a_static_commit_council_records_the_requested_base() {
     let layers = real_selector("/nonexistent");
     let document = expand(
         &layers,
-        "review-council",
+        "review",
         "brief",
         &[
             "parameters.worktree='/repo/w'".into(),
@@ -5521,7 +5515,7 @@ fn a_static_commit_council_records_the_requested_base() {
 /// Every document a preset emits must pass the admission checks the runtime
 /// applies on submit, not just deserialize: a document that carried a review
 /// base under schema 1 expanded and explained cleanly yet was refused as
-/// "invalid input" by every `run --preset review-council` with a base.
+/// "invalid input" by every `run --preset review` with a base.
 #[test]
 fn every_bundled_preset_document_passes_graph_admission() {
     let layers = real_selector("/nonexistent");
@@ -5540,14 +5534,14 @@ fn every_bundled_preset_document_passes_graph_admission() {
         "fan-out",
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "scope-then-run",
         "deliver",
         "big-batch",
     ] {
         for extra in shapes {
             let mut overrides: Vec<String> = match name {
-                "generator-evaluator" | "review-council" | "scope-then-run" | "deliver" => {
+                "generator-evaluator" | "review" | "scope-then-run" | "deliver" => {
                     vec!["parameters.worktree='/repo/lane'".into()]
                 }
                 "big-batch" => vec![
@@ -5642,7 +5636,7 @@ fn preset_file_spec_reaches_review_nodes_and_warns_when_missing() {
     .unwrap();
     let mut layers = Layers::empty();
     layers.project_dir = Some(project.clone());
-    for preset in ["generator-evaluator", "review-council"] {
+    for preset in ["generator-evaluator", "review"] {
         let expanded = super::preset::expand_with(
             &layers,
             preset,
@@ -6022,6 +6016,16 @@ fn copied_generator_evaluator_receives_the_same_request_and_nodes() {
         documents.push(expansion.document["nodes"].clone());
     }
     assert_eq!(documents[0], documents[1]);
+}
+
+#[test]
+fn removed_review_preset_name_uses_the_unknown_preset_error() {
+    let old_name = ["review", "council"].join("-");
+    let error = Layers::empty().resolve(&old_name).unwrap_err();
+    assert!(
+        error.contains(&format!("unknown preset: {old_name}")),
+        "{error}"
+    );
 }
 
 #[test]
