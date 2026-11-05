@@ -282,11 +282,6 @@ boundary = "lane_git"
 reason = "A writer's Git wrapper must bind commands to the private Git and object directories."
 
 [[guard]]
-site = "providers/src/launch.rs#private_git_objects"
-boundary = "unclassified"
-reason = "Read-only Git executable and search-path setup can also fail and needs classification."
-
-[[guard]]
 site = "providers/src/lane.rs#LaunchSpec::configure_publishing"
 boundary = "credentials"
 reason = "The publishing wrapper must preserve the selected GitHub credential policy and avoid exposing it to other lanes."
