@@ -23,6 +23,13 @@ use std::{
     time::Duration,
 };
 
+/// Distinguishes a refusal before custody from a failed withdrawal after it.
+#[derive(Debug)]
+pub(crate) enum WriterCustodyError {
+    Admission(provenant_supervisor::custody::CustodyError),
+    Withdrawal(provenant_supervisor::custody::CustodyError),
+}
+
 #[cfg(test)]
 thread_local! {
     pub(crate) static FAIL_IMPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1610,9 +1617,11 @@ impl crate::RunStore {
             provenant_supervisor::custody::CustodyLease,
         >,
         call: &crate::Request<'_>,
-    ) -> provenant_supervisor::custody::Result<provenant_supervisor::custody::CustodyLease> {
-        let slot = directory.try_clone()?;
-        let lease = acquire(directory, scope, binding)?;
+    ) -> std::result::Result<provenant_supervisor::custody::CustodyLease, WriterCustodyError> {
+        let slot = directory
+            .try_clone()
+            .map_err(|e| WriterCustodyError::Admission(e.into()))?;
+        let lease = acquire(directory, scope, binding).map_err(WriterCustodyError::Admission)?;
         let checked = (|| -> Result<()> {
             call.check()?;
             let metadata = slot.metadata()?;
@@ -1662,9 +1671,13 @@ impl crate::RunStore {
             Ok(())
         })();
         if let Err(error) = checked {
-            lease.withdraw_unlaunched()?;
-            return Err(provenant_supervisor::custody::CustodyError::Io(
-                std::io::Error::other(error.to_string()),
+            lease
+                .withdraw_unlaunched()
+                .map_err(WriterCustodyError::Withdrawal)?;
+            return Err(WriterCustodyError::Admission(
+                provenant_supervisor::custody::CustodyError::Io(std::io::Error::other(
+                    error.to_string(),
+                )),
             ));
         }
         Ok(lease)
@@ -2220,4 +2233,54 @@ pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
 pub(crate) struct WriterOwnership {
     pub schema_version: u64,
     pub lane_owned: bool,
+}
+
+#[cfg(test)]
+mod custody_admission_tests {
+    use super::*;
+    use crate::tests::{call, clock, context};
+    use provenant_core::{AttemptId, RunId};
+    use provenant_supervisor::custody::{self, Scope};
+
+    #[test]
+    fn failed_admission_withdrawal_retains_a_protected_error()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = crate::RunStore::open(&context(temp.path())?, &call)?;
+        let path = temp.path().join("slot");
+        std::fs::create_dir(&path)?;
+        let scope = Scope {
+            run: RunId::from_bytes([3; 16]),
+            attempt: AttemptId::from_bytes([4; 16]),
+            generation: 1,
+        };
+        let result = store.acquire_writer_fenced(
+            Directory::open_anchor(&path)?,
+            scope,
+            WriterBinding::read_only(),
+            &|directory, scope, binding| {
+                let lease = custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    call.lock_budget(),
+                    call.cancel,
+                    call.clock,
+                )?;
+                std::fs::create_dir(path.join(scope.attempt.to_string()).join("settlement.json"))?;
+                cancel.cancel();
+                Ok(lease)
+            },
+            &call,
+        );
+        assert!(matches!(result, Err(WriterCustodyError::Withdrawal(_))));
+        assert!(custody::reservation_present(
+            &Directory::open_anchor(&path)?,
+            scope
+        )?);
+        Ok(())
+    }
 }

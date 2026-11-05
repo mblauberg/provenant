@@ -992,3 +992,44 @@ fn an_unrecorded_escape_cannot_be_cleared_by_an_empty_census() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn failed_ownership_publication_reports_retained_reservation() -> TestResult {
+    struct FailOwnership(PathBuf);
+    impl ProcessObserver for FailOwnership {
+        fn boot_identity(&self) -> std::result::Result<String, crate::census::CensusError> {
+            std::fs::create_dir(&self.0).expect("create ownership obstruction");
+            Ok("fixture-recorded-boot-v1".into())
+        }
+        fn observe(&self, _: i64) -> ProcessObservation {
+            ProcessObservation::Absent
+        }
+        fn census(
+            &self,
+            _: usize,
+        ) -> std::result::Result<crate::census::Census, crate::census::CensusError> {
+            crate::census::Census::from_observations([], [], [], true, false, 1)
+        }
+    }
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let observer = FailOwnership(
+        root.path()
+            .join(scope().attempt.to_string())
+            .join("ownership.json"),
+    );
+    let result = acquire_writer_with_observer(
+        directory.try_clone()?,
+        scope(),
+        WriterBinding::read_only(),
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+        &observer,
+    );
+    assert!(matches!(result, Err(CustodyError::ReservationRetained(_))));
+    assert!(reservation_present(&directory, scope())?);
+    Ok(())
+}

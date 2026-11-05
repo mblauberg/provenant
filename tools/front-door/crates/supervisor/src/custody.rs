@@ -40,6 +40,8 @@ pub enum CustodyError {
     Timeout,
     #[error(transparent)]
     Admission(#[from] AdmissionError),
+    #[error("custody reservation may be retained: {0}")]
+    ReservationRetained(String),
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -485,22 +487,28 @@ pub(crate) fn acquire_writer_with_observer(
     };
     reservation.validate()?;
     // Publish the fence first: owner death cannot leave an invisible ownership gap.
-    Publication::require_durable(write_record(
-        &directory,
-        "reservation.json",
-        &reservation,
-        PublishMode::NoReplace,
-    )?)?;
-    Publication::require_durable(write_record(
-        &directory,
-        "ownership.json",
-        &OwnershipJournal {
-            schema_version: 1,
-            scope,
-            binding: reservation.binding.clone(),
-        },
-        PublishMode::Replace,
-    )?)?;
+    // Publication can fail after the reservation becomes visible. From this
+    // point an error must not be mistaken for a custody-free refusal.
+    let publish = (|| -> Result<()> {
+        Publication::require_durable(write_record(
+            &directory,
+            "reservation.json",
+            &reservation,
+            PublishMode::NoReplace,
+        )?)?;
+        Publication::require_durable(write_record(
+            &directory,
+            "ownership.json",
+            &OwnershipJournal {
+                schema_version: 1,
+                scope,
+                binding: reservation.binding.clone(),
+            },
+            PublishMode::Replace,
+        )?)?;
+        Ok(())
+    })();
+    publish.map_err(|error| CustodyError::ReservationRetained(error.to_string()))?;
     Ok(CustodyLease {
         directory,
         lock_directory,

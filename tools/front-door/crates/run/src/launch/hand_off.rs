@@ -77,13 +77,19 @@ impl RunStore {
             }
             // Readers take the same injected acquisition as writers, so a
             // fixture guardian and its reservation share one boot observer.
-            None => acquire_writer(directory()?, scope, custody::WriterBinding::read_only()),
+            None => acquire_writer(directory()?, scope, custody::WriterBinding::read_only())
+                .map_err(crate::writer::WriterCustodyError::Admission),
         }
-        .map_err(|e| {
-            if matches!(e, custody::CustodyError::Busy) {
+        .map_err(|e| match e {
+            crate::writer::WriterCustodyError::Admission(custody::CustodyError::Busy) => {
                 HandOff::Busy
-            } else {
-                local("custody", &e)
+            }
+            crate::writer::WriterCustodyError::Admission(
+                custody::CustodyError::ReservationRetained(error),
+            ) => HandOff::Uncertain(format!("custody reservation: {error}")),
+            crate::writer::WriterCustodyError::Admission(error) => local("custody", &error),
+            crate::writer::WriterCustodyError::Withdrawal(error) => {
+                HandOff::Uncertain(format!("custody withdrawal: {error}"))
             }
         })?;
         // Once custody is acquired, every local preparation failure must
@@ -327,7 +333,7 @@ mod tests {
         )?;
         let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
         assert!(record.requested_priority.is_none());
-        let plan = PreparedLaunch {
+        let plan = || PreparedLaunch {
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),
@@ -351,7 +357,7 @@ mod tests {
         };
         let result = store.hand_off(
             &request.request.tasks[0],
-            plan,
+            plan(),
             provenant_core::ActorId::from_bytes([2; 16]),
             &|_, _| Ok(Vec::new()),
             &acquire,
@@ -374,6 +380,22 @@ mod tests {
             call.clock,
         )?;
         lease.withdraw_unlaunched()?;
+        let result = store.hand_off(
+            &request.request.tasks[0],
+            plan(),
+            provenant_core::ActorId::from_bytes([2; 16]),
+            &|_, _| Ok(Vec::new()),
+            &|_, _, _| Err(custody::CustodyError::ReservationRetained("fixture".into())),
+            &record,
+            60,
+            &call,
+        );
+        match result {
+            Err(HandOff::Uncertain(reason)) => assert!(reason.contains("fixture"), "{reason}"),
+            Err(HandOff::Local(reason)) => panic!("local: {reason}"),
+            Err(HandOff::Busy) => panic!("busy"),
+            Ok(()) => panic!("unexpected launch"),
+        }
         Ok(())
     }
 }
