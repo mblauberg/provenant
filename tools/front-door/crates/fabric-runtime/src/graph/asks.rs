@@ -669,7 +669,7 @@ fn pause_action(
     }
     let mut all = checkpoint.extensions.clone();
     all.extend(extensions.iter().cloned());
-    if let Some(reason) = envelope::reason(document, &checkpoint.expansions, &all, plan) {
+    if let Some(reason) = graph_envelope_reason(document, &checkpoint.expansions, &all, plan) {
         return Err(("checkpoint_too_large", reason));
     }
     Ok(PauseAction::Resume(extensions))

@@ -614,6 +614,21 @@ Use read-only junior swarms for scouting and research. Give implementation
 lanes to seniors, and put long-horizon principal refactoring at batch end.
 Choose review depth from the risk and author tier.
 
+The checkpoint estimate reserves space for bounded node outputs and for each
+deferred review. Disposition findings share a per-node budget: when inherited
+copies exceed it, the checkpoint retains the bounded findings block and
+reconstructs the copies from upstream inputs on replay. A warning records the
+compaction; full results remain in their attempt files.
+
+An unpinned review size resolves after its subject is committed. Admission
+reserves its configured maximum panel, including the candidate templates and
+inherited inputs. The runtime checks the prospective expansion against that
+reservation before publishing it; an expansion outside the reserved shape is
+refused with its projection and a remedy. This keeps the estimate conservative
+without reducing the selected panel or changing the checkpoint limit. Use
+`--explain` to check larger batches, and split a batch if the estimate exceeds
+the limit.
+
 A graph that reads `source = { type = "integration" }` pins the integration
 head when that source first resolves, and the head joins the graph ID. The
 graph stops before synthesis, and before a writer that starts from the pinned

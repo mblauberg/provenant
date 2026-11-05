@@ -885,12 +885,16 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .enumerate()
         .map(|(i, node)| (node.id.clone(), i))
         .collect();
-    for (progress, node) in checkpoint.nodes.iter().zip(&plan.nodes) {
+    for (index, (progress, node)) in checkpoint.nodes.iter().zip(&plan.nodes).enumerate() {
         let bad = |invariant| GraphError::BadCheckpoint {
             node: node.id.clone(),
             invariant,
         };
         for (invalid, invariant) in [
+            (
+                !valid_compacted_findings(index, plan, checkpoint, &positions),
+                "compacted findings must reconstruct from the node inputs",
+            ),
             (
                 progress.round != node.round,
                 "round must match expanded plan",
