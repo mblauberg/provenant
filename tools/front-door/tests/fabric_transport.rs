@@ -4745,6 +4745,58 @@ fn peer_writer_reports_delivery_prepare_failure() -> Result {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Exercise the real wait deadline.
+fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
+    let mut rig = TestRig::new()?;
+    let _peer = loopback_peer(&mut rig)?;
+    std::fs::write(
+        rig.root.join("ssh"),
+        "#!/bin/sh\nexec /usr/bin/tail -f /dev/null\n",
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "fixture")?;
+    let start = std::time::Instant::now();
+    let (status, result) = json_command(
+        &rig,
+        &[
+            "dispatch",
+            "--host",
+            "workshop",
+            "--mode",
+            "read-only",
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            "held-submit",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "1s",
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0, "{result}");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(6),
+        "{result}"
+    );
+    assert_eq!(result["error"]["code"], "LAUNCH_UNKNOWN", "{result}");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .is_some_and(|s| s.contains("launch preparation")),
+        "{result}"
+    );
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .is_some_and(|s| s.contains("held-submit")),
+        "{result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();

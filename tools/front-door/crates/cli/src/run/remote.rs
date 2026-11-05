@@ -893,12 +893,20 @@ fn submitted_task(
     }
 }
 
+#[allow(clippy::disallowed_methods)] // One wall-clock budget spans peer submission and polling.
 pub(super) fn dispatch(
     edge: &Edge<'_>,
     host: &str,
     batch: Batch,
     wait: Option<u64>,
 ) -> Result<(Value, String, bool), Fail> {
+    let deadline =
+        wait.and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds)));
+    let remaining = || {
+        deadline.map_or(Duration::MAX, |end| {
+            end.saturating_duration_since(Instant::now())
+        })
+    };
     let peer = Peer::open(edge)?;
     let project = peer.project()?;
     let host = peer
@@ -932,13 +940,21 @@ pub(super) fn dispatch(
     let PeerResult::Submitted {
         data: receipt,
         extra: _,
-    } = peer.call(
-        host,
-        PeerAction::Submit {
-            extra: Default::default(),
-            input,
-        },
-    )?
+    } = peer
+        .call_within(
+            host,
+            PeerAction::Submit {
+                extra: Default::default(),
+                input,
+            },
+            remaining(),
+        )
+        .map_err(|mut failure| {
+            if failure.kind == ErrorKind::LaunchUnknown {
+                failure.message = format!("launch preparation: {}", failure.message);
+            }
+            failure
+        })?
     else {
         return Err(corrupt());
     };
@@ -952,7 +968,7 @@ pub(super) fn dispatch(
         return Err(corrupt());
     }
     let selected: Vec<_> = receipt.targets.iter().map(|t| (host, t.attempt)).collect();
-    let lanes = peer.records(&selected)?;
+    let lanes = peer.records_within(&selected, remaining())?;
     let run_id = lanes.first().ok_or_else(corrupt)?.run_id;
     if lanes.iter().any(|lane| lane.run_id != run_id) {
         return Err(corrupt());
@@ -977,8 +993,14 @@ pub(super) fn dispatch(
         },
     )?;
     let (lanes, met) = match wait {
-        Some(seconds) => {
-            let (lanes, met) = peer.wait(&selected, Condition::All, seconds)?;
+        Some(_) if remaining().is_zero() => (lanes, Some(false)),
+        Some(_) => {
+            let (lanes, met) = poll_until(
+                |left| peer.records_following(&selected, left),
+                Condition::All,
+                remaining(),
+                POLL,
+            )?;
             (lanes, Some(met))
         }
         None => (lanes, None),
