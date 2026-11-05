@@ -1056,11 +1056,7 @@ pub fn expand_with(
         .map_err(|error| format!("{error}; valid parameter and slot paths: {valid}"))?;
     }
     for item in overrides {
-        let (path, raw) = item
-            .split_once('=')
-            .ok_or_else(|| format!("expected path=value: {item}"))?;
-        let parsed: Value = toml_edit::de::from_str(&format!("value = {raw}"))
-            .map_err(|e| format!("{path}: {e}; string values need quotes, for example --set 'parameters.route=\"utility\"'"))?;
+        let (path, parsed) = parse_preset_override(item)?;
         if parsed["value"].is_object() {
             return Err(format!(
                 "{path}: --set requires a scalar or array value; set table fields with dotted paths, for example --set 'parameters.subject.commit=\"<sha>\"'"
@@ -4497,6 +4493,122 @@ fn params_file(path: &Path) -> Result<Vec<(String, Value)>, String> {
         .collect())
 }
 
+fn parse_preset_override(item: &str) -> Result<(&str, Value), String> {
+    let (path, raw) = item
+        .split_once('=')
+        .ok_or_else(|| format!("expected path=value: {item}"))?;
+    let parsed = toml_edit::de::from_str(&format!("value = {raw}"))
+        .map_err(|e| format!("{path}: {e}; string values need quotes, for example --set 'parameters.route=\"utility\"'"))?;
+    Ok((path, parsed))
+}
+
+enum PresetInputError {
+    Invalid(String),
+    Secret,
+}
+impl From<String> for PresetInputError {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+fn scan_preset_value(value: &Value) -> Result<(), PresetInputError> {
+    match value {
+        Value::String(text) => {
+            provenant_run::Service::scan(text).map_err(|_| PresetInputError::Secret)
+        }
+        Value::Array(values) => values.iter().try_for_each(scan_preset_value),
+        Value::Object(values) => values.iter().try_for_each(|(key, value)| {
+            provenant_run::Service::scan(key).map_err(|_| PresetInputError::Secret)?;
+            scan_preset_value(value)
+        }),
+        _ => Ok(()),
+    }
+}
+// Path fields are execution context, not content sent as a user secret. Keep
+// the rest of the document (including role cards and provenance) in the scan.
+fn scan_preset_graph(document: &Value) -> Result<(), PresetInputError> {
+    let mut content = document.clone();
+    if let Some(nodes) = content.get_mut("nodes").and_then(Value::as_array_mut) {
+        visit_nodes(nodes, &mut |node| {
+            if let Some(object) = node.as_object_mut() {
+                object.remove("worktree");
+                object.remove("read_roots");
+                if let Some(review) = object.get_mut("review").and_then(Value::as_object_mut) {
+                    review.remove("worktree");
+                }
+            }
+            Ok(())
+        })
+        .map_err(PresetInputError::Invalid)?;
+    }
+    if let Some(subject) = content
+        .pointer_mut("/provenance/resolved_subject")
+        .and_then(Value::as_object_mut)
+    {
+        subject.remove("worktree");
+    }
+    // Origins record the filesystem location of preset and role definitions.
+    if let Some(provenance) = content.get_mut("provenance").and_then(Value::as_object_mut) {
+        if let Some(origins) = provenance.get_mut("origins").and_then(Value::as_object_mut) {
+            for origin in origins.values_mut() {
+                *origin = Value::Null;
+            }
+        }
+        if let Some(roles) = provenance.get_mut("roles").and_then(Value::as_object_mut) {
+            for role in roles.values_mut().filter_map(Value::as_object_mut) {
+                role.remove("origin");
+            }
+        }
+    }
+    scan_preset_value(&content)
+}
+struct PresetInputs {
+    bytes: Vec<u8>,
+    params: Vec<(String, Value)>,
+}
+
+fn preset_inputs(request: &provenant_cli::Dispatch) -> Result<PresetInputs, PresetInputError> {
+    let bytes = if let Some(path) = &request.input.prompt_file {
+        let mut file = provenant_os::fs::FileHandle::open_source(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        file.read_bounded(1_048_576)
+            .map_err(|e| format!("{}: {e}", path.display()))?
+    } else if request.input.prompt_stdin {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .lock()
+            .take(1_048_577)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() > 1_048_576 {
+            return Err(PresetInputError::Invalid(
+                "prompt exceeds 1048576 bytes".into(),
+            ));
+        }
+        bytes
+    } else {
+        return Err(PresetInputError::Invalid(
+            "preset selection requires a prompt input".into(),
+        ));
+    };
+
+    let prompt = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+    provenant_run::Service::scan(prompt).map_err(|_| PresetInputError::Secret)?;
+    let params = match &request.preset_params_file {
+        Some(path) => params_file(path)?,
+        None => Vec::new(),
+    };
+    for (_, value) in &params {
+        scan_preset_value(value)?;
+    }
+    for item in &request.preset_set {
+        let (_, parsed) = parse_preset_override(item)?;
+        scan_preset_value(&parsed["value"])?;
+    }
+    Ok(PresetInputs { bytes, params })
+}
+
 fn prompt_ready(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
     let named_surface = [
@@ -4541,27 +4653,32 @@ pub(crate) fn run_with_review(
     workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
     review: bool,
 ) -> u8 {
+    let PresetInputs {
+        bytes,
+        params: file_params,
+    } = match preset_inputs(&request) {
+        Ok(inputs) => inputs,
+        Err(PresetInputError::Secret) => {
+            return crate::fail(
+                "run",
+                provenant_records::Outcome::Refused,
+                "SECRET_INPUT",
+                "input matches a secret pattern; remove the secret and retry",
+                globals,
+            );
+        }
+        Err(PresetInputError::Invalid(error)) => {
+            return crate::fail(
+                "run",
+                provenant_records::Outcome::Invalid,
+                "preset",
+                &error,
+                globals,
+            );
+        }
+    };
+    let mut deferred_stderr = Vec::new();
     let result = (|| -> Result<(Expansion, Vec<String>), String> {
-        let bytes = if let Some(path) = &request.input.prompt_file {
-            let mut file = provenant_os::fs::FileHandle::open_source(path)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-            file.read_bounded(1_048_576)
-                .map_err(|e| format!("{}: {e}", path.display()))?
-        } else if request.input.prompt_stdin {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            std::io::stdin()
-                .lock()
-                .take(1_048_577)
-                .read_to_end(&mut bytes)
-                .map_err(|error| error.to_string())?;
-            if bytes.len() > 1_048_576 {
-                return Err("prompt exceeds 1048576 bytes".into());
-            }
-            bytes
-        } else {
-            return Err("preset selection requires a prompt input".into());
-        };
         let prompt = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
         let directory = crate::roots::selected_project(globals.project.as_deref(), false)
             .map_err(|e| e.to_string())?;
@@ -4590,10 +4707,6 @@ pub(crate) fn run_with_review(
         let config =
             provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
                 .map_err(|e| e.to_string())?;
-        let file_params = match &request.preset_params_file {
-            Some(path) => params_file(path)?,
-            None => Vec::new(),
-        };
         let mut layers = configured(globals)?;
         layers.graph_limits = config.domains.fabric.graph.limits.clone();
         layers.launch_dir = Some(directory.clone());
@@ -4719,7 +4832,7 @@ pub(crate) fn run_with_review(
         {
             use std::io::Write;
             for warning in &placement.warnings {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                let _ = writeln!(deferred_stderr, "warning: {warning}");
             }
         }
         if let Some(assignment) = &placement.assignment {
@@ -4790,7 +4903,7 @@ pub(crate) fn run_with_review(
                 &directory,
                 &spec,
                 advice_path.as_deref(),
-                &mut std::io::stderr().lock(),
+                &mut deferred_stderr,
                 bind,
             )?;
         } else {
@@ -4850,12 +4963,6 @@ pub(crate) fn run_with_review(
             &directory,
             request.access.worktree.as_deref(),
         )?;
-        {
-            use std::io::Write;
-            for warning in &expansion.warnings {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-            }
-        }
         // Every bound worktree and read root counts as readable; the brief's
         // own paths are warned about, never refused.
         let mut effective = Vec::new();
@@ -4899,35 +5006,60 @@ pub(crate) fn run_with_review(
         };
         Ok((expansion, brief_warnings))
     })();
-    match result {
-        Err(error) => crate::fail(
-            "run",
-            provenant_records::Outcome::Invalid,
-            "preset",
-            &error,
-            globals,
-        ),
-        Ok((expansion, brief_warnings)) if request.explain => {
-            explain(expansion, brief_warnings, globals)
-        }
-        Ok((expansion, brief_warnings)) => {
-            if !expansion.repo_files.is_empty() {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "Repository preset: {}",
-                    expansion.repo_files.join(", ")
-                );
-            }
-            crate::fabric::run_preset_graph(
-                expansion.document,
-                request.wait.unwrap_or(240),
-                &brief_warnings,
+    let (expansion, brief_warnings) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            return crate::fail(
+                "run",
+                provenant_records::Outcome::Invalid,
+                "preset",
+                &error,
                 globals,
-                workers,
-                review,
-            )
+            );
         }
+    };
+    if scan_preset_graph(&expansion.document).is_err() {
+        return crate::fail(
+            "run",
+            provenant_records::Outcome::Refused,
+            "SECRET_INPUT",
+            "input matches a secret pattern; remove the secret and retry",
+            globals,
+        );
+    }
+    // Advice may include text outside the graph, such as the full spec.
+    // Suppress matches without changing whether explain and launch accept it.
+    if provenant_run::Service::scan(&String::from_utf8_lossy(&deferred_stderr)).is_err() {
+        deferred_stderr.clear();
+    }
+    {
+        use std::io::Write;
+        let _ = std::io::stderr().lock().write_all(&deferred_stderr);
+        for warning in &expansion.warnings {
+            if provenant_run::Service::scan(warning).is_ok() {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            }
+        }
+    }
+    if request.explain {
+        explain(expansion, brief_warnings, globals)
+    } else {
+        if !expansion.repo_files.is_empty() {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "Repository preset: {}",
+                expansion.repo_files.join(", ")
+            );
+        }
+        crate::fabric::run_preset_graph(
+            expansion.document,
+            request.wait.unwrap_or(240),
+            &brief_warnings,
+            globals,
+            workers,
+            review,
+        )
     }
 }
 
