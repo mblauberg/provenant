@@ -1614,8 +1614,19 @@ impl RunStore {
             } else {
                 Outcome::Failed
             };
-            decoded.reason =
-                Some("result-policy recovery decision retained from interrupted settlement".into());
+            decoded.reason = Some(
+                frozen_policy
+                    .as_ref()
+                    .filter(|decision| {
+                        decision.action == crate::PolicyAction::Stop
+                            && !decision.instruction.is_empty()
+                    })
+                    .map(|decision| decision.instruction.clone())
+                    .unwrap_or_else(|| {
+                        "result-policy recovery decision retained from interrupted settlement"
+                            .into()
+                    }),
+            );
         }
         if frozen_policy.is_none()
             && !cancelled
@@ -1650,7 +1661,7 @@ impl RunStore {
                     });
                 }
             } else if let Some(cause) = assessment.cause {
-                self.stage_policy_stop(&record, cause)?;
+                self.stage_policy_stop(&record, cause, decoded.reason.as_deref())?;
             }
         }
         // Assess a complete, verified successful response before rejecting an

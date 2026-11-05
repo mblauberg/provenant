@@ -43,6 +43,7 @@ pub struct PolicyRetry {
     pub resume: bool,
     /// Attempts in this run including its first, capped again by the store.
     pub max_attempts: u64,
+    /// Successor instruction, or the sealed refusal reason for a stop.
     pub instruction: String,
     /// Earliest wall time, in Unix seconds, at which the successor may
     /// launch. The settling guardian waits for it; a later sweep that finds
@@ -240,6 +241,7 @@ impl RunStore {
         &self,
         record: &AttemptRecord,
         cause: PolicyCause,
+        reason: Option<&str>,
     ) -> Result<()> {
         if self.staged_policy_retry(record)?.is_none() {
             let decision = PolicyRetry {
@@ -249,7 +251,7 @@ impl RunStore {
                 route: record.requested_route.clone(),
                 resume: false,
                 max_attempts: 1,
-                instruction: String::new(),
+                instruction: reason.unwrap_or_default().to_owned(),
                 not_before_unix_seconds: None,
             };
             let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
@@ -533,7 +535,7 @@ mod tests {
         store.create(&input, &call)?;
         seal_observation(&store, &input, &exit())?;
         let old = store.record(input.attempts[0].attempt_id, &call)?;
-        store.stage_policy_stop(&old, PolicyCause::Quota)?;
+        store.stage_policy_stop(&old, PolicyCause::Quota, None)?;
         store.publish_terminal(old.attempt_id, 1, &publication(), &exit(), &call)?;
         let decision = store.staged_policy_retry(&old)?.unwrap();
         assert_eq!(

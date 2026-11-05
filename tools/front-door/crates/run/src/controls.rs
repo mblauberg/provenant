@@ -956,6 +956,44 @@ mod lineage_tests {
             worktree: info.path.clone(),
         });
         store.create(&original, &call)?;
+        let launch = crate::prepare_writer(
+            original.request.tasks[0].writer.as_ref().unwrap(),
+            &store.writer_registry,
+            project_id,
+        )?;
+        let mut probe = crate::tests::input();
+        probe.request.tasks[0].writer = original.request.tasks[0].writer.clone();
+        probe.run_id = RunId::from_bytes([70; 16]);
+        probe.operation_id = "lineage-probe".parse()?;
+        probe.attempts[0].attempt_id = AttemptId::from_bytes([71; 16]);
+        store.create(&probe, &call)?;
+        let continuation = store.record(probe.attempts[0].attempt_id, &call)?;
+        launch.snapshot(
+            store.context.state_root.as_path(),
+            &store.attempt_dir(continuation.run_id, continuation.attempt_id, false)?,
+            RunStore::scope(&continuation),
+        )?;
+        let queued = store.record(prior, &call)?;
+        assert!(matches!(
+            store.check_writer_lineage(&continuation, &launch.worktree, &call),
+            Err(RunError::Nonterminal)
+        ));
+        let mut running = queued.clone();
+        running.state = AttemptState::Running {
+            extra: Default::default(),
+        };
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![crate::db::bytes(&running)?, prior.to_string()],
+        )?;
+        assert!(matches!(
+            store.check_writer_lineage(&continuation, &launch.worktree, &call),
+            Err(RunError::Nonterminal)
+        ));
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![crate::db::bytes(&queued)?, prior.to_string()],
+        )?;
         store.withdraw(
             prior,
             AttemptState::Queued {
@@ -966,6 +1004,11 @@ mod lineage_tests {
             clock.wall_now()?,
             &call,
         )?;
+        assert!(
+            store
+                .check_writer_lineage(&continuation, &launch.worktree, &call)?
+                .is_some()
+        );
         let launch = crate::prepare_writer(
             original.request.tasks[0].writer.as_ref().unwrap(),
             &store.writer_registry,
@@ -1874,6 +1917,17 @@ impl RunStore {
                 owner.attempt_id == Some(current.attempt_id)
                     || owner.operation_id.as_ref() == Some(&current.operation_id)
             }) {
+                let owner_id = lane
+                    .and_then(|owner| owner.attempt_id)
+                    .ok_or(RunError::Validation("continuation owner attempt missing"))?;
+                if owner_id != record.attempt_id
+                    && !matches!(
+                        self.record(owner_id, call)?.state,
+                        AttemptState::Terminal { .. }
+                    )
+                {
+                    return Err(RunError::Nonterminal);
+                }
                 return Ok(owner);
             }
             let directory = self.attempt_dir(current.run_id, current.attempt_id, false)?;
@@ -1888,6 +1942,15 @@ impl RunStore {
                         .as_ref()
                         .is_some_and(|saved| Some(saved) == lane)
                 {
+                    let owner_id = lane
+                        .and_then(|owner| owner.attempt_id)
+                        .ok_or(RunError::Validation("continuation owner attempt missing"))?;
+                    if !matches!(
+                        self.record(owner_id, call)?.state,
+                        AttemptState::Terminal { .. }
+                    ) {
+                        return Err(RunError::Nonterminal);
+                    }
                     return Ok(owner);
                 }
             }

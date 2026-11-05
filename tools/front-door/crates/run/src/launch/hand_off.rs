@@ -148,7 +148,7 @@ impl RunStore {
         if let Some(confinement) = &mut plan.confinement {
             _git_setup_lock = match retry_setup_lock(
                 record.retry_of.is_some(),
-                || confinement.prepare_git(),
+                |budget| confinement.prepare_git(call.cancel, budget),
                 || call.check(),
             ) {
                 Ok(lock) => lock,
@@ -266,14 +266,23 @@ impl RunStore {
 
 // A setup lock timeout occurs before Git preparation and before any guardian
 // launch. Keep the same attempt and custody while waiting for another turn.
+const SETUP_RETRY_SECONDS: u64 = 240;
 fn retry_setup_lock<T>(
     continuation: bool,
-    mut prepare: impl FnMut() -> Result<T>,
+    mut prepare: impl FnMut(provenant_core::WaitBudget) -> Result<T>,
     mut check: impl FnMut() -> Result<()>,
 ) -> Result<T> {
+    use provenant_core::Clock;
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), SETUP_RETRY_SECONDS)
+        .map_err(|_| RunError::Validation("setup retry deadline"))?;
     loop {
-        match prepare() {
-            Err(RunError::LaneSetupLockTimeout) if continuation => check()?,
+        match prepare(budget) {
+            Err(RunError::LaneSetupLockTimeout)
+                if continuation && budget.remaining(clock.mono_now()).as_micros() > 0 =>
+            {
+                check()?
+            }
             result => return result,
         }
     }
@@ -288,7 +297,7 @@ mod tests {
         let mut calls = 0;
         let result = retry_setup_lock(
             true,
-            || {
+            |_| {
                 calls += 1;
                 if calls == 1 {
                     Err(RunError::LaneSetupLockTimeout)
@@ -303,7 +312,7 @@ mod tests {
         let mut calls = 0;
         let result: Result<()> = retry_setup_lock(
             false,
-            || {
+            |_| {
                 calls += 1;
                 Err(RunError::LaneSetupLockTimeout)
             },
@@ -311,7 +320,7 @@ mod tests {
         );
         assert!(matches!(result, Err(RunError::LaneSetupLockTimeout)));
         assert_eq!(calls, 1);
-        let result: Result<()> = retry_setup_lock(true, || Err(RunError::Conflict), || Ok(()));
+        let result: Result<()> = retry_setup_lock(true, |_| Err(RunError::Conflict), || Ok(()));
         assert!(matches!(result, Err(RunError::Conflict)));
     }
 }

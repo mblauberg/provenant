@@ -735,7 +735,7 @@ fn model_policy_results_check_sections_and_bound_continuations()
         .retry
         .ok_or("missing continuation")?;
     assert!(continuation.resume);
-    assert!(continuation.max_attempts >= 3);
+    assert!(continuation.max_attempts > 3);
     decoded.session = None;
     record.session = None;
     assert!(
