@@ -443,9 +443,9 @@ pub struct LanePriority {
 impl Default for LanePriority {
     fn default() -> Self {
         Self {
-            writer: 10,
-            read_only: 5,
-            build_heavy: 15,
+            writer: provenant_records::run::DEFAULT_WRITER_PRIORITY,
+            read_only: provenant_records::run::DEFAULT_READER_PRIORITY,
+            build_heavy: provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY,
         }
     }
 }

@@ -1479,18 +1479,20 @@ impl Providers for FirstPriorityFailure {
 }
 
 #[test]
-fn priority_selection_failure_does_not_stall_siblings() -> TestResult {
+fn priority_selection_failure_uses_compiled_default_and_starts_siblings() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let prepared = two_tasks(2);
+    let mut prepared = two_tasks(2);
+    prepared.request.tasks[0].build_heavy = true;
     store.create(&prepared, &call)?;
     let first = prepared.attempts[0].attempt_id;
     let sibling = prepared.attempts[1].attempt_id;
     let held = RefCell::new(Vec::new());
     let holder = |record: &AttemptRecord, _| {
-        held.borrow_mut().push(record.attempt_id);
+        held.borrow_mut()
+            .push((record.attempt_id, record.requested_priority));
         Err(RunError::Validation("fixture holder"))
     };
     let started = store.start(
@@ -1500,10 +1502,19 @@ fn priority_selection_failure_does_not_stall_siblings() -> TestResult {
         &call,
     )?;
     assert!(matches!(started.as_slice(), [
-        Started::Refused { attempt, kind: RefusalKind::PriorityUnavailable, .. },
-        Started::Refused { attempt: second, .. },
+        Started::Refused { attempt, kind: RefusalKind::Handoff, .. },
+        Started::Refused { attempt: second, kind: RefusalKind::Handoff, .. },
     ] if *attempt == first && *second == sibling));
-    assert_eq!(*held.borrow(), [sibling]);
+    assert_eq!(
+        *held.borrow(),
+        [
+            (
+                first,
+                Some(provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY)
+            ),
+            (sibling, Some(5))
+        ]
+    );
     let index = WorkIndex::open(store.writer_registry(), &call)?;
     let selector = |attempt| WorkSelector {
         project: store.context.project_id,
@@ -1515,7 +1526,7 @@ fn priority_selection_failure_does_not_stall_siblings() -> TestResult {
     };
     assert_eq!(
         index.validate(&selector(first), &call)?,
-        WorkCoverage::Unindexed
+        WorkCoverage::Verified
     );
     assert_eq!(
         index.validate(&selector(sibling), &call)?,

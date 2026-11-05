@@ -62,9 +62,31 @@ boundary = "unclassified"
 reason = "A fixed wire-size limit refuses launch while recording applied grants; it needs a configurable default or a safe warning fallback."
 
 [[guard]]
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "warning"
+setting = "domains.fabric.lanes.priority"
+reason = "Unavailable lane priority warns and falls back to the compiled priority for the lane mode."
+
+[[guard]]
+site = "run/src/launch.rs#Providers::check_policy"
+boundary = "configurable_default"
+setting = "gc.free_floor"
+reason = "Writer launch may refuse when available storage remains below the configured free-space floor after collection."
+
+[[guard]]
+site = "run/src/launch.rs#Providers::check_policy"
+boundary = "unclassified"
+reason = "Provider policy read failures still need classification."
+
+[[guard]]
+site = "cli/src/run/submit.rs#check_writer_disk_with_collection"
+boundary = "warning"
+reason = "An unobservable disk floor or available space warns and allows dispatch; measured low space retains the configurable floor."
+
+[[guard]]
 site = "run/src/launch.rs#start_inner"
 boundary = "unclassified"
-reason = "Stored prompt, priority, policy, provider preparation and handoff can refuse; enumerate their originating guards."
+reason = "Stored prompt, policy, provider preparation and handoff can refuse; enumerate their originating guards."
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"

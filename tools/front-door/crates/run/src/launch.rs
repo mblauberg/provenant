@@ -405,7 +405,10 @@ pub trait Providers {
     }
     /// Host-selected minimum nice value for this lane.
     fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
-        Ok(if task.writer.is_some() { 10 } else { 5 })
+        Ok(provenant_records::run::default_lane_priority(
+            task.writer.is_some(),
+            task.build_heavy,
+        ))
     }
     /// Host policy checks before provider preparation. A refusal is task-local;
     /// no provider is prepared and siblings remain eligible to launch.
@@ -1595,20 +1598,17 @@ impl RunStore {
                 temporary: base.join("tmp"),
                 temporary_alias: crate::short_temporary::ensure(&attempt),
             };
+            let priority = providers.priority(task).unwrap_or_else(|reason| {
+                let fallback = provenant_records::run::default_lane_priority(task.writer.is_some(), task.build_heavy);
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(),
+                    "warning: lane priority unavailable ({reason}); using compiled domains.fabric.lanes.priority default {fallback}");
+                fallback
+            });
             let prepared = providers
-                .priority(task)
-                .map_err(|reason| {
-                    (
-                        RefusalKind::PriorityUnavailable,
-                        PrepareRefusal::from(reason),
-                    )
-                })
-                .and_then(|priority| {
-                    providers
-                        .check_policy(task)
-                        .map(|()| priority)
-                        .map_err(|reason| (RefusalKind::Policy, PrepareRefusal::from(reason)))
-                })
+                .check_policy(task)
+                .map(|()| priority)
+                .map_err(|reason| (RefusalKind::Policy, PrepareRefusal::from(reason)))
                 .and_then(|priority| {
                     providers
                         .prepare(

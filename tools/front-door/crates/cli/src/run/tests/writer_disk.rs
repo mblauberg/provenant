@@ -158,7 +158,7 @@ fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
 }
 
 #[test]
-fn writer_disk_observation_failure_is_not_low_disk() -> Result<(), String> {
+fn writer_disk_observation_failure_warns_and_continues() -> Result<(), String> {
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
         ..Default::default()
@@ -170,13 +170,7 @@ fn writer_disk_observation_failure_is_not_low_disk() -> Result<(), String> {
         Path::new("/home"),
         |_| Err("Not a directory".into()),
     );
-    match result {
-        Err(DiskCheck::Unobserved(message)) => {
-            assert!(message.contains("Not a directory"), "{message}");
-            Ok(())
-        }
-        other => Err(format!("observation failure misclassified: {other:?}")),
-    }
+    result.map_err(String::from)
 }
 
 #[test]
