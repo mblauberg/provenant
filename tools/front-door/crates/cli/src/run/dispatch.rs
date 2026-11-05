@@ -689,6 +689,11 @@ mod writer_admission_retry_tests {
         }
         for error in [
             WorktreeError::LiveWriter,
+            WorktreeError::LiveProcess(provenant_confinement::worktrees::ObservedProcess::new(
+                123,
+                Some("foreign-writer".into()),
+                provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
+            )),
             WorktreeError::Dirty(String::new()),
         ] {
             assert!(!WorktreeAdmissionError::Run(run::RunError::Writer(error)).is_transient());
