@@ -1369,12 +1369,15 @@ pub fn expand_with(
     // Retain explicit empty fields until node lowering itself is typed. The
     // graph's schema and document fields come from the typed value above.
     map.insert("nodes".into(), Value::Array(nodes));
-    if serde_json::to_vec(&document)
+    let document_bytes = serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
-        .len()
-        > 8_388_608
-    {
-        return Err("expanded graph exceeds the 8 MiB graph document limit".into());
+        .len();
+    let document_bound = provenant_fabric_runtime::config::GraphLimits::document_bytes_bound();
+    if let Some(reason) = document_bound.refusal(document_bytes) {
+        return Err(format!(
+            "expanded graph exceeds the {} MiB graph document limit: {reason}",
+            document_bound.maximum / (1024 * 1024)
+        ));
     }
     Ok(Expansion {
         review_shape: Some(

@@ -286,6 +286,10 @@ pub struct GraphBound<'a> {
 }
 
 impl GraphBound<'_> {
+    pub fn maximum_u64(&self) -> u64 {
+        u64::try_from(self.maximum).unwrap_or(u64::MAX)
+    }
+
     pub fn refusal(&self, actual: usize) -> Option<String> {
         (actual > self.maximum).then(|| {
             format!(
@@ -297,6 +301,15 @@ impl GraphBound<'_> {
 }
 
 impl GraphLimits {
+    /// Maximum size of a persisted graph document accepted by graph readers.
+    pub fn document_bytes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "graph_document_bytes",
+            maximum: 8_388_608,
+            owner: "graph document reader",
+        }
+    }
+
     /// Internal node bound used while expanding a graph before admission.
     pub fn composite_expansion_safety_nodes(&self) -> usize {
         self.nodes.max(16_384)
@@ -905,6 +918,16 @@ fn boundary_existing(error: &SectionError) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn graph_document_bound_reports_its_name_and_owner() {
+        let bound = GraphLimits::document_bytes_bound();
+        assert_eq!(bound.maximum, 8_388_608);
+        assert!(bound.refusal(bound.maximum).is_none());
+        let reason = bound.refusal(bound.maximum + 1).unwrap();
+        assert!(reason.contains("graph_document_bytes"), "{reason}");
+        assert!(reason.contains("graph document reader"), "{reason}");
+    }
 
     #[test]
     fn configured_commands_keep_literal_argv_and_validate_executable_and_nuls() {

@@ -817,7 +817,10 @@ fn collect_scratch_documents(execution: &GraphExecution) -> Result<(), JournalEr
         if metadata.uid != provenant_os::fs::effective_uid() || metadata.links != 1 {
             continue;
         }
-        let Ok(bytes) = directory.read_stable(&name, 8_388_608) else {
+        let Ok(bytes) = directory.read_stable(
+            &name,
+            crate::config::GraphLimits::document_bytes_bound().maximum_u64(),
+        ) else {
             continue;
         };
         if serde_json::from_slice::<GraphDocument>(&bytes)

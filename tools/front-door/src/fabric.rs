@@ -3424,14 +3424,19 @@ fn decode_graph_document(
     }
     // Check the version before decoding the graph, so a future schema can
     // request an upgrade even when its node fields are unknown to this reader.
-    let header: Header = provenant_records::decode(bytes, provenant_records::Limits::default())
+    let limits = provenant_records::Limits {
+        max_bytes: provenant_fabric_runtime::config::GraphLimits::document_bytes_bound()
+            .maximum_u64(),
+        ..Default::default()
+    };
+    let header: Header = provenant_records::decode(bytes, limits)
         .map_err(|_| FacadeError::invalid("graph document is not a valid record"))?;
     match header
         .schema_version
         .as_ref()
         .and_then(serde_json::Value::as_u64)
     {
-        Some(1 | 2) => provenant_records::decode(bytes, provenant_records::Limits::default())
+        Some(1 | 2) => provenant_records::decode(bytes, limits)
             .map_err(|error| FacadeError::invalid(format!("graph document: {error}"))),
         Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
             reader_release: env!("CARGO_PKG_VERSION").into(),
@@ -6505,8 +6510,23 @@ impl Factory {
             return Err(FacadeError::ConfinementRefused);
         }
         let bytes = provenant_os::fs::FileHandle::open_source(&path)
-            .and_then(|mut file| file.read_bounded(8_388_608))
-            .map_err(|_| FacadeError::io("access graph journal"))?;
+            .and_then(|mut file| {
+                file.read_bounded(
+                    provenant_fabric_runtime::config::GraphLimits::document_bytes_bound()
+                        .maximum_u64(),
+                )
+            })
+            .map_err(|error| match error {
+                provenant_os::fs::FsError::TooLarge { .. } => {
+                    let bound =
+                        provenant_fabric_runtime::config::GraphLimits::document_bytes_bound();
+                    FacadeError::invalid(format!(
+                        "limits.{}={} reached; set by {}",
+                        bound.name, bound.maximum, bound.owner
+                    ))
+                }
+                _ => FacadeError::io("access graph journal"),
+            })?;
         let document = decode_graph_document(&bytes)?;
         Ok((document, path, bytes))
     }
@@ -6603,11 +6623,13 @@ impl Factory {
         let prefix = hash.to_ascii_lowercase();
         let mut found = Vec::new();
         for name in graphs.entries()?.flatten() {
-            if let Ok(bytes) = graphs.read_bounded(&name, 8_388_608)
-                && provenant_records::CanonicalV1::file_digest(&bytes)
-                    .to_string()
-                    .strip_prefix("sha256:")
-                    .is_some_and(|digest| digest.starts_with(&prefix))
+            if let Ok(bytes) = graphs.read_bounded(
+                &name,
+                provenant_fabric_runtime::config::GraphLimits::document_bytes_bound().maximum_u64(),
+            ) && provenant_records::CanonicalV1::file_digest(&bytes)
+                .to_string()
+                .strip_prefix("sha256:")
+                .is_some_and(|digest| digest.starts_with(&prefix))
                 && let Ok(document) = decode_graph_document(&bytes)
             {
                 found.push(document);

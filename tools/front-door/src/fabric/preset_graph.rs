@@ -82,7 +82,11 @@ pub(crate) fn publish_preset_graph(
             if metadata.uid != provenant_os::fs::effective_uid()
                 || metadata.mode & 0o077 != 0
                 || metadata.links != 1
-                || dir.read_stable(OsStr::new(&filename), 8_388_608)? != bytes
+                || dir.read_stable(
+                    OsStr::new(&filename),
+                    provenant_fabric_runtime::config::GraphLimits::document_bytes_bound()
+                        .maximum_u64(),
+                )? != bytes
             {
                 return Err(
                     "existing preset graph is not private or does not match its content hash"
