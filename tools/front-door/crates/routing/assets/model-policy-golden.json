@@ -211,7 +211,7 @@
       },
       "lane": {
         "stop_early_ok": false,
-        "max_continuations": 2
+        "max_continuations": 8
       }
     }
   },
@@ -227,7 +227,7 @@
       },
       "lane": {
         "stop_early_ok": false,
-        "max_continuations": 2
+        "max_continuations": 8
       }
     }
   },

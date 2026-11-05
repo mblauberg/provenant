@@ -49,7 +49,7 @@ model = "codex/gpt-6.1-terra"
 read_ratio = 0.05
 [rules.policy.lane]
 stop_early_ok = false
-max_continuations = 2
+max_continuations = 8
 
 [[rules]]
 model = "codex/gpt-6-luna"
