@@ -23,6 +23,7 @@ macro_rules! lane_row {
 
 lane_row! {
     required {
+        project_id: String => string();
         run_id: String => string();
         task_id: String => string();
         attempt_id: String => string();
@@ -50,6 +51,7 @@ lane_row! {
         overdue: Option<bool> => nullable(boolean());
         stale: Option<bool> => nullable(boolean());
         partial_signals: Value => any();
+        usage: Value => any();
         delivery_id: Option<String> => nullable(string());
         write_grants: Value => nullable(array(grant_schema()));
         read_only_writable: Value => nullable(array(nullable(super::schema::worktree_path())));
@@ -226,6 +228,7 @@ impl LaneRow {
                 reason: terminal_reason,
             });
         Self {
+            project_id: lane.project_id.to_string(),
             run_id: lane.run_id.to_string(),
             task_id: lane.task_id.to_string(),
             attempt_id: lane.attempt_id.to_string(),
@@ -262,6 +265,7 @@ impl LaneRow {
             overdue: facts.overdue,
             stale: facts.stale,
             partial_signals: json!(lane.partial_signals),
+            usage: json!(lane.usage),
             delivery_id: lane.delivery_id.map(|id| id.to_string()),
             write_grants: json!(write_grants),
             read_only_writable: json!(read_only_writable),

@@ -4,6 +4,7 @@ use serde_json::json;
 
 fn row() -> LaneRow {
     LaneRow {
+        project_id: "9".repeat(32),
         run_id: "0".repeat(32),
         task_id: "1".repeat(32),
         attempt_id: "2".repeat(32),
@@ -33,6 +34,7 @@ fn row() -> LaneRow {
         overdue: Some(false),
         stale: Some(false),
         partial_signals: json!([]),
+        usage: json!({}),
         delivery_id: None,
         write_grants: json!([]),
         read_only_writable: json!([]),

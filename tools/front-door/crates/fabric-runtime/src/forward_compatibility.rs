@@ -141,7 +141,7 @@ fn stored_event() -> Value {
     json!({"seq":1,"record":{"header":{"schema_version":1},"project":ID,"kind":"note","detail":"work","at":AT}})
 }
 fn summary() -> Value {
-    json!({"attempt_id":ID,"run_id":ID,"task_id":ID,"operation_id":"submit","state":{"state":"queued"},"requested_route":{"kind":"named","name":"senior"},"queued_at":AT})
+    json!({"attempt_id":ID,"run_id":ID,"task_id":ID,"operation_id":"submit","state":"queued","retry_of":null,"superseded_by":null,"cause":null,"requested_route":{"kind":"named","name":"senior"},"queued_at":AT})
 }
 fn attempt() -> Value {
     json!({"schema_version":1,"attempt_id":ID,"run_id":ID,"project_id":ID,"task_id":ID,"operation_id":"submit","attempt_number":1,"revision":1,"generation":1,
