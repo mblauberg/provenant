@@ -750,6 +750,7 @@ mod review_shape_tests {
             request_digest: provenant_core::Digest::from_bytes([3; 32]),
             run_id,
             state: run::OperationState::Prepared,
+            refusal: None,
         };
         let missing = sealed_operation(Some(prepared.clone()), |_| Err(run::RunError::NotFound))?;
         assert_eq!(missing, None);

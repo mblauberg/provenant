@@ -637,6 +637,17 @@ pub enum OperationKind {
     Resume,
     Cancel,
 }
+/// A refusal before dispatch admission, retained under the operation identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationRefusal {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+    pub diagnostic: crate::diagnostic::Diagnostic,
+    /// Registered worktree identifier, when the request names a worktree.
+    pub worktree: Option<String>,
+    pub refused_at: WallTime,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationRecord {
     #[serde(flatten)]
@@ -649,6 +660,8 @@ pub struct OperationRecord {
     pub request_digest: Digest,
     pub run_id: RunId,
     pub state: OperationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<OperationRefusal>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1224,6 +1237,44 @@ pub struct RunEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_refusal_preserves_projection_and_unknown_fields() {
+        let record = OperationRecord {
+            extra: Default::default(),
+            schema_version: 1,
+            project_id: ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            operation_id: OperationId::parse("refused").unwrap(),
+            kind: OperationKind::Dispatch,
+            request_digest: Digest::from_bytes([3; 32]),
+            run_id: RunId::from_bytes([4; 16]),
+            state: OperationState::Terminal,
+            refusal: Some(OperationRefusal {
+                extra: Default::default(),
+                diagnostic: crate::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                    .category("integrity")
+                    .detail("writer scope refused")
+                    .next("inspect the registered worktree"),
+                worktree: Some("writer".into()),
+                refused_at: WallTime::from_micros(1).unwrap(),
+            }),
+        };
+        let mut value = serde_json::to_value(&record).unwrap();
+        value["future_operation"] = serde_json::json!(true);
+        value["refusal"]["future_refusal"] = serde_json::json!({"kept": true});
+        value["refusal"]["diagnostic"]["future_diagnostic"] = serde_json::json!(42);
+        let decoded: OperationRecord = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        let mut old = serde_json::to_value(record).unwrap();
+        old.as_object_mut().unwrap().remove("refusal");
+        assert!(
+            serde_json::from_value::<OperationRecord>(old)
+                .unwrap()
+                .refusal
+                .is_none()
+        );
+    }
 
     #[test]
     fn request_without_lane_metadata_retains_its_sealed_digest()
