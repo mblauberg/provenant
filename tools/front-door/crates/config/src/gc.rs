@@ -312,6 +312,17 @@ impl Default for GcSettings {
 }
 
 impl GcSettings {
+    /// Resolve a project's explicit settings, or its language-specific default.
+    pub fn project_settings(&self, project: &str, root: &Path) -> ProjectGcSettings {
+        self.projects.get(project).cloned().unwrap_or_else(|| {
+            let mut settings = ProjectGcSettings::default();
+            if root.join("Cargo.toml").is_file() {
+                settings.regenerable.push("target".into());
+            }
+            settings
+        })
+    }
+
     /// Read the owning section without resolving unrelated domain settings.
     /// Invalid optional settings warn and fall back to compiled defaults.
     pub fn read(state: &Path) -> std::io::Result<Self> {
@@ -551,6 +562,43 @@ mod tests {
             serde_json::from_str::<super::ProjectGcSettings>(r#"{"foreign_worktrees":"all"}"#)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn gc_project_defaults_cargo_output_only_without_an_override()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let mut settings = super::GcSettings::default();
+        assert!(
+            settings
+                .project_settings("p", root.path())
+                .regenerable
+                .is_empty()
+        );
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n")?;
+        assert_eq!(
+            settings.project_settings("p", root.path()).regenerable,
+            ["target"]
+        );
+        settings.projects.insert(
+            "p".into(),
+            super::ProjectGcSettings {
+                regenerable: vec!["build".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            settings.project_settings("p", root.path()).regenerable,
+            ["build"]
+        );
+        settings.projects.get_mut("p").unwrap().regenerable.clear();
+        assert!(
+            settings
+                .project_settings("p", root.path())
+                .regenerable
+                .is_empty()
+        );
+        Ok(())
     }
 
     #[test]

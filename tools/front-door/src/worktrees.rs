@@ -1014,10 +1014,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     for project in &mut projects {
         let settings = config
             .gc
-            .projects
-            .get(&project.binding.project_id().to_string())
-            .cloned()
-            .unwrap_or_default();
+            .project_settings(&project.binding.project_id().to_string(), &project.path);
         let cleanup = with_context_mode(
             &roots,
             &home,

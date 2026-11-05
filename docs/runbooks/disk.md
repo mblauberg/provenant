@@ -52,6 +52,8 @@ and GC preview below to investigate it.
    `provenant gc --apply --json`. In addition to lane caches, GC removes clean
    merged worktrees using fetched upstream ancestry. Projects can declare
    regenerable directory names and keep paths in `[gc.projects.PROJECT_ID]`.
+   A Cargo project without an entry defaults to `target`; an explicit entry
+   overrides that default.
    Idle ignored declared output can qualify without a terminal lane when
    writer custody is free and no lane is live. Nested repositories protect
    their containing output directory. Unknown writers remain protected
