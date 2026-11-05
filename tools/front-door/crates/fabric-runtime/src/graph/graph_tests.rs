@@ -470,6 +470,109 @@ fn separation_run(
     (owner, run.checkpoint)
 }
 
+// A graph admitted near the checkpoint boundary must also fit the first
+// deferred panel. The padding makes the boundary reproducible without pinning
+// an incidental estimate or the number of bytes in a particular preset.
+#[test]
+fn admitted_deferred_review_fits_checkpoint_after_expansion() {
+    let oid = "1".repeat(40);
+    let mut review = node("review", route("first"));
+    review.kind = Some(NodeKind::Plan);
+    review.route = None;
+    review.source = Some(SourceBinding::Commit {
+        commit: oid.clone(),
+    });
+    review.review = Some(ReviewSpec {
+        shape: None,
+        risk_tier: Some("crucial".into()),
+        kind: None,
+        size: None,
+        risk_tags: vec![],
+        worktree: None,
+        lenses: vec![],
+        min_successful: Some(1),
+        max_nodes: 2,
+    });
+    let mut nodes = vec![review];
+    for i in 0..9 {
+        let mut item = node(&format!("disposition-{i}"), route("first"));
+        item.dispositions = vec!["accepted".into()];
+        nodes.push(item);
+    }
+    let mut document = graph(nodes);
+    document.schema_version = 2;
+    document
+        .extra
+        .insert("padding".into(), serde_json::json!(""));
+    let limits = crate::config::GraphLimits::default();
+    let expanded = loops::expand(&document, &[], &limits).unwrap();
+    let plan = validate_flat_plan(&expanded, &limits).unwrap().0;
+    let initial = envelope::checkpoint_bound(&document, &[], &[], &plan);
+    let padding = (MAX_CHECKPOINT_BYTES as usize)
+        .checked_sub(initial + 1)
+        .unwrap();
+    document
+        .extra
+        .insert("padding".into(), serde_json::json!("x".repeat(padding)));
+
+    if let Err(reason) = document.admit(&limits) {
+        assert!(reason.contains("graph checkpoint could reach"), "{reason}");
+        return;
+    }
+    let mut root = node("review--review", route("first"));
+    root.kind = Some(NodeKind::Composite);
+    root.route = None;
+    root.prompt.clear();
+    let mut lens = node("lens", route("first"));
+    lens.source = Some(SourceBinding::Commit {
+        commit: oid.clone(),
+    });
+    root.composite = Some(CompositeSpec {
+        min_successful: Some(1),
+        nodes: vec![lens],
+        exports: vec![GraphInput {
+            extra: Default::default(),
+            node: "lens".into(),
+            outputs: vec![OutputKind::Result],
+        }],
+    });
+    let expansion = Expansion {
+        review: Some(ReviewResolution {
+            subject: oid.parse().unwrap(),
+            base: oid.parse().unwrap(),
+            measured_size: "small".into(),
+            shape: "deep".into(),
+            source: "fixture".into(),
+        }),
+        extra: Default::default(),
+        source: "review".into(),
+        continuation: false,
+        nodes: composites::expand(&graph(vec![root]), &plans::generous())
+            .unwrap()
+            .nodes,
+        patterns: vec![],
+    };
+    let mut owner = FakeOwner {
+        review_expansion: Some(expansion),
+        family_pool: vec!["fixture".into()],
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let review = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "review")
+        .unwrap();
+    assert!(review.advance_error.is_none(), "{:?}", review.advance_error);
+    assert!(
+        run.checkpoint
+            .expansions
+            .iter()
+            .any(|expansion| expansion.source == "review")
+    );
+}
+
 #[test]
 fn deferred_review_journals_and_replays_without_resolving_again() {
     let oid = "1".repeat(40);
