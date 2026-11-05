@@ -5518,3 +5518,88 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
     }
     Ok(())
 }
+
+#[test]
+fn image_input_preference_keeps_pool_weights_and_falls_back()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::AdapterSpec;
+    let catalogue = Catalogue::bundled()?;
+    for (cursor_image, codex_image, cursor_weight, codex_weight, preferred) in [
+        (true, false, 1, 50, Some("cursor")),
+        (false, true, 50, 0, Some("codex")),
+        (false, false, 1, 0, Some("cursor")),
+        (true, true, 1, 1, None),
+    ] {
+        let mut config = RoutingConfig::default();
+        config.pools.insert(
+            "image-fixture".into(),
+            vec![
+                RoutePoolMember {
+                    model: ModelId::parse("cursor/gpt-5.3-codex-low")?,
+                    weight: cursor_weight,
+                    effort: None,
+                    efforts: vec![],
+                    free: false,
+                },
+                RoutePoolMember {
+                    model: ModelId::parse("codex/gpt-6-luna")?,
+                    weight: codex_weight,
+                    effort: None,
+                    efforts: vec![],
+                    free: false,
+                },
+            ],
+        );
+        let lookup = |adapter: &str| {
+            let mut spec = *AdapterSpec::get(adapter)?;
+            spec.launch.image_input = match adapter {
+                "cursor" => cursor_image,
+                "codex" => codex_image,
+                _ => false,
+            };
+            Some(spec)
+        };
+        let mut cursor = availability();
+        cursor.adapter = "cursor".into();
+        let available = [cursor, availability()];
+        let access = [
+            AccessContext {
+                adapter: "cursor",
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            },
+            AccessContext {
+                adapter: "codex",
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            },
+        ];
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.availability = &available;
+        ctx.access = &access;
+        ctx.launch_specs = Some(&lookup);
+        let mut query = request("cursor/gpt-5.3-codex-low")?;
+        query.choice = RouteChoice::NamedRoute(RouteName::parse("image-fixture")?);
+        query.intent.image_input = true;
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..32 {
+            let result = resolve_with_seed(&query, &ctx, "image", seed)?;
+            if let Some(expected) = preferred {
+                assert_eq!(result.adapter, expected);
+            }
+            if cursor_image == codex_image {
+                let mut without_image = query.clone();
+                without_image.intent.image_input = false;
+                assert_eq!(
+                    result.adapter,
+                    resolve_with_seed(&without_image, &ctx, "image", seed)?.adapter
+                );
+            }
+            seen.insert(result.adapter);
+        }
+        if preferred.is_none() {
+            assert_eq!(seen.len(), 2);
+        }
+    }
+    Ok(())
+}

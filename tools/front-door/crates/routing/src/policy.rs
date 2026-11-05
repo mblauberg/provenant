@@ -21,6 +21,9 @@ pub struct RouteIntent {
     pub writes: bool,
     /// Requested network mode, when the caller has a concrete launch request.
     pub network: Option<provenant_records::run::NetworkAccess>,
+    /// Prefer adapters that accept image input, without refusing others.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub image_input: bool,
 }
 
 impl RouteIntent {

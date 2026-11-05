@@ -1828,6 +1828,8 @@ struct ClassifiedPool {
     candidates: Vec<RouteSelectionCandidate>,
     routes: Vec<Option<RouteAlternative>>,
     weighted: Vec<(usize, u64)>,
+    zero_ready: Vec<usize>,
+    standby_ready: Vec<usize>,
     first_zero_ready: Option<usize>,
     first_standby_ready: Option<usize>,
     first_recoverable_unavailable: Option<usize>,
@@ -1859,6 +1861,17 @@ fn go_quota_observation<'a>(
         .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision))
 }
 
+fn image_input_supported(model: &ModelId, _context: &ValidatedContext<'_>) -> bool {
+    #[cfg(test)]
+    let spec = _context
+        .launch_specs
+        .and_then(|lookup| lookup(model.adapter()))
+        .or_else(|| provenant_records::AdapterSpec::get(model.adapter()).copied());
+    #[cfg(not(test))]
+    let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
+    spec.is_some_and(|spec| spec.launch.image_input)
+}
+
 fn classify_pool(
     members: &[RoutePoolMember],
     request: &RouteRequest,
@@ -1870,6 +1883,8 @@ fn classify_pool(
         candidates: Vec::with_capacity(members.len()),
         routes: Vec::with_capacity(members.len()),
         weighted: Vec::new(),
+        zero_ready: Vec::new(),
+        standby_ready: Vec::new(),
         first_zero_ready: None,
         first_standby_ready: None,
         first_recoverable_unavailable: None,
@@ -1989,10 +2004,12 @@ fn classify_pool(
                     readiness = Some(resolved.readiness.clone());
                     if matches!(resolved.readiness, RouteReadiness::Ready { .. }) {
                         if is_standby {
+                            classified.standby_ready.push(classified.candidates.len());
                             if classified.first_standby_ready.is_none() {
                                 classified.first_standby_ready = Some(classified.candidates.len());
                             }
                         } else if member.weight == 0 {
+                            classified.zero_ready.push(classified.candidates.len());
                             if classified.first_zero_ready.is_none() {
                                 classified.first_zero_ready = Some(classified.candidates.len());
                             }
@@ -2130,6 +2147,34 @@ fn selection_receipt(
     }
 }
 
+fn classify_with_image_preference(
+    members: &[RoutePoolMember],
+    request: &RouteRequest,
+    context: &ValidatedContext<'_>,
+    excluded: Excluded<'_>,
+    avoid_cooling: bool,
+) -> Result<ClassifiedPool, RoutingError> {
+    let mut classified = classify_pool(members, request, context, excluded, avoid_cooling)?;
+    let image = |index: usize| image_input_supported(&members[index].model, context);
+    let has_ready_image = members
+        .iter()
+        .zip(&classified.routes)
+        .any(|(member, route)| {
+            image_input_supported(&member.model, context)
+                && route
+                    .as_ref()
+                    .is_some_and(|route| matches!(route.readiness, RouteReadiness::Ready { .. }))
+        });
+    if request.intent.image_input && has_ready_image {
+        classified.weighted.retain(|(index, _)| image(*index));
+        classified.zero_ready.retain(|index| image(*index));
+        classified.standby_ready.retain(|index| image(*index));
+        classified.first_zero_ready = classified.zero_ready.first().copied();
+        classified.first_standby_ready = classified.standby_ready.first().copied();
+    }
+    Ok(classified)
+}
+
 fn select_pool(
     name: &str,
     members: &[RoutePoolMember],
@@ -2138,7 +2183,8 @@ fn select_pool(
     seed: Option<(&str, u64)>,
     excluded_members: Excluded<'_>,
 ) -> Result<PoolPick, RoutingError> {
-    let mut classified = classify_pool(members, request, context, excluded_members, true)?;
+    let mut classified =
+        classify_with_image_preference(members, request, context, excluded_members, true)?;
     let (draw, reason) = match draw_pool(name, &classified, seed) {
         Ok(draw)
             if !matches!(
@@ -2151,7 +2197,8 @@ fn select_pool(
                     && matches!(candidate.readiness, Some(RouteReadiness::Ready { .. }))
             }) =>
         {
-            let normal = classify_pool(members, request, context, excluded_members, false)?;
+            let normal =
+                classify_with_image_preference(members, request, context, excluded_members, false)?;
             let normal_draw = draw_pool(name, &normal, seed)?;
             if matches!(
                 normal.routes[normal_draw.index]
@@ -2175,7 +2222,8 @@ fn select_pool(
                 .iter()
                 .any(|candidate| candidate.exclusion.as_deref() == Some("capacity cooldown")) =>
         {
-            classified = classify_pool(members, request, context, excluded_members, false)?;
+            classified =
+                classify_with_image_preference(members, request, context, excluded_members, false)?;
             let draw = draw_pool(name, &classified, seed).map_err(|_| error)?;
             (
                 draw,
