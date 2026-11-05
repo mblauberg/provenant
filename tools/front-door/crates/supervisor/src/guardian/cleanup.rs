@@ -447,6 +447,70 @@ impl Driver<'_> {
         }
     }
 
+    /// Retire without settlement when the original lock inode has been
+    /// unlinked. This never clears the fence or replaces an unresolved exit.
+    /// The independent pre-opened descriptor proves that no inheritor still
+    /// holds the old lock description; a replacement pathname proves nothing.
+    #[cfg(target_os = "macos")]
+    pub(super) fn retire_unlinked_writer(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+    ) -> bool {
+        let Some(probe) = self.writer_retirement_probe.as_ref() else {
+            return false;
+        };
+        if !unlinked_original(probe, self.writer_identity) {
+            return false;
+        }
+        let Some(first) = self.refresh_census(child) else {
+            return false;
+        };
+        if !self.retirement_census_clear(child, &first)
+            || child.cleanup(true).is_err()
+            || !child.quiescent_children().unwrap_or(false)
+        {
+            return false;
+        }
+        provenant_os::sys::wait_pause(Duration::from_millis(20));
+        let Some(second) = self.refresh_census(child) else {
+            return false;
+        };
+        if !self.retirement_census_clear(child, &second) {
+            return false;
+        }
+        let Some(probe) = self.writer_retirement_probe.as_ref() else {
+            return false;
+        };
+        try_unlinked_writer_lease(probe, self.writer_identity, &mut self.writer)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn retirement_census_clear(
+        &mut self,
+        child: &crate::process_os::provider::ProviderGroup,
+        census: &crate::census::Census,
+    ) -> bool {
+        let Some(provider) = self.reservation.provider.as_ref() else {
+            return false;
+        };
+        if !self.history_complete
+            || !darwin_census_clear(census, provider, &self.guardian, &self.history)
+            || self
+                .tracked
+                .iter()
+                .chain(self.protected.iter())
+                .chain(self.spared.spared_identities())
+                .chain(self.reservation.descendants.iter())
+                .any(|identity| identity_still_possible(census, identity))
+        {
+            return false;
+        }
+        let mut spared: std::collections::BTreeSet<_> =
+            self.spared.spared_identities().cloned().collect();
+        spared.extend(self.protected.iter().cloned());
+        self.marked_escapees(census, child.id(), &spared).is_empty()
+    }
+
     // Process cleanup uses a real-time cap independent of provider progress.
     #[allow(clippy::disallowed_methods)]
     pub(super) fn cleanup(
@@ -575,6 +639,34 @@ impl Driver<'_> {
             );
         }
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn unlinked_original(
+    probe: &provenant_os::fs::FileHandle,
+    expected: provenant_os::fs::Metadata,
+) -> bool {
+    probe
+        .metadata()
+        .is_ok_and(|actual| actual.links == 0 && actual.same_identity(&expected))
+}
+
+/// The probe was opened independently while the inode was linked. Closing our
+/// inherited description and acquiring this one excludes every remaining
+/// inheritor, even though no directory entry can be opened any longer.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn try_unlinked_writer_lease(
+    probe: &provenant_os::fs::FileHandle,
+    expected: provenant_os::fs::Metadata,
+    writer: &mut Option<provenant_os::fs::LockGuard>,
+) -> bool {
+    if !unlinked_original(probe, expected) {
+        return false;
+    }
+    drop(writer.take());
+    provenant_os::sys::fs::try_flock(probe.handoff_file(), provenant_os::fs::LockMode::Exclusive)
+        .is_ok()
+        && unlinked_original(probe, expected)
 }
 
 #[cfg(any(target_os = "macos", test))]

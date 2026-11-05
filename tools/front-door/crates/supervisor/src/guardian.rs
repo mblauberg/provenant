@@ -1,7 +1,7 @@
 //! Dedicated same-binary guardian. Run composes provider decoding at this edge.
 mod cleanup;
 #[cfg(test)]
-use cleanup::{darwin_census_clear, try_writer_lease};
+use cleanup::{darwin_census_clear, try_unlinked_writer_lease, try_writer_lease};
 
 use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
 use crate::custody::*;
@@ -460,6 +460,19 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let exit_publisher = None;
     #[cfg(target_os = "macos")]
     let writer_identity = inherited.writer.metadata()?;
+    // Open a separate description while the original entry is still linked.
+    // It can prove inherited descriptions are gone even if the namespace is
+    // later removed; it cannot authorise releasing or clearing the fence.
+    #[cfg(target_os = "macos")]
+    let writer_retirement_probe = inherited
+        .writer_directory
+        .open_read(OsStr::new("writer.lock"))
+        .ok()
+        .filter(|probe| {
+            probe.metadata().is_ok_and(|metadata| {
+                metadata.links == 1 && metadata.same_identity(&writer_identity)
+            })
+        });
     // Both locks and the durable pre-spawn reservation are held before ACK.
     crate::process_os::handoff::send(
         &mut inherited.channel,
@@ -494,6 +507,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         writer: Some(inherited.writer),
         #[cfg(target_os = "macos")]
         writer_identity,
+        #[cfg(target_os = "macos")]
+        writer_retirement_probe,
         _custody: Some(inherited.custody),
         guardian,
         requester: message.requester,
@@ -522,6 +537,8 @@ struct Driver<'a> {
     writer: Option<provenant_os::fs::LockGuard>,
     #[cfg(target_os = "macos")]
     writer_identity: provenant_os::fs::Metadata,
+    #[cfg(target_os = "macos")]
+    writer_retirement_probe: Option<provenant_os::fs::FileHandle>,
     _custody: Option<provenant_os::fs::LockGuard>,
     guardian: ProcessIdentity,
     requester: provenant_core::ActorId,
@@ -1421,6 +1438,13 @@ impl Driver<'_> {
                             )
                             .unwrap_or(false);
                     }
+                    #[cfg(target_os = "macos")]
+                    if !cleanup_complete && self.retire_unlinked_writer(&mut child) {
+                        return Err(CustodyError::Io(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "writer evidence and original lock removed before exit publication",
+                        )));
+                    }
                     if cleanup_complete {
                         return Err(CustodyError::Io(io::Error::new(
                             io::ErrorKind::NotFound,
@@ -1496,6 +1520,12 @@ impl Driver<'_> {
                     if published {
                         self.republish_settled(record, cancelled)?;
                     }
+                    break;
+                }
+                // The old lock inode can be proven idle even after its name is
+                // removed. Leave the durable unresolved fence untouched.
+                #[cfg(target_os = "macos")]
+                if self.retire_unlinked_writer(&mut child) {
                     break;
                 }
                 match self.reactor.wait(&[], Duration::from_millis(100)) {

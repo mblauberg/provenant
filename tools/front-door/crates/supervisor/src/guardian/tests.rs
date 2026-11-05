@@ -1278,6 +1278,52 @@ fn census(facts: Vec<ProcessFact>, complete: bool) -> Census {
     Census::from_observations(facts, [], absent, complete, false, 100).unwrap()
 }
 #[test]
+fn unlinked_writer_retirement_requires_the_original_lock_to_be_free() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = Directory::open_anchor(root.path()).unwrap();
+    let lease = directory
+        .try_lock(
+            OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )
+        .unwrap();
+    let expected = lease.metadata().unwrap();
+    let inherited = lease.handoff_file().try_clone().unwrap();
+    let probe = directory.open_read(OsStr::new("writer.lock")).unwrap();
+    let other = directory.open_read(OsStr::new("writer.lock")).unwrap();
+    let mut writer = Some(lease);
+    assert!(!try_unlinked_writer_lease(&probe, expected, &mut writer));
+    assert!(writer.is_some(), "a linked entry must retain custody");
+    std::fs::rename(root.path().join("writer.lock"), root.path().join("renamed")).unwrap();
+    assert!(!try_unlinked_writer_lease(&probe, expected, &mut writer));
+    assert!(writer.is_some(), "a renamed inode remains linked");
+    std::fs::remove_file(root.path().join("renamed")).unwrap();
+    let mut different = expected;
+    different.inode = different.inode.wrapping_add(1);
+    assert!(!try_unlinked_writer_lease(&probe, different, &mut writer));
+    assert!(writer.is_some(), "a different inode cannot prove custody");
+    assert!(!try_unlinked_writer_lease(&probe, expected, &mut writer));
+    assert!(writer.is_none());
+    drop(inherited);
+    assert!(try_unlinked_writer_lease(&probe, expected, &mut writer));
+    assert!(
+        provenant_os::sys::fs::try_flock(
+            other.handoff_file(),
+            provenant_os::fs::LockMode::Exclusive
+        )
+        .is_err()
+    );
+    drop(probe);
+    assert!(
+        provenant_os::sys::fs::try_flock(
+            other.handoff_file(),
+            provenant_os::fs::LockMode::Exclusive
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn fresh_writer_lease_refuses_a_replaced_or_unlinked_original() {
     for unlink in [false, true] {
         let root = tempfile::tempdir().unwrap();

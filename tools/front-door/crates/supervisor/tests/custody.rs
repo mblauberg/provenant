@@ -2363,6 +2363,23 @@ fn guardian_exits_after_owner_and_tracked_descendant_are_gone(root: &Path) -> Re
     Ok(())
 }
 fn guardian_retires_after_owner_and_evidence_are_removed(root: &Path) -> Result<()> {
+    orphan_with_removed_writer_state(root, true, false, false)
+}
+fn guardian_retires_after_owner_and_lock_are_removed(root: &Path) -> Result<()> {
+    orphan_with_removed_writer_state(root, false, true, false)
+}
+fn guardian_retires_after_owner_and_writer_state_are_removed(root: &Path) -> Result<()> {
+    orphan_with_removed_writer_state(root, true, true, false)
+}
+fn guardian_retires_after_owner_and_lock_directory_are_removed(root: &Path) -> Result<()> {
+    orphan_with_removed_writer_state(root, true, true, true)
+}
+fn orphan_with_removed_writer_state(
+    root: &Path,
+    remove_evidence: bool,
+    remove_lock: bool,
+    remove_directory: bool,
+) -> Result<()> {
     let descendant_listener = UnixListener::bind(root.join("orphan-descendant.sock"))?;
     let provider_listener = UnixListener::bind(root.join("orphan-provider.sock"))?;
     let owner_listener = UnixListener::bind(root.join("owner-ready.sock"))?;
@@ -2387,7 +2404,14 @@ fn guardian_retires_after_owner_and_evidence_are_removed(root: &Path) -> Result<
         evidence.join("reservation.json"),
         cleanup_record.join("reservation.json"),
     )?;
-    std::fs::remove_dir_all(&evidence)?;
+    if remove_evidence {
+        std::fs::remove_dir_all(&evidence)?;
+    }
+    if remove_directory {
+        std::fs::remove_dir_all(&writer)?;
+    } else if remove_lock {
+        std::fs::remove_file(writer.join("writer.lock"))?;
+    }
     owner.kill()?;
     bounded_reap(&mut owner)?;
     drop(owner_stream);
@@ -2397,15 +2421,29 @@ fn guardian_retires_after_owner_and_evidence_are_removed(root: &Path) -> Result<
         matches!(fixture::RecordedBootObserver.observe(guardian.pid),
         ProcessObservation::Present(fact) if fact.identity == guardian)
     );
-    assert!(
-        Directory::open_anchor(&writer)?
-            .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
-            .is_err()
-    );
+    if !remove_lock {
+        assert!(
+            Directory::open_anchor(&writer)?
+                .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
+                .is_err()
+        );
+    }
     drop(descendant_stream);
     wait_for_identity_absence(&descendant)?;
     wait_for_identity_absence(&guardian)?;
-    assert!(!root.join("orphan-tree-attempt/process-exit.json").exists());
+    if remove_evidence {
+        assert!(!root.join("orphan-tree-attempt/process-exit.json").exists());
+    } else {
+        let handle = reattach(
+            Directory::open_anchor(&root.join("orphan-tree-attempt"))?,
+            scope(),
+        )?;
+        assert!(
+            exited(&handle)?.unresolved_cleanup,
+            "the missing lock must keep the fence unresolved"
+        );
+        assert!(evidence.join("reservation.json").exists());
+    }
     Ok(())
 }
 fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -> Result<()> {
@@ -2699,6 +2737,18 @@ const CASES: &[Case] = &[
     (
         "guardian_retires_after_owner_and_evidence_are_removed",
         guardian_retires_after_owner_and_evidence_are_removed,
+    ),
+    (
+        "guardian_retires_after_owner_and_lock_are_removed",
+        guardian_retires_after_owner_and_lock_are_removed,
+    ),
+    (
+        "guardian_retires_after_owner_and_writer_state_are_removed",
+        guardian_retires_after_owner_and_writer_state_are_removed,
+    ),
+    (
+        "guardian_retires_after_owner_and_lock_directory_are_removed",
+        guardian_retires_after_owner_and_lock_directory_are_removed,
     ),
     (
         "retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive",

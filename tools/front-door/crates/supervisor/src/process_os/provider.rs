@@ -118,55 +118,43 @@ impl GuardianReactor {
     /// Watch known processes for fork and exit. A failure requires a full
     /// scan; kqueue does not expose the new PID in a fork event.
     pub(crate) fn watch_processes(&mut self, pids: &BTreeSet<i64>) -> io::Result<(bool, usize)> {
-        if pids.len() > MAX_CENSUS_ENTRIES {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        self.processes.retain(|pid| pids.contains(pid));
-        let mut added = false;
-        let mut failures = 0;
-        for &pid in pids {
-            if self.processes.contains(&pid) {
-                continue;
-            }
-            let ident = usize::try_from(pid).map_err(|_| io::ErrorKind::InvalidInput)?;
-            // SAFETY: zero is a valid empty kevent; fields below describe one
-            // process filter and no pointers are retained.
-            let mut change: libc::kevent = unsafe { std::mem::zeroed() };
-            change.ident = ident;
-            change.filter = libc::EVFILT_PROC;
-            change.flags = libc::EV_ADD | libc::EV_CLEAR;
-            change.fflags = libc::NOTE_FORK | libc::NOTE_EXIT;
-            // SAFETY: the queue and single change record are live; the kernel
-            // borrows the record only for this call.
-            let result = unsafe {
-                libc::kevent(
-                    self.queue.as_raw_fd(),
-                    &change,
-                    1,
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null(),
-                )
-            };
-            if result < 0 {
-                let error = io::Error::last_os_error();
-                let gone = error.raw_os_error() == Some(libc::ESRCH)
-                    || matches!(
-                        crate::census::SystemProcessObserver.observe(pid),
-                        ProcessObservation::Absent
-                            | ProcessObservation::Present(crate::census::ProcessFact {
-                                zombie: true,
-                                ..
-                            })
-                    );
-                if !gone {
-                    failures += 1;
+        let queue = self.queue.as_raw_fd();
+        let (added, failures) = register_process_watches(
+            &mut self.processes,
+            pids,
+            |pid| {
+                let ident = usize::try_from(pid).map_err(|_| io::ErrorKind::InvalidInput)?;
+                // SAFETY: zero is a valid empty kevent; fields below describe one
+                // process filter and no pointers are retained.
+                let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+                change.ident = ident;
+                change.filter = libc::EVFILT_PROC;
+                change.flags = libc::EV_ADD | libc::EV_CLEAR;
+                change.fflags = libc::NOTE_FORK | libc::NOTE_EXIT;
+                // SAFETY: the queue and single change record are live; the kernel
+                // borrows the record only for this call.
+                let result = unsafe {
+                    libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null())
+                };
+                if result < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
                 }
-                continue;
-            }
-            self.processes.insert(pid);
-            added = true;
-        }
+            },
+            |pid| {
+                matches!(
+                    crate::census::SystemProcessObserver.observe(pid),
+                    ProcessObservation::Absent
+                        | ProcessObservation::Present(crate::census::ProcessFact {
+                            zombie: true,
+                            ..
+                        })
+                )
+            },
+        )?;
+        #[cfg(feature = "fixture")]
+        let mut failures = failures;
         #[cfg(feature = "fixture")]
         if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(std::path::PathBuf::from)
             && state.join("s2-fail-process-watch").exists()
@@ -306,6 +294,34 @@ impl GuardianReactor {
         self.processes.clear();
         Ok(())
     }
+}
+
+fn register_process_watches(
+    processes: &mut BTreeSet<i64>,
+    pids: &BTreeSet<i64>,
+    mut register: impl FnMut(i64) -> io::Result<()>,
+    mut gone: impl FnMut(i64) -> bool,
+) -> io::Result<(bool, usize)> {
+    if pids.len() > MAX_CENSUS_ENTRIES {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    processes.retain(|pid| pids.contains(pid));
+    let mut added = false;
+    let mut failures = 0;
+    for &pid in pids {
+        if processes.contains(&pid) {
+            continue;
+        }
+        match register(pid) {
+            Ok(()) => {
+                processes.insert(pid);
+                added = true;
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) || gone(pid) => {}
+            Err(_) => failures += 1,
+        }
+    }
+    Ok((added, failures))
 }
 
 fn guardian_signals() -> [i32; 4] {
@@ -1203,6 +1219,31 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn process_watch_failures_do_not_hide_later_pids() {
+        let mut watched = BTreeSet::new();
+        let pids = BTreeSet::from([1, 2, 3, 4, 5]);
+        let mut attempted = Vec::new();
+        let result = register_process_watches(
+            &mut watched,
+            &pids,
+            |pid| {
+                attempted.push(pid);
+                match pid {
+                    1 | 3 => Err(io::Error::from_raw_os_error(libc::EPERM)),
+                    2 => Err(io::Error::from_raw_os_error(libc::ESRCH)),
+                    5 => Err(io::Error::from_raw_os_error(libc::EACCES)),
+                    _ => Ok(()),
+                }
+            },
+            |pid| pid == 3,
+        )
+        .unwrap();
+        assert_eq!(attempted, vec![1, 2, 3, 4, 5]);
+        assert_eq!(result, (true, 2));
+        assert!(watched.contains(&4));
+    }
 
     #[test]
     fn provider_lease_descriptors_contain_only_writer_and_ports()
