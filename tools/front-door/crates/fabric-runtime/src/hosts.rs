@@ -35,17 +35,11 @@ pub fn newest_feature_protocol() -> u64 {
         .max(CONSOLE_INBOX_PROTOCOL)
 }
 
-/// Render a protocol mismatch, naming the expected level only when the
-/// refusing frame carried it. Frames from releases before the field existed
-/// omit it, and those releases sent feature actions at fences 7-10, so no
-/// level can be inferred.
-pub fn protocol_mismatch_message(peer: &str, remote: u64, expected: Option<u64>) -> String {
-    match expected {
-        Some(expected) => format!(
-            "peer {peer} speaks protocol {remote}, this host expects protocol {expected}; upgrade both"
-        ),
-        None => format!("peer {peer} speaks protocol {remote}; upgrade both"),
-    }
+/// Render a protocol mismatch with the requested protocol level.
+pub fn protocol_mismatch_message(peer: &str, remote: u64, expected: u64) -> String {
+    format!(
+        "peer {peer} speaks protocol {remote}, this host expects protocol {expected}; upgrade both"
+    )
 }
 
 pub fn discover_ssh_executable(

@@ -36,7 +36,7 @@ pub use confinement::{graph_inputs_directory, graph_node_inputs_directory};
 pub(super) use continuation::continuation_available;
 pub(super) use fixtures::start_fabric_relay;
 #[cfg(feature = "fixture")]
-pub use fixtures::{prepare_fixture, writer_fixture_plan};
+pub use fixtures::{apply_fixture_setup, prepare_fixture, writer_fixture_plan};
 pub(super) use observation::observe_codex_rollout;
 use preparation::PrepareError;
 pub(super) use preparation::prepare;

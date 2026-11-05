@@ -20,8 +20,9 @@ pub(super) fn prepare_command(
     provider: &str,
     name: &str,
 ) -> Result<run::PreparedLaunch, PrepareError> {
-    use provenant_providers::Adapter;
-    if provider != "command" {
+    if !AdapterSpec::get(provider)
+        .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)
+    {
         return Err(unavailable(format!(
             "{provider} has no named model-less entries"
         )));
@@ -32,9 +33,15 @@ pub(super) fn prepare_command(
             resume: resume.is_some(),
             write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
             network: task.access.network,
+            skill_location: task.profile.require_skill_location,
             ..Default::default()
         })
         .map_err(|error| error.to_string())?;
+    let adapter = REGISTRY
+        .iter()
+        .find(|entry| entry.adapter.id() == provider)
+        .map(|entry| entry.adapter)
+        .ok_or_else(|| unavailable(format!("{provider} is not registered")))?;
     let roots = registry.roots.ok_or("routing context is unavailable")?;
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
         .map_err(|error| error.to_string())?;
@@ -132,7 +139,7 @@ pub(super) fn prepare_command(
         pool_selection: None,
     };
     let prompt = Prompt::new(String::new());
-    let mut spec = provenant_providers::command::Command
+    let mut spec = adapter
         .prepare(PrepareInput {
             route: &route,
             command: Some(provenant_providers::command::Invocation {

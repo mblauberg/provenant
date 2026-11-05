@@ -45,10 +45,7 @@ pub(crate) fn defaults() -> BTreeMap<String, ProviderSettings> {
 }
 
 pub(crate) fn validate(providers: &BTreeMap<String, ProviderSettings>) -> Result<(), &'static str> {
-    for (id, settings) in providers {
-        if provenant_records::AdapterSpec::get(id).is_none() {
-            return Err("provider_id");
-        }
+    for settings in providers.values() {
         if settings.update_interval_seconds == 0 {
             return Err("update_interval_seconds_range");
         }

@@ -196,14 +196,17 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             return Err("invalid account label".into());
         }
         let directory = provenant_os::fs::canonicalize(directory).map_err(|e| e.to_string())?;
-        if adapter == provenant_records::Harness::Claude.spec().name
-            && directory != home.join(format!(".claude-{label}"))
+        if provenant_records::AdapterSpec::get(adapter)
+            .and_then(|spec| spec.account_directory_prefix)
+            .is_some_and(|prefix| directory != home.join(format!("{prefix}{label}")))
         {
             return Err(
                 "Claude registration requires its fixed ~/.claude-<label> directory".into(),
             );
         }
-        if adapter == provenant_records::Harness::Agy.spec().name {
+        if provenant_records::AdapterSpec::get(adapter)
+            .is_some_and(|spec| spec.isolated_login_keychain)
+        {
             check_agy_directory(&directory, home)?;
         }
         let executable = crate::run::provider_executable(adapter)?;

@@ -284,7 +284,7 @@ impl DomainConfig for Settings {
     }
 }
 fn valid_entry(entry: &Registration) -> bool {
-    provenant_records::AdapterSpec::get(&entry.adapter).is_some()
+    provenant_quota::component(&entry.adapter)
         && entry.key != "unknown"
         && !entry.key.is_empty()
         && entry.key.len() <= 64
@@ -706,6 +706,25 @@ mod config_tests {
             provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/repo".into());
         input.state_dir = Some("/fixture/state".into());
         input.resolve(&Resolver).unwrap()
+    }
+
+    #[test]
+    fn account_configuration_accepts_a_registry_only_adapter() {
+        let text = ENTRY
+            .replace("adapter='claude'", "adapter='fixture-provider'")
+            .replace("/fixture/claude-work", "/fixture/accounts/work");
+        let config =
+            provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
+                .unwrap();
+        let entry = &config.domains.accounts.entries["work"];
+        let account = entry.registered().unwrap();
+        assert_eq!(account.adapter(), "fixture-provider");
+        assert_eq!(account.key(), "work-key");
+        let invalid = ENTRY.replace("adapter='claude'", "adapter='../fixture'");
+        assert!(
+            provenant_config::load_with_domains(&roots(), Some(invalid.as_bytes()), &SECTIONS)
+                .is_err()
+        );
     }
 
     #[test]

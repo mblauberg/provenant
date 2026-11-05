@@ -10,6 +10,19 @@ use provenant_supervisor::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn account_directories(
+    specs: &[provenant_records::AdapterSpec],
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> std::collections::BTreeMap<String, PathBuf> {
+    specs
+        .iter()
+        .filter_map(|spec| {
+            let (environment, _) = spec.default_account_directory?;
+            lookup(environment).map(|path| (spec.name.to_owned(), PathBuf::from(path)))
+        })
+        .collect()
+}
+
 /// Inputs that re-resolve the submitting edge's state root in the guardian,
 /// whose environment is cleared.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +42,9 @@ pub struct HostLaunchContext {
     #[serde(default)]
     pub executable_search_path: Vec<PathBuf>,
     pub git: PathBuf,
-    pub codex_home: Option<PathBuf>,
+    /// Trusted environment overrides for adapter default account directories.
+    #[serde(default)]
+    pub default_account_directories: std::collections::BTreeMap<String, PathBuf>,
     #[serde(default)]
     pub cargo_build_jobs: Option<String>,
     /// Synthetic fake-provider evidence; absent from installed builds.
@@ -38,6 +53,11 @@ pub struct HostLaunchContext {
     pub fixture_state_write: bool,
 }
 impl HostLaunchContext {
+    pub fn default_account_directories() -> std::collections::BTreeMap<String, PathBuf> {
+        account_directories(provenant_records::ADAPTER_SPECS, |name| {
+            std::env::var_os(name)
+        })
+    }
     /// The inputs a host derives for itself when no guardian handed it any:
     /// the caller's trusted roots and git, with search path and tool homes
     /// from this process's environment and no pinned executables.
@@ -58,7 +78,7 @@ impl HostLaunchContext {
                 })
                 .unwrap_or_default(),
             git,
-            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            default_account_directories: Self::default_account_directories(),
             cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
@@ -1943,7 +1963,7 @@ fn reports_verdict(result: &str) -> bool {
     let mut capture = provenant_records::result_capture::ResultCapture::new(None);
     capture.push(result.as_bytes());
     let captured = capture.finish();
-    captured.verdict.is_some() || captured.legacy_verdict_token().is_some()
+    captured.verdict.is_some()
 }
 /// Stored instead of the provider's answer when settlement cannot filter it.
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
@@ -1987,6 +2007,18 @@ mod host_clock_tests {
     use super::*;
 
     #[test]
+    fn account_directory_overrides_follow_registry_entries() {
+        let mut fixture = provenant_records::ADAPTER_SPECS[0];
+        fixture.name = "fixture";
+        fixture.default_account_directory = Some(("FIXTURE_HOME", ".fixture"));
+        let actual = account_directories(&[fixture], |key| {
+            (key == "FIXTURE_HOME").then(|| "/fixture/home".into())
+        });
+        assert_eq!(actual.get("fixture"), Some(&PathBuf::from("/fixture/home")));
+        assert!(account_directories(&[fixture], |_| None).is_empty());
+    }
+
+    #[test]
     fn a_published_reason_fits_terminal_evidence_on_a_character_boundary() {
         let long = "é".repeat(REASON_LIMIT);
         let bounded = bounded_reason(long.clone());
@@ -2013,12 +2045,7 @@ mod host_clock_tests {
         assert!(reports_verdict(
             "Reviewed the change.\nVERDICT: APPROVE\n```handoff\n{\"schema_version\":2,\"status\":\"done\"}\n```"
         ));
-        // The one-release legacy shape review still reads: exactly one
-        // declaration, on the first non-empty line.
-        assert!(reports_verdict(
-            "Verdict: approve\nLens: correctness\nwrite denied: true"
-        ));
-        // A verdict that is not the first or last thing said is ambiguous: the
+        // A verdict followed by prose is ambiguous: the
         // reader refuses it, and so does settlement.
         assert!(!reports_verdict(
             "Reviewed the change.\nVERDICT: APPROVE\nOne more note."
@@ -2139,7 +2166,7 @@ mod disk_admission_tests {
                 executables: Default::default(),
                 executable_search_path: Vec::new(),
                 git: "/usr/bin/git".into(),
-                codex_home: None,
+                default_account_directories: Default::default(),
                 cargo_build_jobs: None,
                 #[cfg(feature = "fixture")]
                 fixture_state_write: false,
@@ -2229,16 +2256,12 @@ mod writer_recovery_tests {
     use crate::tests::{call, clock, context, input, route};
 
     #[test]
-    fn legacy_slot_root_writers_reconcile_exited_and_never_spawned_to_terminal()
+    fn modern_writer_reconcile_preserves_unlaunched_private_evidence()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-        use std::ffi::{OsStr, OsString};
+        use std::ffi::OsString;
         for mode in [
-            "spawned",
-            "never_spawned",
-            "no_summary",
-            "no_summary_terminal",
             "no_summary_terminal_modern",
             "no_summary_terminal_other_generation",
         ] {
@@ -2251,7 +2274,7 @@ mod writer_recovery_tests {
             run.request.tasks[0].writer = Some(fixture.writer.clone());
             store.create(&run, &call)?;
             let id = run.attempts[0].attempt_id;
-            let mut record = store.mark_starting(
+            let record = store.mark_starting(
                 &store.record(id, &call)?,
                 &route(),
                 &[],
@@ -2259,9 +2282,6 @@ mod writer_recovery_tests {
                 None,
                 &call,
             )?;
-            if mode == "spawned" {
-                record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-            }
             let scope = RunStore::scope(&record);
             let attempt = store.attempt_dir(run.run_id, id, false)?;
             let mut launch = crate::prepare_writer(
@@ -2334,7 +2354,7 @@ mod writer_recovery_tests {
                 "-p",
                 &launch.base.to_string(),
                 "-m",
-                "legacy private commit",
+                "private commit",
             ])?;
             private_git(&["update-ref", launch.branch.as_str(), &head])?;
             let (slot, binding) = launch.custody.take().ok_or("writer custody")?;
@@ -2360,15 +2380,6 @@ mod writer_recovery_tests {
             let modern = slot_path.join(id.to_string());
             let mut reservation: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(modern.join("reservation.json"))?)?;
-            let anchor = slot.metadata()?;
-            reservation["reservation_device"] = anchor.device.into();
-            reservation["reservation_inode"] = anchor.inode.into();
-            if mode == "spawned" {
-                reservation["launch_state"] = "spawned".into();
-                let identity = serde_json::json!({"boot":reservation["boot"],"pid":999999,"native_start":1,"group_id":999999,"session_id":999999});
-                reservation["guardian"] = identity.clone();
-                reservation["provider"] = identity;
-            }
             if mode == "no_summary_terminal_other_generation" {
                 reservation["scope"]["generation"] = (scope.generation + 1).into();
                 let anchor = provenant_os::fs::Directory::open_anchor(&modern)?.metadata()?;
@@ -2378,56 +2389,27 @@ mod writer_recovery_tests {
                     modern.join("reservation.json"),
                     serde_json::to_vec(&reservation)?,
                 )?;
-            } else if mode != "no_summary_terminal_modern" {
-                std::fs::write(
-                    slot_path.join("reservation.json"),
-                    serde_json::to_vec(&reservation)?,
-                )?;
-                std::fs::rename(
-                    modern.join("ownership.json"),
-                    slot_path.join("ownership.json"),
-                )?;
-                std::fs::remove_dir_all(modern)?;
             }
-            if !mode.starts_with("no_summary") {
-                crate::artifacts::seal(
-                    &attempt,
-                    "launch.json",
-                    &serde_json::to_vec(&serde_json::json!({
-                        "schema_version": 1, "scope": scope, "requester": execution.actor_id
-                    }))?,
-                    RECORD_LIMIT,
-                )?;
-                let mut exit = crate::tests::exit();
-                exit.scope = scope;
-                exit.never_spawned = mode == "never_spawned";
-                if exit.never_spawned {
-                    exit.warnings.push("legacy provider never spawned".into());
-                }
-                crate::dispatch_tests::seal_exit(&store, &exit)?;
-            }
-            if mode.starts_with("no_summary_terminal") {
-                store.commit_lost(
-                    scope,
-                    "launch interrupted: provider never spawned; private evidence retained",
-                    &call,
-                )?;
-                let mut spawned = false;
-                store.queue_reconcile_with(run.run_id, &call, |argv, _| {
-                    assert_eq!(argv[1..3], ["internal", "settle"]);
-                    spawned = true;
-                    Ok(())
-                })?;
-                assert!(spawned, "{mode}: reconcile must queue recovery");
-                let queued = store.run_dir(run.run_id, false)?;
-                assert!(
-                    crate::artifacts::read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
-                        .is_some(),
-                    "{mode}: reconcile must queue recovery"
-                );
-                if mode == "no_summary_terminal_other_generation" {
-                    continue;
-                }
+            store.commit_lost(
+                scope,
+                "launch interrupted: provider never spawned; private evidence retained",
+                &call,
+            )?;
+            let mut spawned = false;
+            store.queue_reconcile_with(run.run_id, &call, |argv, _| {
+                assert_eq!(argv[1..3], ["internal", "settle"]);
+                spawned = true;
+                Ok(())
+            })?;
+            assert!(spawned, "{mode}: reconcile must queue recovery");
+            let queued = store.run_dir(run.run_id, false)?;
+            assert!(
+                crate::artifacts::read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
+                    .is_some(),
+                "{mode}: reconcile must queue recovery"
+            );
+            if mode == "no_summary_terminal_other_generation" {
+                continue;
             }
             let found = store.reconcile_with_observer(
                 run.run_id,
@@ -2451,67 +2433,34 @@ mod writer_recovery_tests {
                 "{mode}: {:?}",
                 terminal.state
             );
-            if mode == "never_spawned" {
-                assert!(
-                    matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Rejected, reason: Some(ref reason), .. } if reason.contains("never spawned")),
-                    "{:?}",
-                    terminal.state
-                );
-            }
-            if mode.starts_with("no_summary") {
-                assert!(
-                    matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Lost, reason: Some(ref reason), .. } if reason.contains("never spawned")),
-                    "{:?}",
-                    terminal.state
-                );
-            }
+            assert!(
+                matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Lost, reason: Some(ref reason), .. } if reason.contains("never spawned")),
+                "{:?}",
+                terminal.state
+            );
             assert!(store.writer_fences()?.is_empty());
             assert!(store.writer_fence_listing()?.issues.is_empty());
             assert!(!slot_path.join("reservation.json").exists());
-            let evidence = if mode == "no_summary_terminal_modern" {
-                slot_path.join(id.to_string())
-            } else {
-                slot_path.clone()
-            };
-            assert!(evidence.join("settlement.json").is_file());
-            if mode.starts_with("no_summary") {
-                assert_eq!(
-                    private_git(&["rev-parse", "HEAD"])?,
-                    head,
-                    "unlaunched private head retained"
-                );
-                store.gc_provider_state(
-                    &Directory::open_anchor(execution.state_root.as_path())?,
-                    7,
-                    clock
-                        .wall_now()?
-                        .checked_add(provenant_core::DurationMicros::from_seconds(2 * 86400)?)?,
-                    false,
-                    &call,
-                )?;
-                assert_eq!(
-                    private_git(&["rev-parse", "HEAD"])?,
-                    head,
-                    "private head retained after GC eligibility"
-                );
-            } else {
-                assert!(
-                    attempt
-                        .read_stable(OsStr::new("release.json"), RECORD_LIMIT)?
-                        .len()
-                        > 10
-                );
-                let imported = crate::objects::resolve_ref(
-                    &git,
-                    launch.worktree.repo(),
-                    launch.branch.as_str(),
-                )?;
-                assert_eq!(
-                    imported.to_string(),
-                    head,
-                    "private committed head imported before release"
-                );
-            }
+            assert!(modern.join("settlement.json").is_file());
+            assert_eq!(
+                private_git(&["rev-parse", "HEAD"])?,
+                head,
+                "unlaunched private head retained"
+            );
+            store.gc_provider_state(
+                &Directory::open_anchor(execution.state_root.as_path())?,
+                7,
+                clock
+                    .wall_now()?
+                    .checked_add(provenant_core::DurationMicros::from_seconds(2 * 86400)?)?,
+                false,
+                &call,
+            )?;
+            assert_eq!(
+                private_git(&["rev-parse", "HEAD"])?,
+                head,
+                "private head retained after GC eligibility"
+            );
         }
         Ok(())
     }

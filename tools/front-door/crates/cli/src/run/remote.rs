@@ -46,6 +46,7 @@ const POLL: Duration = Duration::from_secs(2);
 pub(super) struct Task {
     pub(super) context: Option<provenant_records::run::WorkContext>,
     pub(super) build_heavy: bool,
+    pub(super) require_skill_location: bool,
     pub(super) title: Option<String>,
     pub(super) base: Option<String>,
     pub(super) head: Option<String>,
@@ -873,6 +874,7 @@ fn submitted_task(
         context: task.context,
         extra: Default::default(),
         build_heavy: task.build_heavy,
+        require_skill_location: task.require_skill_location,
         title: task.title,
         // A writer's base belongs to its new worktree request.
         base: if new_worktree.is_none() || task.head.is_some() {
@@ -2090,7 +2092,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_writer_moves_its_base_into_the_new_worktree() -> Result {
+    fn peer_writer_moves_its_base_and_skill_requirement_into_the_new_worktree() -> Result {
         let route = run::RequestedRoute::Model {
             extra: Default::default(),
             provider: "fixture".into(),
@@ -2101,6 +2103,7 @@ mod tests {
             Task {
                 context: None,
                 build_heavy: true,
+                require_skill_location: true,
                 title: Some("Make the change".into()),
                 base: Some("main".into()),
                 head: None,
@@ -2134,6 +2137,7 @@ mod tests {
             json!({
                 "access": "worktree_write",
                 "build_heavy": true,
+                "require_skill_location": true,
                 "account": null,
                 "deliver": null,
                 "delivery_id": null,
@@ -2159,6 +2163,7 @@ mod tests {
                     ..Default::default()
                 }),
                 build_heavy: false,
+                require_skill_location: false,
                 title: None,
                 base: Some("main".into()),
                 head: None,

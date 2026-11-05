@@ -2,7 +2,7 @@
 
 Owner: `crates/quota` (record, freshness, publication), `crates/cli/src/quota.rs`
 (persistence and the edge read)
-Anchor: `crates/quota/src/readiness.rs`, `crates/cli/src/quota.rs`, `tests/quota.rs`
+Anchor: `crates/quota/src/readiness.rs`, `crates/cli/src/quota.rs`, `tests/quota.rs`, `tests/hosts_signin.rs`
 
 Quota owns one readiness record per host, adapter, account and canonical model
 or verified pool. It records a schema version, state (ready, unavailable or
@@ -30,8 +30,12 @@ most 64, and is written under the quota lock with the same private atomic
 replacement as the account JSON. Readers take no lock. No existing reader
 rejects an unknown top-level state directory: the disk report counts it as
 other state and the other state walkers visit only the directories they name.
-An absent file reads as unknown and schedules a probe. Login-failure readiness
-expires at the quota probe interval; authentication backoff does not extend it.
+An absent file reads as unknown; quota tick schedules a probe immediately for
+an unprobed account, or after its configured panel interval from the last probe,
+subject to power policy, backoff and an existing claim. A normally due probe
+can run sooner.
+Login-failure readiness expires at the quota probe interval; authentication
+backoff does not extend it.
 A changed agy fingerprint makes the old account unavailable and registers the
 new identity.
 
@@ -46,7 +50,8 @@ Neither state creates or clears quota refusals.
 
 Scope. An observation's route is a canonical `adapter/model`, a verified pool,
 or `*` for every route of the account. A pool refusal covers its pool only, a
-refusal without a pool its model only, and an account observation all routes.
+refusal without a pool its model only, and an account-wide refusal all routes.
+An account-wide ready observation does not establish model readiness.
 Host is `local` for observations this machine publishes.
 
 Writing. Quota derives provider-refusal observations from the account record
@@ -62,11 +67,18 @@ leaves it unknown, never ready. The CLI warns if readiness publication fails;
 the account commit remains authoritative.
 
 Reading. `provenant_quota::ReadinessFile::get(scope, now)` returns a
-`ReadinessRead` (state, reason, expiry, reset, evidence reference) and
-`ReadinessRead::project()` the receipt form. In the CLI edge,
+`ReadinessRead` (state, reason, source scope, observation and expiry times,
+reset, evidence reference) and `ReadinessRead::project()` the receipt form. In the CLI edge,
 `quota::read_readiness(state, scope, now)` opens the file without creating
 anything and returns unknown when it is absent, stale, for another scope or
-damaged. Routing, route commands and diagnostics read only through these.
+damaged. Route lists and resolution show recorded model or verified-pool evidence
+separately from executable availability; quota and doctor label account-wide
+evidence as such. A route list caches each account file for the display and warns
+when its 256-row readiness display limit is reached. Routing, route commands and
+diagnostics read through the same scoped reader.
+Doctor also runs declared local sign-in status commands for installed adapters
+without account observations. Their fresh sign-in result is shown separately
+from recorded readiness; an incomplete or inconclusive command is unknown.
 
 Receipts. The receipt enum `RouteReadiness` (ready, unavailable) gains no
 variant, because an older reader rejects an unrecognised status. Unknown
@@ -86,5 +98,4 @@ for that launch; it does not erase the stored observation, an account mismatch
 or a provider refusal.
 
 Routing, route commands, dispatch, host diagnostics, peer responses and quota
-displays consume this record. Route previews do not perform host I/O unless
-explicitly asked to probe. Receipt wire names remain compatible.
+displays consume this record. Route previews do not run provider probes unless explicitly asked to probe. Receipt wire names remain compatible.

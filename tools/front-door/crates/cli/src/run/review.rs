@@ -563,6 +563,7 @@ fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>
         slot.lens.as_deref().unwrap_or("general")
     );
     Submitted {
+        require_skill_location: false,
         settlement_retry_limit: None,
         context: None,
         build_heavy: false,
@@ -660,19 +661,11 @@ fn review_collect(edge: &Edge<'_>, data: &mut Value) -> Result<(), Fail> {
     }
     Ok(())
 }
-// One-release reader for retained first-line review outputs. The shared lexer
-// still controls declaration uniqueness across the complete artifact.
 fn captured_review_verdict(captured: &CapturedResult) -> Option<ReviewVerdict> {
-    if let Some(token) = captured.verdict.as_deref() {
-        return ReviewVerdict::from_token(token);
-    }
-    let token = captured.legacy_verdict_token()?;
-    match token.to_ascii_lowercase().as_str() {
-        "approve" => Some(ReviewVerdict::Approve),
-        "request_changes" => Some(ReviewVerdict::RequestChanges),
-        "inconclusive" => Some(ReviewVerdict::Inconclusive),
-        _ => None,
-    }
+    captured
+        .verdict
+        .as_deref()
+        .and_then(ReviewVerdict::from_token)
 }
 #[cfg(test)]
 mod review_shape_tests {
@@ -698,44 +691,6 @@ mod review_shape_tests {
             "x".repeat(20_000)
         );
         assert_eq!(captured_review_verdict(&captured(&duplicate)), None);
-    }
-    #[test]
-    fn review_reads_legacy_first_line_only_when_single_declaration() {
-        for (text, expected) in [
-            (
-                "Verdict: approve\nNothing found",
-                Some(ReviewVerdict::Approve),
-            ),
-            (
-                "\n **Verdict: APPROVE**\nNothing found",
-                Some(ReviewVerdict::Approve),
-            ),
-            (
-                "**Verdict:** *Request_Changes*\nFinding",
-                Some(ReviewVerdict::RequestChanges),
-            ),
-            (
-                "Verdict: inconclusive\nIncomplete",
-                Some(ReviewVerdict::Inconclusive),
-            ),
-            ("Verdict: approve\nVerdict: request_changes", None),
-            ("I approve\nVerdict: approve", None),
-            ("Verdict: approved", None),
-            ("Verdict: approve_with_nits\nFinding", None),
-        ] {
-            assert_eq!(captured_review_verdict(&captured(text)), expected, "{text}");
-        }
-        assert_eq!(
-            captured_review_verdict(&captured(&format!(
-                "Verdict: approve\n{}",
-                "x".repeat(20_000)
-            ))),
-            Some(ReviewVerdict::Approve)
-        );
-        assert_eq!(
-            captured_review_verdict(&captured(&format!("Verdict: approve{}", " ".repeat(9000)))),
-            None
-        );
     }
     #[test]
     fn review_consumes_shared_final_line_capture() {

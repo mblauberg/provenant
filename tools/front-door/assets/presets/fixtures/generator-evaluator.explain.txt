@@ -1,6 +1,8 @@
 Graph <id>
 Admission: {"status":"admitted"}
 Inspection: {"dependency_depth":2,"edges":3,"limit_reason":null,"max_attempts":3,"nodes":3,"prompt_bytes":2397}
+tier mix: junior 0 / senior 1 / principal 0
+Warning: writer tier mix is inverted; consider whether lower tiers fit the work.
 Preset selection: generator-evaluator (override)
 Review shape: standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 Pending "planner_authority": "Planner authority is checked when the plan runs."

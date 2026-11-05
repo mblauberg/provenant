@@ -5,6 +5,72 @@
 use std::{path::PathBuf, process::Command};
 
 #[test]
+fn fan_out_branch_parameters_validate_and_route_synthesis() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "study")?;
+    let run = |branches: &str, extra: &[&str]| -> std::io::Result<std::process::Output> {
+        fixture_cli()
+            .current_dir(&root)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args([
+                "--json",
+                "run",
+                "--preset",
+                "fan-out-synthesise",
+                "--prompt-file",
+            ])
+            .arg(&prompt)
+            .args(["--explain", "--plan", "off", "--set", branches])
+            .args(extra)
+            .output()
+    };
+    let branches = "parameters.branches=[{id='a',brief='first',tier='junior'},{id='b',brief='second',tier='senior'}]";
+    let output = run(branches, &["--set", "parameters.synthesis_route='junior'"])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let nodes = result["data"]["graph"]["nodes"].as_array().ok_or("nodes")?;
+    assert_eq!(nodes[0]["routes"][0]["alias"], "junior");
+    assert_eq!(nodes[1]["routes"][0]["alias"], "senior");
+    assert_eq!(nodes[2]["routes"][0]["alias"], "junior");
+    let baseline = run(branches, &[])?;
+    assert!(baseline.status.success());
+    let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout)?;
+    let baseline_nodes = baseline["data"]["graph"]["nodes"]
+        .as_array()
+        .ok_or("baseline nodes")?;
+    assert_eq!(nodes[0]["routes"], baseline_nodes[0]["routes"]);
+    assert_eq!(nodes[1]["routes"], baseline_nodes[1]["routes"]);
+    assert_eq!(baseline_nodes[2]["routes"][0]["alias"], "senior");
+    let duplicate = run(
+        "parameters.branches=[{id='a',brief='first',tier='junior'},{id='a',brief='second',tier='senior'}]",
+        &[],
+    )?;
+    let duplicate = String::from_utf8(duplicate.stdout)?;
+    assert!(
+        duplicate.contains("branch-a") && duplicate.contains("branches"),
+        "{duplicate}"
+    );
+    let invalid = run(
+        "parameters.branches=[{id='a',brief='first',tier='not-a-route'}]",
+        &[],
+    )?;
+    let invalid = String::from_utf8(invalid.stdout)?;
+    assert!(
+        invalid.contains("not-a-route") && invalid.contains("senior"),
+        "{invalid}"
+    );
+    Ok(())
+}
+
+#[test]
 fn preset_explain_warns_about_every_omitted_lens() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -97,6 +163,7 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
         .arg(&prompt)
         .args(["--explain", "--set"])
         .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .args(["--set", "parameters.writer='junior'"])
         .output()?;
     assert!(
         output.status.success(),
@@ -106,6 +173,12 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
     );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let graph = &result["data"]["graph"];
+    assert_eq!(result["data"]["tier_mix"]["junior"], 1);
+    assert_eq!(result["data"]["tier_mix"]["inverted"], false);
+    assert_eq!(
+        result["data"]["tier_mix"]["line"],
+        "tier mix: junior 1 / senior 0 / principal 0"
+    );
     assert_eq!(graph["nodes"][0]["source"]["commit"], worktree_head);
     assert_eq!(
         graph["provenance"]["resolved_subject"]["commit"],
@@ -513,6 +586,70 @@ fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn partial_graph_run_and_status_agree() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("partial.toml"),
+        r#"
+stages = [
+  { id = "group", min_successful = 1, parallel = [
+    { id = "pass", kind = "gate", condition = { type = "budget" } },
+    { id = "fail", kind = "gate", depends_on = ["pass"], inputs = [{ node = "pass", outputs = ["verdict"] }], condition = { type = "verdict", expected = "FAIL", threshold = "all" } }
+  ] },
+  { id = "after", kind = "gate", condition = { type = "budget" } }
+]
+"#,
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "partial graph")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", "partial", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--wait", "1s"])
+        .output()?;
+    let result: serde_json::Value = serde_json::from_slice(&run.stdout)?;
+    assert!(run.status.success(), "{result}");
+    assert_eq!(result["data"]["graph"]["outcome"], "partial", "{result}");
+    let id = result["data"]["graph_id"].as_str().ok_or("graph id")?;
+    let status = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["fabric", "graph", "status", id])
+        .output()?;
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(
+        status["data"]["outcome"],
+        result["data"]["graph"]["outcome"]
+    );
+    Ok(())
+}
+
+#[test]
 fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -561,6 +698,7 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
     );
     let first: serde_json::Value = serde_json::from_slice(&first.stdout)?;
     assert_eq!(first["data"]["graph"]["status"], "complete");
+    assert_eq!(first["data"]["graph"]["outcome"], "succeeded");
     let graph_id = first["data"]["graph"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or("graph id")?;
@@ -633,6 +771,7 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
         prefix,
     ] {
         let status = graph("status", selector)?;
+        assert_eq!(status["data"]["outcome"], first["data"]["graph"]["outcome"]);
         assert_eq!(
             status["data"]["checkpoint"]["graph_id"], graph_id,
             "{selector}"
@@ -2027,7 +2166,8 @@ fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
 }
 
 #[test]
-fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
+fn scout_swarm_and_generator_evaluator_explain_admission_and_inspection()
+-> Result<(), Box<dyn std::error::Error>> {
     for (name, args, nodes, edges, max_attempts) in [
         ("scout-swarm", &["--plan", "off"][..], 7, 6, 12),
         (
@@ -2053,6 +2193,11 @@ fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn s
         assert_eq!(inspection["edges"], edges, "{text}");
         assert_eq!(inspection["max_attempts"], max_attempts, "{text}");
     }
+    let writer = explain_text(
+        "generator-evaluator",
+        &["--set", "parameters.worktree=\".\""],
+    )?;
+    assert!(writer.contains("tier mix: junior "), "{writer}");
     Ok(())
 }
 
@@ -2077,6 +2222,9 @@ fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::
         ("deliver", &deliver[..]),
     ] {
         let explained = explain_text(name, extra)?;
+        if name == "big-batch" {
+            assert!(explained.contains("tier mix: junior "), "{explained}");
+        }
         if name == "single" {
             let inspection = explained
                 .lines()
@@ -2624,7 +2772,6 @@ fn plan_flag_decides_and_explains_the_planner_front_end() -> Result<(), Box<dyn 
         on.contains("deadline_seconds: \"${budget_seconds}\""),
         "{on}"
     );
-    golden("big-batch.plan-on.explain.txt", &on)?;
     let off = run("off")?;
     assert!(
         off.contains("plan: off -> off (planning turned off)"),

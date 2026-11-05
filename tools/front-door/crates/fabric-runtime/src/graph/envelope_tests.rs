@@ -209,6 +209,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
             NodeProgress {
                 extra: Default::default(),
                 children: node.composite_members.clone(),
+                min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_commit: node.source.as_ref().map(|_| "1".repeat(64)),
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
                 handoff: plans::writer(node).then(|| "\"".repeat(plans::STORED_HANDOFF_BYTES / 2 - 1)),

@@ -1199,6 +1199,12 @@ fn configured_polling_intervals_reach_show_and_tick() -> Result {
     let path = directory.join("codex.json");
     fs::write(&path, serde_json::to_vec(&record)?)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    // Missing readiness can accelerate a timer tick to the panel interval.
+    // Keep that interval longer than the snapshot age to isolate the timer.
+    let config = rig.state.join("config.toml");
+    let mut text = fs::read_to_string(&config)?;
+    text.push_str("\n[domains.quota.polling_intervals.codex]\npanel_seconds = 900\n");
+    fs::write(&config, &text)?;
     let row = |args: &[&str]| -> Result<serde_json::Value> {
         let out = rig.command(args)?;
         assert_eq!(
@@ -1212,9 +1218,7 @@ fn configured_polling_intervals_reach_show_and_tick() -> Result {
     assert_eq!(row(&["quota", "show", "--json"])?["status"], "available");
     // Not due under the 900 s timer default, so a timer tick must not probe the account.
     assert!(row(&["quota", "tick", "--trigger", "timer", "--json"])?["error"].is_null());
-    let config = rig.state.join("config.toml");
-    let mut text = fs::read_to_string(&config)?;
-    text.push_str("\n[domains.quota.polling_intervals.codex]\ntimer_seconds = 300\n");
+    text.push_str("timer_seconds = 300\n");
     fs::write(&config, text)?;
     assert_eq!(row(&["quota", "show", "--json"])?["status"], "stale");
     // Due under the 300 s override, so a timer tick probes and the missing Codex CLI is reported.

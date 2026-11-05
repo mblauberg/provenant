@@ -221,6 +221,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "resume_refuses_low_disk_writer",
             "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text",
             "lane_prepare_isolates_nested_state",
+            "lane_prepare_isolates_nested_claude_state",
             "lane_prepare_isolates_nested_writer_state",
             "lane_prepare_isolates_nested_publishing_state",
             "lane_builds_and_tests_swift_in_a_registered_worktree",
@@ -296,6 +297,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "resume_refuses_low_disk_writer" => resume_refuses_low_disk_writer(),
                 "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text" => gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
+                "lane_prepare_isolates_nested_claude_state" => lane_prepare_isolates_nested_claude_state(),
                 "lane_prepare_isolates_nested_writer_state" => {
                     lane_prepare_isolates_nested_writer_state()
                 }
@@ -2973,7 +2975,12 @@ fn lane_prepare_isolates_nested_state() -> Result {
         return Err("fixture process identity unavailable".into());
     };
     assert_eq!(FixtureResources.guardian_identity(), Some(fact.identity));
-    lane_prepare_cases(&[("codex", false, false, 91), ("claude", false, false, 93)])
+    lane_prepare_cases(&[("codex", false, false, 91)])
+}
+
+// The Claude read-only case runs in the nightly native harness tier.
+fn lane_prepare_isolates_nested_claude_state() -> Result {
+    lane_prepare_cases(&[("claude", false, false, 93)])
 }
 
 fn lane_prepare_isolates_nested_writer_state() -> Result {
@@ -2985,8 +2992,9 @@ fn lane_prepare_isolates_nested_publishing_state() -> Result {
 }
 
 /// A writer builds and tests a SwiftPM package in its registered worktree.
-/// A real compile cannot share the shell probe's per-test budget (#2627), so
-/// it is one case with its own nextest timeout.
+/// The real compile runs in the nightly native tier with a longer timeout.
+/// This fixture prepares and executes the lane directly, so it has no queued
+/// writer event to wait for.
 fn lane_builds_and_tests_swift_in_a_registered_worktree() -> Result {
     let selected = cfg!(target_os = "macos")
         && Path::new("/usr/bin/swift").exists()
@@ -3514,7 +3522,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 executables: [("codex".into(), executable.clone())].into(),
                 executable_search_path: Vec::new(),
                 git: selected_git.clone(),
-                codex_home: None,
+                default_account_directories: Default::default(),
                 cargo_build_jobs: None,
                 fixture_state_write: true,
             }),
