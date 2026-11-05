@@ -86,6 +86,21 @@ impl RunStore {
                 local("custody", &e)
             }
         })?;
+        // Once custody is acquired, every local preparation failure must
+        // withdraw it before fallback can consider another candidate.
+        macro_rules! local_or_withdraw {
+            ($result:expr) => {
+                match $result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        lease
+                            .withdraw_unlaunched()
+                            .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                        return Err(error);
+                    }
+                }
+            };
+        }
         if record.retry_of.is_some()
             && let Some(writer) = plan
                 .confinement
@@ -155,11 +170,13 @@ impl RunStore {
                     return Err(local("Git setup", &error));
                 }
             };
-            let writer_attempt = directory()?;
+            let writer_attempt = local_or_withdraw!(directory());
             if let Some(writer) = &confinement.writer
                 && let Err(error) = crate::objects::prepare_bound(
-                    &provenant_os::git::git_executable()
-                        .ok_or_else(|| local("Git", &RunError::GitUnavailable))?,
+                    &local_or_withdraw!(
+                        provenant_os::git::git_executable()
+                            .ok_or_else(|| local("Git", &RunError::GitUnavailable))
+                    ),
                     writer.worktree.repo(),
                     &writer_attempt,
                     &confinement.plan.permissions().scratch.path,
@@ -180,7 +197,7 @@ impl RunStore {
                 &plan.environment,
                 &id,
                 call.cancel,
-                &directory()?,
+                &local_or_withdraw!(directory()),
             ) {
                 Ok(argv) => plan.argv = argv,
                 Err(error) => {
@@ -235,9 +252,11 @@ impl RunStore {
             stdin: plan.stdin,
             secret_input: plan.secret_input,
             holder_context,
-            priority: record
-                .requested_priority
-                .ok_or_else(|| local("lane priority", &"missing"))?,
+            priority: local_or_withdraw!(
+                record
+                    .requested_priority
+                    .ok_or_else(|| local("lane priority", &"missing"))
+            ),
         };
         let capture = capture_plan(task, runtime_seconds);
         // Held before launch: an unconfirmed handoff may still have a guardian.
