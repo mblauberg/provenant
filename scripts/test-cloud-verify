@@ -76,15 +76,16 @@ class CloudVerify(unittest.TestCase):
 
     def test_log_location_with_credentials_is_refused_before_command(self):
         marker = self.root / "ran"
-        result = subprocess.run(
-            [sys.executable, str(HELPER), "--job-id", "test-job", "--nonce", "test-nonce",
-             "--commit", self.commit, "--test", "tier 1", "--log", str(self.root / "log"),
-             "--log-location", "https://example.invalid/log?token=secret", "--",
-             sys.executable, "-c", f"open({str(marker)!r},'w').close()"],
-            cwd=self.repo, capture_output=True, text=True,
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(marker.exists())
+        for location in ("https://example.invalid/log?token=secret", "https://example.invalid/log?key=secret"):
+            result = subprocess.run(
+                [sys.executable, str(HELPER), "--job-id", "test-job", "--nonce", "test-nonce",
+                 "--commit", self.commit, "--test", "tier 1", "--log", str(self.root / "log"),
+                 "--log-location", location, "--",
+                 sys.executable, "-c", f"open({str(marker)!r},'w').close()"],
+                cwd=self.repo, capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(marker.exists())
 
     def test_tracked_result_path_is_not_overwritten(self):
         result_path = self.repo / ".provenant-cloud-result.json"
