@@ -2747,9 +2747,16 @@ pub(super) fn launch_on_host_with_wait(
                         && (owner.operation_id.as_ref() == Some(&attempt.operation_id)
                             || owner.attempt_id.is_some() && owner.attempt_id == attempt.retry_of)
                     {
+                        let expected = owner.clone();
                         owner.attempt_id = Some(attempt.attempt_id);
                         owner.operation_id = Some(attempt.operation_id.clone());
-                        worktrees::save_owner(&tree, &owner)?;
+                        worktrees::update_owner_when_unchanged(
+                            context,
+                            &tree,
+                            &expected,
+                            &owner,
+                            call.cancel,
+                        )?;
                     }
                     Ok(())
                 },

@@ -12,6 +12,7 @@ pub struct RepoFacts {
 struct InventorySnapshot {
     device: u64,
     inode: u64,
+    budget: UtilityBudget,
     entries: Vec<GitWorktree>,
 }
 
@@ -170,12 +171,20 @@ impl RepoFacts {
         context: &WorktreeContext<'_>,
         cancel: &CancelToken,
     ) -> Result<Vec<GitWorktree>, WorktreeError> {
+        let budget = context
+            .utility_budget
+            .with_stdout_cap(self.inventory_limit)?;
         let entries = self.read_inventory(context, cancel)?;
-        self.remember_inventory(context, &entries);
+        self.remember_inventory(context, &entries, budget);
         Ok(entries)
     }
 
-    fn remember_inventory(&self, context: &WorktreeContext<'_>, entries: &[GitWorktree]) {
+    fn remember_inventory(
+        &self,
+        context: &WorktreeContext<'_>,
+        entries: &[GitWorktree],
+        budget: UtilityBudget,
+    ) {
         let path = context.repo.common_git_dir();
         let mut inventories = self
             .inventories
@@ -188,6 +197,7 @@ impl RepoFacts {
                 InventorySnapshot {
                     device: metadata.dev(),
                     inode: metadata.ino(),
+                    budget,
                     entries: entries.to_vec(),
                 },
             );
@@ -206,7 +216,13 @@ impl RepoFacts {
             .unwrap_or_else(|poison| poison.into_inner());
         let snapshot = inventories.get(context.repo.common_git_dir())?;
         let metadata = std::fs::metadata(context.repo.common_git_dir()).ok()?;
-        (snapshot.device == metadata.dev() && snapshot.inode == metadata.ino())
+        let budget = context
+            .utility_budget
+            .with_stdout_cap(self.inventory_limit)
+            .ok()?;
+        (snapshot.device == metadata.dev()
+            && snapshot.inode == metadata.ino()
+            && snapshot.budget == budget)
             .then(|| snapshot.entries.clone())
     }
 
@@ -222,7 +238,13 @@ impl RepoFacts {
             .unwrap_or_else(|poison| poison.into_inner())
             .remove(context.repo.common_git_dir())?;
         let metadata = std::fs::metadata(context.repo.common_git_dir()).ok()?;
-        (snapshot.device == metadata.dev() && snapshot.inode == metadata.ino())
+        let budget = context
+            .utility_budget
+            .with_stdout_cap(self.inventory_limit)
+            .ok()?;
+        (snapshot.device == metadata.dev()
+            && snapshot.inode == metadata.ino()
+            && snapshot.budget == budget)
             .then_some(snapshot.entries)
     }
 }

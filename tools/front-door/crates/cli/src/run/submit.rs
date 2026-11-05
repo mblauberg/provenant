@@ -656,8 +656,15 @@ pub(super) fn submit_with_host_and_wait(
                                 .iter()
                                 .find(|attempt| attempt.task_id == task.task_id)
                         {
+                            let expected = owner.clone();
                             owner.attempt_id = Some(attempt.attempt_id);
-                            worktrees::save_owner(&tree, &owner)?;
+                            worktrees::update_owner_when_unchanged(
+                                context,
+                                &tree,
+                                &expected,
+                                &owner,
+                                call.cancel,
+                            )?;
                         }
                         Ok(())
                     },

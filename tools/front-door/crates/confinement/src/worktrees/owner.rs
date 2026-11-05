@@ -62,6 +62,42 @@ pub fn save_owner(worktree: &VerifiedWorktree, owner: &WorktreeOwner) -> Result<
         .map_err(|_| WorktreeError::RegistrationUnconfirmed)
 }
 
+/// Update ownership metadata only if the observed record is still current.
+/// The repository lock serialises this check with lane-owner claims, and the
+/// writer guard excludes updates while custody is held. Call before acquiring
+/// writer custody; the guard does not bind this reservation to a later lease.
+pub fn update_owner_when_unchanged(
+    context: &WorktreeContext<'_>,
+    worktree: &VerifiedWorktree,
+    expected: &WorktreeOwner,
+    updated: &WorktreeOwner,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    validate(updated)?;
+    validate_binding(context)?;
+    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+    let tree = verify_worktree(context.repo, worktree.path())?;
+    if !tree.identity().same_identity(&worktree.identity()) {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    let current = load_owner(&tree)?;
+    if current.as_ref() == Some(updated) {
+        return Ok(());
+    }
+    if current.as_ref() != Some(expected) {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    let _writer =
+        cache_writer_guard(context.project_state, tree.path()).map_err(|state| match state {
+            WorkerState::Busy => WorktreeError::WriterBusy {
+                holder: current.as_ref().and_then(|owner| owner.attempt_id),
+            },
+            WorkerState::Live => WorktreeError::LiveWriter,
+            _ => WorktreeError::UnknownWriter,
+        })?;
+    save_owner(&tree, updated)
+}
+
 fn validate(owner: &WorktreeOwner) -> Result<(), WorktreeError> {
     GitRefName::branch(&owner.branch).map_err(|_| WorktreeError::InvalidRequest)?;
     GitOid::parse(&owner.base).map_err(|_| WorktreeError::InvalidRequest)?;

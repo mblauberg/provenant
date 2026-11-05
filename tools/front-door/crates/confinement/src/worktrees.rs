@@ -15,6 +15,7 @@ pub use inventory::*;
 pub use lifecycle::*;
 pub use owner::{
     WorktreeOrigin, WorktreeOwner, load_owner, prune_owned, save_lane_owner_when_free, save_owner,
+    update_owner_when_unchanged,
 };
 
 use crate::repo::{

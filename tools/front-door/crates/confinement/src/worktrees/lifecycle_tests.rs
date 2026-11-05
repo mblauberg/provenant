@@ -299,6 +299,17 @@ fn cached_inventory_is_reused_until_a_worktree_mutation() -> Result<(), Box<dyn 
     assert_eq!(list_cached(&context, &cancel())?.len(), 1);
     assert_eq!(list_cached(&context, &cancel())?.len(), 1);
     assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    let tight = WorktreeContext {
+        utility_budget: context.utility_budget.with_stdout_cap(1)?,
+        ..context
+    };
+    assert!(matches!(
+        list_cached(&tight, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert_eq!(git.listings.load(Ordering::SeqCst), 2);
     create(
         &context,
         WorktreeCreate {
@@ -1592,6 +1603,72 @@ fn competing_initial_lane_claims_publish_only_one_owner() -> Result<(), Box<dyn 
     );
     let owner = load_owner(&tree)?.ok_or("missing winning owner")?;
     assert!(owner == first || owner == second);
+    Ok(())
+}
+
+#[test]
+fn stale_owner_update_cannot_overwrite_a_successor_claim() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "owner-update-race".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let first = WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([4; 16])),
+        operation_id: Some("first-operation".parse()?),
+        branch: "owner-update-race".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    save_lane_owner_when_free(&context, &tree, &first, info.head, None, false, &cancel())?;
+    let successor = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("successor-operation".parse()?),
+        ..first.clone()
+    };
+    save_lane_owner_when_free(
+        &context,
+        &tree,
+        &successor,
+        info.head,
+        Some(&first),
+        true,
+        &cancel(),
+    )?;
+    let stale_update = WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([5; 16])),
+        ..first.clone()
+    };
+    assert!(matches!(
+        update_owner_when_unchanged(&context, &tree, &first, &stale_update, &cancel()),
+        Err(WorktreeError::IdentityChanged)
+    ));
+    assert_eq!(load_owner(&tree)?, Some(successor.clone()));
+    let current_update = WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([6; 16])),
+        ..successor.clone()
+    };
+    let held = cache_writer_guard(context.project_state, &info.path).map_err(|_| "lease")?;
+    assert!(matches!(
+        update_owner_when_unchanged(&context, &tree, &successor, &current_update, &cancel()),
+        Err(WorktreeError::WriterBusy { holder: None })
+    ));
+    assert_eq!(load_owner(&tree)?, Some(successor.clone()));
+    drop(held);
+    update_owner_when_unchanged(&context, &tree, &successor, &current_update, &cancel())?;
+    // A replay that already reached the exact target remains idempotent.
+    update_owner_when_unchanged(&context, &tree, &successor, &current_update, &cancel())?;
+    assert_eq!(load_owner(&tree)?, Some(current_update));
     Ok(())
 }
 
