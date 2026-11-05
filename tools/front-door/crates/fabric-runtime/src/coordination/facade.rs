@@ -803,7 +803,16 @@ mod diagnostic_tests {
         let result = serde_json::from_value::<FacadeError>(serde_json::json!({
             "code": "peer_protocol_mismatch", "peer": "w", "remote": 1
         }));
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().classify(),
+            serde_json::error::Category::Data
+        );
+        let current = FacadeError::PeerProtocolMismatch {
+            peer: "w".into(),
+            remote: 1,
+            expected: 2,
+        };
+        assert_eq!(current.code(), "peer_version");
     }
 
     #[test]

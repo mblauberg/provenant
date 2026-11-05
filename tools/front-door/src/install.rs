@@ -259,7 +259,7 @@ impl PreviewReporter {
     ) -> io::Result<()> {
         if matches!(
             action.selector.as_str(),
-            "peer-agent" | "tick-agent" | "tick-service"
+            "peer-agent" | "tick-agent" | "tick-service" | "gc-agent"
         ) {
             let home = self
                 .home
@@ -270,6 +270,7 @@ impl PreviewReporter {
                 "tick-agent" if cfg!(target_os = "linux") => super::tick_agent::timer(&home),
                 "tick-agent" => super::tick_agent::plist(&home),
                 "tick-service" => super::tick_agent::service(&home),
+                "gc-agent" => home.join("Library/LaunchAgents/dev.provenant.gc.plist"),
                 _ => provenant_fabric_runtime::peer_agent::plist(&home),
             };
             if action.before.is_some() && action.path.to_path_buf().ok().as_ref() != Some(&expected)
@@ -287,6 +288,7 @@ impl InstallReporter for PreviewReporter {
             "tick-agent" | "tick-service" => {
                 super::tick_agent::stop(home).map_err(io::Error::other)
             }
+            "gc-agent" => super::tick_agent::retire_gc(home).map_err(io::Error::other),
             _ => provenant_fabric_runtime::peer_agent::stop(home).map_err(io::Error::other),
         })
     }

@@ -8894,6 +8894,10 @@ fn upgrading_a_version_1_ledger_is_atomic() -> TestResult {
     Ok(())
 }
 
+const VERSION_1_LEDGER: &str = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
+     CREATE INDEX lease_projects ON leases(project);
+     CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;";
+
 fn version_1_start(store: &RunStore, host: &Stepped, ago_ms: i64) -> TestResult {
     let started = host.wall_now()?.as_micros() / 1000 - ago_ms;
     old_ledger(
