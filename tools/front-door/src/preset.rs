@@ -3804,12 +3804,38 @@ pub fn run(
                 })
             });
         let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
-        bind_default_subject_to_worktree(
-            &mut expansion,
-            &directory,
-            explicit_subject,
-            request.access.worktree.as_deref(),
-        )?;
+        let mut spec = None;
+        if name == "deliver" && !request.explain {
+            spec = params
+                .iter()
+                .find(|(key, _)| key == "spec")
+                .and_then(|(_, value)| value.as_str())
+                .map(str::to_owned);
+            for item in &request.preset_set {
+                if let Some(raw) = item.strip_prefix("parameters.spec=")
+                    && let Ok(value) =
+                        toml_edit::de::from_str::<serde_json::Value>(&format!("value = {raw}"))
+                {
+                    spec = value
+                        .get("value")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+        }
+        let mut bind = || {
+            bind_default_subject_to_worktree(
+                &mut expansion,
+                &directory,
+                explicit_subject,
+                request.access.worktree.as_deref(),
+            )
+        };
+        if let Some(spec) = spec {
+            crate::tracker::advise_then(&directory, &spec, &mut std::io::stderr().lock(), bind)?;
+        } else {
+            bind()?;
+        }
         if !placement.skipped.is_empty() {
             expansion.document["provenance"]["experiments"] = json!(placement.skipped);
         }

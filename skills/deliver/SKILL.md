@@ -18,6 +18,9 @@ needs a delivery record saves one with `provenant workflow receipt save ID
 --expected-revision N --request FILE` and reads it with `provenant workflow
 receipt show ID`.
 
+Before starting an issue, run `provenant tracker lint N` (or `--file PATH` for
+a local spec), show its advice and proceed even if checks are unavailable.
+
 ## How it runs
 
 - **Research or analysis:** `provenant run --preset scout-swarm --prompt-file

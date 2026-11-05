@@ -90,6 +90,19 @@
           "orchestrate"
         ]
       }
+    },
+    {
+      "id": "q2885",
+      "relation": "positive",
+      "prompt": "Verify this approved research issue against its acceptance criteria and report the outcome.",
+      "tags": [
+        "issue",
+        "entry"
+      ],
+      "expected": {
+        "primary_skill": "deliver",
+        "companion_skills": []
+      }
     }
   ]
 }

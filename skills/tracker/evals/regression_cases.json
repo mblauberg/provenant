@@ -78,7 +78,7 @@
     {
       "id": "r2885",
       "relation": "positive",
-      "prompt": "Review a proposed issue claiming the tree has no record schema, though a schema exists. Its acceptance requires a single version read, but the tree has no such read. What should be corrected before a fresh implementer starts?",
+      "prompt": "Review this proposed issue before filing. The complete relevant tree has records.rs declaring `struct RecordRow`, and reader.rs reads the version in both `decode_header` and `decode_record`. Draft: \"No record schema exists; add one. Acceptance: use the existing single `read_version` call everywhere. Verify: run tests.\"",
       "tags": [
         "filing",
         "premise",
@@ -88,7 +88,7 @@
         "primary_skill": "tracker",
         "companion_skills": []
       },
-      "note": "Check the premise against the tree and replace the impossible criterion with observable behaviour and a feasible verification route."
+      "note": "Flag the false schema premise and the criterion requiring a nonexistent single read; check the tree and replace the criterion with observable behaviour and a feasible verification route."
     }
   ]
 }

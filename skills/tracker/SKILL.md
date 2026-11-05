@@ -49,6 +49,9 @@ into the repository runbook: Backlog, Ready (readiness test passes or `plan.scop
 returns PASS), In progress, In review, Awaiting user, Done. Do not invent other
 status names.
 
+Before filing, run `provenant tracker lint --file ISSUE.md`; use `--kind` when
+needed. Treat findings and unavailable checks as advice, never a filing gate.
+
 ## File without sprawl
 
 1. Search title keywords, then a symbol or error string, and open PRs. Record what
@@ -80,7 +83,9 @@ Each stacked PR links its own issues; see the [stacked PR workflow](../../docs/r
 
 ## Steward sweep
 
-A read-only sweep clusters duplicates, thin bodies, orphans and mis-closed issues,
+Run `provenant tracker lint N...` on issues selected for the sweep; findings
+are advice, not a backfill mandate. A read-only sweep clusters duplicates, thin
+bodies, orphans and mis-closed issues,
 then the chair applies the fixes:
 
 ```sh
