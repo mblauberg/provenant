@@ -16,13 +16,20 @@ mod graph_writer_admission_tests {
             graph_writer_initialisation_error("head", WorktreeError::RegistryLockTimeout),
             FacadeError::Busy
         ));
+        assert!(matches!(
+            graph_writer_initialisation_error("head", WorktreeError::LockBusy),
+            FacadeError::Busy
+        ));
+        assert!(matches!(
+            graph_writer_initialisation_error("head", WorktreeError::UnknownWriter),
+            FacadeError::WriterUnknown
+        ));
         for error in [
             lock("writer.lock"),
             WorktreeError::LiveWriter,
             WorktreeError::WriterBusy {
                 holder: Some(provenant_core::AttemptId::from_bytes([7; 16])),
             },
-            WorktreeError::UnknownWriter,
             WorktreeError::Dirty(String::new()),
         ] {
             assert!(matches!(
@@ -139,7 +146,7 @@ mod graph_writer_admission_tests {
         }))
         .unwrap();
 
-        let lock_timeout = WorktreeError::RegistryLockTimeout;
+        let lock_timeout = WorktreeError::LockBusy;
 
         let mut owner = MockWriterOwner {
             errors: std::collections::VecDeque::from([lock_timeout]),
@@ -148,7 +155,7 @@ mod graph_writer_admission_tests {
         };
         let mut journal = MemoryJournal::default();
 
-        // First advance: launch encounters lock timeout on worktrees.lock
+        // First advance: launch encounters a held writer lock.
         let first = advance(&document, &mut owner, &mut journal).unwrap();
         // The node must be retryable Running, NOT Blocked!
         assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
