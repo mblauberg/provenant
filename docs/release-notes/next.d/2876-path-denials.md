@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- Failed lanes include path-bearing permission errors from captured stderr in their result, helping diagnose access grants (#2876).
+- Lanes include path-bearing permission errors from captured output or decoded answers in their result, helping diagnose access grants (#2876).

@@ -3916,6 +3916,35 @@ if (process.argv[2] === 'child') {
                 ),
             ),
             (
+                "git stash",
+                concat!(
+                    "set -eu; d=\"$TMPDIR/stash-probe\"; mkdir \"$d\"; cd \"$d\"; git init -q; ",
+                    "git config user.name lane; git config user.email lane@example.test; ",
+                    "printf base > file; git add file; git commit -qm base; ",
+                    "printf changed > file; git stash -q; test \"$(cat file)\" = base; git stash pop -q; test \"$(cat file)\" = changed"
+                ),
+            ),
+            (
+                "git rebase",
+                concat!(
+                    "set -eu; d=\"$TMPDIR/rebase-probe\"; mkdir \"$d\"; cd \"$d\"; git init -q; ",
+                    "git config user.name lane; git config user.email lane@example.test; ",
+                    "printf base > base; git add base; git commit -qm base; git branch upstream; ",
+                    "printf topic > topic; git add topic; git commit -qm topic; git checkout -q upstream; ",
+                    "printf upstream > upstream; git add upstream; git commit -qm upstream; ",
+                    "git checkout -q -; git rebase -q upstream; test -f topic; test -f upstream"
+                ),
+            ),
+            (
+                "rg",
+                concat!(
+                    "set -eu; if command -v rg >/dev/null; then ",
+                    "printf 'fixture\\n' > \"$TMPDIR/rg-probe\"; rg -q fixture \"$TMPDIR/rg-probe\"; ",
+                    "elif [ \"${PROVENANT_LANE_TOOLS_REQUIRED:-0}\" = 1 ]; then ",
+                    "echo 'required rg unavailable' >&2; exit 15; else echo 'SKIP: rg unavailable' >&2; fi"
+                ),
+            ),
+            (
                 "cargo",
                 "set -eu; cargo test -j2 --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\"",
             ),

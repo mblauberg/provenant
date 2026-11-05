@@ -1130,21 +1130,23 @@ impl RunStore {
                 None => note,
             });
         }
-        // A provider may leave a tool's denial only in stderr. Preserve the
-        // reported path without claiming that an OS permission error proves
-        // which sandbox rule (or filesystem permission) caused it.
-        if decoded.outcome == Outcome::Failed {
-            let stderr = read_sealed(attempt, "stderr.log", CAPTURE_LIMIT)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            if let Some(note) = path_denial_hint(&stderr) {
-                if !decoded.result.is_empty() {
-                    decoded.result.push_str("\n\n");
-                }
-                decoded.result.push_str(&note);
-                decoded.result.push('\n');
+        // A provider can report a tool denial even when the provider itself
+        // succeeds. Captures and the decoded answer are evidence, not proof
+        // of which sandbox rule or filesystem permission caused the error.
+        let denial = path_denial_hint(decoded.result.as_bytes()).or_else(|| {
+            ["stdout.log", "stderr.log"].iter().find_map(|name| {
+                read_sealed(attempt, name, CAPTURE_LIMIT)
+                    .ok()
+                    .flatten()
+                    .and_then(|capture| path_denial_hint(&capture))
+            })
+        });
+        if let Some(note) = denial {
+            if !decoded.result.is_empty() {
+                decoded.result.push_str("\n\n");
             }
+            decoded.result.push_str(&note);
+            decoded.result.push('\n');
         }
         // Valid natural completion wins over a late stop request.
         if decoded.outcome != Outcome::Succeeded {
@@ -1914,7 +1916,7 @@ fn path_denial_hint(stderr: &[u8]) -> Option<String> {
             && (line.contains("Permission denied") || line.contains("Operation not permitted"))
     })?;
     Some(format!(
-        "Path access was denied; check the lane's grants and filesystem permissions: {}",
+        "Path access was denied; the missing access grant may be for this path (also check filesystem permissions): {}",
         provenant_confinement::redact::bounded_line(line, 240)
     ))
 }
