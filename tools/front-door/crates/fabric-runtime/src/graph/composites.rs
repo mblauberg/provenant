@@ -329,6 +329,7 @@ fn children(
 
 fn outputs(
     spec: &CompositeSpec,
+    plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> Result<NodeOutputs, String> {
@@ -390,7 +391,9 @@ fn outputs(
                     {
                         inherited_notices.push(notice.to_owned());
                     }
-                    if !source.findings.is_empty() {
+                    let findings =
+                        materialized_findings(positions[&export.node], plan, checkpoint, positions);
+                    if !findings.is_empty() {
                         finding_members.push((
                             export.node.clone(),
                             member
@@ -402,7 +405,7 @@ fn outputs(
                     }
                     selected
                         .findings
-                        .extend(source.findings.iter().cloned().map(|mut finding| {
+                        .extend(findings.into_iter().map(|mut finding| {
                             finding.id = format!("{}:{}", export.node, finding.id);
                             finding
                         }))
@@ -704,7 +707,7 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     let mut exported = None;
     let mut export_error = None;
     if state == NodeState::Succeeded {
-        match outputs(spec, checkpoint, positions) {
+        match outputs(spec, plan, checkpoint, positions) {
             Ok(value) => exported = Some(value),
             Err(reason) => {
                 state = NodeState::Failed;
@@ -814,7 +817,7 @@ pub(super) fn validate_progress(
     let export = node
         .composite
         .as_ref()
-        .map(|spec| outputs(spec, checkpoint, positions));
+        .map(|spec| outputs(spec, plan, checkpoint, positions));
     let failed_for_export = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && shortfall.is_none()

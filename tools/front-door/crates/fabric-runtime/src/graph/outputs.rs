@@ -5,6 +5,8 @@ pub(super) const OUTPUT_FIELD_BYTES: usize = 1024;
 pub(super) const SEPARATION_FAMILIES: usize = 8;
 pub(super) const FAMILY_BYTES: usize = 64;
 pub(super) const MAX_FINDINGS: usize = 32;
+/// Checkpoint extension holding the original bounded synthesis block.
+const COMPACT_FINDINGS: &str = "_compact_disposition_findings";
 
 /// Soft per-node budget for inherited disposition descriptions.
 const DISPOSITION_TEXT_TARGET: usize = 64 * 1024;
@@ -69,43 +71,17 @@ pub(super) fn make_outputs_with_upstream(
     upstream: &[Finding],
 ) -> NodeOutputs {
     let mut warnings = Vec::new();
-    let windows = result.map(|capture| {
-        let head = if capture.truncated {
-            capture
-                .excerpt
-                .rsplit_once('\n')
-                .map_or("", |(head, _)| head)
-        } else {
-            &capture.excerpt
-        };
-        let tail = if capture.tail_truncated {
-            capture.tail.split_once('\n').map_or("", |(_, tail)| tail)
-        } else {
-            &capture.tail
-        };
-        [head, tail]
-    });
     if let Some(warning) = result_warning {
         warnings.push(bounded(&warning, WARNING_BYTES));
     }
     let verdict = result
         .and_then(|capture| capture.verdict.as_deref())
         .map(str::to_owned);
-    let parsed = windows
-        .as_ref()
-        .and_then(|windows| {
-            windows
-                .iter()
-                .rev()
-                .find_map(|text| text.rsplit_once("```findings\n").map(|(_, block)| block))
-        })
-        .ok_or_else(|| "field findings: block missing".to_owned())
-        .and_then(|block| {
-            let (block, _) = block
-                .split_once("```")
-                .ok_or_else(|| "field findings: block unterminated".to_owned())?;
-            parse_findings(block, upstream)
-        });
+    let parsed = result
+        .ok_or("field findings: block missing")
+        .and_then(findings_block)
+        .map_err(str::to_owned)
+        .and_then(|block| parse_findings(block, upstream));
     let findings = parsed
         .map(|(findings, skipped, trimmed)| {
             if trimmed > 0 {
@@ -432,13 +408,136 @@ fn parse_findings(
             }
         }
     }
-    if size > cap {
+    if upstream.is_empty() && size > cap {
         return Err("field findings: exceeds canonical byte cap".into());
     }
     if findings.is_empty() && !skipped.is_empty() {
         return Err(skipped.remove(0));
     }
     Ok((findings, skipped, trimmed))
+}
+
+/// Read only a complete findings block from the captured head or tail.
+fn findings_block(capture: &crate::result_capture::CapturedResult) -> Result<&str, &'static str> {
+    let head = if capture.truncated {
+        capture
+            .excerpt
+            .rsplit_once('\n')
+            .map_or("", |(head, _)| head)
+    } else {
+        &capture.excerpt
+    };
+    let tail = if capture.tail_truncated {
+        capture.tail.split_once('\n').map_or("", |(_, tail)| tail)
+    } else {
+        &capture.tail
+    };
+    let block = [head, tail]
+        .iter()
+        .rev()
+        .find_map(|text| text.rsplit_once("```findings\n").map(|(_, block)| block))
+        .ok_or("field findings: block missing")?;
+    let (block, _) = block
+        .split_once("```")
+        .ok_or("field findings: block unterminated")?;
+    // ResultCapture's largest window is 16 KiB. Refuse a fabricated capture
+    // that would evade the checkpoint reservation for this block.
+    if block.len() > 16 * 1024 {
+        return Err("field findings: block exceeds capture window");
+    }
+    Ok(block)
+}
+
+/// Replace an oversized disposition projection by its original bounded block.
+/// The original upstream inputs remain in the checkpoint and reconstruct it.
+pub(super) fn compact_findings(
+    outputs: &mut NodeOutputs,
+    capture: Option<&crate::result_capture::CapturedResult>,
+    upstream: &[Finding],
+) {
+    if upstream.is_empty() || canonical_len(&outputs.findings) <= DISPOSITION_FINDINGS_BYTES - 512 {
+        return;
+    }
+    if let Some(block) = capture.and_then(|capture| findings_block(capture).ok()) {
+        outputs.extra.insert(COMPACT_FINDINGS.into(), block.into());
+        let count = outputs.findings.len();
+        outputs.findings.clear();
+        outputs.warnings.truncate(MAX_WARNINGS - 1);
+        outputs.warnings.push(bounded(
+            &format!(
+                "findings compacted: {count} entries reconstructed from block and upstream inputs"
+            ),
+            WARNING_BYTES,
+        ));
+    }
+}
+
+/// Reject malformed compacted records on checkpoint replay.
+pub(super) fn valid_compacted_findings(
+    index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
+        return true;
+    };
+    let Some(value) = outputs.extra.get(COMPACT_FINDINGS) else {
+        return true;
+    };
+    let Some(block) = value.as_str() else {
+        return false;
+    };
+    if block.len() > 16 * 1024
+        || !outputs.findings.is_empty()
+        || plan.nodes[index].dispositions.is_empty()
+    {
+        return false;
+    }
+    let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
+        .into_iter()
+        .map(|(source, mut finding)| {
+            finding.extra.insert(
+                "propagates".into(),
+                format!("{source}:{}", finding.id).into(),
+            );
+            finding
+        })
+        .collect();
+    !upstream.is_empty() && parse_findings(block, &upstream).is_ok()
+}
+
+/// Expand a compacted synthesis projection using the same selected inputs as
+/// settlement. Legacy checkpoints have no block and use their stored list.
+pub(super) fn materialized_findings(
+    index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<Finding> {
+    let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
+        return Vec::new();
+    };
+    let Some(block) = outputs
+        .extra
+        .get(COMPACT_FINDINGS)
+        .and_then(|value| value.as_str())
+    else {
+        return outputs.findings.clone();
+    };
+    let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
+        .into_iter()
+        .map(|(source, mut finding)| {
+            finding.extra.insert(
+                "propagates".into(),
+                format!("{source}:{}", finding.id).into(),
+            );
+            finding
+        })
+        .collect();
+    parse_findings(block, &upstream)
+        .map(|(findings, _, _)| findings)
+        .unwrap_or_default()
 }
 
 type FindingOrigin = (String, String);
@@ -523,9 +622,9 @@ fn resolved_inputs_inner(
         let Some(&index) = positions.get(&input.node) else {
             continue;
         };
-        let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
+        if checkpoint.nodes[index].outputs.is_none() {
             continue;
-        };
+        }
         let upstream = if let Some(cached) = cache.get(&index) {
             cached.clone()
         } else {
@@ -534,7 +633,7 @@ fn resolved_inputs_inner(
             cache.insert(index, resolved.clone());
             resolved
         };
-        for finding in &outputs.findings {
+        for finding in &materialized_findings(index, plan, checkpoint, positions) {
             let default = (input.node.clone(), finding.id.clone());
             let root = finding
                 .extra
@@ -687,10 +786,15 @@ pub(super) fn truncated_finding_ids(
                     );
                 }
             }
-        } else if let Some(outputs) = &progress.outputs {
-            found.extend(outputs.findings.iter().enumerate().map(|(index, finding)| {
-                (format!("{prefix}{}", finding.id), format!("{id}:{index}"))
-            }));
+        } else if progress.outputs.is_some() {
+            found.extend(
+                materialized_findings(index, plan, checkpoint, positions)
+                    .iter()
+                    .enumerate()
+                    .map(|(index, finding)| {
+                        (format!("{prefix}{}", finding.id), format!("{id}:{index}"))
+                    }),
+            );
         }
     }
     let mut found = Vec::new();

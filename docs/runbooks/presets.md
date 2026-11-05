@@ -614,20 +614,20 @@ Use read-only junior swarms for scouting and research. Give implementation
 lanes to seniors, and put long-horizon principal refactoring at batch end.
 Choose review depth from the risk and author tier.
 
-The checkpoint estimate reserves space for each node’s bounded outputs and,
-for disposition nodes, copies of upstream findings. Those reservations can be
-much larger than the text actually stored. When inherited disposition metadata
-is large, settlement trims summaries and optional fields toward a shared
-per-node target and warns; identities, severity, location, dispositions,
-reasons and propagation markers remain. That target is not yet a hard bound:
-large required fields can still exceed the existing reservation. Review panels
-with an unpinned size expand after their subjects are committed. The current
-admission estimate does not include all of that expansion, so a graph that
-explains successfully can
-still exceed the checkpoint limit. Setting the top-level `size` or `review_shape`
-fixes the council and repair panels,
-but does not fix the lane panels. Split a large batch into smaller graphs to
-reduce its checkpoint footprint.
+The checkpoint estimate reserves space for bounded node outputs and for each
+deferred review. Disposition findings share a per-node budget: when inherited
+copies exceed it, the checkpoint retains the bounded findings block and
+reconstructs the copies from upstream inputs on replay. A warning records the
+compaction; full results remain in their attempt files.
+
+An unpinned review size resolves after its subject is committed. Admission
+reserves its configured maximum panel, including the candidate templates and
+inherited inputs. The runtime checks the prospective expansion against that
+reservation before publishing it; an expansion outside the reserved shape is
+refused with its projection and a remedy. This keeps the estimate conservative
+without reducing the selected panel or changing the checkpoint limit. Use
+`--explain` to check larger batches, and split a batch if the estimate exceeds
+the limit.
 
 A graph that reads `source = { type = "integration" }` pins the integration
 head when that source first resolves, and the head joins the graph ID. The
