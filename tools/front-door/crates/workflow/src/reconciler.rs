@@ -95,7 +95,7 @@ pub struct Store {
 }
 impl Store {
     pub fn open(db: Connection) -> Result<Self, Error> {
-        db.execute_batch("CREATE TABLE IF NOT EXISTS pr_work (key TEXT PRIMARY KEY, repository TEXT NOT NULL, pr TEXT NOT NULL, head TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS pr_work_head ON pr_work(repository, pr, head);")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS pr_work (key TEXT PRIMARY KEY, repository TEXT NOT NULL, pr TEXT NOT NULL, head TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS pr_work_head ON pr_work(repository, pr, head); CREATE TABLE IF NOT EXISTS pr_work_ids (key TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(key, kind, id));")?;
         Ok(Self { db })
     }
     fn id(key: &Key) -> Result<String, Error> {
@@ -142,6 +142,32 @@ impl Store {
             records.push(record);
         }
         Ok(records)
+    }
+    // Retain arbitrary caller-supplied IDs after their archived payload is pruned.
+    fn remember_ids(db: &Connection, record: &Record) -> Result<(), Error> {
+        let key = Self::id(&record.key)?;
+        for history in &record.history {
+            if let Some(attempt) = &history.attempt {
+                db.execute(
+                    "INSERT OR IGNORE INTO pr_work_ids VALUES (?1, 'attempt', ?2)",
+                    params![key, attempt.id],
+                )?;
+            }
+            for intent in &history.intents {
+                db.execute(
+                    "INSERT OR IGNORE INTO pr_work_ids VALUES (?1, 'intent', ?2)",
+                    params![key, intent.id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+    fn used_id(db: &Connection, key: &Key, kind: &str, id: &str) -> Result<bool, Error> {
+        Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pr_work_ids WHERE key=?1 AND kind=?2 AND id=?3)",
+            params![Self::id(key)?, kind, id],
+            |row| row.get(0),
+        )?)
     }
     /// The caller supplies an authoritative current head, not an unordered event head.
     pub fn observe_head(&mut self, key: Key) -> Result<Record, Error> {
@@ -195,6 +221,10 @@ impl Store {
                 verdict: result.verdict.take(),
                 intents: std::mem::take(&mut result.intents),
             });
+            Self::remember_ids(&tx, &result)?;
+            result
+                .history
+                .retain(|h| h.intents.iter().any(|i| i.receipt.is_none()));
             result.state = State::NeedsReview;
             result.cancelled = false;
             Self::save(&tx, &result)?;
@@ -244,6 +274,9 @@ impl Store {
             }
         }
         let mut record = Self::get_from(&tx, key)?;
+        if Self::used_id(&tx, key, "attempt", &attempt.id)? {
+            return Err(Error::Invalid);
+        }
         {
             let r = &mut record;
             if r.cancelled
@@ -362,7 +395,15 @@ impl Store {
         id: String,
         effect: Effect,
     ) -> Result<(), Error> {
-        self.update(key, |r| {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if Self::used_id(&tx, key, "intent", &id)? {
+            return Err(Error::Invalid);
+        }
+        let mut record = Self::get_from(&tx, key)?;
+        {
+            let r = &mut record;
             Self::leased(r, attempt, owner, now)?;
             let allowed = match effect {
                 Effect::Verdict => r.state == State::Verdict,
@@ -388,8 +429,10 @@ impl Store {
             if effect == Effect::Merge {
                 r.state = State::Landing;
             }
-            Ok(())
-        })
+        }
+        Self::save(&tx, &record)?;
+        tx.commit()?;
+        Ok(())
     }
     /// Query remote state before deciding whether the same intent may be retried.
     pub fn reconcile_remote(
@@ -583,6 +626,66 @@ mod tests {
         assert_eq!(record.verdict.as_deref(), Some("new verdict"));
         assert_eq!(record.state, State::Verdict);
         assert_eq!(s.get(&b).unwrap().verdict, None);
+    }
+    #[test]
+    fn returning_head_prunes_settled_history_but_keeps_unresolved_intents() {
+        let mut s = Store::open(Connection::open_in_memory().unwrap()).unwrap();
+        let a = key("a");
+        let b = key("b");
+        start(&mut s, &a);
+        verdict(&mut s, &a);
+        s.intent(&a, "a", "worker", 1, "pending".into(), Effect::Verdict)
+            .unwrap();
+        s.observe_head(b.clone()).unwrap();
+        s.observe_head(a.clone()).unwrap();
+        s.reconcile(&a, "pending", 0, Observation::Absent).unwrap();
+        let initial = s.get(&a).unwrap().history.len();
+        for n in 0..20 {
+            let attempt_id = format!("attempt-{n}");
+            let intent_id = format!("intent-{n}");
+            let mut next = attempt();
+            next.id = attempt_id.clone();
+            s.start(&a, next, 0).unwrap();
+            s.verdict(&a, &attempt_id, "worker", 1, "approved".into())
+                .unwrap();
+            s.intent(
+                &a,
+                &attempt_id,
+                "worker",
+                1,
+                intent_id.clone(),
+                Effect::Verdict,
+            )
+            .unwrap();
+            s.reconcile(&a, &intent_id, 0, Observation::Found("receipt".into()))
+                .unwrap();
+            s.observe_head(b.clone()).unwrap();
+            s.observe_head(a.clone()).unwrap();
+        }
+        let record = s.get(&a).unwrap();
+        assert!(record.history.len() <= initial);
+        assert!(
+            record
+                .history
+                .iter()
+                .flat_map(|h| &h.intents)
+                .any(|i| i.id == "pending")
+        );
+        assert!(s.start(&a, attempt(), 0).is_err());
+        let mut pruned = attempt();
+        pruned.id = "attempt-0".into();
+        assert!(s.start(&a, pruned, 0).is_err());
+        let mut next = attempt();
+        next.id = "fresh".into();
+        s.start(&a, next, 0).unwrap();
+        s.verdict(&a, "fresh", "worker", 1, "approved".into())
+            .unwrap();
+        assert!(
+            s.intent(&a, "fresh", "worker", 1, "intent-0".into(), Effect::Verdict)
+                .is_err()
+        );
+        s.reconcile(&a, "pending", 0, Observation::Found("late receipt".into()))
+            .unwrap();
     }
     #[test]
     fn state_machine_and_undefined_transitions() {

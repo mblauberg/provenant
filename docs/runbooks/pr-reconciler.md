@@ -16,8 +16,10 @@ cancels older records atomically. A cancelled record cannot issue or retry an
 intent, and its verdict never transfers to another key. Reclaim an expired lease
 on the existing attempt. When a cancelled head returns, observing it archives its
 previous attempt and creates fresh work for that same exact key. Its archived
-intents remain available for reconciliation; attempt and intent IDs cannot be
-reused within the key.
+intents without receipts remain available for reconciliation, including settled
+absences. On a return, archives whose intents all have receipts are pruned;
+compact ID tombstones prevent attempt and intent IDs from being reused within
+the key.
 Before starting an attempt, reconcile every unresolved intent on other heads and
 previous attempts of the same head.
 An unknown outcome blocks the start; a receipt or a settled, authoritative
