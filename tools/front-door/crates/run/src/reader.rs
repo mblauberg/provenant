@@ -445,6 +445,28 @@ impl RunStore {
     pub fn record(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
         self.read_record(id, call, RecordRead::Durable)
     }
+    /// Resolve a worktree owner by its globally unique attempt ID. The owner
+    /// can belong to another project scope; only its state is used for lineage.
+    pub(crate) fn writer_owner_terminal(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
+        call.check()?;
+        let project: String = self
+            .db
+            .query_row(
+                "SELECT project FROM attempts WHERE id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(RunError::NotFound)?;
+        let mut context = self.context.clone();
+        context.project_id = provenant_core::ProjectId::parse(&project)
+            .map_err(|_| RunError::Validation("attempt index project"))?;
+        let owner_store = Self::open(&context, call)?;
+        Ok(matches!(
+            owner_store.record(id, call)?.state,
+            AttemptState::Terminal { .. }
+        ))
+    }
     /// The record read for view paths. It reports the published checkpoint
     /// without syncing it, so status, lane listings and output paging do not
     /// pay a durable flush per history row.

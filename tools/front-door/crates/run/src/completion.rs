@@ -476,7 +476,7 @@ mod tests {
                 cause: Some(self.cause),
                 refusal: (self.cause == PolicyCause::Unfinished
                     || self.outcome == Outcome::Succeeded)
-                    .then(|| "result policy refused".into()),
+                    .then(|| "model reported unfinished work; continuation limit exhausted".into()),
                 ..Default::default()
             })
         }
@@ -513,7 +513,11 @@ mod tests {
                     if interrupted {
                         // Crash boundary: decision sealed, terminal intent not
                         // yet written. Recovery must re-decode the provider result.
-                        store.stage_policy_stop(&old, cause)?;
+                        store.stage_policy_stop(
+                            &old,
+                            cause,
+                            Some("model reported unfinished work; continuation limit exhausted"),
+                        )?;
                     }
                     let terminal = store.finish(id, &attempt, &exit(), &provider, &call)?;
                     let expected =
@@ -527,6 +531,13 @@ mod tests {
                         "{cause:?} {outcome:?} interrupted={interrupted}: {:?}",
                         terminal.state
                     );
+                    if cause == PolicyCause::Unfinished
+                        && matches!(outcome, Outcome::Succeeded | Outcome::Uncommitted)
+                    {
+                        assert!(
+                            matches!(&terminal.state, AttemptState::Terminal { reason: Some(reason), .. } if reason == "model reported unfinished work; continuation limit exhausted")
+                        );
+                    }
                     let decision = store
                         .staged_policy_retry(&terminal)?
                         .ok_or("missing stop")?;

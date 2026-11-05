@@ -759,6 +759,8 @@ scan. The host snapshot survives provider-state and temporary cleanup.
 Recovery and fresh manual continuation carry this bounded snapshot with the
 original brief and worktree state, rather than a result transcript. Policy
 continuations use `stopped_early`; `blocked` needs a decision or external change.
+The bundled policy for `codex/gpt-6.1-terra` permits eight continuations after
+an unfinished result; the initial attempt is separate.
 The `Status:` line protocol is removed.
 - Why: a lane that did part of its brief must not read as one that did all of it.
 - Test: `crates/run/src/dispatch_tests.rs::a_declared_stop_settles_review_required`;
@@ -1207,6 +1209,12 @@ The private Git admin directory holds `provenant-owner.json` as a bounded,
 atomic `WorktreeOwner`: optional attempt and operation IDs, short branch,
 pinned base OID, host, creation time, origin (`lane` or `adopted`) and optional
 owner label. `load_owner` and `save_owner` require a verified linked worktree.
+
+A continuation may reuse a saved lane-owned worktree only when its recorded
+owner attempt is terminal. Records predating the saved `owner` field retain
+their refusal; use `provenant run --branch B --base SHA` to proceed. Setup
+waits for the shared Git configuration lock with a 240-second retry deadline and
+observes lane cancellation while waiting.
 
 Git's inventory and verified common-directory/backlink membership admit
 existing linked checkouts without an adoption step. Canonical paths locate
