@@ -404,7 +404,9 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
     let mut state = provider.observe(job).map_err(CloudJobError::Provider)?;
     // Seeing a running job does not prove whether an earlier cancellation
     // request was delivered or will take effect later.
-    if job.state == RemoteState::CancellationUnconfirmed && state == RemoteState::Running {
+    if job.state == RemoteState::CancellationUnconfirmed
+        && matches!(state, RemoteState::Running | RemoteState::Unknown { .. })
+    {
         state = RemoteState::CancellationUnconfirmed;
     }
     if let RemoteState::Finished { result } = &state {
@@ -625,6 +627,11 @@ mod lifecycle_tests {
         reconcile(&mut provider, &mut store, &mut recovered).unwrap();
         assert_eq!(recovered.state, RemoteState::CancellationUnconfirmed);
         assert_eq!(store.saved.as_ref(), Some(&recovered));
+        provider.observed = RemoteState::Unknown {
+            detail: "deadline".into(),
+        };
+        reconcile(&mut provider, &mut store, &mut recovered).unwrap();
+        assert_eq!(recovered.state, RemoteState::CancellationUnconfirmed);
         provider.observed = RemoteState::Finished {
             result: result(&"a".repeat(40)),
         };

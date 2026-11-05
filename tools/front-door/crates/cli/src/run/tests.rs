@@ -3259,7 +3259,7 @@ fn trace_store(
 #[test]
 fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::cloud::{
-        self, CloudProvider, CloudResult, CloudSubmission, RemoteJob, RemoteState,
+        CloudProvider, CloudResult, CloudSubmission, RemoteJob, RemoteState,
     };
     struct Fake {
         running: bool,
@@ -3327,49 +3327,25 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
         job.nonce,
         cloud_owner::prepare_job(id, "target", &target, &"a".repeat(40), &clock)?.nonce
     );
-    let submitted =
-        cloud_store::AttemptCloudStore::with_attempt(&store, id, true, &call, |cloud_store| {
-            cloud::submit(&mut Fake { running: true }, cloud_store, job, "run tests")
-        })?
-        .map_err(|error| format!("{error:?}"))?;
-    drop(store);
-    let store = trace_store(&temp, &call)?;
-    cloud_store::AttemptCloudStore::with_attempt(
+    let submitted = cloud_owner::submit(
+        &mut Fake { running: true },
         &store,
         id,
-        false,
+        job,
+        "run tests",
         &call,
-        |cloud_store| -> Result<(), Box<dyn std::error::Error>> {
-            let mut recovered = cloud_store.load()?.ok_or("missing cloud job")?;
-            assert_eq!(recovered, submitted);
-            cloud::cancel(&mut Fake { running: true }, cloud_store, &mut recovered)
-                .map_err(|error| format!("{error:?}"))?;
-            assert_eq!(recovered.state, RemoteState::CancellationUnconfirmed);
-            Ok(())
-        },
-    )??;
+    )?;
     drop(store);
     let store = trace_store(&temp, &call)?;
-    cloud_store::AttemptCloudStore::with_attempt(
-        &store,
-        id,
-        false,
-        &call,
-        |cloud_store| -> Result<(), Box<dyn std::error::Error>> {
-            let mut recovered = cloud_store.load()?.ok_or("missing cloud job")?;
-            assert_eq!(recovered.state, RemoteState::CancellationUnconfirmed);
-            cloud::reconcile(&mut Fake { running: true }, cloud_store, &mut recovered)
-                .map_err(|error| format!("{error:?}"))?;
-            assert_eq!(recovered.state, RemoteState::CancellationUnconfirmed);
-            cloud::reconcile(&mut Fake { running: false }, cloud_store, &mut recovered)
-                .map_err(|error| format!("{error:?}"))?;
-            assert!(matches!(
-                cloud_store.load()?.unwrap().state,
-                RemoteState::Finished { .. }
-            ));
-            Ok(())
-        },
-    )??;
+    let cancelled = cloud_owner::cancel(&mut Fake { running: true }, &store, id, &call)?;
+    assert_eq!(cancelled.remote_id, submitted.remote_id);
+    assert_eq!(cancelled.state, RemoteState::CancellationUnconfirmed);
+    drop(store);
+    let store = trace_store(&temp, &call)?;
+    let running = cloud_owner::reconcile(&mut Fake { running: true }, &store, id, &call)?;
+    assert_eq!(running.state, RemoteState::CancellationUnconfirmed);
+    let finished = cloud_owner::reconcile(&mut Fake { running: false }, &store, id, &call)?;
+    assert!(matches!(finished.state, RemoteState::Finished { .. }));
     Ok(())
 }
 

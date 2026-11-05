@@ -413,6 +413,38 @@ mod adapter_tests {
         assert!(adapter.cli.calls[4].contains("--delete"));
     }
     #[test]
+    fn cloud_codex_finished_result_is_checked_and_reports_changed_files() {
+        use std::collections::VecDeque;
+        struct Script(VecDeque<String>);
+        impl CloudCli for Script {
+            fn run(&mut self, _: &str, _: &[&str], _: Option<&str>) -> Result<String, String> {
+                self.0.pop_front().ok_or_else(|| "missing response".into())
+            }
+        }
+        let job = job();
+        let diff = format!(
+            "diff --git a/.provenant-cloud-result.json b/.provenant-cloud-result.json\nnew file mode 100644\n--- /dev/null\n+++ b/.provenant-cloud-result.json\n@@ -0,0 +1 @@\n+{{\"job_id\":\"job\",\"nonce\":\"nonce\",\"commit\":\"{}\",\"exit_status\":0,\"tests_run\":[\"test\"],\"tests_failed\":[],\"log_location\":\"log\",\"tracked_files_changed\":true,\"observed_model\":\"claimed\"}}\n",
+            job.commit
+        );
+        let mut adapter = CodexCloud {
+            cli: Script(["completed".into(), diff.clone()].into()),
+        };
+        let RemoteState::Finished { result } = adapter.observe(&job).unwrap() else {
+            panic!("expected result")
+        };
+        let checked = result
+            .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
+            .unwrap();
+        assert!(!checked.passed);
+        assert_eq!(checked.model, crate::cloud::ModelObservation::Unknown);
+        let mut wrong = job;
+        wrong.nonce = "other".into();
+        let mut adapter = CodexCloud {
+            cli: Script(["completed".into(), diff].into()),
+        };
+        assert!(adapter.observe(&wrong).is_err());
+    }
+    #[test]
     fn cloud_adapters_submit_and_cancel_unconfirmed() {
         let job = job();
         let mut claude = ClaudeCloud {

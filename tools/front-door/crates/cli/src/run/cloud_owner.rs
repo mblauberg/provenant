@@ -38,3 +38,70 @@ pub fn prepare_job(
         state: RemoteState::Submitting,
     })
 }
+
+/// Persist the intent and remote identity under the attempt's cloud lock.
+pub fn submit<P: provenant_providers::cloud::CloudProvider>(
+    provider: &mut P,
+    store: &provenant_run::RunStore,
+    id: AttemptId,
+    job: RemoteJob,
+    task: &str,
+    call: &provenant_run::Request<'_>,
+) -> Result<RemoteJob, String>
+where
+    P::Error: std::fmt::Debug,
+{
+    if job.job_id != id.to_string() {
+        return Err("cloud job identity does not match the attempt".into());
+    }
+    provenant_run::Service::scan(task).map_err(|error| error.to_string())?;
+    super::cloud_store::AttemptCloudStore::with_attempt(store, id, true, call, |cloud_store| {
+        provenant_providers::cloud::submit(provider, cloud_store, job, task)
+    })
+    .map_err(|error| error.to_string())?
+    .map_err(|error| format!("{error:?}"))
+}
+
+/// Observe a durable job after a restart and save any validated result.
+pub fn reconcile<P: provenant_providers::cloud::CloudProvider>(
+    provider: &mut P,
+    store: &provenant_run::RunStore,
+    id: AttemptId,
+    call: &provenant_run::Request<'_>,
+) -> Result<RemoteJob, String>
+where
+    P::Error: std::fmt::Debug,
+{
+    super::cloud_store::AttemptCloudStore::with_attempt(store, id, false, call, |cloud_store| {
+        let mut job = cloud_store
+            .load()
+            .map_err(|error| error.to_string())?
+            .ok_or("missing cloud job")?;
+        provenant_providers::cloud::reconcile(provider, cloud_store, &mut job)
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(job)
+    })
+    .map_err(|error| error.to_string())?
+}
+
+/// Record cancellation as unconfirmed unless the provider can prove it stopped.
+pub fn cancel<P: provenant_providers::cloud::CloudProvider>(
+    provider: &mut P,
+    store: &provenant_run::RunStore,
+    id: AttemptId,
+    call: &provenant_run::Request<'_>,
+) -> Result<RemoteJob, String>
+where
+    P::Error: std::fmt::Debug,
+{
+    super::cloud_store::AttemptCloudStore::with_attempt(store, id, false, call, |cloud_store| {
+        let mut job = cloud_store
+            .load()
+            .map_err(|error| error.to_string())?
+            .ok_or("missing cloud job")?;
+        provenant_providers::cloud::cancel(provider, cloud_store, &mut job)
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(job)
+    })
+    .map_err(|error| error.to_string())?
+}
