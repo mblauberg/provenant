@@ -216,6 +216,7 @@ pub enum FacadeError {
     PeerVersion,
     #[error("{}", crate::hosts::protocol_mismatch_message(peer, *remote, *expected))]
     PeerProtocolMismatch {
+        #[serde(serialize_with = "serialise_peer_label")]
         peer: String,
         remote: u64,
         /// The requested protocol level.
@@ -405,6 +406,10 @@ fn serialise_io_operation<S: serde::Serializer>(
     serializer.serialize_str(operation)
 }
 
+fn serialise_peer_label<S: serde::Serializer>(_: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str("peer")
+}
+
 fn delivery_stage_wire<S: serde::Serializer>(
     stage: &provenant_records::run::WriterDeliveryStage,
     serializer: S,
@@ -485,6 +490,10 @@ impl FacadeError {
                     .next(format!("inspect the {access} grant and select a permitted root"));
             }
             _ => {}
+        }
+        if projected.next.is_none() {
+            projected = projected
+                .next("inspect the current state and request before taking further action");
         }
         projected
     }
@@ -855,6 +864,23 @@ mod diagnostic_tests {
     }
 
     #[test]
+    fn generic_io_has_safe_action_without_source_detail() {
+        let error = FacadeError::Io {
+            operation: "TOKEN_SENTINEL\u{1b}".into(),
+            path: Some("/private/host".into()),
+            delivery_limit: None,
+            delivery_stage: None,
+        };
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.code, "io");
+        assert!(diagnostic.detail.is_none());
+        assert!(diagnostic.next.is_some());
+        let wire = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        assert!(!wire.contains("/private/host"));
+    }
+
+    #[test]
     fn protocol_projection_omits_untrusted_peer_name() {
         let error = FacadeError::PeerProtocolMismatch {
             peer: "/private/TOKEN_SENTINEL\u{1b}".into(),
@@ -865,6 +891,9 @@ mod diagnostic_tests {
         let wire = serde_json::to_string(&projected).unwrap();
         assert!(!wire.contains("TOKEN_SENTINEL"));
         assert!(!wire.contains("/private"));
+        let transport = serde_json::to_string(&error).unwrap();
+        assert!(!transport.contains("TOKEN_SENTINEL"));
+        assert!(!transport.contains("/private"));
         assert!(projected.detail.unwrap().contains('3'));
         assert!(projected.next.is_some());
     }

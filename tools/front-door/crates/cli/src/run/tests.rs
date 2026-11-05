@@ -3045,7 +3045,14 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
     );
     let refusal = super::Fail::from(run::RunError::Writer(census_unknown));
     assert!(refusal.message.contains(&path.display().to_string()));
-    assert!(refusal.message.contains("injected census incomplete"));
+    assert!(!refusal.message.contains("injected census incomplete"));
+    assert!(
+        refusal
+            .projection
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.next.as_ref())
+            .is_some()
+    );
 
     let observer = LiveObserver(path.clone(), std::sync::atomic::AtomicUsize::new(0));
     let live_policy = worktrees::CensusPolicyWorkers::for_run(&observer, &roots)?;

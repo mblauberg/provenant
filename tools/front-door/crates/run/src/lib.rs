@@ -575,29 +575,12 @@ impl RunError {
                         ));
                     }
                 }
-                // Census evidence can name processes and host paths. The local
-                // operator needs it to understand the uncertainty, but it is
-                // not an approved fact for remote peers.
-                if let WorktreeError::CensusUnknown { path, detail } = error
-                    && matches!(
-                        destination,
-                        provenant_records::diagnostic::Destination::Local
-                    )
-                {
-                    let scope = safe_path(path, destination)
-                        .unwrap_or_else(|| "the requested worktree".into());
-                    diagnostic = diagnostic
-                        .detail(format!("writer occupancy is unknown for {scope}: {detail}"));
+                if matches!(error, WorktreeError::BranchCollision { .. }) {
+                    diagnostic = diagnostic.detail("branch name collides with an existing ref");
                 }
-                if let WorktreeError::BranchCollision { existing } = error {
+                if let WorktreeError::BranchExistsWithBase { head, base, .. } = error {
                     diagnostic = diagnostic
-                        .detail(format!("branch name collides with existing ref {existing}"));
-                }
-                if let WorktreeError::BranchExistsWithBase { branch, head, base } = error {
-                    diagnostic = diagnostic
-                        .detail(format!(
-                            "branch {branch} at {head} does not contain base {base}"
-                        ))
+                        .detail(format!("branch at {head} does not contain base {base}"))
                         .next("omit --base to reuse the branch");
                 }
                 if let WorktreeError::WriterBusy {
@@ -642,14 +625,6 @@ impl RunError {
                         "run-store path {path} is not private or contained: {check}"
                     ));
                 }
-            }
-            Self::Sqlite(error)
-                if matches!(
-                    destination,
-                    provenant_records::diagnostic::Destination::Local
-                ) =>
-            {
-                diagnostic = diagnostic.detail(format!("run store: {error}"));
             }
             Self::GenerationConflict { current_generation } => {
                 diagnostic =
@@ -730,6 +705,10 @@ impl RunError {
                     ));
             }
             _ => {}
+        }
+        if diagnostic.next.is_none() {
+            diagnostic = diagnostic
+                .next("inspect the current state and request before taking further action");
         }
         diagnostic
     }
@@ -887,6 +866,51 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
+    fn branch_refusal_omits_untrusted_ref_text() {
+        use provenant_confinement::worktrees::WorktreeError;
+        let error = RunError::Writer(WorktreeError::BranchCollision {
+            existing: "TOKEN_SENTINEL\u{1b}".into(),
+        });
+        for destination in [
+            Destination::Local,
+            Destination::Remote {
+                repository: None,
+                home: None,
+            },
+        ] {
+            let diagnostic = error.diagnostic(destination);
+            assert_eq!(diagnostic.code, "WRITER_SCOPE");
+            assert!(diagnostic.detail.as_deref().unwrap().contains("collides"));
+            assert!(diagnostic.next.is_some());
+            assert!(
+                !serde_json::to_string(&diagnostic)
+                    .unwrap()
+                    .contains("TOKEN_SENTINEL")
+            );
+        }
+    }
+
+    #[test]
+    fn source_errors_are_not_diagnostic_detail_even_locally() {
+        use provenant_confinement::worktrees::WorktreeError;
+        let errors = [
+            RunError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "TOKEN_SENTINEL".into(),
+            )),
+            RunError::Writer(WorktreeError::CensusUnknown {
+                path: "/repo/tree".into(),
+                detail: "TOKEN_SENTINEL\u{1b}".into(),
+            }),
+        ];
+        for error in errors {
+            let projection = error.diagnostic(Destination::Local);
+            let encoded = serde_json::to_string(&projection).unwrap();
+            assert!(!encoded.contains("TOKEN_SENTINEL"));
+            assert!(projection.next.is_some());
+        }
+    }
+
+    #[test]
     fn filesystem_fact_keeps_operation_without_source() {
         let error = RunError::Filesystem(provenant_os::fs::FsError::ReadIo {
             path: "/private/host".into(),
@@ -990,7 +1014,7 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn unknown_census_diagnostic_names_local_scope_and_evidence() {
+    fn unknown_census_diagnostic_names_local_scope_without_source() {
         let error = RunError::Writer(
             provenant_confinement::worktrees::WorktreeError::CensusUnknown {
                 path: PathBuf::from("/checkout/tree"),
@@ -1000,7 +1024,8 @@ mod diagnostic_projection_tests {
         let local = error.diagnostic(Destination::Local);
         let detail = local.detail.unwrap();
         assert!(detail.contains("/checkout/tree"));
-        assert!(detail.contains("process 123: cwd unreadable at /private/other"));
+        assert!(!detail.contains("process 123"));
+        assert!(!detail.contains("/private/other"));
         let remote = error.diagnostic(Destination::Remote {
             repository: None,
             home: None,

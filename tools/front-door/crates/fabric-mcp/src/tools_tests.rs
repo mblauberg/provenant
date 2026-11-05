@@ -4,6 +4,7 @@ fn invalid_input_paths_omit_untrusted_data() {
     for path in [
         "/private/TOKEN_SENTINEL\u{1b}".to_owned(),
         format!("tasks[{}].title", "1".repeat(200)),
+        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
     ] {
         for error in [
             ServiceError::Invalid(InputError { path: path.clone() }),
@@ -15,6 +16,8 @@ fn invalid_input_paths_omit_untrusted_data() {
             assert!(detail["path"].is_null());
             assert!(!wire.contains("TOKEN_SENTINEL"));
             assert!(!wire.contains("/private"));
+            assert!(wire.len() < 4096);
+            assert!(!wire.chars().any(char::is_control));
             assert!(detail["hint"].is_string());
         }
     }
