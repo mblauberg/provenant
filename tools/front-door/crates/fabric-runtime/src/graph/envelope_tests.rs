@@ -271,6 +271,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 .then(|| LaunchRetry {
                     extra: Default::default(),
                     failures: u8::MAX,
+                    deadline: Some(envelope::latest()),
                     wake_at: Some(envelope::latest()),
                     reason: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
                 }),

@@ -154,8 +154,18 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
                     ObservedProcess {
                         pid: 123,
                         command: Some("first".into()),
+                        kind: ProcessEvidenceKind::WorkingDirectory,
                         cwd: Some(root.clone()),
                     },
+                )]),
+                taints: BTreeMap::from([(
+                    root.clone(),
+                    TaintCause::LiveWriter(ObservedProcess {
+                        pid: 123,
+                        command: Some("first".into()),
+                        kind: ProcessEvidenceKind::WorkingDirectory,
+                        cwd: Some(root.clone()),
+                    }),
                 )]),
                 details: BTreeMap::from([(root, "first observation".into())]),
             }
@@ -173,6 +183,8 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
     assert_eq!(states[&root], WorkerState::Live);
     assert_eq!(details[&root], "first observation");
     assert_eq!(session.live_process(&root).unwrap().pid, 123);
+    let (_, taints) = session.observe_roots_with_taints(std::slice::from_ref(&root));
+    assert!(matches!(&taints[&root], TaintCause::LiveWriter(p) if p.pid == 123));
     assert_eq!(observer.0.load(Ordering::SeqCst), 1);
     let missing = root.join("missing");
     assert_eq!(
@@ -1025,6 +1037,7 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
                     states,
                     holders,
                     details,
+                    ..WorkerEvidence::default()
                 }
             }
         }
@@ -1040,6 +1053,23 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
         let clock = provenant_os::clock::SystemClock;
         CensusSession::new(&observer, &clock).observe_roots(&roots)
     };
+    // The resolved ancestor places an unresolvable cwd under a.
+    let unplaceable = a.join("cwd-loop");
+    std::os::unix::fs::symlink("cwd-loop", &unplaceable)?;
+    let states = observe_worker_roots(
+        &roots,
+        &processes,
+        &Occupancy {
+            cwd: unplaceable,
+            paths: vec![],
+            complete: true,
+        },
+        &current,
+        false,
+    )
+    .0;
+    assert_eq!(states[&a], WorkerState::Unknown);
+    assert_eq!(states[&b], WorkerState::Free);
     let free = observe(vec![], true);
     assert_eq!(free[&a], WorkerState::Free);
     assert_eq!(free[&b], WorkerState::Free);
@@ -1054,8 +1084,8 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     let outside = base.join("loop");
     std::os::unix::fs::symlink("loop", &outside)?;
     let outside_states = observe(vec![outside], true);
-    assert_eq!(outside_states[&a], WorkerState::Free);
-    assert_eq!(outside_states[&b], WorkerState::Free);
+    assert_eq!(outside_states[&a], WorkerState::Unknown);
+    assert_eq!(outside_states[&b], WorkerState::Unknown);
     let inside = a.join("loop");
     std::os::unix::fs::symlink("loop", &inside)?;
     let alias = if let Ok(suffix) = inside.strip_prefix("/private") {
@@ -1063,11 +1093,6 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     } else {
         Path::new("/private").join(inside.strip_prefix("/")?)
     };
-    assert!(occupancy_path_could_be_under(&alias, &a));
-    assert!(occupancy_path_could_be_under(
-        &inside,
-        alias.parent().unwrap()
-    ));
     let alias_root = alias.parent().unwrap().to_path_buf();
     let (alias_states, alias_details) = observe_worker_roots(
         &[alias_root.clone(), b.clone()],
@@ -1631,6 +1656,7 @@ fn ancestor_exclusion_is_limited_to_run_admission() -> Result<(), Box<dyn Error>
             (!exclude).then(|| ObservedProcess {
                 pid: 90,
                 command: Some("shell".into()),
+                kind: ProcessEvidenceKind::WorkingDirectory,
                 cwd: Some(root.to_path_buf()),
             })
         }
@@ -2766,4 +2792,681 @@ mod narrowing {
         assert_eq!(foreign_holder.cwd.as_ref(), Some(&root));
         Ok(())
     }
+}
+
+#[test]
+fn unplaceable_aliased_cwd_does_not_taint_unrelated_worktrees() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let affected = temp.path().join("affected");
+    let unrelated = temp.path().join("unrelated");
+    fs::create_dir(&affected)?;
+    fs::create_dir(&unrelated)?;
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(&affected, &alias)?;
+    let non_directory = alias.join("file");
+    fs::write(&non_directory, b"")?;
+    let mut states = BTreeMap::from([
+        (affected.clone(), WorkerState::Free),
+        (unrelated.clone(), WorkerState::Free),
+    ]);
+    let mut reported = false;
+    record_live_path_with_audit(&mut states, &non_directory.join("cwd"), &mut || {
+        reported = true;
+    });
+    assert!(reported);
+    assert_eq!(states[&affected], WorkerState::Unknown);
+    assert_eq!(states[&unrelated], WorkerState::Free);
+    Ok(())
+}
+
+#[test]
+fn affirmative_evidence_of_different_root_does_not_taint_this_one() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let this_root = temp.path().join("this-root");
+    let other_root = temp.path().join("other-root");
+    fs::create_dir(&this_root)?;
+    fs::create_dir(&other_root)?;
+    let inside_other = other_root.join("sub-dir");
+    fs::create_dir(&inside_other)?;
+    let mut states = BTreeMap::from([
+        (this_root.clone(), WorkerState::Free),
+        (other_root.clone(), WorkerState::Free),
+    ]);
+    let mut unplaceable_reported = false;
+    let placed = record_live_path_with_audit(&mut states, &inside_other, &mut || {
+        unplaceable_reported = true;
+    });
+    assert!(!unplaceable_reported);
+    assert_eq!(placed, vec![other_root.clone()]);
+    assert_eq!(states[&this_root], WorkerState::Free);
+    assert_eq!(states[&other_root], WorkerState::Live);
+    Ok(())
+}
+
+#[test]
+fn wholly_unplaceable_process_taints_every_root_fail_closed() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root_a = temp.path().join("root-a");
+    let root_b = temp.path().join("root-b");
+    fs::create_dir(&root_a)?;
+    fs::create_dir(&root_b)?;
+
+    // Relative path cannot safely rule out any root.
+    let mut states = BTreeMap::from([
+        (root_a.clone(), WorkerState::Free),
+        (root_b.clone(), WorkerState::Free),
+    ]);
+    let mut reported = false;
+    let placed = record_live_path_with_audit(&mut states, Path::new("relative/path"), &mut || {
+        reported = true;
+    });
+    assert!(reported);
+    assert!(placed.is_empty());
+    assert_eq!(states[&root_a], WorkerState::Unknown);
+    assert_eq!(states[&root_b], WorkerState::Unknown);
+
+    // Empty path is similarly wholly unplaceable and fails closed.
+    let mut states_empty = BTreeMap::from([
+        (root_a.clone(), WorkerState::Free),
+        (root_b.clone(), WorkerState::Free),
+    ]);
+    let mut reported_empty = false;
+    let placed_empty = record_live_path_with_audit(&mut states_empty, Path::new(""), &mut || {
+        reported_empty = true;
+    });
+    assert!(reported_empty);
+    assert!(placed_empty.is_empty());
+    assert_eq!(states_empty[&root_a], WorkerState::Unknown);
+    assert_eq!(states_empty[&root_b], WorkerState::Unknown);
+    Ok(())
+}
+
+#[test]
+fn taint_causes_distinguish_contention_from_uncertainty() {
+    let live = TaintCause::LiveWriter(ObservedProcess::cwd(1234, Some("worker".into())));
+    assert!(!live.is_contention());
+    assert!(!live.is_uncertainty());
+
+    let lock = TaintCause::LockContention;
+    assert!(lock.is_contention());
+    assert!(!lock.is_uncertainty());
+
+    let uncertainty_reasons = [
+        UncertaintyReason::CensusUnavailable,
+        UncertaintyReason::UnstableProcessIdentity,
+        UncertaintyReason::CwdUnreadable,
+        UncertaintyReason::OccupancyIncomplete,
+        UncertaintyReason::PathUnplaceable,
+        UncertaintyReason::ListingIncomplete,
+        UncertaintyReason::PolicyRejected,
+        UncertaintyReason::RootUnreadable,
+    ];
+    for reason in uncertainty_reasons {
+        let cause = TaintCause::Uncertainty(reason);
+        assert!(!cause.is_contention());
+        assert!(cause.is_uncertainty());
+    }
+}
+
+#[test]
+fn live_observer_without_process_details_preserves_unattributed_writer() {
+    struct LiveObserver;
+    impl WorkerObserver for LiveObserver {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Live))
+                .collect()
+        }
+    }
+
+    let root = PathBuf::from("/worktree");
+    let (states, taints) = LiveObserver.observe_roots_with_taints(std::slice::from_ref(&root));
+    assert_eq!(states[&root], WorkerState::Live);
+    assert_eq!(taints[&root], TaintCause::UnattributedLiveWriter);
+    assert!(!taints[&root].is_contention());
+    assert_eq!(taints[&root].to_string(), "live writer");
+}
+
+#[test]
+fn census_observation_produces_typed_taints_for_contention_and_uncertainty()
+-> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let fixture = Fixture::new()?;
+    let base = canonicalize(fixture._temp.path())?;
+    let live_root = base.join("live-root");
+    let unknown_root = base.join("unknown-root");
+    let free_root = base.join("free-root");
+    fs::create_dir(&live_root)?;
+    fs::create_dir(&unknown_root)?;
+    fs::create_dir(&free_root)?;
+
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: Some("test-cmd".into()),
+    };
+    let current = fact(100);
+    let live_proc = fact(200);
+    let unknown_proc = fact(300);
+
+    let processes = InjectedCensus {
+        census: Census::from_observations(
+            [current.clone(), live_proc.clone(), unknown_proc.clone()],
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+
+    struct MockCwdObserver {
+        live_dir: PathBuf,
+        unreadable_file: PathBuf,
+    }
+    impl CwdObserver for MockCwdObserver {
+        fn occupancy(&self, _pid: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: true,
+                gap: None,
+            }
+        }
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            if pid == 200 {
+                Ok(CwdObservation::Path(self.live_dir.clone()))
+            } else if pid == 300 {
+                Ok(CwdObservation::Path(self.unreadable_file.clone()))
+            } else {
+                Ok(CwdObservation::Gone)
+            }
+        }
+    }
+
+    let unreadable_file = unknown_root.join("file-not-dir");
+    fs::write(&unreadable_file, b"not a dir")?;
+
+    let cwd_obs = MockCwdObserver {
+        live_dir: live_root.clone(),
+        unreadable_file: unreadable_file.join("sub"),
+    };
+
+    let roots = vec![live_root.clone(), unknown_root.clone(), free_root.clone()];
+    let (states, taints) =
+        observe_worker_root_taints(&roots, &processes, &cwd_obs, &current, false);
+
+    assert_eq!(states[&live_root], WorkerState::Live);
+    assert_eq!(states[&unknown_root], WorkerState::Unknown);
+    assert_eq!(states[&free_root], WorkerState::Free);
+
+    let live_taint = &taints[&live_root];
+    assert!(!live_taint.is_contention());
+    assert!(!live_taint.is_uncertainty());
+    assert!(matches!(live_taint, TaintCause::LiveWriter(p) if p.pid == 200));
+
+    let unknown_taint = &taints[&unknown_root];
+    assert!(!unknown_taint.is_contention());
+    assert!(unknown_taint.is_uncertainty());
+    assert!(matches!(unknown_taint, TaintCause::Uncertainty(_)));
+
+    assert!(!taints.contains_key(&free_root));
+
+    Ok(())
+}
+
+#[test]
+fn census_refusal_names_working_directory_evidence_kind() -> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let fixture = Fixture::new()?;
+    let root = canonicalize(fixture._temp.path())?.join("root-wd");
+    fs::create_dir(&root)?;
+
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: Some("agent-shell".into()),
+    };
+    let current = fact(100);
+    let worker = fact(200);
+
+    let processes = InjectedCensus {
+        census: Census::from_observations(
+            [current.clone(), worker.clone()],
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+
+    struct WdCwdObserver(PathBuf);
+    impl CwdObserver for WdCwdObserver {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            if pid == 200 {
+                Ok(CwdObservation::Path(self.0.clone()))
+            } else {
+                Ok(CwdObservation::Gone)
+            }
+        }
+    }
+
+    struct MockObserver<'a> {
+        processes: &'a InjectedCensus,
+        cwd_obs: WdCwdObserver,
+    }
+    impl WorkerObserver for MockObserver<'_> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            observe_worker_roots(
+                roots,
+                self.processes,
+                &self.cwd_obs,
+                &self.processes.current,
+                false,
+            )
+            .0
+        }
+        fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
+            let (_, holders, _) = observe_worker_holders(
+                std::slice::from_ref(&root.to_path_buf()),
+                self.processes,
+                &self.cwd_obs,
+                &self.processes.current,
+                false,
+            );
+            holders.get(root).cloned()
+        }
+    }
+
+    let observer = MockObserver {
+        processes: &processes,
+        cwd_obs: WdCwdObserver(root.clone()),
+    };
+
+    let refusal = live_refusal(&observer, &root);
+    let WorktreeError::LiveProcess(observed) = &refusal else {
+        panic!("expected LiveProcess, got {refusal:?}");
+    };
+    assert_eq!(observed.pid, 200);
+    assert_eq!(observed.kind, ProcessEvidenceKind::WorkingDirectory);
+    let message = refusal.to_string();
+    assert!(
+        message.contains("has its working directory inside the tree"),
+        "expected working directory refusal message, got: {message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn census_refusal_names_executable_image_evidence_kind() -> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let fixture = Fixture::new()?;
+    let base = canonicalize(fixture._temp.path())?;
+    let root = base.join("root-exe");
+    let external_cwd = base.join("tmp-cwd");
+    fs::create_dir(&root)?;
+    fs::create_dir(&external_cwd)?;
+
+    // Create an executable image file inside the root checkout
+    let exe_path = root.join("tools/front-door/target/debug/provenant");
+    fs::create_dir_all(exe_path.parent().unwrap())?;
+    fs::write(&exe_path, b"ELF or Mach-O binary content")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: Some("provenant-supervise".into()),
+    };
+    let current = fact(100);
+    let worker = fact(200);
+
+    let processes = InjectedCensus {
+        census: Census::from_observations(
+            [current.clone(), worker.clone()],
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+
+    struct ExeCwdObserver {
+        cwd: PathBuf,
+        exe: PathBuf,
+        held: PathBuf,
+    }
+    impl CwdObserver for ExeCwdObserver {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            if pid == 200 {
+                // Cwd is outside the tree (e.g. temp dir)
+                Ok(CwdObservation::Path(self.cwd.clone()))
+            } else {
+                Ok(CwdObservation::Gone)
+            }
+        }
+        fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+            if pid == 200 {
+                provenant_os::pid::OccupancyObservation {
+                    paths: vec![self.held.clone()],
+                    complete: true,
+                    gap: None,
+                }
+            } else {
+                provenant_os::pid::OccupancyObservation::default()
+            }
+        }
+        fn executable(&self, pid: i64) -> Option<PathBuf> {
+            if pid == 200 {
+                Some(self.exe.clone())
+            } else {
+                None
+            }
+        }
+    }
+
+    struct MockObserver<'a> {
+        processes: &'a InjectedCensus,
+        cwd_obs: ExeCwdObserver,
+    }
+    impl WorkerObserver for MockObserver<'_> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            observe_worker_roots(
+                roots,
+                self.processes,
+                &self.cwd_obs,
+                &self.processes.current,
+                false,
+            )
+            .0
+        }
+        fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
+            let (_, holders, _) = observe_worker_holders(
+                std::slice::from_ref(&root.to_path_buf()),
+                self.processes,
+                &self.cwd_obs,
+                &self.processes.current,
+                false,
+            );
+            holders.get(root).cloned()
+        }
+    }
+
+    #[cfg(unix)]
+    let executable_alias = {
+        let alias = base.join("executable-alias");
+        std::os::unix::fs::symlink(&exe_path, &alias)?;
+        alias
+    };
+    #[cfg(not(unix))]
+    let executable_alias = exe_path.clone();
+    let observer = MockObserver {
+        processes: &processes,
+        cwd_obs: ExeCwdObserver {
+            cwd: external_cwd,
+            exe: executable_alias,
+            held: exe_path,
+        },
+    };
+
+    let refusal = live_refusal(&observer, &root);
+    let WorktreeError::LiveProcess(observed) = &refusal else {
+        panic!("expected LiveProcess, got {refusal:?}");
+    };
+    assert_eq!(observed.pid, 200);
+    assert_eq!(observed.kind, ProcessEvidenceKind::ExecutableImage);
+    let message = refusal.to_string();
+    assert!(
+        message.contains("has its executable image inside the tree"),
+        "expected executable image refusal message, got: {message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn census_refusal_names_other_held_path_evidence_kind() -> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let fixture = Fixture::new()?;
+    let base = canonicalize(fixture._temp.path())?;
+    let root = base.join("root-other");
+    let external_cwd = base.join("tmp-cwd");
+    fs::create_dir(&root)?;
+    fs::create_dir(&external_cwd)?;
+
+    // An executable-mode file held open is not necessarily the running image.
+    let log_path = root.join("logs/output.log");
+    fs::create_dir_all(log_path.parent().unwrap())?;
+    fs::write(&log_path, b"log stream content")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&log_path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: Some("log-writer".into()),
+    };
+    let current = fact(100);
+    let worker = fact(200);
+
+    let processes = InjectedCensus {
+        census: Census::from_observations(
+            [current.clone(), worker.clone()],
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+
+    struct OtherHeldPathCwdObserver {
+        cwd: PathBuf,
+        held_file: PathBuf,
+    }
+    impl CwdObserver for OtherHeldPathCwdObserver {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            if pid == 200 {
+                Ok(CwdObservation::Path(self.cwd.clone()))
+            } else {
+                Ok(CwdObservation::Gone)
+            }
+        }
+        fn executable(&self, pid: i64) -> Option<PathBuf> {
+            (pid == 200).then(|| self.cwd.join("different-image"))
+        }
+        fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+            if pid == 200 {
+                provenant_os::pid::OccupancyObservation {
+                    paths: vec![self.held_file.clone()],
+                    complete: true,
+                    gap: None,
+                }
+            } else {
+                provenant_os::pid::OccupancyObservation::default()
+            }
+        }
+    }
+
+    struct MockObserver<'a> {
+        processes: &'a InjectedCensus,
+        cwd_obs: OtherHeldPathCwdObserver,
+    }
+    impl WorkerObserver for MockObserver<'_> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            observe_worker_roots(
+                roots,
+                self.processes,
+                &self.cwd_obs,
+                &self.processes.current,
+                false,
+            )
+            .0
+        }
+        fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
+            let (_, holders, _) = observe_worker_holders(
+                std::slice::from_ref(&root.to_path_buf()),
+                self.processes,
+                &self.cwd_obs,
+                &self.processes.current,
+                false,
+            );
+            holders.get(root).cloned()
+        }
+    }
+
+    let observer = MockObserver {
+        processes: &processes,
+        cwd_obs: OtherHeldPathCwdObserver {
+            cwd: external_cwd,
+            held_file: log_path,
+        },
+    };
+
+    let refusal = live_refusal(&observer, &root);
+    let WorktreeError::LiveProcess(observed) = &refusal else {
+        panic!("expected LiveProcess, got {refusal:?}");
+    };
+    assert_eq!(observed.pid, 200);
+    assert_eq!(observed.kind, ProcessEvidenceKind::OtherHeldPath);
+    let message = refusal.to_string();
+    assert!(
+        message.contains("has its other held path inside the tree"),
+        "expected other held path refusal message, got: {message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn census_keeps_holder_and_evidence_together_across_processes() -> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let temp = tempfile::tempdir()?;
+    let root = canonicalize(temp.path())?;
+    let held = root.join("held");
+    fs::write(&held, b"held")?;
+    let outside = tempfile::tempdir()?;
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: Some(format!("process-{pid}")),
+    };
+    let current = fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations(
+            [current.clone(), fact(200), fact(300)],
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    struct Observer {
+        root: PathBuf,
+        held: PathBuf,
+        outside: PathBuf,
+    }
+    impl CwdObserver for Observer {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(if pid == 300 {
+                self.root.clone()
+            } else {
+                self.outside.clone()
+            }))
+        }
+        fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: if pid == 200 {
+                    vec![self.held.clone()]
+                } else {
+                    vec![]
+                },
+                complete: true,
+                gap: None,
+            }
+        }
+    }
+    let (_, holders, _, taints) = observe_worker_holders_with_taints_and_audit(
+        std::slice::from_ref(&root),
+        &processes,
+        &Observer {
+            root: root.clone(),
+            held,
+            outside: outside.path().to_path_buf(),
+        },
+        &current,
+        false,
+        &mut |_, _| {},
+    );
+    let holder = &holders[&root];
+    assert_eq!(holder.pid, 200);
+    assert_eq!(holder.kind, ProcessEvidenceKind::OtherHeldPath);
+    assert!(
+        matches!(&taints[&root], TaintCause::LiveWriter(p) if p.pid == 200 && p.kind == ProcessEvidenceKind::OtherHeldPath)
+    );
+    Ok(())
 }

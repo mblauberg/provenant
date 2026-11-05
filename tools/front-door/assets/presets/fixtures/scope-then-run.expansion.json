@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-e7973f2b944c094b14fd007110dd901d",
+  "graph_id": "preset-8cf1695da1ed08431fc2108b0e3da069",
   "nodes": [
     {
       "access": "read_only",
@@ -56,7 +56,7 @@
                   "access": "read_only",
                   "depends_on": [],
                   "id": "scout-1",
-                  "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 1. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+                  "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 1. Research read-only for the writers: brief\nThe shared build brief describes their work; do not implement it.\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
                   "read_roots": [],
                   "references": [
                     {
@@ -66,7 +66,7 @@
                     }
                   ],
                   "role": "scout.codebase",
-                  "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
+                  "role_digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57",
                   "routes": [
                     {
                       "alias": "junior"
@@ -81,7 +81,7 @@
                   "access": "read_only",
                   "depends_on": [],
                   "id": "scout-2",
-                  "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 2. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+                  "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 2. Research read-only for the writers: brief\nThe shared build brief describes their work; do not implement it.\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
                   "read_roots": [],
                   "references": [
                     {
@@ -91,7 +91,7 @@
                     }
                   ],
                   "role": "scout.codebase",
-                  "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
+                  "role_digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57",
                   "routes": [
                     {
                       "alias": "junior"
@@ -106,7 +106,7 @@
                   "access": "read_only",
                   "depends_on": [],
                   "id": "scout-3",
-                  "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 3. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+                  "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 3. Research read-only for the writers: brief\nThe shared build brief describes their work; do not implement it.\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
                   "read_roots": [],
                   "references": [
                     {
@@ -116,7 +116,7 @@
                     }
                   ],
                   "role": "scout.codebase",
-                  "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
+                  "role_digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57",
                   "routes": [
                     {
                       "alias": "junior"
@@ -131,7 +131,7 @@
                   "access": "read_only",
                   "depends_on": [],
                   "id": "external",
-                  "prompt": "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date.\n\nExternal scout 1. Research outward for: brief\nPrefer primary sources and current documentation over memory, even when\nconfident. Prefer sources from roughly the past two months and label older ones\nas background, unless the assignment sets another window. Report each finding\nwith its source URL and publication or retrieval date, mark vendor-reported\nfigures, and state where sources disagree. Do not edit files.\n\n\n# Researcher\n\nUse when a scope depends on facts outside the repository: standards, vendor\nbehaviour, prior art, competing tools or published evidence.\n\nLook outward first. Search current documentation, upstream source and credible\nwrite-ups before relying on memory, even when confident.\n\nPrefer sources from roughly the past two months. Label older sources as\nbackground, and say when no recent source supports a claim. The brief may\noverride this window.\n\nReturn for each finding:\n- The claim in one sentence.\n- The source URL and its publication or retrieval date.\n- Whether the source is primary (specification, source code, vendor\n  documentation) or secondary, and whether any figure is vendor-reported.\n- How the claim bears on the decision in front of the chair.\n\nSeparate established fact from inference. State disagreement between sources\nrather than resolving it silently. Cite no source you did not read.\n",
+                  "prompt": "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date.\n\nExternal scout 1. Research outward for the writers: brief\nThe shared build brief describes their work; do not implement it.\nPrefer primary sources and current documentation over memory, even when\nconfident. Prefer sources from roughly the past two months and label older ones\nas background, unless the assignment sets another window. Report each finding\nwith its source URL and publication or retrieval date, mark vendor-reported\nfigures, and state where sources disagree. Do not edit files.\n\n\n# Researcher\n\nUse when a scope depends on facts outside the repository: standards, vendor\nbehaviour, prior art, competing tools or published evidence.\n\nLook outward first. Search current documentation, upstream source and credible\nwrite-ups before relying on memory, even when confident.\n\nPrefer sources from roughly the past two months. Label older sources as\nbackground, and say when no recent source supports a claim. The brief may\noverride this window.\n\nReturn for each finding:\n- The claim in one sentence.\n- The source URL and its publication or retrieval date.\n- Whether the source is primary (specification, source code, vendor\n  documentation) or secondary, and whether any figure is vendor-reported.\n- How the claim bears on the decision in front of the chair.\n\nSeparate established fact from inference. State disagreement between sources\nrather than resolving it silently. Cite no source you did not read.\n",
                   "references": [
                     {
                       "digest": "sha256:e4fa928901af6d26760a39d52b26ce86284b6ffe0a9b662f21139e5437d3bbc9",
@@ -140,7 +140,7 @@
                     }
                   ],
                   "role": "scout.external",
-                  "role_digest": "sha256:1037e572ae7b8be53967840edb7d2ca08a1cbc9dd1c85848d9b3a4eb0d839495",
+                  "role_digest": "sha256:6a06d9ece1c9bb403d70e93ee5fcbfd439f2cbfbb9517f5b8cfc8164f87859bc",
                   "routes": [
                     {
                       "alias": "web"
@@ -172,9 +172,9 @@
               }
             ],
             "kind": "synthesise",
-            "prompt": "You reconcile research evidence into next steps.\n\nReconcile the scouts' evidence for: brief\nPreserve useful scope partitions, file references, dated external sources and\nunresolved uncertainty. Choose next implementation steps using judgement;\nretain every child's evidence.\n",
+            "prompt": "You reconcile research evidence for the writers; you do not implement.\n\nMap and reconcile the scouts' evidence for the writers: brief\nThe shared brief describes their work, not instructions for you to implement.\nDo not implement, edit files, commit, or require an implementation worktree.\nPreserve useful scope partitions, file references, dated external sources and\nunresolved uncertainty. Recommend next steps and retain every child's evidence.\n",
             "role": "plan.research",
-            "role_digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
+            "role_digest": "sha256:8e06e7a486b81c987903b260609047d9091de7fe066ae9697fe11ee15c207dbc",
             "routes": [
               {
                 "alias": "senior"
@@ -667,7 +667,7 @@
         ]
       },
       "plan.research": {
-        "digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
+        "digest": "sha256:8e06e7a486b81c987903b260609047d9091de7fe066ae9697fe11ee15c207dbc",
         "extends": [
           "plan.research",
           "plan"
@@ -709,7 +709,7 @@
         "references": []
       },
       "scout.codebase": {
-        "digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
+        "digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57",
         "extends": [
           "scout.codebase",
           "scout"
@@ -724,7 +724,7 @@
         ]
       },
       "scout.external": {
-        "digest": "sha256:1037e572ae7b8be53967840edb7d2ca08a1cbc9dd1c85848d9b3a4eb0d839495",
+        "digest": "sha256:6a06d9ece1c9bb403d70e93ee5fcbfd439f2cbfbb9517f5b8cfc8164f87859bc",
         "extends": [
           "scout.external",
           "scout"

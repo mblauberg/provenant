@@ -316,6 +316,7 @@ pub(super) fn input() -> PreparedRun {
                 title: None,
                 base: None,
                 head: None,
+                source_head: None,
                 base_ref: None,
                 writer: None,
                 profile: HarnessProfile::default(),
@@ -2402,7 +2403,7 @@ fn the_store_initialises_at_version_six_without_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let spacing: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
         [],
@@ -2459,12 +2460,12 @@ fn temporary_tracking_upgrade_drops_version_two_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     Ok(())
 }
 
 #[test]
-fn the_store_refuses_a_version_newer_than_seven() -> TestResult {
+fn the_store_refuses_a_version_newer_than_eight() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -2472,10 +2473,10 @@ fn the_store_refuses_a_version_newer_than_seven() -> TestResult {
     let call = call(&clock, &cancel);
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("PRAGMA user_version=8;")?;
+        .execute_batch("PRAGMA user_version=9;")?;
     assert!(matches!(
         RunStore::open(&context, &call),
-        Err(RunError::Version(8))
+        Err(RunError::Version(9))
     ));
     Ok(())
 }
@@ -2670,7 +2671,7 @@ fn version_six_upgrades_from_five_and_keeps_existing_attempts() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     // History is not backfilled: nothing is owed for attempts that predate it.
     assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
     store.record(input.attempts[0].attempt_id, &call)?;

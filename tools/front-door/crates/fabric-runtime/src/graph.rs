@@ -137,9 +137,6 @@ const HOST_ID_BYTES: usize = 256;
 const MAX_UNKNOWN_USAGE: usize = 64;
 const MAX_USAGE_EVENTS: usize = 128;
 
-/// Launch retries granted after the initial failure, with a bounded backoff.
-/// Past this count the node is blocked instead of retried.
-pub const MAX_LAUNCH_RETRIES: u8 = 3;
 /// Seconds before the first launch retry; each further failure doubles it.
 const LAUNCH_RETRY_FIRST_SECONDS: u64 = 5;
 /// The longest launch retry wait.
@@ -176,6 +173,26 @@ pub enum ReviewResolveError {
 
 pub trait AttemptOwner {
     type Error: Error + 'static;
+
+    /// Resolve the existing infrastructure allowance once, before admission.
+    /// Hosts without routing policy retain the legacy explicit-route behavior.
+    fn retry_allowance(
+        &self,
+        _node: &provenant_records::ExtraFields,
+        _graph: &provenant_records::ExtraFields,
+    ) -> Result<Option<(u8, String)>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Infrastructure successors already published in this run lineage.
+    fn retry_successors(&mut self, _attempt_ref: &str) -> Result<u64, Self::Error> {
+        Ok(0)
+    }
+
+    /// Maximum time to admit a launch, measured from its first submission.
+    fn admission_timeout_seconds(&self) -> Option<u64> {
+        None
+    }
 
     /// Re-read host-owned proof of a pre-custody preparation refusal and
     /// released custody. Missing or unverifiable proof never authorizes a route.
@@ -306,6 +323,12 @@ pub trait AttemptOwner {
 
     /// Read-only check: never starts or replays an attempt.
     fn cancelled_attempt_settled(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    /// Whether a launch already crossed run's acceptance boundary. This is
+    /// read-only and must not submit a new operation.
+    fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
         Ok(false)
     }
 
@@ -458,6 +481,8 @@ struct PlannedNode {
     deadline_seconds: Option<u64>,
     prompt: String,
     depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "model::is_false")]
+    advisory: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     inputs: Vec<GraphInput>,
     routes: Vec<GraphRoute>,
@@ -624,44 +649,76 @@ fn launch_diagnostic(error: &(dyn Error + 'static)) -> provenant_records::diagno
 
 /// Apply a persisted disposition to a node whose launch errored while its
 /// attempt was still starting: a bounded retry with backoff for a transient
-/// kind, a blocked node with reason and remedy otherwise and after the retry
-/// limit. Saves the checkpoint either way.
+/// kind, a blocked node with reason and remedy otherwise and after the
+/// admission deadline. Saves the checkpoint either way.
 fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     checkpoint: &mut GraphCheckpoint,
     index: usize,
     error: &R::Error,
     clock: Option<provenant_core::WallTime>,
+    admission_seconds: u64,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
     let retrying = launch_retry_kind(error);
     if retrying {
         let Some(now) = clock else {
-            // Like a decide timeout, a launch wait needs a real clock: refuse
-            // the advance with the attempt still starting, so no wait is lost.
-            return Err(GraphError::Refused(format!(
-                "node {}: no wall clock to schedule the launch retry; retry the advance",
-                checkpoint.nodes[index].id
-            )));
+            let retry = checkpoint.nodes[index]
+                .launch_retry
+                .get_or_insert_with(|| LaunchRetry {
+                    extra: Default::default(),
+                    failures: 0,
+                    deadline: None,
+                    wake_at: None,
+                    reason: None,
+                });
+            retry.failures = retry.failures.saturating_add(1);
+            retry.wake_at = None;
+            retry.reason =
+                Some("wall clock unavailable; launch retry timing is unavailable".into());
+            asks::refresh_wake(checkpoint);
+            return journal.save(checkpoint).map_err(GraphError::Journal);
         };
         let retry = checkpoint.nodes[index]
             .launch_retry
             .get_or_insert_with(|| LaunchRetry {
                 extra: Default::default(),
                 failures: 0,
+                deadline: None,
                 wake_at: None,
                 reason: None,
             });
         retry.failures = retry.failures.saturating_add(1);
-        if retry.failures <= MAX_LAUNCH_RETRIES {
+        let deadline = match retry.deadline {
+            Some(deadline) => deadline,
+            None => {
+                let Some(deadline) = DurationMicros::from_seconds(admission_seconds)
+                    .ok()
+                    .and_then(|duration| now.checked_add(duration).ok())
+                else {
+                    retry.wake_at = None;
+                    retry.reason = Some(
+                        "launch retry deadline unavailable; retry timing is unavailable".into(),
+                    );
+                    asks::refresh_wake(checkpoint);
+                    return journal.save(checkpoint).map_err(GraphError::Journal);
+                };
+                retry.deadline = Some(deadline);
+                deadline
+            }
+        };
+        if now < deadline {
             let delay = provenant_core::retry::Backoff::new(
                 std::time::Duration::from_secs(LAUNCH_RETRY_FIRST_SECONDS),
                 2,
                 std::time::Duration::from_secs(LAUNCH_RETRY_MAX_SECONDS),
             )
             .delay(u64::from(retry.failures) - 1);
-            retry.wake_at = DurationMicros::from_seconds(delay.as_secs())
-                .ok()
-                .and_then(|duration| now.checked_add(duration).ok());
+            retry.wake_at = Some(
+                DurationMicros::from_seconds(delay.as_secs())
+                    .ok()
+                    .and_then(|duration| now.checked_add(duration).ok())
+                    .map_or(deadline, |wake| wake.min(deadline)),
+            );
             let projected = launch_diagnostic(error);
             retry.reason = Some(bounded(
                 projected.detail.as_deref().unwrap_or(&projected.code),
@@ -1422,6 +1479,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 continue;
             }
+            if !checkpoint.nodes[node_index].extra.contains_key("retry")
+                && let Some((retries, origin)) = owner
+                    .retry_allowance(&node.extra, &plan.extra)
+                    .map_err(GraphError::Run)?
+            {
+                checkpoint.nodes[node_index].extra.insert(
+                    "retry".into(),
+                    serde_json::json!({"retries":retries,"origin":origin}),
+                );
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            }
             if node.review.is_some() {
                 if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
                     continue;
@@ -1612,9 +1680,40 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .launch_retry
                     .as_ref()
                     .and_then(|retry| retry.wake_at)
-                    .is_some_and(|wake| launch_clock.is_none_or(|now| now < wake))
+                    .is_some_and(|wake| launch_clock.is_some_and(|now| now < wake))
                 {
                     break;
+                }
+                if let Some(retry) = &checkpoint.nodes[node_index].launch_retry
+                    && retry
+                        .deadline
+                        .zip(launch_clock)
+                        .is_some_and(|(end, now)| now >= end)
+                {
+                    let accepted = match checkpoint.nodes[node_index].attempts.last() {
+                        Some(attempt) if attempt.attempt_ref.is_some() => true,
+                        Some(attempt) => owner.launch_accepted(attempt).map_err(GraphError::Run)?,
+                        None => false,
+                    };
+                    if !accepted {
+                        let reason = retry.reason.clone().unwrap_or_default();
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.advance_error_code = Some("launch_retry_exhausted".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: the launch failed: {}; {}",
+                            progress.id,
+                            reason,
+                            launch_diagnostic(&crate::coordination::facade::FacadeError::Busy)
+                                .next
+                                .as_deref()
+                                .unwrap_or("retry the graph advance")
+                        ));
+                        progress.state = NodeState::Blocked;
+                        progress.launch_retry = None;
+                        asks::refresh_wake(&mut checkpoint);
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
                 }
                 let progress = &checkpoint.nodes[node_index];
                 let route_index = match progress.attempts.last() {
@@ -1647,6 +1746,23 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Some(_) => break,
                 };
+                let allowance = progress
+                    .extra
+                    .get("retry")
+                    .and_then(|value| value["retries"].as_u64());
+                // Preparation refusals have not launched a provider and do not
+                // consume the settlement retry allowance.
+                let mut spent = 0u64;
+                for reference in progress
+                    .attempts
+                    .iter()
+                    .filter_map(|attempt| attempt.attempt_ref.as_deref())
+                {
+                    spent = spent.saturating_add(
+                        owner.retry_successors(reference).map_err(GraphError::Run)?,
+                    );
+                }
+                let settlement_retries = allowance.map(|limit| limit.saturating_sub(spent) as u8);
                 let route = node
                     .routes
                     .get(route_index)
@@ -1864,6 +1980,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         usage: None,
                     });
                     checkpoint.nodes[node_index].state = NodeState::Running;
+                    if let Some(seconds) = owner.admission_timeout_seconds() {
+                        let deadline = owner.wall_now().and_then(|now| {
+                            DurationMicros::from_seconds(seconds)
+                                .ok()
+                                .and_then(|duration| now.checked_add(duration).ok())
+                        });
+                        checkpoint.nodes[node_index].launch_retry = Some(LaunchRetry {
+                            extra: Default::default(),
+                            failures: 0,
+                            deadline,
+                            wake_at: None,
+                            reason: deadline.is_none().then(|| {
+                                "wall clock unavailable; launch retry timing is unavailable".into()
+                            }),
+                        });
+                    }
                     // A retry must not replay the preceding attempt's family snapshot.
                     checkpoint.nodes[node_index].separation = None;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -2070,6 +2202,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
+                        settlement_retries,
                         prior_attempts: &prior_attempts,
                         family_peers: &family_peers,
                         context: node_context(&plan, node),
@@ -2117,6 +2250,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             node_index,
                             &error,
                             owner.wall_now(),
+                            owner.admission_timeout_seconds().unwrap_or(3600),
                             journal,
                         )?;
                         break;
@@ -2466,6 +2600,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 }
                                 AttemptOutcome::TaskFailed
                                 | AttemptOutcome::OtherFailure
+                                | AttemptOutcome::ReviewRequired
                                 | AttemptOutcome::DeclaredStop => {
                                     progress.state = NodeState::Failed;
                                     false
@@ -2679,7 +2814,10 @@ fn dependency_state(
     }
     for parent in &node.after_expansion {
         let progress = &checkpoint.nodes[positions[parent]];
-        if !checkpoint.node_successful(progress) {
+        if !checkpoint.node_successful(progress)
+            && !(plan.nodes[positions[parent]].advisory
+                && matches!(progress.state, NodeState::Failed | NodeState::Blocked))
+        {
             return Some(NodeState::Blocked);
         }
     }
@@ -2698,6 +2836,7 @@ fn dependency_state(
                     .is_some_and(|round| &round.loop_id == target)
         });
         match checkpoint.nodes[index].state {
+            NodeState::Failed | NodeState::Blocked if plan.nodes[index].advisory => {}
             // A failed CI gate that reported no failing check leaves a node
             // that consumes its findings nothing to act on, so it is skipped,
             // not launched. Other recovery nodes (notify, diagnose) still run.

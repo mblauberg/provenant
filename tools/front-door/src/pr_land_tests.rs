@@ -1100,16 +1100,19 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     }
     // The merge went through the existing repository workflow at this head.
     let merge = fs::read_to_string(rig.project.join("merge-args"))?;
-    assert!(
-        merge.contains(&format!("sha={}", landing.head)) && merge.contains("merge_method=merge"),
-        "{merge}"
+    assert_eq!(
+        merge,
+        format!(
+            "api\n--include\n--method\nPUT\nrepos/{{owner}}/{{repo}}/pulls/{NUMBER}/merge\n-f\nsha={}\n-f\nmerge_method=merge\n",
+            landing.head
+        )
     );
     assert!(!rig.project.join("watched").exists());
     let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
     assert!(
-        !calls.lines().any(|line| line.starts_with("pr view ")
-            || line.starts_with("pr checks ")
-            || line.starts_with("pr merge ")),
+        !calls.lines().any(|line| {
+            line.starts_with("pr ") || line.split_whitespace().any(|arg| arg == "graphql")
+        }),
         "{calls}"
     );
     assert_eq!(

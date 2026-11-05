@@ -1,6 +1,6 @@
 integration_branch = "${integration_branch}"
 stages = [
-  { id = "scout", preset = "scout-swarm", parameters = { width = "${width}", external = "${external}", read_roots = "${read_roots}" } },
+  { id = "scout", preset = "scout-swarm", count = "${scout}", advisory = true, parameters = { width = "${width}", external = "${external}", read_roots = "${read_roots}" } },
   { id = "lanes", parallel = [
     { id = "lane", for_each = "${lanes}", preset = "generator-evaluator", parameters = { worktree = "${item.worktree}", scope = "${item.scope}", spec = "${item.spec}", spec_max_bytes = "${spec_max_bytes}", base = "${base}", delivery = "integrate:${integration_branch}" } },
   ] },
@@ -64,6 +64,7 @@ nodes = [
 wave = { type = "string", doc = "Wave name." }
 
 [parameters]
+scout = { type = "integer", default = 1, min = 0, max = 1, doc = "Run the advisory scout stage; 0 skips it." }
 width = { type = "integer", default = 4, min = 1, max = 32, doc = "Scouts in the opening swarm." }
 external = { type = "integer", default = 1, min = 0, max = 8, doc = "External scouts that research outward; 0 opts out." }
 read_roots = { type = "list", default = [], doc = "Extra read roots for the scouts." }

@@ -3011,9 +3011,12 @@ impl Providers for Fake {
             && decoded.result.is_empty()
         {
             return Ok(crate::ResultAssessment {
+                cause: Some(crate::PolicyCause::ResultCheck),
                 refusal: Some("empty result rejected by policy".into()),
                 retry: Some(crate::PolicyRetry {
-                    schema_version: 1,
+                    schema_version: 2,
+                    cause: crate::PolicyCause::ResultCheck,
+                    action: crate::PolicyAction::Retry,
                     route: record.requested_route.clone(),
                     resume: false,
                     max_attempts: 2,
@@ -8943,7 +8946,9 @@ fn a_policy_retry_launches_for_no_launcher_before_its_sealed_time() -> TestResul
     let id = run.attempts[0].attempt_id;
     let old = store.record(id, &call(&clock, &cancel))?;
     let retry = crate::PolicyRetry {
-        schema_version: 1,
+        schema_version: 2,
+        cause: crate::PolicyCause::Capacity,
+        action: crate::PolicyAction::Retry,
         route: old.requested_route.clone(),
         resume: false,
         max_attempts: 2,

@@ -591,6 +591,36 @@ pub(super) fn check_flag_capabilities_with_writes(
     Ok(())
 }
 
+enum WorktreeAdmissionError {
+    Own(worktree::OwnWorktreeError),
+    Run(run::RunError),
+    Fail(Fail),
+}
+
+impl WorktreeAdmissionError {
+    fn is_transient(&self) -> bool {
+        use provenant_confinement::worktrees::WorktreeError;
+        match self {
+            Self::Own(worktree::OwnWorktreeError::Other(run::RunError::Writer(err)))
+            | Self::Run(run::RunError::Writer(err)) => matches!(
+                err,
+                WorktreeError::RegistryLockTimeout | WorktreeError::UnknownWriter
+            ),
+            _ => false,
+        }
+    }
+}
+
+impl From<WorktreeAdmissionError> for Fail {
+    fn from(error: WorktreeAdmissionError) -> Self {
+        match error {
+            WorktreeAdmissionError::Own(err) => err.into(),
+            WorktreeAdmissionError::Run(err) => err.into(),
+            WorktreeAdmissionError::Fail(fail) => fail,
+        }
+    }
+}
+
 pub(super) fn dispatch_inner(
     mut command: Dispatch,
     edge: &Edge<'_>,
@@ -607,16 +637,22 @@ pub(super) fn dispatch_inner(
                 "--explain applies to one --route or --model, or to --preset",
             ));
         }
+        let run_config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+            .map(|config| config.domains.run)
+            .unwrap_or_default();
+        let project = preview_project_id(edge.roots, edge.cwd);
+        let configured_admission = project
+            .as_ref()
+            .and_then(|id| run_config.admission_seconds_for(&id.to_string()))
+            .or(run_config.admission_seconds);
+        let effective_admission =
+            run::AdmissionPolicy::resolve_timeout(command.admission_timeout, configured_admission);
         // The brief scan only reads the prompt file and resolves the roots; it
         // never prepares anything that could lead to a submission.
         let warnings = match command.input.prompt_file.as_deref() {
             Some(path) => {
                 let prompt = read_bounded(path)?;
                 let access = lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
-                let run_config =
-                    provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-                        .map(|config| config.domains.run)
-                        .unwrap_or_default();
                 if brief_read_root_warnings_enabled(&run_config, edge.roots, edge.cwd) {
                     brief_read_root_warnings(
                         &prompt,
@@ -633,6 +669,14 @@ pub(super) fn dispatch_inner(
         };
         return crate::route::explain_dispatch(&command.route, edge.roots)
             .map(|(mut data, mut text)| {
+                data["admission_timeout"] = json!({
+                    "seconds": effective_admission.seconds,
+                    "origin": effective_admission.origin.as_str(),
+                });
+                text.push_str(&format!(
+                    "admission timeout: {}s ({})\n",
+                    effective_admission.seconds, effective_admission.origin
+                ));
                 record_warnings(&mut data, warnings);
                 text.push_str(&warnings_text(&data));
                 (data, text, false)
@@ -982,7 +1026,7 @@ pub(super) fn dispatch_inner(
             command.wait,
         );
     }
-    let session = open(edge, &call)?;
+    let mut session = open(edge, &call)?;
     // Protection governs new admission. Service::dispatch still compares the
     // immutable inputs when an existing operation is replayed.
     if session
@@ -1023,67 +1067,256 @@ pub(super) fn dispatch_inner(
         }
         fallback(models)?;
     }
+
+    let configured_admission = config
+        .domains
+        .run
+        .admission_seconds_for(&session.context.project_id.to_string());
+    let effective_admission =
+        run::AdmissionPolicy::resolve_timeout(command.admission_timeout, configured_admission);
+    let mut policy = session.store.admission_policy();
+    policy.admission_seconds = effective_admission.seconds;
+    session.store.set_admission_policy(policy);
+
+    let now_wall = clock
+        .wall_now()
+        .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
+    let initial_deadline = DurationMicros::from_seconds(effective_admission.seconds)
+        .ok()
+        .and_then(|duration| now_wall.checked_add(duration).ok())
+        .ok_or_else(|| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "invalid admission timeout",
+            )
+        })?;
+
+    let mut admission_window = match session
+        .store
+        .admission_window(&command.operation_id, &call)?
+    {
+        Some(window) => window,
+        None => session.store.save_admission_window(
+            &command.operation_id,
+            run::AdmissionWindow {
+                deadline: initial_deadline,
+                wake_at: None,
+            },
+            &call,
+        )?,
+    };
+
     // Preflight is complete: create or claim the owned tree, then admit.
     let mut pinned_base = None;
-    let worktree = if let Some(owned) = owned {
-        let (info, base) = own_worktree(
-            &owned,
-            command.base.as_deref(),
-            &command.operation_id,
-            edge,
-            workers,
-            |attempt| {
-                session
-                    .store
-                    .record(attempt, &call)
-                    .is_ok_and(|record| matches!(record.state, run::AttemptState::Terminal { .. }))
-            },
-            created,
-            &clock,
-            &cancel,
-        )?;
-        pinned_base = Some(base);
-        command.access.worktree = Some(info.path.clone());
-        lane_access = self::lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
-        Some(json!({"path": info.path, "branch": owned.branch, "owned": true}))
-    } else if let Some(path) = &command.access.worktree {
-        let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
-        // A replayed operation returns the run it already started, even while
-        // that run holds the writer; only a new admission is refused.
-        let replay = session
-            .store
-            .operation(&command.operation_id, &call)?
-            .is_some();
-        Some(provenant_confinement::worktrees::with_context_using_workers(
-            edge.roots, edge.home, &writer.project, &clock, &cancel, workers, |context| {
-                use provenant_confinement::worktrees;
-                let context = &worktrees::WorktreeContext { workers, ..*context };
-                let info = worktrees::list(context, &cancel)?.into_iter()
-                    .find(|tree| tree.path == writer.worktree)
-                    .ok_or(worktrees::WorktreeError::NotFound)?;
-                let branch = info.branch.ok_or(worktrees::WorktreeError::DetachedWorktree { head: info.head })?;
-                if !replay {
-                    match worktrees::cache_writer_probe(context.project_state, &info.path) {
-                        Ok(_) => {}
-                        Err(worktrees::WorkerState::Busy) => {
-                            let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-                            let holder = worktrees::load_owner(&tree)?.and_then(|owner| owner.attempt_id);
-                            return Err(worktrees::WorktreeError::WriterBusy { holder });
-                        }
-                        Err(worktrees::WorkerState::Live) => {
-                            return Err(worktrees::live_refusal(context.workers, &info.path));
-                        }
-                        Err(_) => return Err(worktrees::WorktreeError::UnknownWriter),
-                    }
-                }
-                Ok(json!({"path": info.path, "branch": branch.trim_start_matches("refs/heads/"), "owned": false}))
-            },
-        ).map_err(|error| match error {
-            provenant_confinement::worktrees::WorktreeError::NotFound => {
-                run::RunError::WorktreeUnregistered(writer.worktree.clone())
+    let worktree = if owned.is_some() || command.access.worktree.is_some() {
+        let backoff = provenant_core::retry::Backoff::new(
+            Duration::from_millis(100),
+            2,
+            Duration::from_secs(2),
+        );
+        let mut retries = 0_u64;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(Fail::new(
+                    Status::Cancelled,
+                    ErrorKind::Cancelled,
+                    "cancelled",
+                ));
             }
-            other => run::RunError::from(other),
-        })?)
+            if let Some(wake) = admission_window.wake_at {
+                let now = clock
+                    .wall_now()
+                    .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
+                let until = wake.min(admission_window.deadline);
+                if now < until {
+                    let micros = u64::try_from(until.as_micros() - now.as_micros()).unwrap_or(0);
+                    let target = clock
+                        .mono_now()
+                        .checked_add(DurationMicros::from_micros(micros))
+                        .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "mono clock"))?;
+                    clock
+                        .wait_until(target)
+                        .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wait until"))?;
+                    continue;
+                }
+            }
+            let now = clock
+                .wall_now()
+                .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
+            if now >= admission_window.deadline {
+                return Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Refused,
+                    "admission deadline exceeded",
+                ));
+            }
+            let remaining =
+                u64::try_from(admission_window.deadline.as_micros() - now.as_micros()).unwrap_or(0);
+            let lock_budget = provenant_core::WaitBudget::up_to(
+                clock.mono_now(),
+                DurationMicros::from_micros(remaining.min(5_000_000)),
+            );
+            let res: Result<(Value, Option<provenant_core::GitOid>), WorktreeAdmissionError> =
+                if let Some(owned) = &owned {
+                    match own_worktree(
+                        owned,
+                        command.base.as_deref(),
+                        &command.operation_id,
+                        edge,
+                        workers,
+                        |attempt| {
+                            session.store.record(attempt, &call).is_ok_and(|record| {
+                                matches!(record.state, run::AttemptState::Terminal { .. })
+                            })
+                        },
+                        created,
+                        &clock,
+                        &cancel,
+                        Some(lock_budget),
+                    ) {
+                        Ok((info, base)) => {
+                            command.access.worktree = Some(info.path.clone());
+                            match self::lane_access(
+                                &command.access,
+                                edge.roots.state.as_path(),
+                                edge.home,
+                            ) {
+                                Ok(access) => {
+                                    lane_access = access;
+                                    Ok((
+                                        json!({"path": info.path, "branch": owned.branch, "owned": true}),
+                                        Some(base),
+                                    ))
+                                }
+                                Err(err) => Err(WorktreeAdmissionError::Fail(err)),
+                            }
+                        }
+                        Err(err) => Err(WorktreeAdmissionError::Own(err)),
+                    }
+                } else if let Some(path) = &command.access.worktree {
+                    let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)
+                        .map_err(WorktreeAdmissionError::Run)?;
+                    let replay = session
+                        .store
+                        .operation(&command.operation_id, &call)
+                        .map_err(WorktreeAdmissionError::Run)?
+                        .is_some();
+                    provenant_confinement::worktrees::with_context_using_workers(
+                        edge.roots,
+                        edge.home,
+                        &writer.project,
+                        &clock,
+                        &cancel,
+                        workers,
+                        |context| {
+                            use provenant_confinement::worktrees;
+                            let context = &worktrees::WorktreeContext {
+                                workers,
+                                lock_budget,
+                                ..*context
+                            };
+                            let info = worktrees::list(context, &cancel)?
+                                .into_iter()
+                                .find(|tree| tree.path == writer.worktree)
+                                .ok_or(worktrees::WorktreeError::NotFound)?;
+                            let branch =
+                                info.branch
+                                    .ok_or(worktrees::WorktreeError::DetachedWorktree {
+                                        head: info.head,
+                                    })?;
+                            if !replay {
+                                match worktrees::cache_writer_probe(
+                                    context.project_state,
+                                    &info.path,
+                                ) {
+                                    Ok(_) => {}
+                                    Err(worktrees::WorkerState::Busy) => {
+                                        let tree = provenant_confinement::verify_worktree(
+                                            context.repo,
+                                            &info.path,
+                                        )?;
+                                        let holder = worktrees::load_owner(&tree)?
+                                            .and_then(|owner| owner.attempt_id);
+                                        return Err(worktrees::WorktreeError::WriterBusy {
+                                            holder,
+                                        });
+                                    }
+                                    Err(worktrees::WorkerState::Live) => {
+                                        return Err(worktrees::live_refusal(
+                                            context.workers,
+                                            &info.path,
+                                        ));
+                                    }
+                                    Err(_) => return Err(worktrees::WorktreeError::UnknownWriter),
+                                }
+                            }
+                            Ok(json!({
+                                "path": info.path,
+                                "branch": branch.trim_start_matches("refs/heads/"),
+                                "owned": false
+                            }))
+                        },
+                    )
+                    .map_err(|error| match error {
+                        provenant_confinement::worktrees::WorktreeError::NotFound => {
+                            run::RunError::WorktreeUnregistered(writer.worktree.clone())
+                        }
+                        other => run::RunError::from(other),
+                    })
+                    .map_err(WorktreeAdmissionError::Run)
+                    .map(|tree_res| (tree_res, None))
+                } else {
+                    unreachable!()
+                };
+
+            match res {
+                Ok((value, base)) => {
+                    pinned_base = base;
+                    break Some(value);
+                }
+                Err(err) => {
+                    if !err.is_transient() {
+                        return Err(err.into());
+                    }
+                    let now = clock
+                        .wall_now()
+                        .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
+                    if now >= admission_window.deadline {
+                        return Err(err.into());
+                    }
+                    let delay = backoff.delay(retries);
+                    let left_micros = u64::try_from(
+                        admission_window
+                            .deadline
+                            .as_micros()
+                            .saturating_sub(now.as_micros()),
+                    )
+                    .unwrap_or(0);
+                    let pause = delay.min(Duration::from_micros(left_micros));
+                    let wake_micros = u64::try_from(pause.as_micros()).unwrap_or(u64::MAX);
+                    let wake_at = now
+                        .checked_add(DurationMicros::from_micros(wake_micros))
+                        .map_or(admission_window.deadline, |w| {
+                            w.min(admission_window.deadline)
+                        });
+                    admission_window.wake_at = Some(wake_at);
+                    admission_window = session.store.save_admission_window(
+                        &command.operation_id,
+                        admission_window,
+                        &call,
+                    )?;
+                    let wait_deadline = clock
+                        .mono_now()
+                        .checked_add(DurationMicros::from_micros(wake_micros))
+                        .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "mono clock"))?;
+                    clock
+                        .wait_until(wait_deadline)
+                        .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wait until"))?;
+                    retries = retries.saturating_add(1);
+                }
+            }
+        }
     } else {
         None
     };
@@ -1109,6 +1342,7 @@ pub(super) fn dispatch_inner(
                     access.network = network;
                 }
                 Submitted {
+                    settlement_retry_limit: None,
                     context,
                     build_heavy,
                     title,
@@ -1195,6 +1429,21 @@ pub fn warnings_text(data: &Value) -> String {
 }
 
 /// Resolve an existing project binding without creating state during previews.
+pub fn preview_project_id(roots: &Roots, cwd: &Path) -> Option<provenant_core::ProjectId> {
+    let git = provenant_os::git::git_executable()?;
+    let runtime = provenant_confinement::UtilityRuntime::read_only(git).ok()?;
+    let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5)).ok()?;
+    let location = runtime
+        .project_location(&executor, cwd, budget, &CancelToken::new())
+        .ok()?
+        .location;
+    provenant_config::lookup_project(roots, &location)
+        .ok()?
+        .map(|binding| binding.project_id())
+}
+
+/// Resolve an existing project binding without creating state during previews.
 pub fn brief_read_root_warnings_enabled(
     config: &provenant_confinement::run_config::RunConfig,
     roots: &Roots,
@@ -1203,19 +1452,7 @@ pub fn brief_read_root_warnings_enabled(
     if config.projects.is_empty() {
         return config.brief_read_root_warnings;
     }
-    let project = (|| {
-        let git = provenant_os::git::git_executable()?;
-        let runtime = provenant_confinement::UtilityRuntime::read_only(git).ok()?;
-        let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
-        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5)).ok()?;
-        let location = runtime
-            .project_location(&executor, cwd, budget, &CancelToken::new())
-            .ok()?
-            .location;
-        provenant_config::lookup_project(roots, &location)
-            .ok()?
-            .map(|binding| binding.project_id())
-    })();
+    let project = preview_project_id(roots, cwd);
     project.map_or(config.brief_read_root_warnings, |id| {
         config.brief_read_root_warnings_for(&id.to_string())
     })

@@ -526,11 +526,57 @@ pub(super) fn prepare_candidates(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
-    if let (Some(writer), Some(head)) = (&writer, task.head.as_deref()) {
+    // Status is evidence for both the brief and a source refusal. Failure to
+    // collect it must never masquerade as a clean predecessor worktree.
+    let uncommitted = if let (Some(writer), Some(_)) = (&writer, &task.source_head) {
         writer
-            .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
-            .map_err(|error| error.to_string())?;
+            .uncommitted_paths(&git)
+            .map_err(|error| format!("cannot inspect uncommitted predecessor edits: {error}"))?
+    } else {
+        Vec::new()
+    };
+    if let Some(writer) = &writer {
+        if let Some(source_head) = task.source_head.as_deref() {
+            let predecessor = task
+                .head
+                .as_deref()
+                .ok_or("missing predecessor head for writer continuation")?
+                .parse()
+                .map_err(|_| "invalid pinned writer predecessor head")?;
+            let source = source_head
+                .parse()
+                .map_err(|_| "invalid pinned writer source")?;
+            if let Err(error) = writer.require_continuation_source(&git, source, predecessor) {
+                if uncommitted.is_empty() {
+                    return Err(error.to_string().into());
+                } else {
+                    return Err(format!(
+                        "{error}; uncommitted predecessor edits: {}",
+                        uncommitted.join(", ")
+                    )
+                    .into());
+                }
+            }
+        } else if let Some(head) = task.head.as_deref() {
+            writer
+                .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
+                .map_err(|error| error.to_string())?;
+        }
     }
+    let prompt_text_buf;
+    let prompt_text = if !uncommitted.is_empty() {
+        prompt_text_buf = format!(
+            "{prompt_text}\n\nUncommitted predecessor edits in worktree:\n{}",
+            uncommitted
+                .iter()
+                .map(|p| format!("- {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        &prompt_text_buf
+    } else {
+        prompt_text
+    };
     // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
     // credential. Missing gh tools or configuration leave the
     // writer able to do local work without publishing credential access.

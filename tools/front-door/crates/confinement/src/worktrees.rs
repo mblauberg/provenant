@@ -115,7 +115,8 @@ pub enum WorktreeError {
     #[error("worktree writer is live")]
     LiveWriter,
     #[error(
-        "worktree writer is live: process {0} has its working directory inside the tree; run from the main checkout or another directory"
+        "worktree writer is live: process {_0} has its {kind} inside the tree; run from the main checkout or another directory",
+        kind = _0.kind
     )]
     LiveProcess(ObservedProcess),
     #[error("incomplete worker census: {detail}")]
@@ -272,13 +273,71 @@ impl WorktreeError {
     }
 }
 
+/// The kind of evidence placing a process inside a worktree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ProcessEvidenceKind {
+    #[default]
+    WorkingDirectory,
+    ExecutableImage,
+    OtherHeldPath,
+}
+
+impl std::fmt::Display for ProcessEvidenceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkingDirectory => write!(f, "working directory"),
+            Self::ExecutableImage => write!(f, "executable image"),
+            Self::OtherHeldPath => write!(f, "other held path"),
+        }
+    }
+}
+
 /// A process seen inside a worktree, named so an operator can tell their own
 /// shell from a real writer. Diagnostic only; it never grants signal authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedProcess {
     pub pid: i64,
     pub command: Option<String>,
+    pub kind: ProcessEvidenceKind,
     pub cwd: Option<PathBuf>,
+}
+
+impl ObservedProcess {
+    pub fn new(pid: i64, command: Option<String>, kind: ProcessEvidenceKind) -> Self {
+        Self {
+            pid,
+            command,
+            kind,
+            cwd: None,
+        }
+    }
+
+    pub fn cwd(pid: i64, command: Option<String>) -> Self {
+        Self {
+            pid,
+            command,
+            kind: ProcessEvidenceKind::WorkingDirectory,
+            cwd: None,
+        }
+    }
+
+    pub fn executable(pid: i64, command: Option<String>) -> Self {
+        Self {
+            pid,
+            command,
+            kind: ProcessEvidenceKind::ExecutableImage,
+            cwd: None,
+        }
+    }
+
+    pub fn other_path(pid: i64, command: Option<String>) -> Self {
+        Self {
+            pid,
+            command,
+            kind: ProcessEvidenceKind::OtherHeldPath,
+            cwd: None,
+        }
+    }
 }
 
 impl std::fmt::Display for ObservedProcess {
@@ -491,8 +550,79 @@ pub enum WorkerState {
     Unknown,
 }
 
+/// The typed reason a worktree root is tainted (not free).
+///
+/// Distinguishes contention (which can be retried with backoff)
+/// from uncertainty (scoped unplaceable processes, incomplete queries),
+/// and foreign live writers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaintCause {
+    /// A live process occupies the worktree.
+    LiveWriter(ObservedProcess),
+    /// A live writer was observed without attributable process details.
+    UnattributedLiveWriter,
+    /// A writer lock is held.
+    LockContention,
+    /// Census uncertainty: the root could not be proven free.
+    Uncertainty(UncertaintyReason),
+}
+
+impl TaintCause {
+    pub fn is_contention(&self) -> bool {
+        matches!(self, Self::LockContention)
+    }
+
+    pub fn is_uncertainty(&self) -> bool {
+        matches!(self, Self::Uncertainty(_))
+    }
+}
+
+impl std::fmt::Display for TaintCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LiveWriter(process) => write!(f, "live writer: process {process}"),
+            Self::UnattributedLiveWriter => write!(f, "live writer"),
+            Self::LockContention => write!(f, "lock contention"),
+            Self::Uncertainty(reason) => write!(f, "uncertainty: {reason}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UncertaintyReason {
+    CensusUnavailable,
+    UnstableProcessIdentity,
+    CwdUnreadable,
+    OccupancyIncomplete,
+    PathUnplaceable,
+    ListingIncomplete,
+    PolicyRejected,
+    RootUnreadable,
+}
+
+impl std::fmt::Display for UncertaintyReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CensusUnavailable => write!(f, "census unavailable"),
+            Self::UnstableProcessIdentity => write!(f, "unstable process identity"),
+            Self::CwdUnreadable => write!(f, "cwd unreadable"),
+            Self::OccupancyIncomplete => write!(f, "occupancy incomplete"),
+            Self::PathUnplaceable => write!(f, "path unplaceable"),
+            Self::ListingIncomplete => write!(f, "listing incomplete"),
+            Self::PolicyRejected => write!(f, "policy rejected"),
+            Self::RootUnreadable => write!(f, "root unreadable"),
+        }
+    }
+}
+
 /// Per-root custody states and reasons for unknown states.
 pub type WorkerObservations = (BTreeMap<PathBuf, WorkerState>, BTreeMap<PathBuf, String>);
+
+/// Per-root custody states and typed causes for tainted states.
+pub type WorkerTaintObservations = (
+    BTreeMap<PathBuf, WorkerState>,
+    BTreeMap<PathBuf, TaintCause>,
+);
 
 #[cfg(test)]
 mod census_tests;

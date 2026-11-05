@@ -17,6 +17,7 @@ pub enum AttemptOutcome {
     /// A lane reported a declared stop; review roles may accept its result.
     DeclaredStop,
     OtherFailure,
+    ReviewRequired,
     AuthRequired,
     UsageLimited,
     AdapterUnavailable,

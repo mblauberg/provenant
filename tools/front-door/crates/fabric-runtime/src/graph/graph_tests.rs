@@ -35,6 +35,9 @@ impl GraphJournal for MemoryJournal {
 
 #[derive(Default)]
 struct FakeOwner {
+    retry_limit: Option<u8>,
+    retry_used: u64,
+    retry_budgets: Vec<Option<u8>>,
     deliveries: usize,
     cancelled_attempt_settled: bool,
     cancellation_stops: usize,
@@ -90,6 +93,17 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+
+    fn retry_allowance(
+        &self,
+        _: &provenant_records::ExtraFields,
+        _: &provenant_records::ExtraFields,
+    ) -> Result<Option<(u8, String)>, Self::Error> {
+        Ok(self.retry_limit.map(|limit| (limit, "host_config".into())))
+    }
+    fn retry_successors(&mut self, _: &str) -> Result<u64, Self::Error> {
+        Ok(self.retry_used)
+    }
 
     fn preparation_fallback_evidence(
         &mut self,
@@ -222,6 +236,7 @@ impl AttemptOwner for FakeOwner {
         self.delivery_modes.push(replay.delivery.cloned());
         self.fast_forward_only.push(replay.fast_forward_only);
         self.stored_refs.push(replay.stored_ref.map(str::to_owned));
+        self.retry_budgets.push(node.settlement_retries);
         self.launch_actors.push(replay.launch_actor.to_owned());
         self.calls.push((key.clone(), route.clone()));
         self.permissions.push((access, worktree.map(str::to_owned)));
@@ -308,6 +323,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         deadline_seconds: None,
         prompt: format!("work for {id}"),
         depends_on: Vec::new(),
+        advisory: false,
         inputs: Vec::new(),
         route: Some(route),
         routes: None,
@@ -5250,6 +5266,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         deadline_seconds: None,
         prompt: "do the work".to_owned(),
         depends_on: Vec::new(),
+        advisory: false,
         inputs: Vec::new(),
         route: None,
         routes: Some(routes.clone()),
@@ -5523,6 +5540,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             deadline_seconds: None,
             prompt: "do the work".to_owned(),
             depends_on: Vec::new(),
+            advisory: false,
             inputs: Vec::new(),
             route: None,
             routes: Some(routes.clone()),
@@ -5962,6 +5980,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         deadline_seconds: None,
         prompt: "do the work".to_owned(),
         depends_on: Vec::new(),
+        advisory: false,
         inputs: Vec::new(),
         route: None,
         routes: Some(vec![route("first"), route("second")]),
@@ -6904,6 +6923,8 @@ struct ErrorLauncher {
     stored_refs: Vec<Option<String>>,
     now: Option<provenant_core::WallTime>,
     now_after_error: Option<provenant_core::WallTime>,
+    admission_seconds: Option<u64>,
+    accepted: bool,
 }
 
 impl AttemptOwner for ErrorLauncher {
@@ -6914,6 +6935,12 @@ impl AttemptOwner for ErrorLauncher {
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         self.now
+    }
+    fn admission_timeout_seconds(&self) -> Option<u64> {
+        Some(self.admission_seconds.unwrap_or(3600))
+    }
+    fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+        Ok(self.accepted)
     }
     fn observe_or_start(
         &mut self,
@@ -6974,6 +7001,7 @@ fn transient_launch_error_waits_and_retries_the_same_attempt_once_due() {
     assert!(attempt.attempt_ref.is_none());
     let retry = progress.launch_retry.as_ref().expect("persisted wait");
     assert_eq!(retry.failures, 1);
+    assert_eq!(retry.deadline, Some(at(3600)));
     assert_eq!(retry.wake_at, Some(at(5)));
     assert!(
         retry
@@ -7083,6 +7111,8 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
         owner.now = Some(at(now));
         advance(&document, &mut owner, &mut journal).unwrap();
     }
+    owner.now = Some(at(3600));
+    advance(&document, &mut owner, &mut journal).unwrap();
     let progress = &journal.0.as_ref().unwrap().nodes[0];
     assert_eq!(progress.state, NodeState::Blocked);
     let text = progress.advance_error.as_deref().unwrap();
@@ -7090,7 +7120,7 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
 }
 
 #[test]
-fn launch_errors_past_the_retry_limit_block_the_node() {
+fn launch_errors_retry_until_the_persisted_deadline() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -7109,9 +7139,16 @@ fn launch_errors_past_the_retry_limit_block_the_node() {
         assert_eq!(retry.failures, failures);
         assert_eq!(retry.wake_at, wake);
     }
-    // The fourth bounded retry is spent, so the node is blocked, not
-    // silently stopped.
+    // The fourth failure remains retryable; the persisted window does not
+    // reset when the journal is reloaded on the next advance.
     owner.now = Some(at(38));
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        retry_of(journal.0.as_ref().unwrap()).deadline,
+        Some(at(3600))
+    );
+    assert_eq!(retry_of(journal.0.as_ref().unwrap()).failures, 4);
+    owner.now = Some(at(3600));
     advance(&document, &mut owner, &mut journal).unwrap();
     let checkpoint = journal.0.as_ref().unwrap();
     let progress = &checkpoint.nodes[0];
@@ -7126,15 +7163,103 @@ fn launch_errors_past_the_retry_limit_block_the_node() {
     );
     let reason = progress.advance_error.as_deref().expect("blocked reason");
     assert!(reason.contains("service is busy"));
-    assert!(reason.contains("provenant fabric graph cancel g-test"));
-    assert!(reason.contains("new graph_id"));
+    assert!(!reason.contains("new graph_id"));
     assert_eq!(owner.calls.len(), 4);
 
     // A blocked node never launches again.
-    owner.now = Some(at(39));
+    owner.now = Some(at(3601));
     let stopped = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(stopped.checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(owner.calls.len(), 4);
+}
+
+#[test]
+fn expired_launch_replays_an_accepted_operation() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: busy_times(1),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    owner.accepted = true;
+    owner.now = Some(at(3600));
+    let result = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(result.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0], owner.calls[1]);
+}
+
+#[test]
+fn launch_succeeds_after_more_than_three_transient_failures() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: busy_times(4),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    for now in [0, 6, 17, 38] {
+        owner.now = Some(at(now));
+        let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+        assert_eq!(waiting.checkpoint.nodes[0].attempts.len(), 1);
+        assert_eq!(retry_of(&waiting.checkpoint).deadline, Some(at(3600)));
+    }
+    owner.now = Some(at(79));
+    let done = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(done.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
+    assert!(owner.calls.iter().all(|key| key == &owner.calls[0]));
+    assert_eq!(owner.calls.len(), 5);
+}
+
+#[test]
+fn launch_wake_is_capped_by_the_original_deadline() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        admission_seconds: Some(3),
+        errors: busy_times(1),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let retry = retry_of(journal.0.as_ref().unwrap());
+    assert_eq!(retry.deadline, Some(at(3)));
+    assert_eq!(retry.wake_at, Some(at(3)));
+    // A new policy on restart cannot extend the saved window.
+    owner.admission_seconds = Some(3600);
+    owner.now = Some(at(3));
+    let ended = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(ended.checkpoint.nodes[0].state, NodeState::Blocked);
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+fn launch_with_an_admission_window_continues_without_a_wall_clock() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        errors: busy_times(1),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+    assert!(
+        retry_of(&waiting.checkpoint)
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("wall clock unavailable")
+    );
+    let result = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(result.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(owner.calls.len(), 2);
 }
 
 #[test]
@@ -7268,6 +7393,162 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     }
     impl Error for Untyped {}
     assert!(!launch_retry_kind(&Untyped));
+}
+
+#[test]
+fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
+    for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"advisory", "nodes":[
+                {"id":"scout", "kind":"composite", "access":"read_only", "advisory":true,
+                 "composite":{"nodes":[{"id":"synthesis","access":"read_only","prompt":"research","route":{"alias":"fixture"}}],
+                              "exports":[{"node":"synthesis","outputs":["result"]}]}},
+                {"id":"lane", "access":"read_only", "prompt":"write", "route":{"alias":"fixture"},
+                 "depends_on":["scout"], "inputs":[{"node":"scout","outputs":["result"]}]}
+            ]
+        })).unwrap();
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal(outcome), terminal(AttemptOutcome::Succeeded)]),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let scout = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "scout--synthesis")
+            .unwrap();
+        assert_eq!(scout.attempts[0].outcome, Some(outcome));
+        assert_eq!(
+            run.checkpoint
+                .nodes
+                .iter()
+                .find(|n| n.id == "lane")
+                .unwrap()
+                .state,
+            NodeState::Succeeded
+        );
+        assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
+    }
+}
+
+#[test]
+fn cumulative_allowance_counts_run_successors_and_survives_observation_replay() {
+    let mut lane = node("lane", route("first"));
+    lane.route = None;
+    lane.routes = Some(vec![route("first"), route("second"), route("third")]);
+    let document = graph(vec![lane]);
+    let mut owner = FakeOwner {
+        retry_limit: Some(2),
+        observations: [AttemptObservation::Pending {
+            attempt_ref: Some("first".into()),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.retry_budgets, vec![Some(2)]);
+    owner.retry_limit = Some(9); // Host changes cannot renew an admitted node.
+    owner.retry_used = 2;
+    let mut refused = terminal(AttemptOutcome::UsageLimited);
+    if let AttemptObservation::Terminal { attempt_ref, .. } = &mut refused {
+        *attempt_ref = Some("first".into());
+    }
+    owner.observations.push_back(refused);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(run.checkpoint.nodes[0].extra["retry"]["retries"], 2);
+    assert_eq!(owner.calls.len(), 2); // Same-key observation, no second route.
+    assert_eq!(owner.calls[0].0, owner.calls[1].0);
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.len(), 2);
+}
+
+#[test]
+fn preparation_fallback_does_not_consume_settlement_allowance() {
+    use provenant_records::run::PreparationFailure;
+    let mut lane = node("lane", route("first"));
+    lane.route = None;
+    lane.routes = Some(vec![route("first"), route("second"), route("third")]);
+    let mut owner = FakeOwner {
+        retry_limit: Some(0),
+        fallback_evidence: [
+            ("first".into(), PreparationFailure::UsageLimited),
+            ("second".into(), PreparationFailure::UsageLimited),
+        ]
+        .into(),
+        observations: [
+            preparation_refusal("first", AttemptOutcome::UsageLimited),
+            preparation_refusal("second", AttemptOutcome::UsageLimited),
+            terminal(AttemptOutcome::Succeeded),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![lane]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.retry_budgets, vec![Some(0), Some(0), Some(0)]);
+}
+
+#[test]
+fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
+    let node_source = "0".repeat(40);
+    let head_2 = "2".repeat(40);
+
+    let mut write = node("writer", route("first"));
+    write.access = AccessMode::WorktreeWrite;
+    write.worktree = Some(".worktrees/write".into());
+    write.source = Some(SourceBinding::Commit {
+        commit: node_source.clone(),
+    });
+
+    let mut lens = node("lens", route("first"));
+    lens.access = AccessMode::ReadOnly;
+    lens.depends_on = vec!["writer".into()];
+    lens.source = Some(SourceBinding::Commit {
+        commit: node_source.clone(),
+    });
+
+    // Writer predecessor committed and hit quota; its continuation succeeded with head_2.
+    let writer_done = AttemptObservation::Terminal {
+        attempt_ref: Some("host/writer-cont".into()),
+        outcome: AttemptOutcome::Succeeded,
+        launched: true,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: Some("writer".into()),
+        commit: Some(head_2.clone()),
+    };
+    let lens_done = terminal(AttemptOutcome::Succeeded);
+
+    let mut owner = FakeOwner {
+        observations: [writer_done, lens_done].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&graph(vec![write, lens]), &mut owner, &mut journal).unwrap();
+
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .and_then(|o| o.commit.as_ref()),
+        Some(&head_2)
+    );
+    // Writer launched pinned to node_source.
+    assert_eq!(owner.source_commits[0], Some(node_source.clone()));
+    // Lens diff base stays the original node_source, not advancing to writer's intermediate/final head.
+    assert_eq!(owner.source_commits[1], Some(node_source));
 }
 
 #[test]

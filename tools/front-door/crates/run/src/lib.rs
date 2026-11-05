@@ -1,5 +1,13 @@
 //! Durable execution records and bounded, project-scoped readers.
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    all(test, feature = "fixture"),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "the custom continuation driver includes private fixtures without libtest"
+    )
+)]
 mod admission;
 mod artifacts;
 mod board;
@@ -20,7 +28,9 @@ mod objects;
 mod overview;
 mod plan;
 mod policy;
-pub use policy::{POLICY_ATTEMPT_CEILING, PolicyRetry, ResultAssessment};
+pub use policy::{
+    POLICY_ATTEMPT_CEILING, PolicyAction, PolicyCause, PolicyRetry, ResultAssessment,
+};
 mod pr_contribution;
 pub use pr_contribution::{Contribution, Contributions, PullRequest, WEIGHT_ONE};
 pub mod reactions;
@@ -43,7 +53,8 @@ pub mod target_seed_gc;
 mod writer;
 
 pub use admission::{
-    AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
+    AdmissionPolicy, AdmissionTimeoutOrigin, AdmissionWindow, EffectiveAdmissionTimeout,
+    HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{
     CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,
@@ -358,6 +369,13 @@ pub enum RunError {
     Validation(&'static str),
     #[error("invalid run record: writer HEAD is not the lane branch")]
     WriterHeadNotLaneBranch,
+    #[error(
+        "invalid run record: writer commit {actual} differs from pinned source commit {expected}"
+    )]
+    WriterSourceMismatch {
+        expected: provenant_core::GitOid,
+        actual: provenant_core::GitOid,
+    },
     #[error("invalid run record: review required; use lane deliver --accept-review ATTEMPT")]
     ReviewAcceptanceRequired,
     #[error("lane object import refused: {0}")]
@@ -661,6 +679,21 @@ mod delivery_tests;
 mod dispatch_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "fixture"))]
+mod continuation_test_driver;
+
+// The custom integration target reuses this crate root so its same-binary
+// guardian can exercise private settlement fixtures without exported test APIs.
+#[cfg(all(test, feature = "fixture"))]
+#[allow(dead_code)]
+fn main() {
+    if let Err(error) = continuation_test_driver::main() {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "writer continuation: {error}");
+        std::process::exit(1);
+    }
+}
 
 #[cfg(test)]
 mod diagnostic_projection_tests {

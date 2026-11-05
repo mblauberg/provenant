@@ -1461,15 +1461,28 @@ impl RunStore {
                         &record.requested_route,
                         &task.route,
                         prior
-                            .and_then(|prior| prior.applied_route)
-                            .and_then(|route| route.provider)
-                            .as_deref(),
+                            .as_ref()
+                            .and_then(|prior| prior.applied_route.as_ref())
+                            .and_then(|route| route.provider.as_deref()),
                     )
                 {
                     effective_task.account = None;
                 }
                 effective_task.route = record.requested_route.clone();
                 effective_task.fallback.clear();
+                if task.writer.is_some()
+                    && let Some(prior) = &prior
+                    && let Some(h) = prior.head
+                {
+                    let h_str = h.to_string();
+                    // Even an unchanged HEAD can carry uncommitted predecessor
+                    // edits. Mark every settled writer continuation so preparation
+                    // verifies its lineage and reports those paths.
+                    effective_task.source_head = effective_task
+                        .source_head
+                        .or_else(|| effective_task.head.clone());
+                    effective_task.head = Some(h_str);
+                }
             }
             let policy_resume = if record.continuation.as_deref() == Some("policy_continuation") {
                 record

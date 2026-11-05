@@ -40,6 +40,7 @@ fn input() -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
                 title: None,
                 base: None,
                 head: None,
+                source_head: None,
                 base_ref: None,
                 writer: None,
                 profile: HarnessProfile::default(),

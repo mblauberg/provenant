@@ -458,7 +458,7 @@ fn fixture() -> Result {
     }
     let home = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("CODEX_HOME")?);
     let auth: Value = serde_json::from_slice(&fs::read(home.join("auth.json"))?)?;
-    if !prompt.contains("fixture handoff recovery") {
+    if !prompt.contains("fixture handoff recovery") && !prompt.contains("fixture graph redraw") {
         assert_eq!(auth["tokens"]["account_id"], "fixture-one");
     }
     let session = "01234567-89ab-cdef-0123-456789abcdef";
@@ -486,13 +486,26 @@ fn fixture() -> Result {
             format!(
                 "{}\n{}\n{}\n",
                 json!({"type":"session_meta","payload":{"id":recorded_session}}),
-                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
+                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") || prompt.contains("fixture graph redraw") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
                 json!({"type":"response_item","payload":{"content":recorded}})
             ),
         )?;
     }
     if prompt.contains("fixture handoff recovery") {
         return handoff_recovery_provider(&prompt, &args, &auth);
+    }
+    if prompt.contains("fixture graph redraw") && policy_model == Some("gpt-6-luna") {
+        writeln!(
+            io::stdout(),
+            "{}",
+            json!({"type":"thread.started","thread_id":session})
+        )?;
+        writeln!(
+            io::stdout(),
+            "{}",
+            json!({"type":"turn.failed","error":{"message":"usage limit reached","codex_error_info":"usage_limit_exceeded"}})
+        )?;
+        return Ok(());
     }
     if prompt.contains("fixture capacity") {
         writeln!(
@@ -2867,6 +2880,69 @@ fn graph_fixture_available() -> Result<bool> {
     Ok(true)
 }
 
+fn graph_read_only_alias_does_not_redraw_after_launch_quota() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\nretry-test=[{model='codex/gpt-6-luna',weight=1,effort='low'},{model='codex/gpt-6.1-terra',weight=0,effort='low'}]\n",
+    )?;
+    for (label, account) in [("one", "fixture-one"), ("two", "fixture-two")] {
+        let directory = rig.root.join(format!("codex-{label}"));
+        fs::create_dir_all(&directory)?;
+        let auth = serde_json::to_vec(&json!({"tokens":{"account_id":account}}))?;
+        fs::write(directory.join("auth.json"), &auth)?;
+        let key = provenant_providers::identity::codex_account(&auth).ok_or("account key")?;
+        support::register_account(&rig, "codex", label, &key, &directory)?;
+    }
+    fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(&json!({
+            "schema_version":1,"graph_id":"quota-redraw","nodes":[{
+                "id":"read","prompt":"fixture graph redraw","access":"read_only","route":{"alias":"retry-test"}
+            }]
+        }))?,
+    )?;
+    let started = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(code(&started), 0, "{started:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        let status = rig.command(&["fabric", "graph", "status", "quota-redraw", "--json"])?;
+        assert_eq!(code(&status), 0, "{status:?}");
+        let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+        if status["data"]["checkpoint"]["nodes"][0]["state"] == "failed" {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "graph did not settle: {status}"
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(50));
+    };
+    let attempts = status["data"]["checkpoint"]["nodes"][0]["attempts"]
+        .as_array()
+        .ok_or("attempts")?;
+    assert_eq!(attempts.len(), 1, "{status}");
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    assert_eq!(code(&lanes), 0, "{lanes:?}");
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let rows = lanes["data"]["lanes"].as_array().ok_or("lanes")?;
+    assert_eq!(rows.len(), 1, "{lanes}");
+    assert_eq!(rows[0]["state"], "quota_limited", "{lanes}");
+    cleanup.disarm();
+    Ok(())
+}
+
 fn review_council_overcap_runs_through_fake_providers() -> Result {
     if !graph_fixture_available().map_err(|e| format!("fixture availability: {e}"))? {
         return Ok(());
@@ -3154,6 +3230,120 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
         ),
         "{status}"
     );
+    cleanup.disarm();
+    Ok(())
+}
+
+fn graph_retries_real_registry_lock_and_runs_writer() -> Result {
+    use provenant_core::Clock;
+    use provenant_os::fs::{Directory, LockMode};
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = claude_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let commit = rig.execute(
+        &git,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&commit), 0);
+    let create = rig.command(&[
+        "worktree",
+        "create",
+        "graph-lock-writer",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&create),
+        0,
+        "{}",
+        String::from_utf8_lossy(&create.stderr.bytes)
+    );
+    let head = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+    let head = std::str::from_utf8(&head.stdout.bytes)?.trim();
+    let graph = json!({"schema_version":1,"graph_id":"real-lock-provider","nodes":[{
+        "id":"write","prompt":"reply OK","access":"worktree_write","worktree":".worktrees/graph-lock-writer",
+        "source":{"type":"commit","commit":head},
+        "route":{"adapter":"claude","model":"claude/claude-sonnet-5-5","effort":"medium","account":"pro"}
+    }]});
+    fs::write(rig.project.join("graph.json"), serde_json::to_vec(&graph)?)?;
+    let registry_root = rig.state.join("worktrees");
+    let registry = fs::read_dir(registry_root)?
+        .next()
+        .ok_or("registry")??
+        .path();
+    let directory = Directory::open_anchor(&registry)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let lock = directory.lock(
+        std::ffi::OsStr::new("worktrees.lock"),
+        LockMode::Exclusive,
+        provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
+        &cancel,
+        &clock,
+    )?;
+    let first = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&first),
+        0,
+        "{} {}",
+        String::from_utf8_lossy(&first.stdout.bytes),
+        String::from_utf8_lossy(&first.stderr.bytes)
+    );
+    let result: Value = serde_json::from_slice(&first.stdout.bytes)?;
+    assert_eq!(
+        result["data"]["checkpoint"]["nodes"][0]["state"], "running",
+        "{result}"
+    );
+    assert!(
+        result["data"]["checkpoint"]["nodes"][0]["launch_retry"]["wake_at"].is_string(),
+        "{result}"
+    );
+    drop(lock);
+    clock.wait_until(
+        clock
+            .mono_now()
+            .checked_add(provenant_core::DurationMicros::from_micros(5_500_000))?,
+    )?;
+    let second = rig.command(&[
+        "fabric",
+        "graph",
+        "resume",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&second),
+        0,
+        "{} {}",
+        String::from_utf8_lossy(&second.stdout.bytes),
+        String::from_utf8_lossy(&second.stderr.bytes)
+    );
+    let result: Value = serde_json::from_slice(&second.stdout.bytes)?;
+    let node = &result["data"]["checkpoint"]["nodes"][0];
+    assert_ne!(node["state"], "blocked", "{result}");
+    assert_eq!(node["attempts"][0]["launched"], true, "{result}");
     cleanup.disarm();
     Ok(())
 }
@@ -3570,6 +3760,7 @@ fn persisted_attempt_with(
                 title: None,
                 base: None,
                 head: None,
+                source_head: None,
                 base_ref: None,
                 profile: HarnessProfile::default(),
                 task_id,
@@ -4927,6 +5118,8 @@ fn main() -> ExitCode {
                 "host_native_dispatch_uses_the_declared_agent_and_refuses_resume",
                 "host_native_preparation_uses_the_provider_contract",
                 "unconfigured_host_native_repair_launches_alias_fallback",
+                "graph_read_only_alias_does_not_redraw_after_launch_quota",
+                "graph_retries_real_registry_lock_and_runs_writer",
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_node_reads_full_upstream_result_from_its_inputs_directory",
                 "review_council_overcap_runs_through_fake_providers",
@@ -5001,6 +5194,8 @@ fn main() -> ExitCode {
                     "unconfigured_host_native_repair_launches_alias_fallback" => {
                         unconfigured_host_native_repair_launches_alias_fallback()
                     }
+                    "graph_read_only_alias_does_not_redraw_after_launch_quota" => graph_read_only_alias_does_not_redraw_after_launch_quota(),
+                    "graph_retries_real_registry_lock_and_runs_writer" => graph_retries_real_registry_lock_and_runs_writer(),
                     "graph_settlement_advances_writer_and_account_routed_review" => {
                         graph_settlement_advances_writer_and_account_routed_review()
                     }

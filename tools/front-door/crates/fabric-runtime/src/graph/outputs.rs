@@ -933,7 +933,20 @@ pub(super) fn render_input(
             .get(&input.node)
             .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
         else {
-            return (prompt, true);
+            if !positions.get(&input.node).is_some_and(|index| {
+                matches!(
+                    checkpoint.nodes[*index].state,
+                    NodeState::Failed | NodeState::Blocked
+                )
+            }) {
+                return (prompt, true);
+            }
+            let section = format!("{}: unavailable\n", input.node);
+            if section.len() + INPUT_CLOSE.len() > cap.saturating_sub(prompt.len()) {
+                return (prompt, true);
+            }
+            prompt.push_str(&section);
+            continue;
         };
         let truncation: Vec<_> = if input
             .outputs

@@ -1001,6 +1001,7 @@ pub fn expand_with(
         "integration_branch",
         "delivery",
         "decision_session",
+        "retry",
     ] {
         if let Some(value) = config.get(key) {
             let value = interpolate(value, &parameters, prompt, 1)?;
@@ -1536,8 +1537,10 @@ fn lower_leaf(
             "purpose",
             "dispositions",
             "require_findings",
+            "advisory",
             "continues",
             "land",
+            "retry",
             "family_group",
         ]
         .contains(&key.as_str())
@@ -1987,6 +1990,7 @@ fn build_stages(
                 "integration_branch",
                 "delivery",
                 "decision_session",
+                "retry",
                 "pattern",
                 "plan",
             ]
@@ -2016,13 +2020,39 @@ fn build_stages(
         repo_files,
         scope,
     };
-    builder.sequence(
+    let start = nodes.len();
+    let ends = builder.sequence(
         config.get("stages").ok_or("missing stages")?,
         "",
         deps,
         nodes,
         0,
-    )
+    )?;
+    if let Some(retry) = config.get("retry") {
+        let retry = interpolate(retry, &builder.parameters, prompt, 1)?;
+        inherit_preset_retry(&mut nodes[start..], &retry);
+    }
+    Ok(ends)
+}
+
+// Preserve the nearest preset default on lowered leaves, including composite
+// and loop bodies. Explicit node retry settings retain their own origin.
+fn inherit_preset_retry(nodes: &mut [Value], retry: &Value) {
+    for node in nodes {
+        if node.get("preset_retry").is_none() {
+            node["preset_retry"] = retry.clone();
+        }
+        for pointer in [
+            "/composite/nodes",
+            "/loop/body",
+            "/fallback_stage/nodes",
+            "/plan/fallback/nodes",
+        ] {
+            if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
+                inherit_preset_retry(children, retry);
+            }
+        }
+    }
 }
 
 struct StageBuilder<'a> {
@@ -2434,6 +2464,7 @@ impl StageBuilder<'_> {
                         "read_roots",
                         "inputs",
                         "depends_on",
+                        "advisory",
                     ]
                     .contains(&key.as_str())
                     {
@@ -2447,7 +2478,7 @@ impl StageBuilder<'_> {
                     node["title"] =
                         interpolate(title, &self.parameters, self.prompt, index as usize)?;
                 }
-                for key in ["source", "read_roots", "inputs"] {
+                for key in ["source", "read_roots", "inputs", "advisory"] {
                     if let Some(value) = object.get(key) {
                         node[key] =
                             interpolate(value, &self.parameters, self.prompt, index as usize)?;

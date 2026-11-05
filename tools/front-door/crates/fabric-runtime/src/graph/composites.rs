@@ -747,7 +747,13 @@ fn state(
         let upstream: Vec<_> = node
             .depends_on
             .iter()
-            .map(|parent| checkpoint.nodes[positions[parent]].state)
+            .filter_map(|parent| {
+                let index = positions[parent];
+                let state = checkpoint.nodes[index].state;
+                (!(plan.nodes[index].advisory
+                    && matches!(state, NodeState::Failed | NodeState::Blocked)))
+                .then_some(state)
+            })
             .collect();
         if upstream
             .iter()

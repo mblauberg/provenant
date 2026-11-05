@@ -41,6 +41,7 @@ provider goldens are checked by the Rust snapshot test.
 - [Supervisor](supervisor.md): custody, confinement and worktrees
 - [Routing](routing.md): routes, providers, accounts and quota
 - [Run](run.md): admission, attempts, publication and reconcile
+- [Retry owner](retry-owner.md): lineage, budgets, admission and recovery
 - [Fabric](fabric.md): coordination store, MCP, graphs and peer hosts
 - [Telemetry](telemetry.md): stats, trace and demand counters
 - [Workflow](workflow.md): review coverage, receipts and sessions

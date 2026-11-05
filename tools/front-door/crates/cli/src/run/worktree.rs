@@ -61,6 +61,7 @@ pub(super) fn own_worktree(
     created: &mut Option<(PathBuf, String)>,
     clock: &SystemClock,
     cancel: &CancelToken,
+    lock_budget: Option<provenant_core::WaitBudget>,
 ) -> Result<
     (
         provenant_confinement::worktrees::WorktreeInfo,
@@ -86,6 +87,7 @@ pub(super) fn own_worktree(
             };
             let context = &worktrees::WorktreeContext {
                 workers,
+                lock_budget: lock_budget.unwrap_or(context.lock_budget),
                 ..*context
             };
             let requested_base_oid = if let Some(base) = requested_base {

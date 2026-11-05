@@ -958,6 +958,7 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
             title: None,
             base: None,
             head: None,
+            source_head: None,
             base_ref: None,
             task_id: provenant_core::TaskId::from_bytes([3; 16]),
             profile: Default::default(),
@@ -1372,6 +1373,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         title: None,
         base: None,
         head: None,
+        source_head: None,
         base_ref: None,
         task_id: TaskId::from_bytes([3; 16]),
         profile: Default::default(),
@@ -1539,6 +1541,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         title: None,
         base: Some(review_oid.clone()),
         head: Some(review_oid.clone()),
+        source_head: None,
         base_ref: None,
         task_id: TaskId::from_bytes([3; 16]),
         profile: provenant_records::run::HarnessProfile {
@@ -1658,10 +1661,13 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     )
     .err()
     .ok_or("stale writer source was accepted")?;
-    assert_eq!(
-        error.to_string(),
-        "invalid run record: writer differs from pinned source commit"
+    assert!(
+        error
+            .to_string()
+            .contains("differs from pinned source commit"),
+        "{error}"
     );
+    assert!(error.to_string().contains(&"a".repeat(40)), "{error}");
     let call = run::Request {
         clock: &clock,
         cancel: &cancel,
@@ -2683,6 +2689,465 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         matches!(error, PrepareError::Candidates { ref plans, .. } if plans.iter().any(|plan| matches!(plan, provenant_confinement::PlanError::InvalidRoots))),
         "{error}"
     );
+    Ok(())
+}
+
+// Exercise the owner-to-preparation path so the dirty brief regression also
+// fails when launch forgets to mark an unchanged predecessor HEAD.
+fn prepare_policy_writer_successor(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt: &str,
+    executable: &Path,
+) -> Result<(run::PreparedLaunch, PathBuf), Box<dyn std::error::Error>> {
+    use provenant_core::{ActorId, CancelToken, Clock};
+    use provenant_supervisor::custody::{
+        ExitObservation, PublicationState, Scope, SettlementEvidence,
+    };
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = run::RunStore::open(
+        &run::ExecutionContext {
+            state_root: registry.roots.ok_or("roots")?.state.clone(),
+            project_id: registry.project_id.ok_or("project")?,
+            actor_id: ActorId::from_bytes([40; 16]),
+            read_prompts: true,
+        },
+        &call,
+    )?;
+    let mut input = super::super::tests::trace_run(
+        40,
+        provenant_core::AttemptId::from_bytes([39; 16]),
+        clock.wall_now()?,
+    )?;
+    input.request.parent_attempt = None;
+    input.request.tasks = vec![task.clone()];
+    input.request.tasks[0].head = task.source_head.clone();
+    input.request.tasks[0].source_head = None;
+    input.attempts[0].task_id = task.task_id;
+    input.attempts[0].prompt = prompt.into();
+    store.create(&input, &call)?;
+    let old = store.record(input.attempts[0].attempt_id, &call)?;
+    let exit = ExitObservation {
+        publication: PublicationState::Durable,
+        scope: Scope {
+            run: old.run_id,
+            attempt: old.attempt_id,
+            generation: old.generation,
+        },
+        termination: Some(provenant_os::exec::Termination::Exit(0)),
+        never_spawned: false,
+        stop_reason: None,
+        delivered_signals: vec![],
+        reaped: vec![],
+        omitted_reaped: 0,
+        spared: vec![],
+        omitted_spared: 0,
+        cancel_delivered_before_exit: None,
+        warnings: vec![],
+        omitted_warnings: 0,
+        terminal_observed: false,
+        unresolved_cleanup: false,
+        unresolved_pids: vec![],
+        settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
+        stdout: Default::default(),
+        stderr: Default::default(),
+    };
+    let mut wire = serde_json::to_value(&exit)?;
+    wire.as_object_mut().ok_or("exit")?.remove("publication");
+    wire["schema_version"] = 1.into();
+    let attempt = registry
+        .state_root
+        .ok_or("state")?
+        .join(format!("runs/{}/attempts/{}", old.run_id, old.attempt_id));
+    let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
+    for (name, value) in [
+        ("process-exit.json", wire),
+        (
+            "writer-terminal.json",
+            serde_json::json!({"schema_version":1,"head":task.head,"protected_paths":[]}),
+        ),
+    ] {
+        directory
+            .atomic_write(
+                name.as_ref(),
+                ".fixture-",
+                &serde_json::to_vec(&value)?,
+                provenant_os::fs::PublishMode::NoReplace,
+            )?
+            .require_durable()?;
+    }
+    store.stage_policy_retry(
+        &old,
+        &run::PolicyRetry {
+            schema_version: 2,
+            cause: run::PolicyCause::Quota,
+            action: run::PolicyAction::Retry,
+            route: old.requested_route.clone(),
+            resume: false,
+            max_attempts: 2,
+            instruction: "Continue".into(),
+            not_before_unix_seconds: None,
+        },
+        &call,
+    )?;
+    store.publish_terminal(
+        old.attempt_id,
+        old.revision,
+        &run::TerminalPublication {
+            outcome: run::Outcome::QuotaLimited,
+            finished_at: clock.wall_now()?,
+            started_at: None,
+            provider_ms: None,
+            reason: None,
+            result: "quota",
+            complete: false,
+            redacted: false,
+            resolved_route: None,
+            applied_route: None,
+            observed_route: None,
+            usage: Default::default(),
+            session: None,
+            partial_signals: vec![],
+        },
+        &exit,
+        &call,
+    )?;
+    struct Capture<'a, 'b> {
+        registry: &'a Registry<'b>,
+        executable: &'a Path,
+        launch: std::cell::RefCell<Option<(run::PreparedLaunch, PathBuf)>>,
+    }
+    impl run::Providers for Capture<'_, '_> {
+        fn prepare(
+            &self,
+            task: &run::TaskRequest,
+            prompt: &str,
+            paths: &run::LaunchPaths,
+            _: Option<&run::AttemptRecord>,
+        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+            let launch = prepare_with(
+                self.registry,
+                task,
+                prompt,
+                paths,
+                None,
+                |_| Ok(self.executable.into()),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            self.launch.replace(Some((
+                launch,
+                paths
+                    .provider_state
+                    .parent()
+                    .ok_or("attempt")?
+                    .join("prompt.md"),
+            )));
+            Err("captured prepared successor".into())
+        }
+        fn decode(
+            &self,
+            _: &run::RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &Path,
+        ) -> Result<run::Decoded, String> {
+            unreachable!()
+        }
+    }
+    let capture = Capture {
+        registry,
+        executable,
+        launch: Default::default(),
+    };
+    let custody = directory.try_lock(
+        std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    drop(custody);
+    let started = store.start(input.run_id, &capture, &|_, _| unreachable!(), &call)?;
+    assert!(
+        matches!(started.as_slice(), [run::Started::Refused { reason, .. }] if reason == "captured prepared successor"),
+        "{started:?}"
+    );
+    capture
+        .launch
+        .into_inner()
+        .ok_or_else(|| "successor was not prepared".into())
+}
+
+#[test]
+fn writer_continuation_preserves_uncommitted_edits_and_reports_them_in_brief()
+-> Result<(), Box<dyn std::error::Error>> {
+    writer_continuation_dirty_brief(true)
+}
+
+#[test]
+fn writer_continuation_with_unchanged_head_reports_dirty_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    writer_continuation_dirty_brief(false)
+}
+
+fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
+    use provenant_core::{
+        AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId, WaitBudget,
+    };
+    use provenant_os::clock::SystemClock;
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+    use std::{
+        os::unix::fs::{DirBuilderExt, PermissionsExt},
+        time::Duration,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let assets = base.join("release");
+    let git_home = base.join("git-home");
+    for path in [&home, &state, &project, &assets, &git_home] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let executor = SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let utility = UtilityRuntime::new(&git, &git_home)?;
+    let cancel = CancelToken::new();
+    let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
+    let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let worktree_state = state
+        .join("worktrees")
+        .join(binding.project_id().to_string());
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&worktree_state)?;
+    let project_state = provenant_os::fs::Directory::open_anchor(&worktree_state)?;
+    let clock = SystemClock::new();
+    worktrees::create(
+        &worktrees::WorktreeContext {
+            home: &home,
+            repo: &repo,
+            binding: &binding,
+            project_state: &project_state,
+            executor: &executor,
+            utility: &utility,
+            workers: &worktrees::SystemWorkerObserver,
+            clock: &clock,
+            utility_budget: budget,
+            mutation_budget: budget,
+            lock_budget: WaitBudget::cli(clock.mono_now(), 5)?,
+        },
+        worktrees::WorktreeCreate {
+            branch: "writer".into(),
+            base: Some("HEAD".into()),
+        },
+        &cancel,
+    )?;
+    let executable = assets.join("cursor/bin/agent");
+    std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
+    std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture-cursor 1.0\\n'\n")?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+
+    let worktree = project.join(".worktrees/writer");
+    let source_head = run::resolve_git_base(&git, &project, "HEAD")?;
+
+    let run_git = |args: &[&str], cwd: &std::path::Path| {
+        let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
+            .chain(args.iter().map(Into::into))
+            .collect();
+        let env = [
+            ("HOME".into(), git_home.as_os_str().to_owned()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ];
+        let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
+        options.env = Some(&env);
+        executor.execute(options)
+    };
+    if committed {
+        std::fs::write(worktree.join("committed.txt"), "predecessor work")?;
+        run_git(&["add", "committed.txt"], &worktree)?;
+        let commit_res = run_git(
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "predecessor commit",
+            ],
+            &worktree,
+        )?;
+        assert_eq!(commit_res.termination, Termination::Exit(0));
+    }
+    let predecessor_head = run::resolve_git_base(&git, &worktree, "HEAD")?;
+    assert_eq!(source_head != predecessor_head, committed);
+
+    std::fs::write(
+        worktree.join("uncommitted_leftover.txt"),
+        "uncommitted dirty edit",
+    )?;
+
+    let run_id = RunId::from_bytes([20; 16]);
+    let attempt_id = AttemptId::from_bytes([21; 16]);
+    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let paths = run::LaunchPaths {
+        attempt_id,
+        operation_id: OperationId::parse("writer-continuation-dirty")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id,
+        deadline_unix_ms: u64::MAX,
+        scratch: attempt.join("scratch"),
+        provider_state: attempt.join("provider-state"),
+        temporary: attempt.join("tmp"),
+        temporary_alias: None,
+    };
+    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+    }
+
+    let prompt = "Fix remaining issues in continuation";
+    let task = run::TaskRequest {
+        context: None,
+        extra: Default::default(),
+        build_heavy: false,
+        title: None,
+        base: Some(source_head.clone()),
+        head: Some(predecessor_head.clone()),
+        source_head: Some(source_head.clone()),
+        base_ref: None,
+        task_id: TaskId::from_bytes([22; 16]),
+        profile: Default::default(),
+        prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
+        route: run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "cursor".into(),
+            model: "cursor/gpt-5.3-codex-low".into(),
+            effort: None,
+        },
+        account: None,
+        fallback: vec![],
+        authority_digest: Digest::from_bytes([23; 32]),
+        writer: Some(run::WriterRequest {
+            extra: Default::default(),
+            project: project.clone(),
+            worktree: worktree.clone(),
+        }),
+        deliver: None,
+        provider_timeout_seconds: 20,
+        delivery_id: None,
+        access: Default::default(),
+    };
+
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        assets: Some(&assets),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: Some(binding.project_id()),
+        cancel: Some(&cancel),
+        host: None,
+    };
+
+    let (launch, spilled) = prepare_policy_writer_successor(&registry, &task, prompt, &executable)?;
+
+    // A dirty worktree continues without being reset
+    assert!(worktree.join("uncommitted_leftover.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("uncommitted_leftover.txt"))?,
+        "uncommitted dirty edit"
+    );
+
+    // Spilled prompt contains uncommitted predecessor edits
+    let prompt_content = if spilled.exists() {
+        std::fs::read_to_string(&spilled)?
+    } else {
+        launch.argv.last().unwrap().to_str().unwrap().to_string()
+    };
+    assert!(
+        prompt_content
+            .contains("Uncommitted predecessor edits in worktree:\n- uncommitted_leftover.txt"),
+        "brief must report uncommitted predecessor edits: {prompt_content}"
+    );
+
+    // If continuation check refuses, uncommitted edits are named in the refusal message
+    let mut bad_task = task.clone();
+    bad_task.source_head = Some("0".repeat(40));
+    let error = prepare_with(
+        &registry,
+        &bad_task,
+        prompt,
+        &paths,
+        None,
+        |_| Ok(executable.clone()),
+        None,
+    )
+    .err()
+    .ok_or("mismatched continuation should refuse")?;
+    let error_text = error.to_string();
+    assert!(
+        error_text.contains("uncommitted predecessor edits: uncommitted_leftover.txt"),
+        "refusal must list uncommitted predecessor edits: {error_text}"
+    );
+
+    // Inject a Git that works for ancestry but refuses status. Exercise both
+    // the brief path and the mismatch path: neither may hide missing evidence.
+    let status_git = base.join("status-git");
+    std::fs::write(
+        &status_git,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = status ]; then echo forced-status-failure >&2; exit 73; fi\ndone\nexec '{}' \"$@\"\n",
+            git.display()
+        ),
+    )?;
+    std::fs::set_permissions(&status_git, std::fs::Permissions::from_mode(0o700))?;
+    let host = run::HostLaunchContext::from_environment(&state, &project, status_git);
+    let failing_registry = Registry {
+        host: Some(&host),
+        ..registry
+    };
+    for candidate in [&task, &bad_task] {
+        let error = prepare_with(
+            &failing_registry,
+            candidate,
+            prompt,
+            &paths,
+            None,
+            |_| Ok(executable.clone()),
+            None,
+        )
+        .err()
+        .ok_or("status failure must refuse preparation")?;
+        assert!(
+            error
+                .to_string()
+                .contains("cannot inspect uncommitted predecessor edits"),
+            "status failure must be explicit: {error}"
+        );
+    }
+
     Ok(())
 }
 

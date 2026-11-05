@@ -21,7 +21,12 @@ fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         .filter(|(key, _)| !removed.contains(&key.as_os_str()))
         .collect();
     let cwd = std::env::current_dir()?;
-    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+    let timeout = if name == "run::tests::wait_handles_a_stale_default_cursor" {
+        300
+    } else {
+        30
+    };
+    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(timeout));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 65_536 };
     options.stderr = StreamPolicy::Capture { limit: 65_536 };
@@ -242,6 +247,7 @@ fn run_explain_warns_once_for_existing_brief_paths_outside_read_roots()
     let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
     let edge = Edge {
         roots: &roots,
         home: &home,
@@ -505,6 +511,7 @@ fn render_run_renders_warnings_from_data_and_does_not_scrape_text()
     let mut inputs = provenant_core::RootInputs::new(root.join("home"), project.clone());
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
     let edge = Edge {
         roots: &roots,
         home: &root.join("home"),
@@ -979,14 +986,39 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         run::Providers::assess_result(registry, &task, &record, &capacity, None, None, 1)
     };
     assert!(assess_recovered(&rooted)?.retry.is_none());
+    let mut profiled = task.clone();
+    profiled.profile = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
+        .dispatch_profile(&[])?;
+    assert_eq!(profiled.profile.settlement_retry_limit, None);
+    assert!(
+        run::Providers::assess_result(&rooted, &profiled, &record, &capacity, None, None, 1)?
+            .retry
+            .is_none()
+    );
+
     assert!(assess_recovered(&Registry::default())?.retry.is_some());
     const NOW: i64 = 1_800_000_000;
+    let mut graph_task = task.clone();
+    graph_task.profile.settlement_retry_limit = Some(0);
+    assert!(
+        assess_settlement_retry(&config, &graph_task, &record, &capacity, 1, NOW, false)
+            .retry
+            .is_none()
+    );
+    graph_task.profile.settlement_retry_limit = Some(1);
+    assert_eq!(
+        assess_settlement_retry(&config, &graph_task, &record, &capacity, 1, NOW, false)
+            .retry
+            .ok_or("graph retry")?
+            .max_attempts,
+        2
+    );
     let assess_at = |record: &run::AttemptRecord,
-                     _task: &run::TaskRequest,
+                     task: &run::TaskRequest,
                      decoded: &run::Decoded,
                      attempt: u64,
                      _others: bool| {
-        assess_settlement_retry(&config, record, decoded, attempt, NOW, false)
+        assess_settlement_retry(&config, task, record, decoded, attempt, NOW, false)
     };
     let assess = |task: &run::TaskRequest, decoded: &run::Decoded, attempt: u64, others: bool| {
         assess_at(&record, task, decoded, attempt, others)
@@ -1049,7 +1081,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         "You've hit your weekly limit",
     );
     assert!(assess(&task, &quota, 1, true).retry.is_none());
-    let recovery = assess_settlement_retry(&config, &record, &quota, 1, NOW, true)
+    let recovery = assess_settlement_retry(&config, &task, &record, &quota, 1, NOW, true)
         .retry
         .ok_or("verified handoff continuation")?;
     assert!(!recovery.resume);
@@ -1065,7 +1097,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         ..Default::default()
     };
     assert!(
-        assess_settlement_retry(&off, &record, &quota, 1, NOW, false)
+        assess_settlement_retry(&off, &task, &record, &quota, 1, NOW, false)
             .retry
             .is_none()
     );
@@ -1077,7 +1109,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         retry_delay_ceiling_seconds: 7_200,
         ..Default::default()
     };
-    let capped = assess_settlement_retry(&tuned, &record, &capacity, 4, NOW, false)
+    let capped = assess_settlement_retry(&tuned, &task, &record, &capacity, 4, NOW, false)
         .retry
         .ok_or("tuned retry")?;
     assert_eq!(capped.max_attempts, 6);
@@ -1086,7 +1118,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         retry_delay_ceiling_seconds: 45,
         ..tuned
     };
-    let ceiled = assess_settlement_retry(&ceiling, &record, &capacity, 1, NOW, false)
+    let ceiled = assess_settlement_retry(&ceiling, &task, &record, &capacity, 1, NOW, false)
         .retry
         .ok_or("ceiled retry")?;
     assert_eq!(wait(&ceiled), Some(45));
@@ -1325,6 +1357,7 @@ fn core_run_status_uses_policy_successor_and_retains_receipts()
     let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
     let edge = Edge {
         roots: &roots,
         home: &root.join("home"),
@@ -1364,6 +1397,7 @@ fn core_run_timeout_only_offers_waiting_for_unsettled_lanes()
     let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
     let edge = Edge {
         roots: &roots,
         home: &root.join("home"),
@@ -1983,6 +2017,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         &mut None,
         &clock,
         &cancel,
+        None,
     )
     .unwrap_err();
     let failure: super::Fail = refused.into();
@@ -2098,6 +2133,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             &mut None,
             &clock,
             &cancel,
+            None,
         );
         let owner = load()?.ok_or("owner")?;
         assert_eq!(owner.base, base);
@@ -2207,6 +2243,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         &mut None,
         &clock,
         &cancel,
+        None,
     )?;
     assert_eq!(reused.0.path, path);
     assert_eq!(reused.0.head, head);
@@ -2256,18 +2293,21 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
                             ObservedProcess {
                                 pid: 54321,
                                 command: Some("foreign-writer".into()),
+                                kind: provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
                                 cwd: Some(self.0.clone()),
                             },
                         )
                     })
                     .collect(),
                 details: Default::default(),
+                ..Default::default()
             }
         }
         fn live_process(&self, _root: &Path) -> Option<ObservedProcess> {
             Some(ObservedProcess {
                 pid: 54321,
                 command: Some("foreign-writer".into()),
+                kind: provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
                 cwd: Some(self.0.clone()),
             })
         }
@@ -2424,6 +2464,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         &mut None,
         &clock,
         &cancel,
+        None,
     );
     match census_error {
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
@@ -2462,6 +2503,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         &mut None,
         &clock,
         &cancel,
+        None,
     );
     match err {
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
@@ -2523,6 +2565,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
             (root == self.target).then(|| ObservedProcess {
                 pid: 24680,
                 command: Some("ancestor-shell".into()),
+                kind: provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
                 cwd: Some(self.target.clone()),
             })
         }
@@ -2620,6 +2663,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         &mut None,
         &clock,
         &cancel,
+        None,
     );
     match refused {
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
@@ -2648,6 +2692,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         &mut None,
         &clock,
         &cancel,
+        None,
     )?;
     assert_eq!(admitted.0.path, path);
     assert_eq!(admitted.0.head, head);
@@ -2828,6 +2873,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         &mut None,
         &clock,
         &cancel,
+        None,
     )
     .map_err(|fail| fail.to_string())?;
     assert_eq!(created_info.head, created_base);
@@ -2854,6 +2900,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         &mut None,
         &clock,
         &cancel,
+        None,
     )
     .map_err(|fail| fail.to_string())?;
     assert_eq!(info.head, pinned);
@@ -3121,6 +3168,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         chair: chair.clone(),
         operation_id: OperationId::parse("context-ref-replay").unwrap(),
         tasks: vec![Submitted {
+            settlement_retry_limit: None,
             context: None,
             build_heavy: false,
             title: None,
@@ -3260,6 +3308,7 @@ pub(super) fn trace_run(
                 title: None,
                 base: None,
                 head: None,
+                source_head: None,
                 base_ref: None,
                 task_id,
                 prompt_digest: CanonicalV1::file_digest(b"p"),
@@ -3945,6 +3994,58 @@ fn lane_fixture(
 }
 
 #[test]
+fn lanes_render_retry_lineage() -> Result<(), Box<dyn std::error::Error>> {
+    let now = WallTime::from_micros(100)?;
+    let failed = lane_fixture(
+        1,
+        4,
+        run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: run::Outcome::Failed,
+            exit_code: Some(1),
+            finished_at: now,
+            reason: None,
+        },
+    )?;
+    let mut retry = lane_fixture(
+        2,
+        4,
+        run::AttemptState::Queued {
+            extra: Default::default(),
+        },
+    )?;
+    retry.retry_of = Some(failed.attempt_id);
+    let successors = [(failed.attempt_id, retry.attempt_id)]
+        .into_iter()
+        .collect();
+    let (data, human) = render_lanes_with_lineage(
+        &[failed.clone(), retry.clone()],
+        &[],
+        None,
+        Path::new("/state"),
+        None,
+        &successors,
+    );
+    assert_eq!(data["lanes"][0]["superseded_by"], json!(retry.attempt_id));
+    assert_eq!(data["lanes"][1]["retry_of"], json!(failed.attempt_id));
+    assert_eq!(
+        human,
+        format!(
+            "{}/{}/{} failed → retrying ({}) unresolved\n{}/{}/{} queued (retry of {}) unresolved\n",
+            failed.run_id,
+            failed.task_id,
+            failed.attempt_id,
+            retry.attempt_id,
+            retry.run_id,
+            retry.task_id,
+            retry.attempt_id,
+            failed.attempt_id,
+        )
+    );
+    Ok(())
+}
+
+#[test]
 fn lanes_give_a_settled_lane_its_settlement_reason() -> Result<(), Box<dyn std::error::Error>> {
     let now = WallTime::from_micros(100)?;
     let failed = lane_fixture(
@@ -4132,6 +4233,170 @@ fn render_lanes_omits_account_when_unresolved() -> Result<(), Box<dyn std::error
     assert!(data["lanes"][0]["applied_route"].is_null());
     Ok(())
 }
+#[test]
+#[allow(clippy::disallowed_methods)] // Exercise the real wait and an independent settlement.
+fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane("run::tests::wait_handles_a_stale_default_cursor")? {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let home = root.join("home");
+    let project = root.join("checkout");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&project)?;
+    std::fs::create_dir_all(root.join("state"))?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(root.join("state"), std::fs::Permissions::from_mode(0o700))?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(root.join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let edge = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &project,
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|e| e.message)?;
+    let session = open(&edge, &call).map_err(|e| e.message)?;
+    let make = |n: u64| -> Result<run::PreparedRun, Box<dyn std::error::Error>> {
+        let mut prepared = trace_run(1, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+        let mut bytes = [0; 16];
+        bytes[8..].copy_from_slice(&n.to_be_bytes());
+        prepared.run_id = RunId::from_bytes(bytes);
+        bytes[0] = 1;
+        let task = TaskId::from_bytes(bytes);
+        bytes[0] = 2;
+        prepared.operation_id = OperationId::parse(&format!("backlog-{n}"))?;
+        prepared.request.tasks[0].task_id = task;
+        prepared.attempts[0].task_id = task;
+        prepared.attempts[0].attempt_id = AttemptId::from_bytes(bytes);
+        Ok(prepared)
+    };
+    let seed = make(1)?;
+    session.store.create(&seed, &call)?;
+    session.store.withdraw(
+        seed.attempts[0].attempt_id,
+        run::AttemptState::Queued {
+            extra: Default::default(),
+        },
+        run::Outcome::Cancelled,
+        "fixture",
+        clock.wall_now()?,
+        &call,
+    )?;
+    let cursor = session
+        .store
+        .last_event_sequence(seed.attempts[0].attempt_id, &call)?;
+    session.store.ack_seen("default", cursor, &call)?;
+    let active = make(1003)?;
+    session.store.create(&active, &call)?;
+    let id = active.attempts[0].attempt_id;
+    let mut explicit = Vec::new();
+    for first in (2..=1002).step_by(64) {
+        let mut prepared = make(first)?;
+        for n in first + 1..=(first + 63).min(1002) {
+            let extra = make(n)?;
+            prepared.request.tasks.push(extra.request.tasks[0].clone());
+            prepared.attempts.extend(extra.attempts);
+        }
+        explicit.push(Target {
+            selection: None,
+            run: Some(prepared.run_id),
+            task: None,
+            attempt: None,
+        });
+        session.store.create(&prepared, &call)?;
+        for attempt in &prepared.attempts {
+            session.store.withdraw(
+                attempt.attempt_id,
+                run::AttemptState::Queued {
+                    extra: Default::default(),
+                },
+                run::Outcome::Cancelled,
+                "fixture",
+                clock.wall_now()?,
+                &call,
+            )?;
+        }
+    }
+    let error = wait::select(&session, &explicit, None, session.context.actor_id, &call)
+        .expect_err("explicit selection over the cap must fail");
+    assert!(error.message.contains("1000"));
+    assert!(error.message.contains("narrow"));
+    let context = session.context.clone();
+    let worker = std::thread::spawn(move || -> Result<(), String> {
+        let clock = SystemClock::new();
+        let release = clock
+            .mono_now()
+            .checked_add(DurationMicros::from_micros(5_000_000))
+            .map_err(|e| e.to_string())?;
+        clock.wait_until(release).map_err(|e| e.to_string())?;
+        let cancel = CancelToken::new();
+        let call = run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = run::RunStore::open(&context, &call).map_err(|e| e.to_string())?;
+        store
+            .withdraw(
+                id,
+                run::AttemptState::Queued {
+                    extra: Default::default(),
+                },
+                run::Outcome::Cancelled,
+                "fixture",
+                clock.wall_now().map_err(|e| e.to_string())?,
+                &call,
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    });
+    let picks = Picks {
+        targets: &[],
+        owner: session.context.actor_id,
+        label: None,
+        since: None,
+    };
+    let (data, _, timed_out) = wait_command(
+        &session,
+        &picks,
+        Condition::Any,
+        Instant::now() + Duration::from_secs(30),
+        clock.wall_now()?,
+        &edge,
+    )
+    .map_err(|e| e.message)?;
+    worker.join().map_err(|_| "worker panicked")??;
+    assert!(!timed_out);
+    assert_eq!(data["settled_backlog"]["count"], 1001);
+    assert!(
+        data["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|lane| lane["attempt_id"] == json!(id))
+    );
+    assert_eq!(
+        data["settled_backlog"]["newest"].as_array().unwrap().len(),
+        100
+    );
+    let (next, _, _) = wait_command(
+        &session,
+        &picks,
+        Condition::Any,
+        Instant::now() + Duration::from_secs(5),
+        clock.wall_now()?,
+        &edge,
+    )
+    .map_err(|e| e.message)?;
+    assert!(next["lanes"].as_array().unwrap().is_empty());
+    assert!(next.get("settled_backlog").is_none());
+    Ok(())
+}
+
 #[test]
 fn local_wait_observes_settlement_and_renders_pending_details()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -6118,6 +6383,47 @@ fn claude_absent_usage_names_its_reason() {
 }
 
 #[test]
+fn wait_any_follows_a_superseded_failure() -> Result<(), Box<dyn std::error::Error>> {
+    let now = WallTime::from_micros(100)?;
+    let mut failed = lane_fixture(
+        1,
+        1,
+        run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: run::Outcome::Failed,
+            exit_code: Some(1),
+            finished_at: now,
+            reason: None,
+        },
+    )?;
+    let mut retry = lane_fixture(
+        2,
+        1,
+        run::AttemptState::Queued {
+            extra: Default::default(),
+        },
+    )?;
+    failed.superseded_by = Some(retry.attempt_id);
+    assert!(!condition_met(
+        &[failed.clone(), retry.clone()],
+        Condition::Any
+    ));
+    assert!(!condition_met(
+        std::slice::from_ref(&failed),
+        Condition::Any
+    ));
+    retry.state = run::AttemptState::Terminal {
+        extra: Default::default(),
+        outcome: run::Outcome::Succeeded,
+        exit_code: Some(0),
+        finished_at: now,
+        reason: None,
+    };
+    assert!(condition_met(&[failed, retry], Condition::Any));
+    Ok(())
+}
+
+#[test]
 fn wait_follows_a_policy_chain_to_the_ceiling_reading_state_before_tail() {
     let ceiling = provenant_run::POLICY_ATTEMPT_CEILING;
     // Attempts 0..ceiling-1 form one full chain; each tail read names the next.
@@ -6152,6 +6458,644 @@ fn wait_follows_a_policy_chain_to_the_ceiling_reading_state_before_tail() {
             .all(|pair| pair[0].0 == "state" && pair[1].0 == "tail" && pair[0].1 == pair[1].1),
         "each hop reads state before its tail"
     );
+}
+
+#[test]
+fn run_explain_reports_admission_timeout_with_visible_origin()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let project = root.join("project");
+    std::fs::create_dir_all(&project)?;
+    let home = root.join("home");
+    std::fs::create_dir_all(&home)?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(root.join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
+    let edge = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &project,
+    };
+    let brief = project.join("brief.md");
+    std::fs::write(&brief, "test prompt")?;
+    let brief_arg = brief.to_string_lossy().into_owned();
+
+    // 1. Shipped default (3600s, "shipped default")
+    let cmd_default = parsed_run(&[
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        &brief_arg,
+        "--explain",
+    ])?;
+    let reply_default = super::run(cmd_default, &edge);
+    assert_eq!(
+        reply_default.result.status,
+        Status::Ok,
+        "{:?}",
+        reply_default.result.error
+    );
+    assert_eq!(
+        reply_default.result.data["admission_timeout"]["seconds"],
+        3600
+    );
+    assert_eq!(
+        reply_default.result.data["admission_timeout"]["origin"],
+        "shipped default"
+    );
+    assert!(
+        reply_default
+            .human
+            .contains("admission timeout: 3600s (shipped default)")
+    );
+
+    // 2. Host config override (1800s, "host config")
+    std::fs::create_dir_all(roots.state.as_path())?;
+    std::fs::write(
+        roots.state.as_path().join("config.toml"),
+        "schema_version = 1\n[domains.run]\nadmission_seconds = 1800\n",
+    )?;
+    let cmd_host = parsed_run(&[
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        &brief_arg,
+        "--explain",
+    ])?;
+    let reply_host = super::run(cmd_host, &edge);
+    assert_eq!(
+        reply_host.result.status,
+        Status::Ok,
+        "{:?}",
+        reply_host.result.error
+    );
+    assert_eq!(reply_host.result.data["admission_timeout"]["seconds"], 1800);
+    assert_eq!(
+        reply_host.result.data["admission_timeout"]["origin"],
+        "host config"
+    );
+    assert!(
+        reply_host
+            .human
+            .contains("admission timeout: 1800s (host config)")
+    );
+
+    // 3. CLI flag override (--admission-timeout 15m -> 900s, "flag")
+    let cmd_flag = parsed_run(&[
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        &brief_arg,
+        "--explain",
+        "--admission-timeout",
+        "15m",
+    ])?;
+    let reply_flag = super::run(cmd_flag, &edge);
+    assert_eq!(
+        reply_flag.result.status,
+        Status::Ok,
+        "{:?}",
+        reply_flag.result.error
+    );
+    assert_eq!(reply_flag.result.data["admission_timeout"]["seconds"], 900);
+    assert_eq!(
+        reply_flag.result.data["admission_timeout"]["origin"],
+        "flag"
+    );
+    assert!(reply_flag.human.contains("admission timeout: 900s (flag)"));
+
+    Ok(())
+}
+
+#[test]
+fn admission_window_deadline_is_preserved_on_restart() -> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane("run::tests::admission_window_deadline_is_preserved_on_restart")? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.tree,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            provenant_config::bind_project(
+                edge.roots,
+                provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
+            )?;
+            provenant_config::bind_host(edge.roots)?;
+
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+
+            let op: OperationId = "test-restart-op".parse().unwrap();
+            let t0 = WallTime::from_micros(10_000_000).unwrap();
+            let initial_window = run::AdmissionWindow {
+                deadline: t0,
+                wake_at: None,
+            };
+            let saved = session
+                .store
+                .save_admission_window(&op, initial_window, &call)?;
+            assert_eq!(saved.deadline, t0);
+            assert_eq!(saved.wake_at, None);
+
+            // Later restart attempts to set a later deadline (t1) and a wake_at
+            let t1 = WallTime::from_micros(20_000_000).unwrap();
+            let wake = WallTime::from_micros(12_000_000).unwrap();
+            let restarted_window = run::AdmissionWindow {
+                deadline: t1,
+                wake_at: Some(wake),
+            };
+            let reloaded = session
+                .store
+                .save_admission_window(&op, restarted_window, &call)?;
+            // The deadline MUST NOT be renewed: it must remain t0!
+            assert_eq!(reloaded.deadline, t0);
+            // wake_at was updated
+            assert_eq!(reloaded.wake_at, Some(wake));
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
+fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{
+        self, WorkerObserver, WorkerState, WorktreeOrigin, WorktreeOwner,
+    };
+
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+
+    if reexec_test_in_lane("run::tests::foreign_writer_and_dirty_tree_refusals_remain_fail_closed")?
+    {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    let prompt = fixture.root.join("prompt.md");
+    std::fs::write(&prompt, "reply OK")?;
+
+    with_edge(
+        &fixture.root,
+        &fixture.tree,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            provenant_config::bind_project(
+                edge.roots,
+                provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
+            )?;
+            provenant_config::bind_host(edge.roots)?;
+
+            let command = |operation| {
+                parsed_run(&[
+                    "--operation-id",
+                    operation,
+                    "--model",
+                    "codex/gpt-6-luna",
+                    "--mode",
+                    "worktree-write",
+                    "--worktree-branch",
+                    "writer",
+                    "--prompt-file",
+                    prompt.to_str().unwrap(),
+                ])
+                .map(|mut command| {
+                    command.wait = None;
+                    command
+                })
+            };
+
+            // 1. Dirty worktree fails closed immediately without retry
+            std::fs::write(fixture.tree.join("uncommitted.txt"), "dirty content")?;
+            let dirty_res = dispatch_with_workers(command("dirty-tree")?, edge, &Free);
+            assert_eq!(
+                dirty_res.result.status,
+                Status::Refused,
+                "dirty_res was: {:?}",
+                dirty_res.result
+            );
+            let err_msg = dirty_res
+                .result
+                .error
+                .as_ref()
+                .map(|e| e.message.as_str())
+                .unwrap_or_default();
+            assert!(
+                err_msg.contains("dirty"),
+                "expected dirty refusal, got: {err_msg}"
+            );
+            // Clean up dirty file
+            std::fs::remove_file(fixture.tree.join("uncommitted.txt"))?;
+
+            // 2. Foreign owner fails closed immediately without retry
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &fixture.project,
+                &clock,
+                &cancel,
+                |context| {
+                    let verified =
+                        provenant_confinement::verify_worktree(context.repo, &fixture.tree)?;
+                    let info = worktrees::list(context, &cancel)?
+                        .into_iter()
+                        .find(|info| info.path == fixture.tree)
+                        .ok_or(worktrees::WorktreeError::NotFound)?;
+                    worktrees::save_owner(
+                        &verified,
+                        &WorktreeOwner {
+                            attempt_id: None,
+                            operation_id: Some("manual-op".parse().unwrap()),
+                            branch: "writer".into(),
+                            base: info.head.to_string(),
+                            host: provenant_config::bind_host(edge.roots).unwrap(),
+                            created_at: WallTime::from_micros(1).unwrap(),
+                            origin: WorktreeOrigin::Adopted,
+                            label: None,
+                        },
+                    )?;
+                    Ok(())
+                },
+            )?;
+            let foreign_res = dispatch_with_workers(command("foreign-tree")?, edge, &Free);
+            assert_eq!(
+                foreign_res.result.status,
+                Status::Refused,
+                "foreign_res was: {:?}",
+                foreign_res.result
+            );
+            assert_eq!(
+                foreign_res
+                    .result
+                    .error
+                    .as_ref()
+                    .ok_or("foreign refusal")?
+                    .code,
+                "REFUSED"
+            );
+
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
+fn worktrees_lock_held_past_five_seconds_retries_and_admits()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_os::fs::{Directory, LockMode};
+
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+
+    if reexec_test_in_lane("run::tests::worktrees_lock_held_past_five_seconds_retries_and_admits")?
+    {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    let prompt = fixture.root.join("prompt.md");
+    std::fs::write(&prompt, "reply OK")?;
+
+    with_edge(
+        &fixture.root,
+        &fixture.tree,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            provenant_config::bind_host(edge.roots)?;
+
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+
+            let target_project_id = provenant_confinement::worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &fixture.project,
+                &clock,
+                &cancel,
+                |ctx| Ok(ctx.binding.project_id()),
+            )?;
+            let reg_dir = edge
+                .roots
+                .state
+                .as_path()
+                .join("worktrees")
+                .join(target_project_id.to_string());
+            std::fs::create_dir_all(&reg_dir)?;
+
+            // Background thread acquires worktrees.lock and holds it for 5.3s
+            let (tx, rx) = std::sync::mpsc::channel();
+            let lock_dir_path = reg_dir.clone();
+            let holder = std::thread::spawn(move || {
+                let dir = Directory::open_anchor(&lock_dir_path).unwrap();
+                let clk = SystemClock::new();
+                let cnl = CancelToken::new();
+                let guard = dir
+                    .lock(
+                        std::ffi::OsStr::new("worktrees.lock"),
+                        LockMode::Exclusive,
+                        provenant_core::WaitBudget::cli(clk.mono_now(), 10).unwrap(),
+                        &cnl,
+                        &clk,
+                    )
+                    .unwrap();
+                tx.send(()).unwrap();
+                let wake = clk
+                    .mono_now()
+                    .checked_add(DurationMicros::from_micros(6_500_000))
+                    .unwrap();
+                clk.wait_until(wake).unwrap();
+                drop(guard);
+            });
+
+            rx.recv().unwrap(); // Wait until lock is held!
+
+            let mut cmd = parsed_run(&[
+                "--operation-id",
+                "lock-retry-test",
+                "--model",
+                "codex/gpt-6-luna",
+                "--mode",
+                "worktree-write",
+                "--worktree",
+                fixture.tree.to_str().unwrap(),
+                "--prompt-file",
+                prompt.to_str().unwrap(),
+                "--admission-timeout",
+                "60s",
+            ])?;
+            cmd.wait = None;
+
+            let reply = dispatch_with_workers(cmd, edge, &Free);
+            assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+            holder.join().unwrap();
+
+            // Check that admission window exists and wake_at was updated during retry!
+            let window = session
+                .store
+                .admission_window(&"lock-retry-test".parse()?, &call)?
+                .expect("admission window must be saved");
+            assert!(
+                window.wake_at.is_some(),
+                "wake_at must be recorded on lock retry"
+            );
+
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
+fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_os::fs::{Directory, LockMode};
+
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+
+    if reexec_test_in_lane("run::tests::admission_lock_wait_respects_deadline")? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    let prompt = fixture.root.join("prompt.md");
+    std::fs::write(&prompt, "reply OK")?;
+
+    with_edge(
+        &fixture.root,
+        &fixture.tree,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            provenant_config::bind_host(edge.roots)?;
+
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let _session = open(edge, &call).map_err(|fail| fail.message)?;
+
+            let target_project_id = provenant_confinement::worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &fixture.project,
+                &clock,
+                &cancel,
+                |ctx| Ok(ctx.binding.project_id()),
+            )?;
+            let reg_dir = edge
+                .roots
+                .state
+                .as_path()
+                .join("worktrees")
+                .join(target_project_id.to_string());
+            std::fs::create_dir_all(&reg_dir)?;
+
+            // Background thread acquires worktrees.lock and holds it for 5.3s
+            let (tx, rx) = std::sync::mpsc::channel();
+            let lock_dir_path = reg_dir.clone();
+            let holder = std::thread::spawn(move || {
+                let dir = Directory::open_anchor(&lock_dir_path).unwrap();
+                let clk = SystemClock::new();
+                let cnl = CancelToken::new();
+                let guard = dir
+                    .lock(
+                        std::ffi::OsStr::new("worktrees.lock"),
+                        LockMode::Exclusive,
+                        provenant_core::WaitBudget::cli(clk.mono_now(), 10).unwrap(),
+                        &cnl,
+                        &clk,
+                    )
+                    .unwrap();
+                tx.send(()).unwrap();
+                let wake = clk
+                    .mono_now()
+                    .checked_add(DurationMicros::from_micros(3_000_000))
+                    .unwrap();
+                clk.wait_until(wake).unwrap();
+                drop(guard);
+            });
+
+            rx.recv().unwrap(); // Wait until lock is held!
+
+            let mut cmd = parsed_run(&[
+                "--operation-id",
+                "lock-retry-test",
+                "--model",
+                "codex/gpt-6-luna",
+                "--mode",
+                "worktree-write",
+                "--worktree",
+                fixture.tree.to_str().unwrap(),
+                "--prompt-file",
+                prompt.to_str().unwrap(),
+                "--admission-timeout",
+                "1s",
+            ])?;
+            cmd.wait = None;
+
+            let started = clock.mono_now();
+            let reply = dispatch_with_workers(cmd, edge, &Free);
+            assert_eq!(
+                reply.result.status,
+                Status::Refused,
+                "{:?}",
+                reply.result.error
+            );
+            assert!(
+                clock
+                    .mono_now()
+                    .as_micros()
+                    .saturating_sub(started.as_micros())
+                    < 2_000_000,
+                "lock wait exceeded admission deadline"
+            );
+            holder.join().unwrap();
+
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
+fn dispatch_restart_honours_saved_admission_wake_and_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting(AtomicUsize);
+    impl WorkerObserver for Counting {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+    if reexec_test_in_lane(
+        "run::tests::dispatch_restart_honours_saved_admission_wake_and_deadline",
+    )? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    let prompt = fixture.root.join("prompt.md");
+    std::fs::write(&prompt, "reply OK")?;
+    with_edge(
+        &fixture.root,
+        &fixture.tree,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            provenant_config::bind_host(edge.roots)?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let now = clock.wall_now()?;
+            let op: OperationId = "restart-wake".parse()?;
+            session.store.save_admission_window(
+                &op,
+                run::AdmissionWindow {
+                    deadline: now.checked_add(DurationMicros::from_micros(5_000_000))?,
+                    wake_at: Some(now.checked_add(DurationMicros::from_micros(1_000_000))?),
+                },
+                &call,
+            )?;
+            let make = |id: &str| {
+                parsed_run(&[
+                    "--operation-id",
+                    id,
+                    "--model",
+                    "codex/gpt-6-luna",
+                    "--mode",
+                    "worktree-write",
+                    "--worktree",
+                    fixture.tree.to_str().unwrap(),
+                    "--prompt-file",
+                    prompt.to_str().unwrap(),
+                    "--admission-timeout",
+                    "60s",
+                ])
+            };
+            let workers = Counting(AtomicUsize::new(0));
+            let start = clock.mono_now();
+            let reply = dispatch_with_workers(make("restart-wake")?, edge, &workers);
+            assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+            assert!(
+                clock
+                    .mono_now()
+                    .as_micros()
+                    .saturating_sub(start.as_micros())
+                    >= 800_000
+            );
+            let expired: OperationId = "restart-expired".parse()?;
+            session.store.save_admission_window(
+                &expired,
+                run::AdmissionWindow {
+                    deadline: now,
+                    wake_at: Some(now),
+                },
+                &call,
+            )?;
+            let before = workers.0.load(Ordering::SeqCst);
+            let reply = dispatch_with_workers(make("restart-expired")?, edge, &workers);
+            assert_eq!(
+                reply.result.status,
+                Status::Refused,
+                "{:?}",
+                reply.result.error
+            );
+            assert_eq!(workers.0.load(Ordering::SeqCst), before);
+            Ok(())
+        },
+    )??;
+    Ok(())
 }
 
 #[test]

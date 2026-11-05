@@ -578,6 +578,7 @@ pub(super) fn validate_flat_plan(
             title: node.title.clone(),
             prompt: plans::prompt(node),
             depends_on,
+            advisory: node.advisory,
             inputs: node.inputs.clone(),
             routes,
             required_verdict: node.required_verdict.clone(),
@@ -1118,7 +1119,11 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             NodeState::Failed => last.is_some_and(|attempt| {
                 attempt.state == AttemptState::Terminal
                     && match attempt.outcome {
-                        Some(AttemptOutcome::TaskFailed | AttemptOutcome::OtherFailure) => true,
+                        Some(
+                            AttemptOutcome::TaskFailed
+                            | AttemptOutcome::OtherFailure
+                            | AttemptOutcome::ReviewRequired,
+                        ) => true,
                         Some(outcome) if outcome != AttemptOutcome::Succeeded => {
                             !historical_fallback_admissible(outcome, node.access, attempt.launched)
                                 || progress.attempts.len() == node.routes.len()

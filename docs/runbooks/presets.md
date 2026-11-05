@@ -188,7 +188,7 @@ all role briefs and defaults.
 | `generator-evaluator` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `evaluator = "senior"`, `delivery = "none"` | Senior writer, the lens list over the commit it wrote, then an evaluator that gives each finding a disposition |
 | `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `verifiers = 1`, `verifier_tier = "verifier"`, `risk_tier`, `review_shape`, `risk_tags` | One `lens.NAME` role per lens, a verifier, preferably from another model family, that tries to falsify the findings, then senior synthesis with a disposition per finding |
 | `scope-then-run` | `width = 3`, `worktree`, `write_scope = ["."]`, `base`, `spec`, `delivery = "none"` | Scouts, a senior scoping stage, a verdict gate (a blocked scope launches no writer), then `generator-evaluator` |
-| `big-batch` | `lanes`, `batch_worktree`, `base`, `spec`, `integration_branch = "batch/graph"`, `width = 4`, `read_roots = []` | Scout, one writer lane per `lanes` entry, council, principal refactor, two-round repair and review |
+| `big-batch` | `lanes`, `batch_worktree`, `base`, `spec`, `integration_branch = "batch/graph"`, `scout = 1`, `width = 4`, `read_roots = []` | Scout, one writer lane per `lanes` entry, council, principal refactor, two-round repair and review |
 | `deliver` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `delivery = "pr"`, `base`, `spec`, `checks = []`, `ci_timeout_seconds = 7200`, `max_iterations = 3`, `repair_tier = "senior"`, `decision_session`, `risk_tier`, `review_shape`, `risk_tags`, `land = 1`, `land_tier = "substantial"` | Senior writer opening a pull request, a CI gate on its head, up to `max_iterations` fresh repairs each followed by the gate, `review-council` on the newest head, then land; see [Deliver through CI to land](#deliver-through-ci-to-land) |
 
 Write list parameters in a TOML file and pass `--params-file lanes.toml`. The
@@ -588,7 +588,10 @@ concurrently. Integrate lane heads into the explicit batch branch, review its
 pinned combined commit, then use that subject for the serial principal and
 repair contexts. Existing clean ancestor contexts fast-forward safely at
 admission; divergent contexts need chair reconciliation. Automatic worktree
-provisioning is outside this workflow.
+provisioning is outside this workflow. The scout stage is advisory: failed or
+blocked scouting remains visible in graph status and does not stop the lanes.
+Set `parameters.scout=0` to skip scouting when the lanes already have specs;
+the default is `1`.
 
 Create the batch worktree on its own branch, never on the integration branch.
 Lanes, the principal and repairs all deliver into the integration branch, which
@@ -848,7 +851,12 @@ retained document and the continuation command, `provenant fabric graph
 resume --document PATH`. Waiting advances the immutable document, including
 pending CI gates, rather than reading status snapshots alone.
 
-Failures in a child fail its composite and block downstream work. An
+Failures in a child fail its composite and normally block downstream work.
+Set `advisory = true` on a stage to allow its dependants to proceed after it
+fails or is blocked; graph status retains the failure, and missing selected
+outputs are labelled unavailable. A failed advisory stage still makes the
+overall graph unsuccessful and prevents graph-level PR delivery. Graph status shows failed child outcomes; use
+`provenant fabric graph status ID --full` for attempt details. An
 exhausted bounded loop pauses for a chair decision; a synthesis does not
 override failed acceptance evidence. Confinement, writer exclusion, immutable
 sources and acceptance checks remain deterministic while the models choose

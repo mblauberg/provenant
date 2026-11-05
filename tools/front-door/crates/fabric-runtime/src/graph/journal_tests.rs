@@ -24,6 +24,12 @@ impl AttemptOwner for Owner {
 }
 #[test]
 fn delivery_retry_reopens_only_the_matching_failed_attempt() {
+    for outcome in [AttemptOutcome::OtherFailure, AttemptOutcome::ReviewRequired] {
+        assert_delivery_retry_reopens_matching_attempt(outcome);
+    }
+}
+
+fn assert_delivery_retry_reopens_matching_attempt(outcome: AttemptOutcome) {
     let temp = crate::test_support::tempdir().expect("state fixture");
     let base = std::fs::canonicalize(temp.path()).expect("absolute state");
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).expect("private state");
@@ -39,7 +45,7 @@ fn delivery_retry_reopens_only_the_matching_failed_attempt() {
             .expect("legacy fixture");
     let node = &mut legacy.checkpoint.nodes[0];
     node.state = NodeState::Failed;
-    node.attempts[0].outcome = Some(AttemptOutcome::OtherFailure);
+    node.attempts[0].outcome = Some(outcome);
     {
         let mut journal =
             FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).expect("journal");

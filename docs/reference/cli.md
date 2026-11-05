@@ -2403,6 +2403,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "description": "Create or reuse a clean local writer worktree owned by this lane", "name": "worktree_branch"}` |
 | `--head` | `{"description": "Chair-verified full commit SHA to review (must exist on the executing host)", "name": "head"}` |
 | `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
+| `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
 | `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
 | `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
@@ -2655,6 +2656,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--head` | `{"description": "Chair-verified full commit SHA to review (must exist on the executing host)", "name": "head"}` |
 | `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for task or preset graph settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
+| `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
 | `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
 | `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
@@ -2742,7 +2744,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--all` | `{"defaults": ["false"], "description": "Show every lane, newest first", "name": "all", "values": ["true", "false"]}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum lanes per page (1 to 100)", "name": "limit"}` |
 | `--cursor` | `{"conflicts": ["wait", "watch"], "description": "Continue from a previous page's cursor", "name": "cursor"}` |
-| `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "description": "Wait for settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
+| `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "description": "Wait for settlement (seconds, or a duration such as 30m). An oversized unseen default backlog is summarised with its count and newest 100 lanes", "name": "wait"}` |
 | `--condition` | `{"conflicts": ["watch"], "defaults": ["any"], "description": "Wait for any or all lanes to settle", "name": "condition", "requires": ["wait"], "values": ["any", "all"]}` |
 | `--watch` | `{"bounds": [1, 14400], "conflicts": ["all", "states", "cursor"], "description": "Print one line per lane state change until every selected lane has settled or this many seconds pass (default 14400)", "name": "watch"}` |
 | `--state` | `{"conflicts": ["wait", "watch"], "description": "Keep lanes in any of these states", "name": "states", "repeatable": true, "values": ["queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |

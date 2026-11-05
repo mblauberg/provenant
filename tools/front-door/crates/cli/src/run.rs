@@ -6,7 +6,8 @@ use crate::{
     Stats, Switch, Target, Trace, limits,
 };
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WallTime,
+    ActorId, AttemptId, CancelToken, Clock, DeliveryId, DurationMicros, OperationId, Roots, RunId,
+    TaskId, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::{clock::SystemClock, fs::entropy_128};
@@ -376,6 +377,7 @@ impl run::Providers for Registry<'_> {
             };
         Ok(assess_settlement_retry(
             &routing,
+            task,
             record,
             decoded,
             policy_attempt,

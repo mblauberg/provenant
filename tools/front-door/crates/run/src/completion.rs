@@ -281,7 +281,9 @@ mod tests {
             }
             Ok(ResultAssessment {
                 retry: Some(PolicyRetry {
-                    schema_version: 1,
+                    schema_version: 2,
+                    cause: crate::PolicyCause::Capacity,
+                    action: crate::PolicyAction::Retry,
                     route: record.requested_route.clone(),
                     resume: false,
                     max_attempts: 2,
@@ -432,6 +434,113 @@ mod tests {
         Ok(())
     }
 
+    struct StoppingResult {
+        outcome: Outcome,
+        cause: PolicyCause,
+    }
+    impl Providers for StoppingResult {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            _: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
+            Err("holder-only fixture does not launch".into())
+        }
+        fn decode(
+            &self,
+            route: &RouteRecord,
+            _: &[u8],
+            _: &provenant_supervisor::custody::ExitObservation,
+            _: &Path,
+        ) -> std::result::Result<Decoded, String> {
+            Ok(Decoded {
+                outcome: self.outcome,
+                complete: true,
+                result: "Result policy fixture".into(),
+                observed_route: Some(route.clone()),
+                ..decoded()
+            })
+        }
+        fn assess_result(
+            &self,
+            _: &TaskRequest,
+            _: &AttemptRecord,
+            _: &Decoded,
+            _: Option<&Handoff>,
+            _: Option<&HolderContext>,
+            _: u64,
+        ) -> std::result::Result<ResultAssessment, String> {
+            Ok(ResultAssessment {
+                cause: Some(self.cause),
+                refusal: (self.cause == PolicyCause::Unfinished
+                    || self.outcome == Outcome::Succeeded)
+                    .then(|| "result policy refused".into()),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn holder_records_stops_and_replay_preserves_outcomes() -> TestResult {
+        for cause in [PolicyCause::ResultCheck, PolicyCause::Unfinished] {
+            for outcome in [Outcome::Succeeded, Outcome::Uncommitted, Outcome::Failed] {
+                for interrupted in [false, true] {
+                    let temp = tempfile::tempdir()?;
+                    let clock = clock();
+                    let cancel = provenant_core::CancelToken::new();
+                    let call = call(&clock, &cancel);
+                    let store = RunStore::open(&context(temp.path())?, &call)?;
+                    let input = input();
+                    store.create(&input, &call)?;
+                    seal_observation(&store, &input, &exit())?;
+                    let id = input.attempts[0].attempt_id;
+                    let mut old = store.record(id, &call)?;
+                    let route = crate::tests::route();
+                    old.resolved_route = Some(route.clone());
+                    old.applied_route = Some(route);
+                    old.provider_launched = Some(true);
+                    old.state = AttemptState::Running {
+                        extra: Default::default(),
+                    };
+                    store.db.execute(
+                        "UPDATE attempts SET record=?1 WHERE id=?2",
+                        rusqlite::params![crate::db::bytes(&old)?, id.to_string()],
+                    )?;
+                    let attempt = store.attempt_dir(old.run_id, id, false)?;
+                    let provider = StoppingResult { outcome, cause };
+                    if interrupted {
+                        // Crash boundary: decision sealed, terminal intent not
+                        // yet written. Recovery must re-decode the provider result.
+                        store.stage_policy_stop(&old, cause)?;
+                    }
+                    let terminal = store.finish(id, &attempt, &exit(), &provider, &call)?;
+                    let expected =
+                        if cause == PolicyCause::ResultCheck && outcome == Outcome::Uncommitted {
+                            Outcome::Uncommitted
+                        } else {
+                            Outcome::Failed
+                        };
+                    assert!(
+                        matches!(terminal.state, AttemptState::Terminal { outcome, .. } if outcome == expected),
+                        "{cause:?} {outcome:?} interrupted={interrupted}: {:?}",
+                        terminal.state
+                    );
+                    let decision = store
+                        .staged_policy_retry(&terminal)?
+                        .ok_or("missing stop")?;
+                    assert_eq!(
+                        (decision.cause, decision.action),
+                        (cause, PolicyAction::Stop)
+                    );
+                    assert_eq!(store.policy_tail(id, &call)?.attempt_id, id);
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn final_handoff_redacts_decoded_strings_and_revalidates_bounds() -> TestResult {
         for prefix in ["\n", "\t"] {
@@ -513,7 +622,9 @@ mod tests {
         result.result = Handoff::from_json(&snapshot("stopped_early"))?.fenced();
         store.capture_handoff(&attempt, &old, &result)?;
         let retry = PolicyRetry {
-            schema_version: 1,
+            schema_version: 2,
+            cause: crate::PolicyCause::Capacity,
+            action: crate::PolicyAction::Retry,
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,

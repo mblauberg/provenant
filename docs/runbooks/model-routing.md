@@ -75,8 +75,24 @@ matching line and the one after it only if the adapter did not accept the run.
 The refusal is scoped to `opencode-go`, or
 `opencode-free` when that text names the free tier or free usage; a retry
 interval with a unit (or a bare `retry-after` header value, in seconds) sets
-the refusal expiry. A pool alias is one route entry, so quota on its last
-member reports `usage_limited` rather than re-dispatching.
+the refusal expiry.
+
+A graph node can move to its next configured route after the host verifies a
+local preparation refusal and released custody. The earlier attempt remains in
+the receipt history. Once a provider has launched, the graph does not switch
+routes automatically; a quota-stopped writer with an unfinished handoff may
+continue on another eligible account.
+
+The settlement retry allowance is `domains.routing.settlement_retries`
+(shipped default **2**). Set `retry.retries` on a preset or graph document for
+its default, or on a node to override it: node → preset → host configuration →
+shipped default. Zero disables settlement successors. For example, a preset
+may declare `retry = { retries = 1 }`, and a leaf stage may declare
+`retry = { retries = 0 }`. `fabric graph status ID --full` shows the effective
+value and its origin. Admission seals the allowance; restart, same-key
+observation, admission reprobes and verified pre-launch preparation fallbacks
+do not renew or spend it.
+
 `provenant quota` includes a recorded refusal's expiry in `resets_at` using
 RFC 3339 and shows its time in the host's local zone. Human output adds the
 local clock time (and weekday when the expiry is not today); a refusal without

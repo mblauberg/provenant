@@ -15,6 +15,9 @@ pub struct LaunchRetry {
     /// Failed launches so far, counting the initial launch.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub failures: u8,
+    /// Absolute end of this attempt's launch admission window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<provenant_core::WallTime>,
     /// Earliest next launch, for the host tick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_at: Option<provenant_core::WallTime>,
@@ -253,6 +256,9 @@ pub struct GraphNode {
     pub prompt: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Allow dependants to proceed after this node fails or is blocked.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub advisory: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<GraphInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -974,6 +980,8 @@ pub struct Replay<'a> {
 
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
+    /// Remaining portion of the graph's single infrastructure allowance.
+    pub settlement_retries: Option<u8>,
     /// Models selected for earlier attempts of this node.
     pub prior_attempts: &'a [String],
     /// Sibling families to avoid where possible, never a routing requirement.

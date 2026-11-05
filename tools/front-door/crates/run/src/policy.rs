@@ -1,7 +1,7 @@
 //! Bounded policy retries stay in the same run, preserving each failed receipt.
 use crate::{
     artifacts::{artifact_path, read_sealed, seal},
-    db::{bytes, decode, sql_int},
+    db::{bytes, decode, decode_unversioned, sql_int},
     store::insert_event,
     *,
 };
@@ -15,9 +15,30 @@ use serde::{Deserialize, Serialize};
 /// queue successors without end; routing's settlement retry limit stays below it.
 pub const POLICY_ATTEMPT_CEILING: u64 = 33;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyCause {
+    ResultCheck,
+    Unfinished,
+    Capacity,
+    Quota,
+    AuthRequired,
+    AdapterUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyAction {
+    Stop,
+    Resume,
+    Retry,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyRetry {
     pub schema_version: u64,
+    pub cause: PolicyCause,
+    pub action: PolicyAction,
     pub route: RequestedRoute,
     pub resume: bool,
     /// Attempts in this run including its first, capped again by the store.
@@ -29,8 +50,17 @@ pub struct PolicyRetry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before_unix_seconds: Option<i64>,
 }
+fn decode_policy_decision(raw: &[u8]) -> Result<PolicyRetry> {
+    let decision: PolicyRetry = decode_unversioned(raw)?;
+    if decision.schema_version != 2 {
+        return Err(RunError::Validation("policy decision schema"));
+    }
+    Ok(decision)
+}
+
 #[derive(Default)]
 pub struct ResultAssessment {
+    pub cause: Option<PolicyCause>,
     pub refusal: Option<String>,
     pub retry: Option<PolicyRetry>,
     /// Appended to the settled reason when the retry is staged.
@@ -70,11 +100,8 @@ fn handoff_brief(handoff: &provenant_records::handoff::Handoff) -> String {
 }
 
 impl RunStore {
-    pub(crate) fn policy_attempt_number(
-        &self,
-        record: &AttemptRecord,
-        call: &Request<'_>,
-    ) -> Result<u64> {
+    /// Ordinal in this task's run, including all its policy successors.
+    pub fn policy_attempt_number(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<u64> {
         call.check()?;
         let first: Option<i64> = {
             self.db.query_row(
@@ -101,7 +128,7 @@ impl RunStore {
     pub fn staged_policy_retry(&self, record: &AttemptRecord) -> Result<Option<PolicyRetry>> {
         let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
         read_sealed(&directory, AttemptFile::PolicyRetry.name(), RECORD_LIMIT)?
-            .map(|raw| decode(&raw))
+            .map(|raw| decode_policy_decision(&raw))
             .transpose()
     }
     /// Follow only host-authored policy successors. Exact record/output APIs
@@ -146,7 +173,7 @@ impl RunStore {
         Err(RunError::Validation("policy successor chain limit"))
     }
     /// Seal the retry decision; true when this call staged it.
-    pub(crate) fn stage_policy_retry(
+    pub fn stage_policy_retry(
         &self,
         record: &AttemptRecord,
         retry: &PolicyRetry,
@@ -166,7 +193,7 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("policy retry task missing"))?;
-        if retry.schema_version != 1
+        if retry.schema_version != 2
             || !retry_within_authority(retry, task, record)
             || retry.max_attempts > POLICY_ATTEMPT_CEILING
             || retry.max_attempts < 2
@@ -209,6 +236,33 @@ impl RunStore {
         Ok(true)
     }
 
+    pub(crate) fn stage_policy_stop(
+        &self,
+        record: &AttemptRecord,
+        cause: PolicyCause,
+    ) -> Result<()> {
+        if self.staged_policy_retry(record)?.is_none() {
+            let decision = PolicyRetry {
+                schema_version: 2,
+                cause,
+                action: PolicyAction::Stop,
+                route: record.requested_route.clone(),
+                resume: false,
+                max_attempts: 1,
+                instruction: String::new(),
+                not_before_unix_seconds: None,
+            };
+            let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+            seal(
+                &directory,
+                AttemptFile::PolicyRetry.name(),
+                &bytes(&decision)?,
+                RECORD_LIMIT,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Prepare artefacts before the terminal transaction. Its INSERT and the
     /// old attempt's terminal UPDATE are atomic, so readers never see a closed
     /// run between a bad result and its replacement.
@@ -246,7 +300,10 @@ impl RunStore {
         else {
             return Ok(None);
         };
-        let retry: PolicyRetry = decode(&raw)?;
+        let retry = decode_policy_decision(&raw)?;
+        if retry.action == PolicyAction::Stop {
+            return Ok(None);
+        }
         if self.policy_attempt_number(old, call)? >= retry.max_attempts
             || retry.max_attempts > POLICY_ATTEMPT_CEILING
         {
@@ -428,6 +485,69 @@ mod tests {
     use crate::tests::{call, clock, context, exit, input, publication, seal_observation};
 
     #[test]
+    fn policy_decision_requires_typed_cause_and_action()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let decision = PolicyRetry {
+            schema_version: 2,
+            cause: PolicyCause::Quota,
+            action: PolicyAction::Retry,
+            route: RequestedRoute::Model {
+                extra: Default::default(),
+                provider: "codex".into(),
+                model: "x".into(),
+                effort: None,
+            },
+            resume: false,
+            max_attempts: 2,
+            instruction: "Continue".into(),
+            not_before_unix_seconds: None,
+        };
+        let value = serde_json::to_value(decision)?;
+        assert!(decode_policy_decision(&serde_json::to_vec(&value)?).is_ok());
+        let mut wrong_version = value.clone();
+        wrong_version["schema_version"] = serde_json::json!(1);
+        assert!(decode_policy_decision(&serde_json::to_vec(&wrong_version)?).is_err());
+        for field in ["cause", "action"] {
+            let mut missing = value.clone();
+            missing
+                .as_object_mut()
+                .ok_or("decision object")?
+                .remove(field);
+            assert!(
+                serde_json::from_value::<PolicyRetry>(missing).is_err(),
+                "{field}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_stop_is_sealed_without_successor()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        seal_observation(&store, &input, &exit())?;
+        let old = store.record(input.attempts[0].attempt_id, &call)?;
+        store.stage_policy_stop(&old, PolicyCause::Quota)?;
+        store.publish_terminal(old.attempt_id, 1, &publication(), &exit(), &call)?;
+        let decision = store.staged_policy_retry(&old)?.unwrap();
+        assert_eq!(
+            (decision.cause, decision.action),
+            (PolicyCause::Quota, PolicyAction::Stop)
+        );
+        assert_eq!(
+            store.policy_tail(old.attempt_id, &call)?.attempt_id,
+            old.attempt_id
+        );
+        Ok(())
+    }
+
+    #[test]
     fn retry_disclosure_scans_decoded_handoff_strings()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -440,7 +560,9 @@ mod tests {
         let id = input.attempts[0].attempt_id;
         let old = store.record(id, &call)?;
         let retry = PolicyRetry {
-            schema_version: 1,
+            schema_version: 2,
+            cause: PolicyCause::Capacity,
+            action: PolicyAction::Retry,
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,
@@ -503,7 +625,9 @@ mod tests {
         let id = input.attempts[0].attempt_id;
         let old = store.record(id, &call)?;
         let retry = PolicyRetry {
-            schema_version: 1,
+            schema_version: 2,
+            cause: PolicyCause::Capacity,
+            action: PolicyAction::Retry,
             route: RequestedRoute::Model {
                 extra: Default::default(),
                 provider: "codex".into(),
@@ -516,6 +640,8 @@ mod tests {
             not_before_unix_seconds: None,
         };
         store.stage_policy_retry(&old, &retry, &call)?;
+        let sealed = store.staged_policy_retry(&old)?.unwrap();
+        assert_eq!((sealed.cause, sealed.action), (retry.cause, retry.action));
         let mut changed_policy = retry.clone();
         changed_policy.route = RequestedRoute::Model {
             extra: Default::default(),
@@ -531,6 +657,22 @@ mod tests {
         let mut publication = publication();
         publication.outcome = Outcome::Failed;
         publication.reason = Some("empty restricted result".into());
+        // Fail after the terminal update and successor insert to prove both
+        // roll back together while the typed sealed decision survives replay.
+        store.db.execute_batch("CREATE TRIGGER reject_policy_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture transaction failure'); END;")?;
+        assert!(
+            store
+                .publish_terminal(id, 1, &publication, &exit(), &call)
+                .is_err()
+        );
+        assert_eq!(store.record(id, &call)?, old);
+        assert_eq!(store.pending_attempts(input.run_id, &call)?.len(), 1);
+        assert_eq!(store.policy_tail(id, &call)?.attempt_id, id);
+        let sealed = store.staged_policy_retry(&old)?.unwrap();
+        assert_eq!((sealed.cause, sealed.action), (retry.cause, retry.action));
+        store
+            .db
+            .execute_batch("DROP TRIGGER reject_policy_event;")?;
         let terminal = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
         assert!(matches!(
             terminal.state,
@@ -545,6 +687,10 @@ mod tests {
         let next = &queued[0];
         assert_eq!(next.attempt_number, 2);
         assert_eq!(store.policy_tail(id, &call)?.attempt_id, next.attempt_id);
+        assert_eq!(
+            Service::new(&store).live_tail(id, &call)?.attempt_id,
+            next.attempt_id
+        );
         assert_eq!(next.retry_of, Some(id));
         assert_eq!(next.authority_digest, old.authority_digest);
         assert_eq!(next.requested_route, retry.route);
@@ -575,7 +721,9 @@ mod tests {
         let input = input();
         store.create(&input, &call(&clock, &cancel))?;
         let retry = PolicyRetry {
-            schema_version: 1,
+            schema_version: 2,
+            cause: PolicyCause::Capacity,
+            action: PolicyAction::Retry,
             route: store
                 .record(input.attempts[0].attempt_id, &call(&clock, &cancel))?
                 .requested_route,
@@ -612,6 +760,10 @@ mod tests {
             )?;
             let queued = store.pending_attempts(input.run_id, &call(&clock, &cancel))?;
             assert_eq!(queued.len(), 1);
+            assert_eq!(
+                store.policy_attempt_number(&queued[0], &call(&clock, &cancel))?,
+                number
+            );
             assert_eq!(queued[0].attempt_number, number);
             assert_eq!(queued[0].retry_of, Some(id));
             id = queued[0].attempt_id;
@@ -641,7 +793,9 @@ mod tests {
         store.create(&input, &call)?;
         let old = store.record(input.attempts[0].attempt_id, &call)?;
         let retry = PolicyRetry {
-            schema_version: 1,
+            schema_version: 2,
+            cause: PolicyCause::Capacity,
+            action: PolicyAction::Retry,
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,
@@ -709,7 +863,9 @@ mod tests {
         let old = store.record(resume.attempt_id, &call)?;
         assert_eq!(old.attempt_number, 2);
         let retry = PolicyRetry {
-            schema_version: 1,
+            schema_version: 2,
+            cause: PolicyCause::Capacity,
+            action: PolicyAction::Retry,
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,
@@ -740,7 +896,9 @@ mod tests {
         store.stage_policy_retry(
             &old,
             &PolicyRetry {
-                schema_version: 1,
+                schema_version: 2,
+                cause: PolicyCause::Capacity,
+                action: PolicyAction::Retry,
                 route: old.requested_route.clone(),
                 resume: false,
                 max_attempts: 2,
@@ -761,6 +919,138 @@ mod tests {
         store.publish_terminal(id, 1, &publication, &observed, &call)?;
         assert!(store.pending_attempts(input.run_id, &call)?.is_empty());
         assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
+        Ok(())
+    }
+
+    #[test]
+    fn writer_continuation_prepares_pinned_predecessor_task()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        writer_continuation_task(true)
+    }
+
+    #[test]
+    fn writer_continuation_marks_unchanged_predecessor_head()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        writer_continuation_task(false)
+    }
+
+    fn writer_continuation_task(
+        committed: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let store = RunStore::open(&context(temp.path())?, &call(&clock, &cancel))?;
+        let mut input = input();
+        let source_head = "1".repeat(40);
+        let committed_head =
+            provenant_core::GitOid::parse(&if committed { "2" } else { "1" }.repeat(40))?;
+        input.request.tasks[0].writer = Some(WriterRequest {
+            extra: Default::default(),
+            project: temp.path().join("project"),
+            worktree: temp.path().join("worktree"),
+        });
+        input.request.tasks[0].head = Some(source_head.clone());
+        store.create(&input, &call(&clock, &cancel))?;
+        seal_observation(&store, &input, &exit())?;
+        let id = input.attempts[0].attempt_id;
+        let old = store.record(id, &call(&clock, &cancel))?;
+        store.stage_policy_retry(
+            &old,
+            &PolicyRetry {
+                schema_version: 2,
+                cause: PolicyCause::Quota,
+                action: PolicyAction::Retry,
+                route: old.requested_route.clone(),
+                resume: false,
+                max_attempts: 2,
+                instruction: "Continue".into(),
+                not_before_unix_seconds: None,
+            },
+            &call(&clock, &cancel),
+        )?;
+        let attempt_dir = store.attempt_dir(input.run_id, id, false)?;
+        let writer_terminal = crate::writer::WriterTerminal {
+            schema_version: 1,
+            head: committed_head,
+            protected_paths: vec![],
+        };
+        crate::artifacts::seal(
+            &attempt_dir,
+            "writer-terminal.json",
+            &crate::db::bytes(&writer_terminal)?,
+            RECORD_LIMIT,
+        )?;
+        let mut publication = publication();
+        publication.outcome = Outcome::QuotaLimited;
+        let terminal =
+            store.publish_terminal(id, 1, &publication, &exit(), &call(&clock, &cancel))?;
+        assert_eq!(terminal.head, Some(committed_head));
+        let queued = store.pending_attempts(input.run_id, &call(&clock, &cancel))?;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].retry_of, Some(id));
+        // A terminal publication precedes release of guardian custody. Create
+        // and release its lock so the successor can verify that boundary.
+        let custody = attempt_dir.try_lock(
+            std::ffi::OsStr::new(AttemptFile::CustodyLock.name()),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        drop(custody);
+
+        struct CaptureProvider {
+            task: std::cell::RefCell<Option<TaskRequest>>,
+        }
+        impl Providers for CaptureProvider {
+            fn prepare(
+                &self,
+                task: &TaskRequest,
+                _prompt: &str,
+                _paths: &LaunchPaths,
+                _resume: Option<&AttemptRecord>,
+            ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
+                *self.task.borrow_mut() = Some(task.clone());
+                Err("stop after capturing effective task".into())
+            }
+            fn decode(
+                &self,
+                _route: &RouteRecord,
+                _stdout: &[u8],
+                _exit: &provenant_supervisor::custody::ExitObservation,
+                _provider_state: &std::path::Path,
+            ) -> std::result::Result<Decoded, String> {
+                unreachable!()
+            }
+        }
+        let provider = CaptureProvider {
+            task: std::cell::RefCell::new(None),
+        };
+        clock.advance(provenant_core::DurationMicros::from_micros(200))?;
+        let started = store.start(
+            input.run_id,
+            &provider,
+            &|_, _| unreachable!(),
+            &call(&clock, &cancel),
+        )?;
+        assert!(
+            matches!(
+                started.as_slice(),
+                [Started::Refused {
+                    kind: RefusalKind::Preparation,
+                    ..
+                }]
+            ),
+            "{started:?}"
+        );
+        let captured = provider
+            .task
+            .borrow()
+            .clone()
+            .expect("provider received task");
+        assert_eq!(
+            captured.head.as_deref(),
+            Some(committed_head.to_string().as_str())
+        );
+        assert_eq!(captured.source_head.as_deref(), Some(source_head.as_str()));
         Ok(())
     }
 }

@@ -1,0 +1,2116 @@
+{
+  "context": {
+    "pattern": "big-batch",
+    "preset": "big-batch"
+  },
+  "graph_id": "preset-71027cd664e3f76b6b67c5f934b26832",
+  "integration_branch": "batch/graph",
+  "nodes": [
+    {
+      "access": "read_only",
+      "composite": {
+        "exports": [
+          {
+            "node": "lane-one",
+            "outputs": [
+              "result",
+              "findings"
+            ]
+          },
+          {
+            "node": "lane-two",
+            "outputs": [
+              "result",
+              "findings"
+            ]
+          }
+        ],
+        "nodes": [
+          {
+            "access": "read_only",
+            "composite": {
+              "exports": [
+                {
+                  "node": "implement",
+                  "outputs": [
+                    "branch",
+                    "commit"
+                  ]
+                },
+                {
+                  "node": "evaluate",
+                  "outputs": [
+                    "result",
+                    "findings",
+                    "verdict"
+                  ]
+                }
+              ],
+              "nodes": [
+                {
+                  "acceptance_checks": [
+                    "Run targeted tests and required static checks",
+                    "Commit the completed slice"
+                  ],
+                  "access": "worktree_write",
+                  "delivery": "integrate:batch/graph",
+                  "depends_on": [],
+                  "id": "implement",
+                  "prompt": "You implement one bounded slice inside the write scope, within the authority envelope below.\n\nImplement one bounded slice: brief\nSpec (acceptance criteria): \nKeep changes within the supplied write scope. Run targeted checks and commit.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\n\nAuthority envelope. The objective above and the acceptance criteria are\napproved. You hold authority to make any engineering decision that serves them\nand is reversible: names, structure, tests, helper code and the order of work.\nDo not stop to ask about those. Make the call, state it as an assumption and\nrecord it in your final report under DECISIONS (decision, reason, how to\nreverse). Ask only when the decision belongs to the owner (product direction,\nscope, cost, irreversible or externally visible effects) or when the work needs\nauthority beyond the write scope and this envelope; then report NEEDS-USER\nwith the specific question and the option you would take.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Run targeted tests and required static checks\n- Commit the completed slice",
+                  "role": "write.implement",
+                  "role_digest": "sha256:66a47c337c54fd277c461a71e017d90f9e2c84410669226509ca05391049b66a",
+                  "route": {
+                    "alias": "senior"
+                  },
+                  "source": {
+                    "commit": "HEAD",
+                    "type": "commit"
+                  },
+                  "title": "implement",
+                  "write_scope": [
+                    "."
+                  ]
+                },
+                {
+                  "access": "read_only",
+                  "composite": {
+                    "exports": [
+                      {
+                        "node": "lens-correctness-spec",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-simplicity",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      }
+                    ],
+                    "min_successful": 1,
+                    "nodes": [
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "distinct_from": "writer",
+                        "id": "lens-correctness-spec",
+                        "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
+                            "ref": "skill:code-review/references/lenses/correctness-spec.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.correctness-spec",
+                        "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-correctness-spec"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-simplicity",
+                        "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- Where does over-engineering add complexity beyond the current need?\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:0b720108a8d2924a4952a3e79ad5e38e0f815e170a30ac7db6a06d319567f77d",
+                            "ref": "skill:code-review/references/lenses/simplicity.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.simplicity",
+                        "role_digest": "sha256:e0adcb44b1fa016a1700e35f8379c381bf84f109f70d4562ca7ffebc9dd8ea82",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-simplicity"
+                      }
+                    ]
+                  },
+                  "depends_on": [
+                    "implement"
+                  ],
+                  "id": "lens",
+                  "inputs": [
+                    {
+                      "node": "implement",
+                      "outputs": [
+                        "result"
+                      ]
+                    }
+                  ],
+                  "kind": "composite",
+                  "source": {
+                    "node": "implement",
+                    "type": "node"
+                  }
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [
+                    "lens",
+                    "implement"
+                  ],
+                  "dispositions": [
+                    "accepted",
+                    "rejected",
+                    "deferred"
+                  ],
+                  "id": "evaluate",
+                  "inputs": [
+                    {
+                      "node": "lens",
+                      "outputs": [
+                        "findings"
+                      ]
+                    },
+                    {
+                      "node": "implement",
+                      "outputs": [
+                        "findings"
+                      ]
+                    }
+                  ],
+                  "kind": "synthesise",
+                  "prompt": "You evaluate a writer's commit from its lens findings and decide whether it is accepted.\n\nEvaluate the implementation of: brief\nSpec (acceptance criteria): \nWeigh the lens findings against the evidence. Give every finding exactly one\ndisposition with a one-line reason: accepted, rejected or deferred. End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"id\", \"disposition\" and \"reason\". Copy the upstream qualified id\nexactly; a bare id works only when unambiguous. These three fields suffice for\nupstream findings; descriptive fields are inherited. New findings require\nseverity, file, summary and status as well. Emit one\nexact VERDICT: PASS only when no accepted finding remains, otherwise\nVERDICT: FAIL.\n",
+                  "role": "review.evaluator",
+                  "role_digest": "sha256:0fbf01f2902e4b4fa6417287dd573e381f40366e54bfe465b5cecabc2025a3a3",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "source": {
+                    "node": "implement",
+                    "type": "node"
+                  },
+                  "title": "evaluate"
+                }
+              ]
+            },
+            "depends_on": [],
+            "id": "lane-one",
+            "kind": "composite"
+          },
+          {
+            "access": "read_only",
+            "composite": {
+              "exports": [
+                {
+                  "node": "implement",
+                  "outputs": [
+                    "branch",
+                    "commit"
+                  ]
+                },
+                {
+                  "node": "evaluate",
+                  "outputs": [
+                    "result",
+                    "findings",
+                    "verdict"
+                  ]
+                }
+              ],
+              "nodes": [
+                {
+                  "acceptance_checks": [
+                    "Run targeted tests and required static checks",
+                    "Commit the completed slice"
+                  ],
+                  "access": "worktree_write",
+                  "delivery": "integrate:batch/graph",
+                  "depends_on": [],
+                  "id": "implement",
+                  "prompt": "You implement one bounded slice inside the write scope, within the authority envelope below.\n\nImplement one bounded slice: brief\nSpec (acceptance criteria): \nKeep changes within the supplied write scope. Run targeted checks and commit.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\n\nAuthority envelope. The objective above and the acceptance criteria are\napproved. You hold authority to make any engineering decision that serves them\nand is reversible: names, structure, tests, helper code and the order of work.\nDo not stop to ask about those. Make the call, state it as an assumption and\nrecord it in your final report under DECISIONS (decision, reason, how to\nreverse). Ask only when the decision belongs to the owner (product direction,\nscope, cost, irreversible or externally visible effects) or when the work needs\nauthority beyond the write scope and this envelope; then report NEEDS-USER\nwith the specific question and the option you would take.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Run targeted tests and required static checks\n- Commit the completed slice",
+                  "role": "write.implement",
+                  "role_digest": "sha256:66a47c337c54fd277c461a71e017d90f9e2c84410669226509ca05391049b66a",
+                  "route": {
+                    "alias": "senior"
+                  },
+                  "source": {
+                    "commit": "HEAD",
+                    "type": "commit"
+                  },
+                  "title": "implement",
+                  "write_scope": [
+                    "."
+                  ]
+                },
+                {
+                  "access": "read_only",
+                  "composite": {
+                    "exports": [
+                      {
+                        "node": "lens-correctness-spec",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-simplicity",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      }
+                    ],
+                    "min_successful": 1,
+                    "nodes": [
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "distinct_from": "writer",
+                        "id": "lens-correctness-spec",
+                        "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
+                            "ref": "skill:code-review/references/lenses/correctness-spec.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.correctness-spec",
+                        "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-correctness-spec"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-simplicity",
+                        "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- Where does over-engineering add complexity beyond the current need?\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:0b720108a8d2924a4952a3e79ad5e38e0f815e170a30ac7db6a06d319567f77d",
+                            "ref": "skill:code-review/references/lenses/simplicity.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.simplicity",
+                        "role_digest": "sha256:e0adcb44b1fa016a1700e35f8379c381bf84f109f70d4562ca7ffebc9dd8ea82",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-simplicity"
+                      }
+                    ]
+                  },
+                  "depends_on": [
+                    "implement"
+                  ],
+                  "id": "lens",
+                  "inputs": [
+                    {
+                      "node": "implement",
+                      "outputs": [
+                        "result"
+                      ]
+                    }
+                  ],
+                  "kind": "composite",
+                  "source": {
+                    "node": "implement",
+                    "type": "node"
+                  }
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [
+                    "lens",
+                    "implement"
+                  ],
+                  "dispositions": [
+                    "accepted",
+                    "rejected",
+                    "deferred"
+                  ],
+                  "id": "evaluate",
+                  "inputs": [
+                    {
+                      "node": "lens",
+                      "outputs": [
+                        "findings"
+                      ]
+                    },
+                    {
+                      "node": "implement",
+                      "outputs": [
+                        "findings"
+                      ]
+                    }
+                  ],
+                  "kind": "synthesise",
+                  "prompt": "You evaluate a writer's commit from its lens findings and decide whether it is accepted.\n\nEvaluate the implementation of: brief\nSpec (acceptance criteria): \nWeigh the lens findings against the evidence. Give every finding exactly one\ndisposition with a one-line reason: accepted, rejected or deferred. End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"id\", \"disposition\" and \"reason\". Copy the upstream qualified id\nexactly; a bare id works only when unambiguous. These three fields suffice for\nupstream findings; descriptive fields are inherited. New findings require\nseverity, file, summary and status as well. Emit one\nexact VERDICT: PASS only when no accepted finding remains, otherwise\nVERDICT: FAIL.\n",
+                  "role": "review.evaluator",
+                  "role_digest": "sha256:0fbf01f2902e4b4fa6417287dd573e381f40366e54bfe465b5cecabc2025a3a3",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "source": {
+                    "node": "implement",
+                    "type": "node"
+                  },
+                  "title": "evaluate"
+                }
+              ]
+            },
+            "depends_on": [],
+            "id": "lane-two",
+            "kind": "composite"
+          }
+        ]
+      },
+      "depends_on": [],
+      "id": "lanes",
+      "kind": "composite"
+    },
+    {
+      "access": "read_only",
+      "composite": {
+        "exports": [
+          {
+            "node": "synthesis",
+            "outputs": [
+              "result",
+              "findings",
+              "verdict",
+              "commit"
+            ]
+          }
+        ],
+        "nodes": [
+          {
+            "access": "read_only",
+            "depends_on": [],
+            "id": "subject",
+            "prompt": "You frame an immutable review subject. Do not edit files.\n\nFrame the immutable review subject for: brief\nBase (diff reference): \nSpec (acceptance criteria): \nIdentify acceptance criteria and risk areas from the pinned source commit,\nreading the spec where one is named. Do not edit files. Subsequent independent\nlenses review this exact commit against the base and the spec.\n",
+            "role": "plan.review",
+            "role_digest": "sha256:cc9b118bf74049c200dc2e053a9d30de01f36479c4688392153484bcf832a60c",
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
+            "source": {
+              "type": "integration"
+            },
+            "title": "subject"
+          },
+          {
+            "access": "read_only",
+            "composite": {
+              "exports": [
+                {
+                  "node": "lens-correctness-spec",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "lens-tests",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "lens-design-fit-reuse",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "lens-simplicity",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "lens-reliability",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "lens-conventions-readability",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "lens-refactor-cleanup",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "lens-flexibility",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                }
+              ],
+              "min_successful": 1,
+              "nodes": [
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "distinct_from": "writer",
+                  "id": "lens-correctness-spec",
+                  "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
+                      "ref": "skill:code-review/references/lenses/correctness-spec.md",
+                      "when": "always"
+                    }
+                  ],
+                  "require_findings": true,
+                  "role": "lens.correctness-spec",
+                  "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "title": "lens-correctness-spec"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-tests",
+                  "prompt": "Lens tests. Check that tests prove the behaviour and would fail without it.\n\nLens: tests. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\n\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: tests\n\nJudge each test by the behaviour it proves and the defect it would catch.\nUse the test-design judgement and boundary references for the full standard.\n\n- Check that assertions observe outcomes and use an oracle independent of the\n  implementation. Flag helpers that ignore their argument.\n- Catch vacuous passes: early returns, fixtures listed as tests, or a test body\n  that never reaches its assertion.\n- Make skips visible. A required test must fail closed when its dependency is\n  unavailable.\n- Do not use real-time waits or sleeps as proof when a barrier, injected clock,\n  timeout or limit can prove the behaviour.\n- Keep wall-clock performance assertions out of the default test run.\n- Question oversized fixtures that exist only to cross a hard-coded limit.\n- Favour pruning. Deleting a rigid, duplicate or implementation-pinned test with\n  a stated reason is good work; flag a deletion only when it removes the sole\n  check of a spec clause.\n- Flag tests pinned to the implementation (private call counts, internal\n  structure) that would fail on a behaviour-preserving refactor.\n- Flag a behaviour proved again at another level without a distinct defect, and\n  net test growth with no new behaviour.\n- Merge near-duplicate cases into table-driven tests when that stays readable.\n- Verify test-runner filters and config names against tests that exist.\n- Flag each new test likely to take more than about one second.\n- Reject an assertion that encodes a spec clause being loosened or skipped to\n  get a green run.\n- Do not mock the unit under test or copy expected values from its output.\n- Ensure a test name does not promise a bound or behaviour its body never checks.\n- Map acceptance criteria to tests and cite the exact command and result used.\n\n\n# Test judgement\n\n- A typed refusal code survives wording changes; an assertion on an error sentence fails on harmless edits. Assert the code.\n- An enum can exclude an invalid state; a test constructing that state through an unsafe escape adds no evidence about ordinary callers.\n- One table-driven contract test can cover input variations; copied tests for each value add maintenance without a distinct defect.\n- A property over parse and serialise round trips covers an invariant; a golden file is useful when the actual wire representation is itself a contract.\n- A public boundary test survives internal reorganisation; call-count tests of owned collaborators constrain the implementation.\n- An independent acceptance test gets expected outcomes from the spec; copying output from the implementation can make both share the same mistake.\n\n## Test safeguards\n\n- Agent-written suites grow faster than behaviour. Before adding a test, look for one to extend, merge or delete; a net-negative test diff is often the right result.\n- Prove each behaviour once, at the lowest boundary that can; do not repeat it at unit, integration and end-to-end level.\n- Every test asserts observable behaviour; printed values alone are not an oracle.\n- Derive expected values from the spec, never from the implementation's current output.\n- An assertion helper must fail on a known-bad input; prove that once when writing it.\n- Declare each test's size: small is hermetic and about 1 s or less; medium uses a local filesystem or DB; large is opt-in. Never wait out a real timeout or sleep as proof; inject clocks, busy timeouts and limits.\n- Compare unordered collections as sets and seed every RNG.\n- Mock only the edges in [boundaries](boundaries.md), never the unit under test.\n- Make every skip visible with a reason and an owner or issue; never use a silent early return.\n- Put timing and performance claims in an opt-in benchmark, not the default run.\n- For risky logic, `cargo mutants --in-diff` or the language equivalent can expose weak tests; investigate survivors. Review councils run it only at crucial or terminal risk.\n\n\n# Test boundaries\n\nExpected values come from the approved spec, not the implementation. Test a real public entry point and assert stable results or error codes. If the necessary seam does not exist, use diagnose to find it before repairing a bug.\n\nMock process, network, clock and randomness edges only. A fake of an owned collaborator can conceal a broken integration; exercise the real collaborator at the boundary. Inject a clock or wait for a state transition with a bounded poll instead of sleeping.\n\nPreserve user-authored work while establishing a failing test. Do not weaken an assertion or delete a test to hide a real behaviour change. Explain every weakened or removed test, including intentional pruning.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:59d329184896c2928e2a825a40beeaef3abb9fd664423584be9d41544125ae36",
+                      "ref": "skill:code-review/references/lenses/tests.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:c2d75a06bfd33579819e65359dc840fe0760fd1599872b84d2c10febf0ae9ec2",
+                      "ref": "skill:test-design/references/judgement.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:0ea6876489689563310c02a884249f342471efa0c2ce15dd0c887b3c1cc9f776",
+                      "ref": "skill:test-design/references/boundaries.md",
+                      "when": "always"
+                    }
+                  ],
+                  "require_findings": true,
+                  "role": "lens.tests",
+                  "role_digest": "sha256:1acffad6d7ba2cf1a0d514ee9310a7a39e6d077695178d7cb63c2baf19f793d0",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "title": "lens-tests"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-design-fit-reuse",
+                  "prompt": "Lens design-fit-reuse. Check design fit and reuse of existing code.\n\nLens: design-fit-reuse. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: design fit and reuse\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" and its design-principle probes.\n\n- Does the change belong where it was put? Find the canonical owner of the\n  behaviour or data and compare.\n- Search the repository for an existing utility, type, validation rule or flow\n  that already does this. Name what should have been reused.\n- Look for a second source of truth, a state machine hidden in flags, or\n  coupling that crosses an ownership boundary.\n- Use SOLID as probes only. Report a principle when it ties to a present defect\n  or material risk, with a way to validate it.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:cdc1ef703b729564597d135d650e554df1013f62113133032e4191016a25ef92",
+                      "ref": "skill:code-review/references/lenses/design-fit-reuse.md",
+                      "when": "always"
+                    }
+                  ],
+                  "require_findings": true,
+                  "role": "lens.design-fit-reuse",
+                  "role_digest": "sha256:8106a66fd80eccc42c6f86526921fa553cd8a0164b72aaa6c38c9f93dda2ade2",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "title": "lens-design-fit-reuse"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-simplicity",
+                  "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- Where does over-engineering add complexity beyond the current need?\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:0b720108a8d2924a4952a3e79ad5e38e0f815e170a30ac7db6a06d319567f77d",
+                      "ref": "skill:code-review/references/lenses/simplicity.md",
+                      "when": "always"
+                    }
+                  ],
+                  "require_findings": true,
+                  "role": "lens.simplicity",
+                  "role_digest": "sha256:e0adcb44b1fa016a1700e35f8379c381bf84f109f70d4562ca7ffebc9dd8ea82",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "title": "lens-simplicity"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-reliability",
+                  "prompt": "Lens reliability. Check failure and recovery paths.\n\nLens: reliability. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: reliability\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Correctness and failure\".\n\n- Trace failure and partial failure paths, including visibility to operators.\n- Check retries, timeouts and idempotency for duplicate or lost work.\n- Check crash and restart safety and recovery from interrupted operations.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:14ab90fa193f9227d5c40f6d1f85d7e4aed996ecd34b6f7889f6ed746d63fe55",
+                      "ref": "skill:code-review/references/lenses/reliability.md",
+                      "when": "always"
+                    }
+                  ],
+                  "require_findings": true,
+                  "role": "lens.reliability",
+                  "role_digest": "sha256:3fc6619b72f1afc2023c8f3e495979675d5e6dc74b90ca18da1f172a5ddd3cae",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "title": "lens-reliability"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-conventions-readability",
+                  "prompt": "Lens conventions-readability. Check repository conventions and readability.\n\nLens: conventions-readability. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: conventions and readability\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\", and the project instructions for naming and docs.\n\n- Compare naming, layout, error style and test style with the neighbouring code\n  and the project instructions.\n- Comments should explain why, and describe live behaviour rather than history.\n- Public behaviour changes need their docs, help text and release notes updated.\n- Check control flow a new maintainer could not follow without the author.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:a7d85c53d2e3e213eae920045e7335dfe45f987777f397c44862d9a04aed13b5",
+                      "ref": "skill:code-review/references/lenses/conventions-readability.md",
+                      "when": "always"
+                    }
+                  ],
+                  "require_findings": true,
+                  "role": "lens.conventions-readability",
+                  "role_digest": "sha256:2a3ed542701c73aac20e2fcf061be84dc3ffe0eb7cae60b4d26d53a38bff2416",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "title": "lens-conventions-readability"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-refactor-cleanup",
+                  "prompt": "Lens refactor-cleanup. Check root-cause refactors and removable code.\n\nLens: refactor-cleanup. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: refactor-cleanup\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Dependency cone\" and \"Ownership and structure\".\n\n- Does the change address the root cause within its dependency cone?\n- Identify duplicated logic the change should consolidate.\n- Identify dead or obsolete paths made removable by the change.\n- Check that refactoring preserves observable behaviour.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:f942c71419f241ed6adb9435c076f010372a97adaba1b698b8ffd3ddf8c3dbd1",
+                      "ref": "skill:code-review/references/lenses/refactor-cleanup.md",
+                      "when": "always"
+                    }
+                  ],
+                  "require_findings": true,
+                  "role": "lens.refactor-cleanup",
+                  "role_digest": "sha256:55978dc6912a015ecfb5af368430ebd46b9fb0631e2b76d8bcdefc2ce4b57ec0",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "title": "lens-refactor-cleanup"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-flexibility",
+                  "prompt": "Lens flexibility. Check configuration and coupling.\n\nLens: flexibility. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: flexibility\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\".\n\n- Identify hard-coded names and values that should be configuration.\n- Check coupling to a single provider, platform or account.\n- Can supported extensions fit without speculative abstraction?\n- Flag a lane or launch refusal, or a guard that blocks ordinary work, outside\n  the hard boundaries the repository declares as a defect to loosen: prefer\n  warn-and-continue or a configurable default.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:c89f5e9655744103673c3944e6baa86078bdd0b0b39a37fea553f86f492f7cf4",
+                      "ref": "skill:code-review/references/lenses/flexibility.md",
+                      "when": "always"
+                    }
+                  ],
+                  "require_findings": true,
+                  "role": "lens.flexibility",
+                  "role_digest": "sha256:8a886d149360b69b7e1291612bbdd40c436d4de0e63170c31aac5faa55f86960",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "title": "lens-flexibility"
+                }
+              ]
+            },
+            "depends_on": [
+              "subject"
+            ],
+            "id": "lenses",
+            "inputs": [
+              {
+                "node": "subject",
+                "outputs": [
+                  "result"
+                ]
+              }
+            ],
+            "kind": "composite",
+            "source": {
+              "node": "subject",
+              "type": "node"
+            }
+          },
+          {
+            "access": "read_only",
+            "depends_on": [
+              "lenses",
+              "subject"
+            ],
+            "distinct_from": "dependencies",
+            "id": "verify",
+            "inputs": [
+              {
+                "node": "lenses",
+                "outputs": [
+                  "result"
+                ]
+              }
+            ],
+            "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nVerify the lens findings for: brief\nTry to falsify every finding against the pinned commit: reproduce it, look for\nthe code or test that contradicts it, and check it against the spec. Re-emit\nevery finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your\nevidence. Add any finding the lenses missed and mark it NEW. Do not edit files.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose entries keep each finding's\nid and add \"verification\": \"upheld\", \"falsified\" or \"unverifiable\". For each\npropagated finding add \"propagates\": \"<input-node-id>:<finding-id>\" naming\nthe selected input node and the finding ID as shown to you (or its stored ID).\nDo not add it to new findings.\nCarry any listed unavailable lenses into your result. If composite findings are\ntruncated, read every listed full member result and verify every finding, including\nthose omitted from the bounded export. Apply the listed finding ID prefix to each\nmember's IDs. Read the complete input index when listed.\nIf any full result is capped or unavailable, report the coverage gap and source\nreferences from the index; do not claim a complete review. Preserve the\ntruncation notice and paths in your result. If more than 32 findings exist, the\nrequired DISPOSITION lines can carry the extra verifications and evidence; keep\nthe structured findings block within its limit.\n",
+            "role": "review.verify",
+            "role_digest": "sha256:665007e1e9514aaf0fc943a4039b14eed83bf1296136ee3eb94b827fcc820db6",
+            "routes": [
+              {
+                "alias": "verifier"
+              },
+              {
+                "alias": "verifier"
+              }
+            ],
+            "source": {
+              "node": "subject",
+              "type": "node"
+            },
+            "title": "verify"
+          },
+          {
+            "access": "read_only",
+            "depends_on": [
+              "verify",
+              "lenses",
+              "subject"
+            ],
+            "dispositions": [
+              "accepted",
+              "rejected",
+              "deferred"
+            ],
+            "id": "synthesis",
+            "inputs": [
+              {
+                "node": "verify",
+                "outputs": [
+                  "result",
+                  "findings"
+                ]
+              },
+              {
+                "node": "lenses",
+                "outputs": [
+                  "result",
+                  "findings"
+                ]
+              },
+              {
+                "node": "subject",
+                "outputs": [
+                  "findings"
+                ]
+              }
+            ],
+            "kind": "synthesise",
+            "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with up to 32 finding ids; each\nentry carries \"id\", \"disposition\" (accepted, rejected or deferred) and \"reason\".\nCopy the upstream qualified id exactly; a bare id works only when unambiguous.\nThese three fields suffice for upstream findings; descriptive fields are inherited.\nNew findings require severity, file, summary and status as well.\nIf the verifier's findings block is missing, empty or truncated, use its prose\nUPHELD/FALSIFIED marks together with the original lens findings. Record each\nupheld finding as accepted, with a reason citing the verifier's evidence.\nIf composite findings are truncated, read every listed full member result and\ndispose of every finding, including those omitted from the bounded export. Apply\nthe listed finding ID prefix to each member's IDs. Read the complete input index\nwhen listed. If any full result is capped or unavailable, report the coverage\ngap and source references from the index; do not claim a complete review.\nWhen more than 32 findings exist, the required DISPOSITION lines can carry the\nadditional dispositions and reasons; keep the structured block within its\n32-entry limit. Name the truncation and full result paths in your result.\nA finding without a disposition is incomplete. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"member:F1\",\"disposition\":\"accepted\",\"reason\":\"Evidence supports it\"}]}\n```\nEmit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\nIf the input lists unavailable lenses, state that the review is degraded and name\nthem with their reasons.\n",
+            "role": "review.synthesis",
+            "role_digest": "sha256:68848fe2b0b2a762445ac11b39b789e95d7dc81ca94c406fab40207d44477a08",
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
+            "source": {
+              "node": "subject",
+              "type": "node"
+            },
+            "title": "synthesis"
+          }
+        ]
+      },
+      "depends_on": [
+        "lanes"
+      ],
+      "id": "council",
+      "inputs": [
+        {
+          "node": "lanes",
+          "outputs": [
+            "result"
+          ]
+        }
+      ],
+      "kind": "composite"
+    },
+    {
+      "acceptance_checks": [
+        "Preserve externally observable behaviour",
+        "Run targeted checks and commit"
+      ],
+      "access": "worktree_write",
+      "delivery": "integrate:batch/graph",
+      "depends_on": [
+        "council"
+      ],
+      "id": "refactor",
+      "inputs": [
+        {
+          "node": "council",
+          "outputs": [
+            "result",
+            "findings",
+            "commit"
+          ]
+        }
+      ],
+      "prompt": "At batch end, inspect long-horizon boundaries, migrations and SOLID for:\nbrief\nStart from the council's pinned combined commit. Remove unnecessary machinery\nand improve the approved design without speculative abstraction. Run checks\nand commit. Independent principal review follows in the repair loop.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Preserve externally observable behaviour\n- Run targeted checks and commit",
+      "role": "refactor-principal",
+      "role_digest": "sha256:eacfb3bc14777bc9d8da090d691824537b377164710f8126924e3d7bb199488d",
+      "route": {
+        "alias": "principal"
+      },
+      "source": {
+        "node": "council",
+        "type": "node"
+      },
+      "title": "refactor",
+      "write_scope": [
+        "."
+      ]
+    },
+    {
+      "access": "read_only",
+      "depends_on": [
+        "refactor"
+      ],
+      "id": "repair",
+      "inputs": [
+        {
+          "node": "refactor",
+          "outputs": [
+            "result"
+          ]
+        }
+      ],
+      "kind": "loop",
+      "loop": {
+        "body": [
+          {
+            "acceptance_checks": [
+              "Resolve accepted findings",
+              "Run targeted checks and commit"
+            ],
+            "access": "worktree_write",
+            "delivery": "integrate:batch/graph",
+            "depends_on": [],
+            "id": "fix",
+            "inputs": [
+              {
+                "node": "previous.review",
+                "outputs": [
+                  "result",
+                  "findings"
+                ]
+              }
+            ],
+            "prompt": "Repair accepted batch findings for: brief\nUse the serial batch worktree advanced by the principal and earlier repairs.\nInspect preceding review evidence, preserve scope, run targeted checks and\ncommit. Reviewers will pin and review this round's changed head.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Resolve accepted findings\n- Run targeted checks and commit",
+            "role": "repairer",
+            "role_digest": "sha256:6b7ce5dba8129984f4e5a4395b1b45dad17876471a70986894a37fcf8597610c",
+            "route": {
+              "alias": "senior"
+            },
+            "title": "fix",
+            "write_scope": [
+              "."
+            ]
+          },
+          {
+            "access": "read_only",
+            "composite": {
+              "exports": [
+                {
+                  "node": "synthesis",
+                  "outputs": [
+                    "result",
+                    "findings",
+                    "verdict",
+                    "commit"
+                  ]
+                }
+              ],
+              "nodes": [
+                {
+                  "access": "read_only",
+                  "depends_on": [
+                    "fix"
+                  ],
+                  "id": "subject",
+                  "prompt": "You frame an immutable review subject. Do not edit files.\n\nFrame the immutable review subject for: brief\nBase (diff reference): \nSpec (acceptance criteria): \nIdentify acceptance criteria and risk areas from the pinned source commit,\nreading the spec where one is named. Do not edit files. Subsequent independent\nlenses review this exact commit against the base and the spec.\n",
+                  "role": "plan.review",
+                  "role_digest": "sha256:cc9b118bf74049c200dc2e053a9d30de01f36479c4688392153484bcf832a60c",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "source": {
+                    "node": "fix",
+                    "type": "node"
+                  },
+                  "title": "subject"
+                },
+                {
+                  "access": "read_only",
+                  "composite": {
+                    "exports": [
+                      {
+                        "node": "lens-correctness-spec",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-tests",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-design-fit-reuse",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-simplicity",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-reliability",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-conventions-readability",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-refactor-cleanup",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-flexibility",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      }
+                    ],
+                    "min_successful": 1,
+                    "nodes": [
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "distinct_from": "writer",
+                        "id": "lens-correctness-spec",
+                        "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
+                            "ref": "skill:code-review/references/lenses/correctness-spec.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.correctness-spec",
+                        "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-correctness-spec"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-tests",
+                        "prompt": "Lens tests. Check that tests prove the behaviour and would fail without it.\n\nLens: tests. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\n\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: tests\n\nJudge each test by the behaviour it proves and the defect it would catch.\nUse the test-design judgement and boundary references for the full standard.\n\n- Check that assertions observe outcomes and use an oracle independent of the\n  implementation. Flag helpers that ignore their argument.\n- Catch vacuous passes: early returns, fixtures listed as tests, or a test body\n  that never reaches its assertion.\n- Make skips visible. A required test must fail closed when its dependency is\n  unavailable.\n- Do not use real-time waits or sleeps as proof when a barrier, injected clock,\n  timeout or limit can prove the behaviour.\n- Keep wall-clock performance assertions out of the default test run.\n- Question oversized fixtures that exist only to cross a hard-coded limit.\n- Favour pruning. Deleting a rigid, duplicate or implementation-pinned test with\n  a stated reason is good work; flag a deletion only when it removes the sole\n  check of a spec clause.\n- Flag tests pinned to the implementation (private call counts, internal\n  structure) that would fail on a behaviour-preserving refactor.\n- Flag a behaviour proved again at another level without a distinct defect, and\n  net test growth with no new behaviour.\n- Merge near-duplicate cases into table-driven tests when that stays readable.\n- Verify test-runner filters and config names against tests that exist.\n- Flag each new test likely to take more than about one second.\n- Reject an assertion that encodes a spec clause being loosened or skipped to\n  get a green run.\n- Do not mock the unit under test or copy expected values from its output.\n- Ensure a test name does not promise a bound or behaviour its body never checks.\n- Map acceptance criteria to tests and cite the exact command and result used.\n\n\n# Test judgement\n\n- A typed refusal code survives wording changes; an assertion on an error sentence fails on harmless edits. Assert the code.\n- An enum can exclude an invalid state; a test constructing that state through an unsafe escape adds no evidence about ordinary callers.\n- One table-driven contract test can cover input variations; copied tests for each value add maintenance without a distinct defect.\n- A property over parse and serialise round trips covers an invariant; a golden file is useful when the actual wire representation is itself a contract.\n- A public boundary test survives internal reorganisation; call-count tests of owned collaborators constrain the implementation.\n- An independent acceptance test gets expected outcomes from the spec; copying output from the implementation can make both share the same mistake.\n\n## Test safeguards\n\n- Agent-written suites grow faster than behaviour. Before adding a test, look for one to extend, merge or delete; a net-negative test diff is often the right result.\n- Prove each behaviour once, at the lowest boundary that can; do not repeat it at unit, integration and end-to-end level.\n- Every test asserts observable behaviour; printed values alone are not an oracle.\n- Derive expected values from the spec, never from the implementation's current output.\n- An assertion helper must fail on a known-bad input; prove that once when writing it.\n- Declare each test's size: small is hermetic and about 1 s or less; medium uses a local filesystem or DB; large is opt-in. Never wait out a real timeout or sleep as proof; inject clocks, busy timeouts and limits.\n- Compare unordered collections as sets and seed every RNG.\n- Mock only the edges in [boundaries](boundaries.md), never the unit under test.\n- Make every skip visible with a reason and an owner or issue; never use a silent early return.\n- Put timing and performance claims in an opt-in benchmark, not the default run.\n- For risky logic, `cargo mutants --in-diff` or the language equivalent can expose weak tests; investigate survivors. Review councils run it only at crucial or terminal risk.\n\n\n# Test boundaries\n\nExpected values come from the approved spec, not the implementation. Test a real public entry point and assert stable results or error codes. If the necessary seam does not exist, use diagnose to find it before repairing a bug.\n\nMock process, network, clock and randomness edges only. A fake of an owned collaborator can conceal a broken integration; exercise the real collaborator at the boundary. Inject a clock or wait for a state transition with a bounded poll instead of sleeping.\n\nPreserve user-authored work while establishing a failing test. Do not weaken an assertion or delete a test to hide a real behaviour change. Explain every weakened or removed test, including intentional pruning.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:59d329184896c2928e2a825a40beeaef3abb9fd664423584be9d41544125ae36",
+                            "ref": "skill:code-review/references/lenses/tests.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:c2d75a06bfd33579819e65359dc840fe0760fd1599872b84d2c10febf0ae9ec2",
+                            "ref": "skill:test-design/references/judgement.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:0ea6876489689563310c02a884249f342471efa0c2ce15dd0c887b3c1cc9f776",
+                            "ref": "skill:test-design/references/boundaries.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.tests",
+                        "role_digest": "sha256:1acffad6d7ba2cf1a0d514ee9310a7a39e6d077695178d7cb63c2baf19f793d0",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-tests"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-design-fit-reuse",
+                        "prompt": "Lens design-fit-reuse. Check design fit and reuse of existing code.\n\nLens: design-fit-reuse. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: design fit and reuse\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" and its design-principle probes.\n\n- Does the change belong where it was put? Find the canonical owner of the\n  behaviour or data and compare.\n- Search the repository for an existing utility, type, validation rule or flow\n  that already does this. Name what should have been reused.\n- Look for a second source of truth, a state machine hidden in flags, or\n  coupling that crosses an ownership boundary.\n- Use SOLID as probes only. Report a principle when it ties to a present defect\n  or material risk, with a way to validate it.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:cdc1ef703b729564597d135d650e554df1013f62113133032e4191016a25ef92",
+                            "ref": "skill:code-review/references/lenses/design-fit-reuse.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.design-fit-reuse",
+                        "role_digest": "sha256:8106a66fd80eccc42c6f86526921fa553cd8a0164b72aaa6c38c9f93dda2ade2",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-design-fit-reuse"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-simplicity",
+                        "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- Where does over-engineering add complexity beyond the current need?\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:0b720108a8d2924a4952a3e79ad5e38e0f815e170a30ac7db6a06d319567f77d",
+                            "ref": "skill:code-review/references/lenses/simplicity.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.simplicity",
+                        "role_digest": "sha256:e0adcb44b1fa016a1700e35f8379c381bf84f109f70d4562ca7ffebc9dd8ea82",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-simplicity"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-reliability",
+                        "prompt": "Lens reliability. Check failure and recovery paths.\n\nLens: reliability. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: reliability\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Correctness and failure\".\n\n- Trace failure and partial failure paths, including visibility to operators.\n- Check retries, timeouts and idempotency for duplicate or lost work.\n- Check crash and restart safety and recovery from interrupted operations.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:14ab90fa193f9227d5c40f6d1f85d7e4aed996ecd34b6f7889f6ed746d63fe55",
+                            "ref": "skill:code-review/references/lenses/reliability.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.reliability",
+                        "role_digest": "sha256:3fc6619b72f1afc2023c8f3e495979675d5e6dc74b90ca18da1f172a5ddd3cae",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-reliability"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-conventions-readability",
+                        "prompt": "Lens conventions-readability. Check repository conventions and readability.\n\nLens: conventions-readability. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: conventions and readability\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\", and the project instructions for naming and docs.\n\n- Compare naming, layout, error style and test style with the neighbouring code\n  and the project instructions.\n- Comments should explain why, and describe live behaviour rather than history.\n- Public behaviour changes need their docs, help text and release notes updated.\n- Check control flow a new maintainer could not follow without the author.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:a7d85c53d2e3e213eae920045e7335dfe45f987777f397c44862d9a04aed13b5",
+                            "ref": "skill:code-review/references/lenses/conventions-readability.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.conventions-readability",
+                        "role_digest": "sha256:2a3ed542701c73aac20e2fcf061be84dc3ffe0eb7cae60b4d26d53a38bff2416",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-conventions-readability"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-refactor-cleanup",
+                        "prompt": "Lens refactor-cleanup. Check root-cause refactors and removable code.\n\nLens: refactor-cleanup. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: refactor-cleanup\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Dependency cone\" and \"Ownership and structure\".\n\n- Does the change address the root cause within its dependency cone?\n- Identify duplicated logic the change should consolidate.\n- Identify dead or obsolete paths made removable by the change.\n- Check that refactoring preserves observable behaviour.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:f942c71419f241ed6adb9435c076f010372a97adaba1b698b8ffd3ddf8c3dbd1",
+                            "ref": "skill:code-review/references/lenses/refactor-cleanup.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.refactor-cleanup",
+                        "role_digest": "sha256:55978dc6912a015ecfb5af368430ebd46b9fb0631e2b76d8bcdefc2ce4b57ec0",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-refactor-cleanup"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-flexibility",
+                        "prompt": "Lens flexibility. Check configuration and coupling.\n\nLens: flexibility. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: flexibility\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\".\n\n- Identify hard-coded names and values that should be configuration.\n- Check coupling to a single provider, platform or account.\n- Can supported extensions fit without speculative abstraction?\n- Flag a lane or launch refusal, or a guard that blocks ordinary work, outside\n  the hard boundaries the repository declares as a defect to loosen: prefer\n  warn-and-continue or a configurable default.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:c89f5e9655744103673c3944e6baa86078bdd0b0b39a37fea553f86f492f7cf4",
+                            "ref": "skill:code-review/references/lenses/flexibility.md",
+                            "when": "always"
+                          }
+                        ],
+                        "require_findings": true,
+                        "role": "lens.flexibility",
+                        "role_digest": "sha256:8a886d149360b69b7e1291612bbdd40c436d4de0e63170c31aac5faa55f86960",
+                        "routes": [
+                          {
+                            "alias": "senior"
+                          },
+                          {
+                            "alias": "senior"
+                          }
+                        ],
+                        "title": "lens-flexibility"
+                      }
+                    ]
+                  },
+                  "depends_on": [
+                    "subject"
+                  ],
+                  "id": "lenses",
+                  "inputs": [
+                    {
+                      "node": "subject",
+                      "outputs": [
+                        "result"
+                      ]
+                    }
+                  ],
+                  "kind": "composite",
+                  "source": {
+                    "node": "subject",
+                    "type": "node"
+                  }
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [
+                    "lenses",
+                    "subject"
+                  ],
+                  "distinct_from": "dependencies",
+                  "id": "verify",
+                  "inputs": [
+                    {
+                      "node": "lenses",
+                      "outputs": [
+                        "result"
+                      ]
+                    }
+                  ],
+                  "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nVerify the lens findings for: brief\nTry to falsify every finding against the pinned commit: reproduce it, look for\nthe code or test that contradicts it, and check it against the spec. Re-emit\nevery finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your\nevidence. Add any finding the lenses missed and mark it NEW. Do not edit files.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose entries keep each finding's\nid and add \"verification\": \"upheld\", \"falsified\" or \"unverifiable\". For each\npropagated finding add \"propagates\": \"<input-node-id>:<finding-id>\" naming\nthe selected input node and the finding ID as shown to you (or its stored ID).\nDo not add it to new findings.\nCarry any listed unavailable lenses into your result. If composite findings are\ntruncated, read every listed full member result and verify every finding, including\nthose omitted from the bounded export. Apply the listed finding ID prefix to each\nmember's IDs. Read the complete input index when listed.\nIf any full result is capped or unavailable, report the coverage gap and source\nreferences from the index; do not claim a complete review. Preserve the\ntruncation notice and paths in your result. If more than 32 findings exist, the\nrequired DISPOSITION lines can carry the extra verifications and evidence; keep\nthe structured findings block within its limit.\n",
+                  "role": "review.verify",
+                  "role_digest": "sha256:665007e1e9514aaf0fc943a4039b14eed83bf1296136ee3eb94b827fcc820db6",
+                  "routes": [
+                    {
+                      "alias": "verifier"
+                    },
+                    {
+                      "alias": "verifier"
+                    }
+                  ],
+                  "source": {
+                    "node": "subject",
+                    "type": "node"
+                  },
+                  "title": "verify"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [
+                    "verify",
+                    "lenses",
+                    "subject"
+                  ],
+                  "dispositions": [
+                    "accepted",
+                    "rejected",
+                    "deferred"
+                  ],
+                  "id": "synthesis",
+                  "inputs": [
+                    {
+                      "node": "verify",
+                      "outputs": [
+                        "result",
+                        "findings"
+                      ]
+                    },
+                    {
+                      "node": "lenses",
+                      "outputs": [
+                        "result",
+                        "findings"
+                      ]
+                    },
+                    {
+                      "node": "subject",
+                      "outputs": [
+                        "findings"
+                      ]
+                    }
+                  ],
+                  "kind": "synthesise",
+                  "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with up to 32 finding ids; each\nentry carries \"id\", \"disposition\" (accepted, rejected or deferred) and \"reason\".\nCopy the upstream qualified id exactly; a bare id works only when unambiguous.\nThese three fields suffice for upstream findings; descriptive fields are inherited.\nNew findings require severity, file, summary and status as well.\nIf the verifier's findings block is missing, empty or truncated, use its prose\nUPHELD/FALSIFIED marks together with the original lens findings. Record each\nupheld finding as accepted, with a reason citing the verifier's evidence.\nIf composite findings are truncated, read every listed full member result and\ndispose of every finding, including those omitted from the bounded export. Apply\nthe listed finding ID prefix to each member's IDs. Read the complete input index\nwhen listed. If any full result is capped or unavailable, report the coverage\ngap and source references from the index; do not claim a complete review.\nWhen more than 32 findings exist, the required DISPOSITION lines can carry the\nadditional dispositions and reasons; keep the structured block within its\n32-entry limit. Name the truncation and full result paths in your result.\nA finding without a disposition is incomplete. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"member:F1\",\"disposition\":\"accepted\",\"reason\":\"Evidence supports it\"}]}\n```\nEmit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\nIf the input lists unavailable lenses, state that the review is degraded and name\nthem with their reasons.\n",
+                  "role": "review.synthesis",
+                  "role_digest": "sha256:68848fe2b0b2a762445ac11b39b789e95d7dc81ca94c406fab40207d44477a08",
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
+                  "source": {
+                    "node": "subject",
+                    "type": "node"
+                  },
+                  "title": "synthesis"
+                }
+              ]
+            },
+            "depends_on": [
+              "fix"
+            ],
+            "id": "review",
+            "inputs": [
+              {
+                "node": "fix",
+                "outputs": [
+                  "result"
+                ]
+              }
+            ],
+            "kind": "composite"
+          },
+          {
+            "access": "read_only",
+            "condition": {
+              "expected": "VERDICT: PASS",
+              "threshold": "all",
+              "type": "verdict"
+            },
+            "depends_on": [
+              "review"
+            ],
+            "id": "accept",
+            "inputs": [
+              {
+                "node": "review",
+                "outputs": [
+                  "verdict"
+                ]
+              }
+            ],
+            "kind": "gate",
+            "title": "accept"
+          }
+        ],
+        "max_rounds": 2,
+        "until": "accept"
+      }
+    }
+  ],
+  "provenance": {
+    "origins": {
+      "expanded.council.exports": "bundled",
+      "expanded.council.parameters.base": "entry",
+      "expanded.council.parameters.base.default": "bundled",
+      "expanded.council.parameters.base.doc": "bundled",
+      "expanded.council.parameters.base.type": "bundled",
+      "expanded.council.parameters.kind": "entry",
+      "expanded.council.parameters.kind.default": "bundled",
+      "expanded.council.parameters.kind.doc": "bundled",
+      "expanded.council.parameters.kind.type": "bundled",
+      "expanded.council.parameters.lenses": "bundled",
+      "expanded.council.parameters.local_check_policy": "ambient",
+      "expanded.council.parameters.local_check_policy.default": "bundled",
+      "expanded.council.parameters.local_check_policy.doc": "bundled",
+      "expanded.council.parameters.local_check_policy.type": "bundled",
+      "expanded.council.parameters.min_reviews.default": "bundled",
+      "expanded.council.parameters.min_reviews.doc": "bundled",
+      "expanded.council.parameters.min_reviews.max": "bundled",
+      "expanded.council.parameters.min_reviews.min": "bundled",
+      "expanded.council.parameters.min_reviews.type": "bundled",
+      "expanded.council.parameters.review_shape": "entry",
+      "expanded.council.parameters.review_shape.default": "bundled",
+      "expanded.council.parameters.review_shape.doc": "bundled",
+      "expanded.council.parameters.review_shape.type": "bundled",
+      "expanded.council.parameters.risk_tags": "entry",
+      "expanded.council.parameters.risk_tags.default": "bundled",
+      "expanded.council.parameters.risk_tags.doc": "bundled",
+      "expanded.council.parameters.risk_tags.type": "bundled",
+      "expanded.council.parameters.risk_tier": "entry",
+      "expanded.council.parameters.risk_tier.default": "bundled",
+      "expanded.council.parameters.risk_tier.doc": "bundled",
+      "expanded.council.parameters.risk_tier.type": "bundled",
+      "expanded.council.parameters.size": "entry",
+      "expanded.council.parameters.size.default": "bundled",
+      "expanded.council.parameters.size.doc": "bundled",
+      "expanded.council.parameters.size.type": "bundled",
+      "expanded.council.parameters.spec": "entry",
+      "expanded.council.parameters.spec.default": "bundled",
+      "expanded.council.parameters.spec.doc": "bundled",
+      "expanded.council.parameters.spec.type": "bundled",
+      "expanded.council.parameters.spec_max_bytes": "entry",
+      "expanded.council.parameters.spec_max_bytes.default": "bundled",
+      "expanded.council.parameters.spec_max_bytes.doc": "bundled",
+      "expanded.council.parameters.spec_max_bytes.max": "bundled",
+      "expanded.council.parameters.spec_max_bytes.min": "bundled",
+      "expanded.council.parameters.spec_max_bytes.type": "bundled",
+      "expanded.council.parameters.subject": "entry",
+      "expanded.council.parameters.subject.default.commit": "bundled",
+      "expanded.council.parameters.subject.default.type": "bundled",
+      "expanded.council.parameters.subject.doc": "bundled",
+      "expanded.council.parameters.subject.type": "bundled",
+      "expanded.council.parameters.verifier_tier.default": "bundled",
+      "expanded.council.parameters.verifier_tier.doc": "bundled",
+      "expanded.council.parameters.verifier_tier.type": "bundled",
+      "expanded.council.parameters.verifiers.default": "bundled",
+      "expanded.council.parameters.verifiers.doc": "bundled",
+      "expanded.council.parameters.verifiers.max": "bundled",
+      "expanded.council.parameters.verifiers.min": "bundled",
+      "expanded.council.parameters.verifiers.type": "bundled",
+      "expanded.council.parameters.worktree": "entry",
+      "expanded.council.parameters.worktree.default": "bundled",
+      "expanded.council.parameters.worktree.doc": "bundled",
+      "expanded.council.parameters.worktree.type": "bundled",
+      "expanded.council.pattern.citations": "bundled",
+      "expanded.council.pattern.cost": "bundled",
+      "expanded.council.pattern.level": "bundled",
+      "expanded.council.pattern.select_when": "bundled",
+      "expanded.council.pattern.summary": "bundled",
+      "expanded.council.pattern.tags": "bundled",
+      "expanded.council.plan.by_size": "bundled",
+      "expanded.council.plan.explicit": "bundled",
+      "expanded.council.plan.guidance": "bundled",
+      "expanded.council.plan.patterns": "bundled",
+      "expanded.council.plan.replaces": "bundled",
+      "expanded.council.plan.subject_types": "bundled",
+      "expanded.council.stages": "bundled",
+      "expanded.lane-one.exports": "bundled",
+      "expanded.lane-one.parameters.base": "entry",
+      "expanded.lane-one.parameters.base.default": "bundled",
+      "expanded.lane-one.parameters.base.doc": "bundled",
+      "expanded.lane-one.parameters.base.type": "bundled",
+      "expanded.lane-one.parameters.delivery": "entry",
+      "expanded.lane-one.parameters.delivery.default": "bundled",
+      "expanded.lane-one.parameters.delivery.doc": "bundled",
+      "expanded.lane-one.parameters.delivery.type": "bundled",
+      "expanded.lane-one.parameters.evaluator.default": "bundled",
+      "expanded.lane-one.parameters.evaluator.doc": "bundled",
+      "expanded.lane-one.parameters.evaluator.type": "bundled",
+      "expanded.lane-one.parameters.kind.default": "bundled",
+      "expanded.lane-one.parameters.kind.doc": "bundled",
+      "expanded.lane-one.parameters.kind.type": "bundled",
+      "expanded.lane-one.parameters.lenses": "bundled",
+      "expanded.lane-one.parameters.local_check_policy": "ambient",
+      "expanded.lane-one.parameters.local_check_policy.default": "bundled",
+      "expanded.lane-one.parameters.local_check_policy.doc": "bundled",
+      "expanded.lane-one.parameters.local_check_policy.type": "bundled",
+      "expanded.lane-one.parameters.min_lenses.default": "bundled",
+      "expanded.lane-one.parameters.min_lenses.doc": "bundled",
+      "expanded.lane-one.parameters.min_lenses.max": "bundled",
+      "expanded.lane-one.parameters.min_lenses.min": "bundled",
+      "expanded.lane-one.parameters.min_lenses.type": "bundled",
+      "expanded.lane-one.parameters.review_shape.default": "bundled",
+      "expanded.lane-one.parameters.review_shape.doc": "bundled",
+      "expanded.lane-one.parameters.review_shape.type": "bundled",
+      "expanded.lane-one.parameters.risk_tags.default": "bundled",
+      "expanded.lane-one.parameters.risk_tags.doc": "bundled",
+      "expanded.lane-one.parameters.risk_tags.type": "bundled",
+      "expanded.lane-one.parameters.risk_tier": "ambient",
+      "expanded.lane-one.parameters.risk_tier.default": "bundled",
+      "expanded.lane-one.parameters.risk_tier.doc": "bundled",
+      "expanded.lane-one.parameters.risk_tier.type": "bundled",
+      "expanded.lane-one.parameters.scope": "entry",
+      "expanded.lane-one.parameters.scope.default": "bundled",
+      "expanded.lane-one.parameters.scope.doc": "bundled",
+      "expanded.lane-one.parameters.scope.type": "bundled",
+      "expanded.lane-one.parameters.size.default": "bundled",
+      "expanded.lane-one.parameters.size.doc": "bundled",
+      "expanded.lane-one.parameters.size.type": "bundled",
+      "expanded.lane-one.parameters.spec": "entry",
+      "expanded.lane-one.parameters.spec.default": "bundled",
+      "expanded.lane-one.parameters.spec.doc": "bundled",
+      "expanded.lane-one.parameters.spec.type": "bundled",
+      "expanded.lane-one.parameters.spec_max_bytes": "entry",
+      "expanded.lane-one.parameters.spec_max_bytes.default": "bundled",
+      "expanded.lane-one.parameters.spec_max_bytes.doc": "bundled",
+      "expanded.lane-one.parameters.spec_max_bytes.max": "bundled",
+      "expanded.lane-one.parameters.spec_max_bytes.min": "bundled",
+      "expanded.lane-one.parameters.spec_max_bytes.type": "bundled",
+      "expanded.lane-one.parameters.subject.default.commit": "bundled",
+      "expanded.lane-one.parameters.subject.default.type": "bundled",
+      "expanded.lane-one.parameters.subject.doc": "bundled",
+      "expanded.lane-one.parameters.subject.type": "bundled",
+      "expanded.lane-one.parameters.worktree": "entry",
+      "expanded.lane-one.parameters.worktree.default": "bundled",
+      "expanded.lane-one.parameters.worktree.doc": "bundled",
+      "expanded.lane-one.parameters.worktree.type": "bundled",
+      "expanded.lane-one.pattern.citations": "bundled",
+      "expanded.lane-one.pattern.cost": "bundled",
+      "expanded.lane-one.pattern.level": "bundled",
+      "expanded.lane-one.pattern.select_when": "bundled",
+      "expanded.lane-one.pattern.summary": "bundled",
+      "expanded.lane-one.pattern.tags": "bundled",
+      "expanded.lane-one.stages": "bundled",
+      "expanded.lane-two.exports": "bundled",
+      "expanded.lane-two.parameters.base": "entry",
+      "expanded.lane-two.parameters.base.default": "bundled",
+      "expanded.lane-two.parameters.base.doc": "bundled",
+      "expanded.lane-two.parameters.base.type": "bundled",
+      "expanded.lane-two.parameters.delivery": "entry",
+      "expanded.lane-two.parameters.delivery.default": "bundled",
+      "expanded.lane-two.parameters.delivery.doc": "bundled",
+      "expanded.lane-two.parameters.delivery.type": "bundled",
+      "expanded.lane-two.parameters.evaluator.default": "bundled",
+      "expanded.lane-two.parameters.evaluator.doc": "bundled",
+      "expanded.lane-two.parameters.evaluator.type": "bundled",
+      "expanded.lane-two.parameters.kind.default": "bundled",
+      "expanded.lane-two.parameters.kind.doc": "bundled",
+      "expanded.lane-two.parameters.kind.type": "bundled",
+      "expanded.lane-two.parameters.lenses": "bundled",
+      "expanded.lane-two.parameters.local_check_policy": "ambient",
+      "expanded.lane-two.parameters.local_check_policy.default": "bundled",
+      "expanded.lane-two.parameters.local_check_policy.doc": "bundled",
+      "expanded.lane-two.parameters.local_check_policy.type": "bundled",
+      "expanded.lane-two.parameters.min_lenses.default": "bundled",
+      "expanded.lane-two.parameters.min_lenses.doc": "bundled",
+      "expanded.lane-two.parameters.min_lenses.max": "bundled",
+      "expanded.lane-two.parameters.min_lenses.min": "bundled",
+      "expanded.lane-two.parameters.min_lenses.type": "bundled",
+      "expanded.lane-two.parameters.review_shape.default": "bundled",
+      "expanded.lane-two.parameters.review_shape.doc": "bundled",
+      "expanded.lane-two.parameters.review_shape.type": "bundled",
+      "expanded.lane-two.parameters.risk_tags.default": "bundled",
+      "expanded.lane-two.parameters.risk_tags.doc": "bundled",
+      "expanded.lane-two.parameters.risk_tags.type": "bundled",
+      "expanded.lane-two.parameters.risk_tier": "ambient",
+      "expanded.lane-two.parameters.risk_tier.default": "bundled",
+      "expanded.lane-two.parameters.risk_tier.doc": "bundled",
+      "expanded.lane-two.parameters.risk_tier.type": "bundled",
+      "expanded.lane-two.parameters.scope": "entry",
+      "expanded.lane-two.parameters.scope.default": "bundled",
+      "expanded.lane-two.parameters.scope.doc": "bundled",
+      "expanded.lane-two.parameters.scope.type": "bundled",
+      "expanded.lane-two.parameters.size.default": "bundled",
+      "expanded.lane-two.parameters.size.doc": "bundled",
+      "expanded.lane-two.parameters.size.type": "bundled",
+      "expanded.lane-two.parameters.spec": "entry",
+      "expanded.lane-two.parameters.spec.default": "bundled",
+      "expanded.lane-two.parameters.spec.doc": "bundled",
+      "expanded.lane-two.parameters.spec.type": "bundled",
+      "expanded.lane-two.parameters.spec_max_bytes": "entry",
+      "expanded.lane-two.parameters.spec_max_bytes.default": "bundled",
+      "expanded.lane-two.parameters.spec_max_bytes.doc": "bundled",
+      "expanded.lane-two.parameters.spec_max_bytes.max": "bundled",
+      "expanded.lane-two.parameters.spec_max_bytes.min": "bundled",
+      "expanded.lane-two.parameters.spec_max_bytes.type": "bundled",
+      "expanded.lane-two.parameters.subject.default.commit": "bundled",
+      "expanded.lane-two.parameters.subject.default.type": "bundled",
+      "expanded.lane-two.parameters.subject.doc": "bundled",
+      "expanded.lane-two.parameters.subject.type": "bundled",
+      "expanded.lane-two.parameters.worktree": "entry",
+      "expanded.lane-two.parameters.worktree.default": "bundled",
+      "expanded.lane-two.parameters.worktree.doc": "bundled",
+      "expanded.lane-two.parameters.worktree.type": "bundled",
+      "expanded.lane-two.pattern.citations": "bundled",
+      "expanded.lane-two.pattern.cost": "bundled",
+      "expanded.lane-two.pattern.level": "bundled",
+      "expanded.lane-two.pattern.select_when": "bundled",
+      "expanded.lane-two.pattern.summary": "bundled",
+      "expanded.lane-two.pattern.tags": "bundled",
+      "expanded.lane-two.stages": "bundled",
+      "expanded.review.exports": "bundled",
+      "expanded.review.parameters.base": "entry",
+      "expanded.review.parameters.base.default": "bundled",
+      "expanded.review.parameters.base.doc": "bundled",
+      "expanded.review.parameters.base.type": "bundled",
+      "expanded.review.parameters.kind": "entry",
+      "expanded.review.parameters.kind.default": "bundled",
+      "expanded.review.parameters.kind.doc": "bundled",
+      "expanded.review.parameters.kind.type": "bundled",
+      "expanded.review.parameters.lenses": "bundled",
+      "expanded.review.parameters.local_check_policy": "ambient",
+      "expanded.review.parameters.local_check_policy.default": "bundled",
+      "expanded.review.parameters.local_check_policy.doc": "bundled",
+      "expanded.review.parameters.local_check_policy.type": "bundled",
+      "expanded.review.parameters.min_reviews.default": "bundled",
+      "expanded.review.parameters.min_reviews.doc": "bundled",
+      "expanded.review.parameters.min_reviews.max": "bundled",
+      "expanded.review.parameters.min_reviews.min": "bundled",
+      "expanded.review.parameters.min_reviews.type": "bundled",
+      "expanded.review.parameters.review_shape": "entry",
+      "expanded.review.parameters.review_shape.default": "bundled",
+      "expanded.review.parameters.review_shape.doc": "bundled",
+      "expanded.review.parameters.review_shape.type": "bundled",
+      "expanded.review.parameters.risk_tags": "entry",
+      "expanded.review.parameters.risk_tags.default": "bundled",
+      "expanded.review.parameters.risk_tags.doc": "bundled",
+      "expanded.review.parameters.risk_tags.type": "bundled",
+      "expanded.review.parameters.risk_tier": "entry",
+      "expanded.review.parameters.risk_tier.default": "bundled",
+      "expanded.review.parameters.risk_tier.doc": "bundled",
+      "expanded.review.parameters.risk_tier.type": "bundled",
+      "expanded.review.parameters.size": "entry",
+      "expanded.review.parameters.size.default": "bundled",
+      "expanded.review.parameters.size.doc": "bundled",
+      "expanded.review.parameters.size.type": "bundled",
+      "expanded.review.parameters.spec": "entry",
+      "expanded.review.parameters.spec.default": "bundled",
+      "expanded.review.parameters.spec.doc": "bundled",
+      "expanded.review.parameters.spec.type": "bundled",
+      "expanded.review.parameters.spec_max_bytes": "entry",
+      "expanded.review.parameters.spec_max_bytes.default": "bundled",
+      "expanded.review.parameters.spec_max_bytes.doc": "bundled",
+      "expanded.review.parameters.spec_max_bytes.max": "bundled",
+      "expanded.review.parameters.spec_max_bytes.min": "bundled",
+      "expanded.review.parameters.spec_max_bytes.type": "bundled",
+      "expanded.review.parameters.subject": "entry",
+      "expanded.review.parameters.subject.default.commit": "bundled",
+      "expanded.review.parameters.subject.default.type": "bundled",
+      "expanded.review.parameters.subject.doc": "bundled",
+      "expanded.review.parameters.subject.type": "bundled",
+      "expanded.review.parameters.verifier_tier.default": "bundled",
+      "expanded.review.parameters.verifier_tier.doc": "bundled",
+      "expanded.review.parameters.verifier_tier.type": "bundled",
+      "expanded.review.parameters.verifiers.default": "bundled",
+      "expanded.review.parameters.verifiers.doc": "bundled",
+      "expanded.review.parameters.verifiers.max": "bundled",
+      "expanded.review.parameters.verifiers.min": "bundled",
+      "expanded.review.parameters.verifiers.type": "bundled",
+      "expanded.review.parameters.worktree": "entry",
+      "expanded.review.parameters.worktree.default": "bundled",
+      "expanded.review.parameters.worktree.doc": "bundled",
+      "expanded.review.parameters.worktree.type": "bundled",
+      "expanded.review.pattern.citations": "bundled",
+      "expanded.review.pattern.cost": "bundled",
+      "expanded.review.pattern.level": "bundled",
+      "expanded.review.pattern.select_when": "bundled",
+      "expanded.review.pattern.summary": "bundled",
+      "expanded.review.pattern.tags": "bundled",
+      "expanded.review.plan.by_size": "bundled",
+      "expanded.review.plan.explicit": "bundled",
+      "expanded.review.plan.guidance": "bundled",
+      "expanded.review.plan.patterns": "bundled",
+      "expanded.review.plan.replaces": "bundled",
+      "expanded.review.plan.subject_types": "bundled",
+      "expanded.review.stages": "bundled",
+      "integration_branch": "bundled",
+      "parameters.base.default": "bundled",
+      "parameters.base.doc": "bundled",
+      "parameters.base.type": "bundled",
+      "parameters.batch_worktree.default": "bundled",
+      "parameters.batch_worktree.doc": "bundled",
+      "parameters.batch_worktree.type": "bundled",
+      "parameters.external.default": "bundled",
+      "parameters.external.doc": "bundled",
+      "parameters.external.max": "bundled",
+      "parameters.external.min": "bundled",
+      "parameters.external.type": "bundled",
+      "parameters.integration_branch.default": "bundled",
+      "parameters.integration_branch.doc": "bundled",
+      "parameters.integration_branch.type": "bundled",
+      "parameters.kind.default": "bundled",
+      "parameters.kind.doc": "bundled",
+      "parameters.kind.type": "bundled",
+      "parameters.lanes": "bundled",
+      "parameters.local_check_policy": "bundled",
+      "parameters.local_check_policy.default": "bundled",
+      "parameters.local_check_policy.doc": "bundled",
+      "parameters.local_check_policy.type": "bundled",
+      "parameters.read_roots.default": "bundled",
+      "parameters.read_roots.doc": "bundled",
+      "parameters.read_roots.type": "bundled",
+      "parameters.review_shape.default": "bundled",
+      "parameters.review_shape.doc": "bundled",
+      "parameters.review_shape.type": "bundled",
+      "parameters.risk_tags.default": "bundled",
+      "parameters.risk_tags.doc": "bundled",
+      "parameters.risk_tags.type": "bundled",
+      "parameters.risk_tier.default": "bundled",
+      "parameters.risk_tier.doc": "bundled",
+      "parameters.risk_tier.type": "bundled",
+      "parameters.scout": "--params-file",
+      "parameters.scout.default": "bundled",
+      "parameters.scout.doc": "bundled",
+      "parameters.scout.max": "bundled",
+      "parameters.scout.min": "bundled",
+      "parameters.scout.type": "bundled",
+      "parameters.size.default": "bundled",
+      "parameters.size.doc": "bundled",
+      "parameters.size.type": "bundled",
+      "parameters.spec.default": "bundled",
+      "parameters.spec.doc": "bundled",
+      "parameters.spec.type": "bundled",
+      "parameters.spec_max_bytes.default": "bundled",
+      "parameters.spec_max_bytes.doc": "bundled",
+      "parameters.spec_max_bytes.max": "bundled",
+      "parameters.spec_max_bytes.min": "bundled",
+      "parameters.spec_max_bytes.type": "bundled",
+      "parameters.width.default": "bundled",
+      "parameters.width.doc": "bundled",
+      "parameters.width.max": "bundled",
+      "parameters.width.min": "bundled",
+      "parameters.width.type": "bundled",
+      "parameters.worktrees.default": "bundled",
+      "parameters.worktrees.doc": "bundled",
+      "parameters.worktrees.type": "bundled",
+      "pattern.citations": "bundled",
+      "pattern.cost": "bundled",
+      "pattern.level": "bundled",
+      "pattern.select_when": "bundled",
+      "pattern.summary": "bundled",
+      "pattern.tags": "bundled",
+      "plan.explicit": "bundled",
+      "plan.guidance": "bundled",
+      "plan.patterns": "bundled",
+      "plan.replaces": "bundled",
+      "roles.lens.conventions-readability": "bundled",
+      "roles.lens.correctness-spec": "bundled",
+      "roles.lens.design-fit-reuse": "bundled",
+      "roles.lens.flexibility": "bundled",
+      "roles.lens.refactor-cleanup": "bundled",
+      "roles.lens.reliability": "bundled",
+      "roles.lens.simplicity": "bundled",
+      "roles.lens.tests": "bundled",
+      "roles.plan.review": "bundled",
+      "roles.refactor-principal": "preset",
+      "roles.refactor-principal.acceptance_checks": "bundled",
+      "roles.refactor-principal.access": "bundled",
+      "roles.refactor-principal.delivery": "bundled",
+      "roles.refactor-principal.outputs": "bundled",
+      "roles.refactor-principal.prompt": "bundled",
+      "roles.refactor-principal.source.node": "bundled",
+      "roles.refactor-principal.source.type": "bundled",
+      "roles.refactor-principal.tier": "bundled",
+      "roles.refactor-principal.worktree": "bundled",
+      "roles.refactor-principal.write_scope": "bundled",
+      "roles.repairer": "preset",
+      "roles.repairer.acceptance_checks": "bundled",
+      "roles.repairer.access": "bundled",
+      "roles.repairer.delivery": "bundled",
+      "roles.repairer.inputs": "bundled",
+      "roles.repairer.prompt": "bundled",
+      "roles.repairer.tier": "bundled",
+      "roles.repairer.worktree": "bundled",
+      "roles.repairer.write_scope": "bundled",
+      "roles.review.evaluator": "bundled",
+      "roles.review.synthesis": "bundled",
+      "roles.review.verify": "bundled",
+      "roles.write.implement": "bundled",
+      "stages": "bundled"
+    },
+    "preset": "big-batch",
+    "roles": {
+      "lens.conventions-readability": {
+        "digest": "sha256:2a3ed542701c73aac20e2fcf061be84dc3ffe0eb7cae60b4d26d53a38bff2416",
+        "extends": [
+          "lens.conventions-readability",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:a7d85c53d2e3e213eae920045e7335dfe45f987777f397c44862d9a04aed13b5",
+            "ref": "skill:code-review/references/lenses/conventions-readability.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.correctness-spec": {
+        "digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
+        "extends": [
+          "lens.correctness-spec",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
+            "ref": "skill:code-review/references/lenses/correctness-spec.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.design-fit-reuse": {
+        "digest": "sha256:8106a66fd80eccc42c6f86526921fa553cd8a0164b72aaa6c38c9f93dda2ade2",
+        "extends": [
+          "lens.design-fit-reuse",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:cdc1ef703b729564597d135d650e554df1013f62113133032e4191016a25ef92",
+            "ref": "skill:code-review/references/lenses/design-fit-reuse.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.flexibility": {
+        "digest": "sha256:8a886d149360b69b7e1291612bbdd40c436d4de0e63170c31aac5faa55f86960",
+        "extends": [
+          "lens.flexibility",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:c89f5e9655744103673c3944e6baa86078bdd0b0b39a37fea553f86f492f7cf4",
+            "ref": "skill:code-review/references/lenses/flexibility.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.refactor-cleanup": {
+        "digest": "sha256:55978dc6912a015ecfb5af368430ebd46b9fb0631e2b76d8bcdefc2ce4b57ec0",
+        "extends": [
+          "lens.refactor-cleanup",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:f942c71419f241ed6adb9435c076f010372a97adaba1b698b8ffd3ddf8c3dbd1",
+            "ref": "skill:code-review/references/lenses/refactor-cleanup.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.reliability": {
+        "digest": "sha256:3fc6619b72f1afc2023c8f3e495979675d5e6dc74b90ca18da1f172a5ddd3cae",
+        "extends": [
+          "lens.reliability",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:14ab90fa193f9227d5c40f6d1f85d7e4aed996ecd34b6f7889f6ed746d63fe55",
+            "ref": "skill:code-review/references/lenses/reliability.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.simplicity": {
+        "digest": "sha256:e0adcb44b1fa016a1700e35f8379c381bf84f109f70d4562ca7ffebc9dd8ea82",
+        "extends": [
+          "lens.simplicity",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:0b720108a8d2924a4952a3e79ad5e38e0f815e170a30ac7db6a06d319567f77d",
+            "ref": "skill:code-review/references/lenses/simplicity.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.tests": {
+        "digest": "sha256:1acffad6d7ba2cf1a0d514ee9310a7a39e6d077695178d7cb63c2baf19f793d0",
+        "extends": [
+          "lens.tests",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:59d329184896c2928e2a825a40beeaef3abb9fd664423584be9d41544125ae36",
+            "ref": "skill:code-review/references/lenses/tests.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:c2d75a06bfd33579819e65359dc840fe0760fd1599872b84d2c10febf0ae9ec2",
+            "ref": "skill:test-design/references/judgement.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:0ea6876489689563310c02a884249f342471efa0c2ce15dd0c887b3c1cc9f776",
+            "ref": "skill:test-design/references/boundaries.md",
+            "when": "always"
+          }
+        ]
+      },
+      "plan.review": {
+        "digest": "sha256:cc9b118bf74049c200dc2e053a9d30de01f36479c4688392153484bcf832a60c",
+        "extends": [
+          "plan.review",
+          "plan"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "refactor-principal": {
+        "digest": "sha256:eacfb3bc14777bc9d8da090d691824537b377164710f8126924e3d7bb199488d",
+        "extends": [
+          "refactor-principal"
+        ],
+        "origin": "preset",
+        "references": []
+      },
+      "repairer": {
+        "digest": "sha256:6b7ce5dba8129984f4e5a4395b1b45dad17876471a70986894a37fcf8597610c",
+        "extends": [
+          "repairer"
+        ],
+        "origin": "preset",
+        "references": []
+      },
+      "review.evaluator": {
+        "digest": "sha256:0fbf01f2902e4b4fa6417287dd573e381f40366e54bfe465b5cecabc2025a3a3",
+        "extends": [
+          "review.evaluator"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "review.synthesis": {
+        "digest": "sha256:68848fe2b0b2a762445ac11b39b789e95d7dc81ca94c406fab40207d44477a08",
+        "extends": [
+          "review.synthesis"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "review.verify": {
+        "digest": "sha256:665007e1e9514aaf0fc943a4039b14eed83bf1296136ee3eb94b827fcc820db6",
+        "extends": [
+          "review.verify"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "write.implement": {
+        "digest": "sha256:66a47c337c54fd277c461a71e017d90f9e2c84410669226509ca05391049b66a",
+        "extends": [
+          "write.implement"
+        ],
+        "origin": "bundled",
+        "references": []
+      }
+    },
+    "substitutions": [],
+    "warnings": [
+      "preset review-council: omitted lens \"security-privacy\": requires risk tag security",
+      "preset review-council: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
+      "preset review-council: omitted lens \"adversarial\": requires risk tag terminal",
+      "preset review-council: omitted lens \"security-privacy\": requires risk tag security",
+      "preset review-council: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
+      "preset review-council: omitted lens \"adversarial\": requires risk tag terminal"
+    ]
+  },
+  "schema_version": 1
+}

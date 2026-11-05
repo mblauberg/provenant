@@ -155,11 +155,87 @@ impl WriterLaunch {
     /// rechecks this prepared base while holding writer custody before launch.
     pub fn require_source(&self, expected: GitOid) -> Result<()> {
         if self.base != expected {
-            return Err(RunError::Validation(
-                "writer differs from pinned source commit",
-            ));
+            return Err(RunError::WriterSourceMismatch {
+                expected,
+                actual: self.base,
+            });
         }
         Ok(())
+    }
+
+    /// Bind a graph writer continuation to its predecessor head, verifying that
+    /// the predecessor head descends from the original lineage source commit.
+    pub fn require_continuation_source(
+        &self,
+        git: &Path,
+        source: GitOid,
+        predecessor: GitOid,
+    ) -> Result<()> {
+        if self.base != predecessor {
+            return Err(RunError::WriterSourceMismatch {
+                expected: predecessor,
+                actual: self.base,
+            });
+        }
+        let repo = self.worktree.repo();
+        let descends = crate::objects::command(
+            git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &[
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                source.to_string().into(),
+                predecessor.to_string().into(),
+            ],
+            None,
+        )
+        .is_ok();
+        if !descends {
+            return Err(RunError::WriterSourceMismatch {
+                expected: source,
+                actual: self.base,
+            });
+        }
+        Ok(())
+    }
+
+    /// List paths with uncommitted predecessor edits in the writer worktree.
+    pub fn uncommitted_paths(&self, git: &Path) -> Result<Vec<String>> {
+        let repo = self.worktree.repo();
+        let output = crate::objects::command(
+            git,
+            repo.private_git_dir(),
+            repo.root_path(),
+            &[
+                "--work-tree".into(),
+                repo.root_path().into(),
+                "status".into(),
+                "--porcelain".into(),
+                "-z".into(),
+            ],
+            None,
+        )?;
+        let mut records = output.split(|byte| *byte == 0);
+        let mut paths = Vec::new();
+        while let Some(record) = records.next() {
+            if record.is_empty() {
+                break;
+            }
+            if record.len() < 4 || record[2] != b' ' {
+                return Err(RunError::Validation("invalid Git status record"));
+            }
+            paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
+            // Porcelain -z puts the destination first and follows it with the source.
+            if record[..2]
+                .iter()
+                .any(|status| matches!(status, b'R' | b'C'))
+                && records.next().is_none_or(|source| source.is_empty())
+            {
+                return Err(RunError::Validation("invalid Git status rename"));
+            }
+        }
+        Ok(paths)
     }
 }
 
@@ -974,6 +1050,8 @@ mod cargo_setup_tests {
             Ok(String::from_utf8(output.stdout)?.trim().to_owned())
         };
         run(&["init", "-q"])?;
+        std::fs::write(project.join("old name.txt"), "tracked")?;
+        run(&["add", "old name.txt"])?;
         run(&[
             "-c",
             "user.name=Fixture",
@@ -1015,6 +1093,103 @@ mod cargo_setup_tests {
             custody: None,
             review_exempt: Default::default(),
         };
+        // Use a real unrelated root, so both named commits exist.
+        let tree = run(&["rev-parse", "HEAD^{tree}"])?;
+        let unrelated = run(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit-tree",
+            &tree,
+            "-m",
+            "unrelated root",
+        ])?;
+        let other = GitOid::parse(&unrelated)?;
+        let mismatch = writer
+            .require_source(other)
+            .err()
+            .ok_or("different source must refuse")?;
+        assert!(
+            matches!(mismatch, RunError::WriterSourceMismatch { expected, actual } if expected == other && actual == writer.base)
+        );
+        let message = mismatch.to_string();
+        assert!(message.contains(&other.to_string()));
+        assert!(message.contains(&expected));
+        writer.require_source(writer.base)?;
+        // A continuation accepts when the predecessor descends from the original source.
+        let child_commit = run(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit-tree",
+            &tree,
+            "-p",
+            &expected,
+            "-m",
+            "child commit",
+        ])?;
+        let child_oid = GitOid::parse(&child_commit)?;
+        let source_oid = GitOid::parse(&expected)?;
+        writer.base = child_oid;
+        writer.require_continuation_source(utility.git_program_path(), source_oid, child_oid)?;
+        // Refuses when HEAD does not descend from the pinned source, naming both commits.
+        let ancestry_mismatch = writer
+            .require_continuation_source(utility.git_program_path(), other, child_oid)
+            .err()
+            .ok_or("unrelated source must refuse")?;
+        assert!(
+            matches!(ancestry_mismatch, RunError::WriterSourceMismatch { expected, actual } if expected == other && actual == child_oid)
+        );
+        let ancestry_message = ancestry_mismatch.to_string();
+        assert!(ancestry_message.contains(&other.to_string()));
+        assert!(ancestry_message.contains(&child_oid.to_string()));
+        // Refuses when the prepared base does not match the predecessor head, naming both commits.
+        let base_mismatch = writer
+            .require_continuation_source(utility.git_program_path(), source_oid, source_oid)
+            .err()
+            .ok_or("predecessor mismatch must refuse")?;
+        assert!(
+            matches!(base_mismatch, RunError::WriterSourceMismatch { expected, actual } if expected == source_oid && actual == child_oid)
+        );
+        let base_message = base_mismatch.to_string();
+        assert!(base_message.contains(&source_oid.to_string()));
+        assert!(base_message.contains(&child_oid.to_string()));
+        assert_eq!(
+            writer.uncommitted_paths(utility.git_program_path())?,
+            Vec::<String>::new()
+        );
+        std::fs::write(lane.join("uncommitted.txt"), "leftover edit")?;
+        assert_eq!(
+            writer.uncommitted_paths(utility.git_program_path())?,
+            vec!["uncommitted.txt".to_string()]
+        );
+        std::fs::remove_file(lane.join("uncommitted.txt"))?;
+        let lane_git = |args: &[&str]| -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command_at(&git)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(&lane)
+                .args(args)
+                .output()?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+            }
+            Ok(())
+        };
+        lane_git(&["mv", "old name.txt", "renamed.txt"])?;
+        std::fs::write(lane.join("café.txt"), "untracked")?;
+        assert_eq!(
+            writer.uncommitted_paths(utility.git_program_path())?,
+            vec!["renamed.txt", "café.txt"]
+        );
+        lane_git(&["mv", "renamed.txt", "old name.txt"])?;
+        std::fs::remove_file(lane.join("café.txt"))?;
+        writer.base = source_oid;
         let second_tree = provenant_confinement::verify_worktree(&repo, &second_lane)?;
         let mut second = WriterLaunch {
             worktree: second_tree,

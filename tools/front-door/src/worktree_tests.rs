@@ -247,6 +247,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "read_only_lane_builds_and_tests_cargo_in_scratch",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
+            "writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source",
             "writer_dispatch_edits_a_linked_worktree",
             "second_writer_is_refused_while_first_holds_the_worktree",
             "writer_terminal_refuses_sequencer_state",
@@ -335,6 +336,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "writer_dispatch_uses_lane_cache_and_narrow_provider_state" => {
                     crate::compose_tests::writer_dispatch_uses_lane_cache_and_narrow_provider_state(
                     )
+                }
+                "writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source" => {
+                    crate::fabric::peer_tests::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source()
                 }
                 "writer_dispatch_edits_a_linked_worktree" => {
                     writer_dispatch_edits_a_linked_worktree()
@@ -1193,7 +1197,7 @@ pub(super) fn writer_process_cleanup(
     provenant_supervisor::fixture::ProcessCleanupGuard::new(context.state_root.as_path())
 }
 
-fn start_writer(
+pub(super) fn start_writer(
     store: &provenant_run::RunStore,
     run: provenant_core::RunId,
     provider: &dyn provenant_run::Providers,
@@ -1285,6 +1289,7 @@ pub(super) fn writer_run(
                 title: None,
                 base: None,
                 head: None,
+                source_head: None,
                 base_ref: None,
                 account: None,
                 profile: provenant_run::HarnessProfile::default(),
@@ -1318,11 +1323,11 @@ pub(super) fn writer_run(
     })
 }
 
-struct WriterProvider {
-    state: PathBuf,
-    home: PathBuf,
-    project: provenant_core::ProjectId,
-    mode: &'static str,
+pub(super) struct WriterProvider {
+    pub(super) state: PathBuf,
+    pub(super) home: PathBuf,
+    pub(super) project: provenant_core::ProjectId,
+    pub(super) mode: &'static str,
 }
 impl provenant_run::Providers for WriterProvider {
     fn prepare(
@@ -1338,6 +1343,24 @@ impl provenant_run::Providers for WriterProvider {
         let request = task.writer.as_ref().ok_or("writer request missing")?;
         let writer = provenant_run::prepare_writer(request, &self.state, self.project)
             .map_err(|error| error.to_string())?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        if let Some(source) = &task.source_head {
+            writer
+                .require_continuation_source(
+                    &git,
+                    source.parse().map_err(|_| "source")?,
+                    task.head
+                        .as_deref()
+                        .ok_or("predecessor")?
+                        .parse()
+                        .map_err(|_| "head")?,
+                )
+                .map_err(|error| error.to_string())?;
+        } else if let Some(head) = &task.head {
+            writer
+                .require_source(head.parse().map_err(|_| "head")?)
+                .map_err(|error| error.to_string())?;
+        }
         let executable =
             fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
                 .map_err(|error| error.to_string())?;
@@ -1450,7 +1473,7 @@ fn writer_observations() -> BTreeMap<
     .into()
 }
 
-fn holder_context<'a>(
+pub(super) fn holder_context<'a>(
     rig: &'a TestRig,
     roots: &'a provenant_core::Roots,
     context: &'a provenant_run::ExecutionContext,
@@ -1476,7 +1499,7 @@ fn holder_context<'a>(
     }
 }
 
-fn await_terminal(
+pub(super) fn await_terminal(
     store: &provenant_run::RunStore,
     attempt: provenant_core::AttemptId,
     call: &provenant_run::Request<'_>,

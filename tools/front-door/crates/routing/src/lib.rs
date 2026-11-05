@@ -7,6 +7,7 @@ mod fallback;
 mod policy;
 mod request;
 mod resolve;
+mod retry;
 mod review;
 pub use catalog::*;
 pub use exclusion::*;
@@ -16,6 +17,7 @@ pub use policy::*;
 pub use provenant_records::ResolvedRoute;
 pub use request::*;
 pub use resolve::*;
+pub use retry::*;
 pub use review::*;
 
 #[derive(Debug, thiserror::Error)]

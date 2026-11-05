@@ -235,6 +235,11 @@ pub trait CwdObserver: Send + Sync {
         OccupancyObservation::default()
     }
 
+    /// Executable image of the process, if known.
+    fn executable(&self, _pid: i64) -> Option<PathBuf> {
+        None
+    }
+
     /// The process's executable on the sealed system volume, or None when any
     /// evidence is missing. Missing evidence never grants an exception.
     fn sealed_system_image(&self, _pid: i64) -> Option<SealedSystemImage> {
@@ -287,6 +292,11 @@ impl CwdObserver for SystemCwdObserver {
             return OccupancyObservation::default();
         };
         crate::sys::pid::occupancy(pid)
+    }
+
+    fn executable(&self, pid: i64) -> Option<PathBuf> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        crate::sys::pid::executable_path(pid)
     }
 
     fn sealed_system_image(&self, pid: i64) -> Option<SealedSystemImage> {

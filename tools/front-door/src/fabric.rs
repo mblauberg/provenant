@@ -80,6 +80,22 @@ pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeErro
     }
 }
 
+fn graph_writer_initialisation_error(
+    commit: &str,
+    error: provenant_confinement::worktrees::WorktreeError,
+) -> FacadeError {
+    use provenant_confinement::worktrees::WorktreeError;
+    if matches!(&error, WorktreeError::RegistryLockTimeout) {
+        FacadeError::Busy
+    } else {
+        FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: format!("initialise graph writer at {commit}: {error}"),
+        }
+    }
+}
+
 fn lane_timeout(deadline_seconds: Option<u64>, graph_timeout_seconds: u64) -> u64 {
     deadline_seconds
         .unwrap_or(graph_timeout_seconds)
@@ -1975,10 +1991,17 @@ impl BinaryRunOwner<'_> {
         targets
             .iter()
             .map(|target| {
-                session
+                let mut record = session
                     .service()
                     .status_for_wait(target.attempt, &call)
-                    .map_err(run_error)
+                    .map_err(run_error)?;
+                let tail = session
+                    .store
+                    .policy_tail(target.attempt, &call)
+                    .map_err(run_error)?;
+                record.superseded_by =
+                    (tail.attempt_id != target.attempt).then_some(tail.attempt_id);
+                Ok(record)
             })
             .collect()
     }
@@ -2008,7 +2031,14 @@ impl BinaryRunOwner<'_> {
                 &self.call(cancel),
             )
             .map_err(run_error)?;
-        Ok(page.lanes)
+        let mut lanes = page.lanes;
+        for lane in &mut lanes {
+            let tail = store
+                .policy_tail(lane.attempt_id, &self.call(cancel))
+                .map_err(run_error)?;
+            lane.superseded_by = (tail.attempt_id != lane.attempt_id).then_some(tail.attempt_id);
+        }
+        Ok(lanes)
     }
     /// The wait of each queued or starting lane among `targets`, for `PeerAction::LaneWaits`.
     fn waits_local(
@@ -2066,6 +2096,7 @@ impl BinaryRunOwner<'_> {
             budget,
             cancel,
             provenant_records::run::LaneAccess::default(),
+            None,
         )
         .map_err(|error| scope_io(error, "submit"))
     }
@@ -2076,8 +2107,9 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
         access: provenant_records::run::LaneAccess,
+        settlement_retry_limit: Option<u8>,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        self.submit_inner(input, budget, cancel, access)
+        self.submit_inner(input, budget, cancel, access, settlement_retry_limit)
             .map_err(|error| scope_io(error, "submit"))
     }
     fn submit_inner(
@@ -2086,6 +2118,7 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
         access: provenant_records::run::LaneAccess,
+        settlement_retry_limit: Option<u8>,
     ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
         let SubmitInput::Submit {
@@ -2170,6 +2203,7 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(fail_error)?;
             submitted.push(Submitted {
+                settlement_retry_limit,
                 context: task.context,
                 build_heavy: task.build_heavy,
                 base: task.base,
@@ -4393,7 +4427,51 @@ impl BoundGraphOwner<'_> {
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn admission_timeout_seconds(&self) -> Option<u64> {
+        let configured = provenant_confinement::run_config::RunConfig::read(
+            self.factory.context.roots.state.as_path(),
+        )
+        .ok()
+        .and_then(|config| {
+            config.admission_seconds_for(&self.factory.context.identity.project.to_string())
+        });
+        let effective = provenant_run::AdmissionPolicy::resolve_timeout(None, configured);
+        Some(effective.seconds)
+    }
     type Error = FacadeError;
+    fn retry_allowance(
+        &self,
+        node: &provenant_records::ExtraFields,
+        graph: &provenant_records::ExtraFields,
+    ) -> Result<Option<(u8, String)>, Self::Error> {
+        Ok(Some(graph_retry_allowance(
+            node,
+            graph,
+            &self.factory.context.roots,
+        )))
+    }
+
+    fn retry_successors(&mut self, reference: &str) -> Result<u64, FacadeError> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        if host != self.factory.context.identity.host.to_string() {
+            // Unknown remote lineage must never grant fresh retry allowance.
+            return Ok(u64::from(provenant_routing::MAX_SETTLEMENT_RETRIES));
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(self.cancel)?;
+        let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
+        let call = owner.call(self.cancel);
+        let record = store.record(attempt, &call).map_err(run_error)?;
+        Ok(store
+            .policy_attempt_number(&record, &call)
+            .map_err(run_error)?
+            .saturating_sub(1))
+    }
 
     fn preparation_fallback_evidence(
         &mut self,
@@ -4875,6 +4953,30 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 
+    fn launch_accepted(
+        &mut self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> Result<bool, Self::Error> {
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: Some(
+                attempt
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+            chair: None,
+        };
+        let operation_id = graph_operation("graph-attempt-operation", &attempt.key)?;
+        let store = owner.store(self.cancel)?;
+        let call = owner.call(self.cancel);
+        Ok(store
+            .operation(&operation_id, &call)
+            .map_err(run_error)?
+            .is_some_and(|operation| operation.state != provenant_run::OperationState::Prepared))
+    }
+
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
@@ -4922,6 +5024,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let mut prepared_without_request = false;
             let mut accepted_knobs = None;
             let mut accepted_route = None;
+            let mut accepted_retry_limit = None;
             let context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
                     Ok(request) => {
@@ -4929,6 +5032,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         if accepted {
                             accepted_knobs = Some(task.profile.overrides.clone());
                             accepted_route = Some(task.route.clone());
+                            accepted_retry_limit = Some(task.profile.settlement_retry_limit);
                         }
                         task.context.clone()
                     }
@@ -5018,11 +5122,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         )
                     },
                 )
-                .map_err(|error| FacadeError::DispatchRefused {
-                    fact: None,
-                    disk: None,
-                    reason: format!("initialise graph writer at {commit}: {error}"),
-                })?;
+                .map_err(|error| graph_writer_initialisation_error(commit, error))?;
             }
             let delivery = if let Some(mode) = replay.delivery {
                 let branch = if let Some(path) = worktree {
@@ -5206,13 +5306,15 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 concurrency: Some(1),
                 knobs: if let Some(knobs) = accepted_knobs {
                     knobs
-                } else if exclude.is_empty() {
-                    vec![]
                 } else {
-                    vec![format!(
-                        "routing.graph_exclude={}",
-                        serde_json::Value::from(exclude)
-                    )]
+                    let mut knobs = Vec::new();
+                    if !exclude.is_empty() {
+                        knobs.push(format!(
+                            "routing.graph_exclude={}",
+                            serde_json::Value::from(exclude)
+                        ));
+                    }
+                    knobs
                 },
                 host: None,
             };
@@ -5254,20 +5356,27 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 }
                 legacy
             });
-            let receipt =
-                match owner.submit_with_access(input, self.budget, self.cancel, grants.clone()) {
-                    Err(FacadeError::OperationConflict) if legacy_input.is_some() => {
-                        // Store admission still requires the reserved digest to match
-                        // exactly. Only legacy metadata is retried, once.
-                        owner.submit_with_access(
-                            legacy_input.ok_or(FacadeError::StateCorrupt)?,
-                            self.budget,
-                            self.cancel,
-                            grants,
-                        )?
-                    }
-                    result => result?,
-                };
+            let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
+            let receipt = match owner.submit_with_access(
+                input,
+                self.budget,
+                self.cancel,
+                grants.clone(),
+                retry_limit,
+            ) {
+                Err(FacadeError::OperationConflict) if legacy_input.is_some() => {
+                    // Store admission still requires the reserved digest to match
+                    // exactly. Only legacy metadata is retried, once.
+                    owner.submit_with_access(
+                        legacy_input.ok_or(FacadeError::StateCorrupt)?,
+                        self.budget,
+                        self.cancel,
+                        grants,
+                        retry_limit,
+                    )?
+                }
+                result => result?,
+            };
             owner.actor = None;
             let target = receipt
                 .targets
@@ -5383,6 +5492,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                 AttemptOutcome::DeclaredStop
                             }
                             Outcome::Failed => AttemptOutcome::TaskFailed,
+                            Outcome::ReviewRequired => AttemptOutcome::ReviewRequired,
                             // Uncommitted edits need the chair, so the node fails without fallback.
                             Outcome::Uncommitted => AttemptOutcome::OtherFailure,
                             _ => AttemptOutcome::OtherFailure,
@@ -5422,6 +5532,53 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 }
+/// Resolve the existing routing allowance, retaining explicit zero overrides.
+fn graph_retry_allowance(
+    node: &provenant_records::ExtraFields,
+    graph: &provenant_records::ExtraFields,
+    roots: &provenant_core::Roots,
+) -> (u8, String) {
+    let mut warnings = Vec::new();
+    let mut read = |extra: &provenant_records::ExtraFields, key: &str| -> Option<u8> {
+        let retry = extra.get(key)?;
+        let value = retry
+            .get("retries")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value <= provenant_routing::MAX_SETTLEMENT_RETRIES);
+        if value.is_none() {
+            warnings.push(format!("ignored invalid {key}.retries"));
+        }
+        value
+    };
+    let node_retry = read(node, "retry");
+    let preset_retry = read(node, "preset_retry").or_else(|| read(graph, "retry"));
+    let host = match provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS) {
+        Ok(config) => matches!(
+            config.origins.get("domains.routing.settlement_retries"),
+            Some(provenant_config::Origin::User { .. })
+        )
+        .then_some(config.domains.routing.settlement_retries),
+        Err(_) => {
+            warnings.push("host retry setting unavailable".into());
+            None
+        }
+    };
+    let allowance = provenant_routing::resolve_retry_allowance(node_retry, preset_retry, host);
+    let origin = match allowance.origin {
+        provenant_routing::RetryAllowanceOrigin::Node => "node",
+        provenant_routing::RetryAllowanceOrigin::Preset => "preset",
+        provenant_routing::RetryAllowanceOrigin::HostConfig => "host_config",
+        provenant_routing::RetryAllowanceOrigin::ShippedDefault => "shipped_default",
+    };
+    let origin = if warnings.is_empty() {
+        origin.to_owned()
+    } else {
+        format!("{origin}; {}", warnings.join("; "))
+    };
+    (allowance.retries, origin)
+}
+
 /// A graph document's optional top-level `exclude` list of route-exclusion
 /// selectors, inherited by every node it launches.
 fn graph_exclude(
