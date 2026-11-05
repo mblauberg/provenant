@@ -150,20 +150,14 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountingGit<'a> {
         inner: &'a dyn Executor,
-        inspections: AtomicUsize,
+        calls: AtomicUsize,
     }
     impl Executor for CountingGit<'_> {
         fn execute(
             &self,
             options: provenant_os::exec::ExecOptions<'_>,
         ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
-            if options
-                .argv
-                .iter()
-                .any(|arg| arg == "status" || arg == "ls-files")
-            {
-                self.inspections.fetch_add(1, Ordering::SeqCst);
-            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
             self.inner.execute(options)
         }
     }
@@ -176,7 +170,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     }
     let git = CountingGit {
         inner: context.executor,
-        inspections: AtomicUsize::new(0),
+        calls: AtomicUsize::new(0),
     };
     context.executor = &git;
     let lanes = list_for_gc(&context, &cancel())?;
@@ -196,7 +190,9 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         &cancel(),
     )?;
     assert!(report.worktrees.removed.is_empty());
-    assert_eq!(git.inspections.load(Ordering::SeqCst), 0);
+    // One inventory read in list and one in collect, independent of the
+    // number of out-of-scope worktrees. No per-tree Git probes are needed.
+    assert_eq!(git.calls.load(Ordering::SeqCst), 2);
     Ok(())
 }
 
@@ -238,6 +234,70 @@ fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Err
             .any(|entry| entry.branch == "dirty-candidate" && entry.reason == RetainReason::Dirty)
     );
     assert!(lane.path.join("untracked").exists());
+    Ok(())
+}
+
+#[test]
+fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct RejectConfig<'a> {
+        inner: &'a dyn Executor,
+        rejected: AtomicUsize,
+    }
+    impl Executor for RejectConfig<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options.argv.iter().any(|arg| arg == "config") {
+                self.rejected.fetch_add(1, Ordering::SeqCst);
+                return Err(provenant_os::exec::ExecError::InvalidLimit);
+            }
+            self.inner.execute(options)
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let lane = create(
+        &context,
+        WorktreeCreate {
+            branch: "probe-failure".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let git = RejectConfig {
+        inner: context.executor,
+        rejected: AtomicUsize::new(0),
+    };
+    context.executor = &git;
+    let lanes = list_for_gc(&context, &cancel())?;
+    let report = collect_lazy(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    assert!(git.rejected.load(Ordering::SeqCst) > 0);
+    assert!(lane.path.exists());
+    assert!(report.worktrees.removed.is_empty());
+    assert!(
+        report
+            .worktrees
+            .retained
+            .iter()
+            .any(|entry| entry.branch == "probe-failure")
+    );
     Ok(())
 }
 

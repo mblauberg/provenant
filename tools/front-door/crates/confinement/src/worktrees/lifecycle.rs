@@ -182,7 +182,15 @@ fn list_impl(
                 true,
             )
         } else {
-            match verify_probed_worktree(context, &path, cancel) {
+            // GC only reads registration and custody here. Its candidate paths
+            // probe their own Git configuration before running Git or
+            // mutating anything; probing every unrelated tree is costly.
+            let verified = if eager_git {
+                verify_probed_worktree(context, &path, cancel)
+            } else {
+                verify_worktree(context.repo, &path).map_err(WorktreeError::from)
+            };
+            match verified {
                 Ok(worktree) => {
                     owner = match load_owner(&worktree) {
                         Ok(Some(_)) => OwnerStatus::Registered,
