@@ -2070,6 +2070,27 @@ fn expanded_composite_id_refusal_matches_admission() {
 }
 
 #[test]
+fn expanded_loop_id_refusal_matches_admission() {
+    let outer = "a".repeat(32);
+    let inner = "b".repeat(32);
+    let mut layers = Layers::empty();
+    let preset = format!(
+        "stages=[{{id='{outer}',loop={{max_rounds=1,until='{inner}',stages=[{{id='{inner}',kind='gate',condition={{type='budget'}}}}]}}}}]\n"
+    );
+    layers.insert("test", "long-loop", &preset).unwrap();
+    let error = expand(&layers, "long-loop", "brief", &[]).unwrap_err();
+    let valid = preset.replace(&outer, "loop");
+    layers.insert("test", "short-loop", &valid).unwrap();
+    let mut document = expand(&layers, "short-loop", "brief", &[])
+        .unwrap()
+        .document;
+    document["nodes"][0]["id"] = json!(outer);
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document).unwrap();
+    assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+}
+
+#[test]
 fn nested_composites_within_the_host_depth_bound_compile() {
     let mut stage = "{ id='leaf', prompt='work' }".to_owned();
     for index in 0..9 {

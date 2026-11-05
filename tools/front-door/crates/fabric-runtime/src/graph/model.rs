@@ -316,7 +316,8 @@ impl GraphDocument {
     /// used by graph admission, without starting a graph.
     pub fn check_composites(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
         let expansion_limits = expansion_safety_limits(limits);
-        composites::expand(self, &expansion_limits).map(|_| ())
+        let expanded = composites::expand(self, &expansion_limits)?;
+        loops::check_expanded_ids(&expanded, &[])
     }
 
     /// Host preflight sees the same bounded static composite/loop expansion as

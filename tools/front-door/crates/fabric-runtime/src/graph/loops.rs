@@ -192,7 +192,31 @@ pub(super) fn expand(
     limits: &crate::config::GraphLimits,
 ) -> Result<GraphDocument, String> {
     let flattened = composites::expand(document, limits)?;
+    check_expanded_ids(&flattened, extensions)?;
     Ok(expand_loops(&flattened, extensions)?)
+}
+
+/// Check the longest round ID before lowering, using the same spelling and
+/// validation as execution. A later round cannot have fewer decimal digits.
+pub(super) fn check_expanded_ids(
+    document: &GraphDocument,
+    extensions: &[String],
+) -> Result<(), String> {
+    for node in &document.nodes {
+        let Some(spec) = &node.loop_body else {
+            continue;
+        };
+        let rounds = allowance(node, extensions);
+        if !(1..=1024).contains(&rounds) {
+            continue;
+        }
+        for child in &spec.body {
+            if !valid_identifier(&id(&node.id, rounds, &child.id)) {
+                return Err("expanded loop node id exceeds 64 bytes".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn expand_loops(
@@ -382,9 +406,6 @@ fn expand_loops(
                 let mut child = child.clone();
                 let local = child.id.clone();
                 child.id = id(&node.id, round, &local);
-                if !valid_identifier(&child.id) {
-                    return Err("expanded loop node id exceeds 64 bytes");
-                }
                 child.round = Some(LoopRound {
                     extra: Default::default(),
                     loop_id: node.id.clone(),
