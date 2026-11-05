@@ -2801,6 +2801,28 @@ fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
 }
 
 #[test]
+fn required_findings_prompt_includes_empty_example_even_when_fence_is_mentioned() {
+    let mut lens = node("lens", route("first"));
+    lens.require_findings = true;
+    lens.prompt = "Review the existing ```findings block.".into();
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal_with_result(
+            AttemptOutcome::Succeeded,
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+        )]),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![lens]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert!(owner.prompts[0].contains("```findings\n{\"schema_version\":1,\"findings\":[]}\n```"));
+}
+
+#[test]
 fn synthesis_recovers_upheld_findings_when_verifier_block_is_truncated() {
     let mut lens = node("lens", route("first"));
     lens.require_findings = true;

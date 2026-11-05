@@ -260,7 +260,7 @@ fn pattern_summary(spec: &PlanSpec) -> String {
 
 pub fn prompt(node: &GraphNode) -> String {
     let mut prompt = node.prompt.clone();
-    if node.require_findings && !prompt.contains("```findings") {
+    if node.require_findings {
         prompt.push_str(
             "\n\nInclude a fenced `findings` JSON block in your final response. If there are no findings, emit exactly:\n```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nEach finding must include its id, severity, file, summary and status.",
         );
