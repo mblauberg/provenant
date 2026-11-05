@@ -80,9 +80,9 @@ setting = "gc.free_floor"
 reason = "Writer launch may refuse when available storage remains below the configured free-space floor after collection."
 
 [[guard]]
-site = "run/src/launch.rs#Providers::check_policy"
-boundary = "unclassified"
-reason = "Provider-specific policy failures still need classification."
+site = "cli/src/run/dispatch.rs#PreparedProvider::check_policy"
+boundary = "authority"
+reason = "A prepared continuation must retain its validated task identity."
 
 [[guard]]
 site = "cli/src/run.rs#writer_gc_settings"
@@ -219,11 +219,6 @@ reason = "The selected keychain and attempt-private home are required to confine
 site = "providers/src/agy.rs#prepare"
 boundary = "authority"
 reason = "A resumed invocation requires its validated continuation identity."
-
-[[guard]]
-site = "providers/src/agy.rs#prepare"
-boundary = "unclassified"
-reason = "Remaining prompt and staged skill path refusals require classification."
 
 [[guard]]
 site = "providers/src/codex.rs#prepare"
