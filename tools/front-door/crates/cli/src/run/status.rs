@@ -1317,11 +1317,16 @@ pub(super) fn route_label(record: &run::AttemptRecord) -> String {
 /// Receipt facts shared by explicit PR opening and graph delivery. Workflow
 /// review receipts, when present, are added by the caller that owns that store.
 pub fn recorded_attempt_facts(record: &run::AttemptRecord) -> AttemptFacts {
-    let (state, _) = state_and_reason(&record.state);
-    let exit_code = match &record.state {
-        run::AttemptState::Terminal { exit_code, .. } => *exit_code,
-        _ => None,
-    };
+    let lane = project_lane(
+        record,
+        &[],
+        Path::new("/"),
+        &Default::default(),
+        None,
+        false,
+    );
+    let state = lane.state;
+    let exit_code = lane.exit_code;
     AttemptFacts {
         attempt_id: record.attempt_id,
         run_id: record.run_id,
