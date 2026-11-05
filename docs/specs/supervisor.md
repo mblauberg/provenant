@@ -23,14 +23,18 @@ each repository. The snapshot is tied to the common Git directory identity and
 is consumed once. Applied cleanup discards the snapshot and reads Git again
 under the repository lock before authorising mutations. Ref resolution uses
 fresh bounded evidence after fetch. The facts session's inventory and scalar
-caps are configurable and never widen the caller's utility budget. Session
+caps are configurable and never widen the caller's utility budget. Cached
+inventories are reused only under the same effective utility budget. Session
 handoff uses one facts session for its inventory, upstream commit reads and
 WIP rechecks, refreshing mutable evidence after its own Git writes. Target-side
 handoff recreation reuses an identity-bound advisory inventory between branches;
 guarded reads and attempted mutations invalidate it before authorising writes.
 Peer and handoff base resolution pins through the facts session and then checks
 that exact commit against remote-tracking refs, so a moved ref cannot change the
-commit after the reachability check.
+commit after the reachability check. A containing tracking tip must also match
+a currently advertised remote branch tip; deleted tracking refs cannot prove
+reachability. Replacement objects and grafts do not alter that ancestry check.
+Fetch, resolution and advertisement share the peer deadline.
 
 ### Worktree census sessions
 
@@ -62,6 +66,9 @@ has not yet acquired an attempt ID. A replay of that same operation can use
 its reservation despite advisory census evidence, after reacquiring custody.
 Publishing an initial owner also takes repository and writer custody and checks
 the previously observed owner, so a creator cannot overwrite a competing claim.
+Subsequent owner updates compare the complete observed record under both guards.
+These reservations are published before the writer lease, so they do not yet
+prove which attempt holds an acquired lease.
 Failed-creation cleanup rechecks the operation owner under those locks before
 removing the tree. An unreadable owner record is custody uncertainty with the
 worktree scope and read failure, not an unowned checkout.
