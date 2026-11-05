@@ -61,8 +61,8 @@ struct Fixture;
 struct FixtureResources;
 impl provenant_run::Resources for FixtureResources {
     fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-        let _ = pid;
-        provenant_supervisor::census::ProcessObservation::Absent
+        use provenant_supervisor::census::ProcessObserver;
+        provenant_supervisor::fixture::RecordedBootObserver.observe(pid)
     }
     fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
         Ok(provenant_os::sys::resources::MemorySample {
@@ -2935,6 +2935,16 @@ fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result {
 // Split by lane mode so each test fits the per-test time budget (#2627);
 // every case costs about 5 s of confined preparation and execution.
 fn lane_prepare_isolates_nested_state() -> Result {
+    use provenant_run::Resources;
+    use provenant_supervisor::census::{ProcessObservation, ProcessObserver};
+
+    let pid = i64::from(std::process::id());
+    let ProcessObservation::Present(fact) =
+        provenant_supervisor::fixture::RecordedBootObserver.observe(pid)
+    else {
+        return Err("fixture process identity unavailable".into());
+    };
+    assert_eq!(FixtureResources.guardian_identity(), Some(fact.identity));
     lane_prepare_cases(&[("codex", false, false, 91), ("claude", false, false, 93)])
 }
 
