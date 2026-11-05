@@ -1726,10 +1726,13 @@ impl RunStore {
         let succeeded_before_stop = decoded.outcome == Outcome::Succeeded;
         // A declared stop requires review even when the provider succeeded.
         let mut partial = std::mem::take(&mut decoded.partial_signals);
+        // A read-only lane has no changes to prove, so its complete answer is
+        // the proof. Only a writer must also report its work in a handoff.
         if matches!(
             decoded.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-        ) && !matches!(&task.route, RequestedRoute::Adapter { .. })
+        ) && task.writer.is_some()
+            && !matches!(&task.route, RequestedRoute::Adapter { .. })
             && provenant_records::handoff::Handoff::from_result(&decoded.result)
                 .ok()
                 .flatten()
