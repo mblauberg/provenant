@@ -419,6 +419,59 @@ mod tests {
     }
 
     #[test]
+    fn failed_unknown_disposition_write_keeps_custody_and_prior_operation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+        let id = request.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
+        let scope = RunStore::scope(&record);
+        let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+        let lease = custody::acquire_writer(
+            directory.try_clone()?,
+            scope,
+            custody::WriterBinding::read_only(),
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
+        let prior = store
+            .operation(&request.operation_id, &call)?
+            .ok_or("operation")?;
+        store.db.execute_batch("CREATE TEMP TRIGGER fail_unknown BEFORE UPDATE ON operations BEGIN SELECT RAISE(ABORT, 'fixture unknown write'); END;")?;
+        assert!(matches!(
+            store.launch_unknown(request.run_id, &call),
+            Err(RunError::Sqlite(_))
+        ));
+        assert_eq!(store.operation(&request.operation_id, &call)?, Some(prior));
+        assert!(custody::reservation_present(&directory, scope)?);
+        store.db.execute_batch("DROP TRIGGER fail_unknown")?;
+        store.launch_unknown(request.run_id, &call)?;
+        assert_eq!(
+            store
+                .operation(&request.operation_id, &call)?
+                .ok_or("operation")?
+                .state,
+            OperationState::LaunchUnknown
+        );
+        assert!(custody::reservation_present(&directory, scope)?);
+        drop(lease);
+        Ok(())
+    }
+
+    #[test]
     fn failed_withdrawal_blocks_the_operation_without_relaunch()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         for fail_save in [false, true] {
