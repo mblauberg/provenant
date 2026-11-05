@@ -396,6 +396,12 @@ fn valid_remote(report: &Report) -> bool {
             .iter()
             .all(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
 }
+fn discard_remote_repairs(report: &mut Report) {
+    report.tick_agent.repair = None;
+    for row in &mut report.login_accounts {
+        row.repair = None;
+    }
+}
 fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError> {
     let Some(name) = host else {
         let resolved = roots::resolve(globals, roots::Workspace::Home, roots::Product::Optional)
@@ -426,10 +432,12 @@ fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError>
     let PeerResult::Doctor { data, .. } = result else {
         return Err(DoctorError::malformed());
     };
-    let report: Report = serde_json::from_value(data).map_err(|_| DoctorError::malformed())?;
+    let mut report: Report = serde_json::from_value(data).map_err(|_| DoctorError::malformed())?;
     if !valid_remote(&report) {
         return Err(DoctorError::malformed());
     }
+    // Commands supplied by a peer are not trusted as local remedies.
+    discard_remote_repairs(&mut report);
     Ok(report)
 }
 pub fn run(command: Hosts, globals: &Globals) -> u8 {
@@ -674,6 +682,17 @@ mod tests {
         );
         std::fs::remove_file(&nextest).unwrap();
         assert_eq!(super::lane_nextest(home.path()), None);
+    }
+
+    #[test]
+    fn remote_doctor_discards_peer_repair_commands() {
+        let mut report: super::Report = serde_json::from_str(
+            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[{"adapter":"claude","label":"work","reason":"login_expired","last_success_unix_seconds":100,"login_expiry":null,"repair":"run peer command"}]}"#,
+        ).unwrap();
+        report.tick_agent.repair = Some("run another peer command".into());
+        super::discard_remote_repairs(&mut report);
+        assert!(report.login_accounts[0].repair.is_none());
+        assert!(report.tick_agent.repair.is_none());
     }
 
     #[test]

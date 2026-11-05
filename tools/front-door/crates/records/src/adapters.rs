@@ -69,6 +69,8 @@ pub struct AdapterSpec {
     /// Also watch the host login keychain on macOS.
     pub credential_host_keychain: bool,
     pub login_hint: &'static str,
+    /// Account-scoped interactive login command, with {directory} shell quoted.
+    pub login_template: Option<&'static str>,
     /// Lowercase provider stderr fragments indicating a missing or expired login.
     pub auth_markers: &'static [&'static str],
     /// Shell wrapper path and environment selector, relative to scratch.
@@ -259,6 +261,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: true,
         credential_host_keychain: true,
         login_hint: "claude auth login",
+        login_template: Some("CLAUDE_CONFIG_DIR={directory} claude auth login"),
         auth_markers: &["not logged in", "authentication_failed"],
         shell_prefix: Some(("bin/claude-shell", "CLAUDE_CODE_SHELL_PREFIX")),
         context_directory_arg: Some("--add-dir"),
@@ -313,6 +316,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "codex login",
+        login_template: Some("CODEX_HOME={directory} codex login"),
         auth_markers: &[
             "please log out and sign in again",
             "refresh token expired",
@@ -371,6 +375,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "agent login",
+        login_template: None,
         auth_markers: &[
             "authentication required. please run agent login",
             "not logged in",
@@ -432,6 +437,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "agy auth login",
+        login_template: Some("HOME={directory} agy` and use `/login"),
         auth_markers: &[
             "authentication required. please login to continue.",
             "authentication required. please log in",
@@ -494,6 +500,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "opencode auth login",
+        login_template: None,
         auth_markers: &["no api key found", "run opencode auth login"],
         shell_prefix: None,
         context_directory_arg: None,
@@ -544,6 +551,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "",
+        login_template: None,
         auth_markers: &[],
         shell_prefix: None,
         context_directory_arg: None,
@@ -596,6 +604,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "",
+        login_template: None,
         auth_markers: &[],
         shell_prefix: None,
         context_directory_arg: None,

@@ -724,38 +724,25 @@ impl Registry<'_> {
                 Some(
                     self.roots
                         .and_then(|roots| {
-                            let key = route.account_key.as_deref()?;
                             let config = provenant_config::read_with_domains(
                                 roots,
                                 &crate::domains::SECTIONS,
                             )
                             .ok()?;
-                            let entry =
-                                config.domains.accounts.entries.values().find(|entry| {
-                                    entry.adapter == adapter.id() && entry.key == key
-                                })?;
-                            let last = crate::quota::read_cache(roots)
-                                .ok()
-                                .and_then(|records| {
-                                    records.into_iter().find(|record| {
-                                        record.account.adapter == adapter.id()
-                                            && record.account.account_key == key
-                                    })
-                                })
-                                .and_then(|record| {
-                                    record
-                                        .snapshot
-                                        .map(|snapshot| snapshot.observed_unix_seconds)
-                                });
-                            Some(crate::quota::login_diagnostic(
-                                Some(entry),
-                                last,
+                            let records = crate::quota::read_cache(roots).unwrap_or_default();
+                            Some(crate::quota::account_login_diagnostic(
+                                config.domains.accounts.entries.values(),
+                                &records,
+                                adapter.id(),
+                                route.account_key.as_deref(),
                                 &provenant_records::RouteExclusionReason::AuthRequired,
                             ))
                         })
                         .unwrap_or_else(|| {
-                            crate::quota::login_diagnostic(
-                                None,
+                            crate::quota::account_login_diagnostic(
+                                std::iter::empty(),
+                                &[],
+                                adapter.id(),
                                 None,
                                 &provenant_records::RouteExclusionReason::AuthRequired,
                             )

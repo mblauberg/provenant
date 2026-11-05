@@ -640,6 +640,15 @@ fn read_readiness_file(
 /// nothing here reads as ready unless fresh evidence says so. Routing and the
 /// route and host commands read through this.
 pub(crate) fn read_readiness(state: &Path, scope: &ReadinessScope, now: i64) -> ReadinessRead {
+    read_readiness_after_probe(state, scope, now, None)
+}
+
+pub(crate) fn read_readiness_after_probe(
+    state: &Path,
+    scope: &ReadinessScope,
+    now: i64,
+    healthy_at: Option<i64>,
+) -> ReadinessRead {
     if !component(&scope.adapter) || !component(&scope.account_key) {
         return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
     }
@@ -649,7 +658,33 @@ pub(crate) fn read_readiness(state: &Path, scope: &ReadinessScope, now: i64) -> 
         })
     });
     match read {
-        Ok(Some(file)) => file.get(scope, now),
+        Ok(Some(mut file)) => {
+            if let Some(healthy_at) = healthy_at {
+                file.records.retain(|record| {
+                    !(record.scope.host == scope.host
+                        && record.scope.adapter == scope.adapter
+                        && record.scope.account_key == scope.account_key
+                        && record.observed_unix_seconds <= healthy_at
+                        && matches!(
+                            record.reason,
+                            Some(
+                                ReadinessReason::SignedOut
+                                    | ReadinessReason::LoginExpired
+                                    | ReadinessReason::AccountMismatch
+                            )
+                        ))
+                });
+                if file.login.as_ref().is_some_and(|login| {
+                    login.scope.host == scope.host
+                        && login.scope.adapter == scope.adapter
+                        && login.scope.account_key == scope.account_key
+                        && login.observed_unix_seconds <= healthy_at
+                }) {
+                    file.login = None;
+                }
+            }
+            file.get(scope, now)
+        }
         Ok(None) => ReadinessRead::absent(),
         Err(_) => ReadinessRead::unknown(ReadinessReason::InvalidEvidence),
     }
@@ -1020,15 +1055,44 @@ pub(crate) fn login_repair(entry: Option<&provenant_providers::accounts::Registr
         return "account-specific login remedy unavailable; check the registered directory".into();
     };
     let quoted = format!("'{}'", directory.replace('\'', "'\\''"));
-    match entry.adapter.as_str() {
-        "claude" => format!("run `CLAUDE_CONFIG_DIR={quoted} claude auth login` interactively"),
-        "codex" => format!("run `CODEX_HOME={quoted} codex login` interactively"),
-        "agy" => format!("run `HOME={quoted} agy` and use /login interactively"),
-        _ => {
-            "account-specific login remedy unavailable; consult the provider's sign-in instructions"
-                .into()
-        }
+    let Some(spec) = provenant_records::AdapterSpec::get(&entry.adapter) else {
+        return "account-specific login remedy unavailable; consult the provider's sign-in instructions".into();
+    };
+    if let Some(template) = spec.login_template {
+        format!(
+            "run `{}` interactively",
+            template.replace("{directory}", &quoted)
+        )
+    } else if !spec.login_hint.is_empty() {
+        format!(
+            "consult the provider's sign-in instructions (`{}`)",
+            spec.login_hint
+        )
+    } else {
+        "account-specific login remedy unavailable; consult the provider's sign-in instructions"
+            .into()
     }
+}
+
+/// Assemble account-scoped login facts from one configuration and cache snapshot.
+pub(crate) fn account_login_diagnostic<'a>(
+    entries: impl IntoIterator<Item = &'a provenant_providers::accounts::Registration>,
+    records: &[AccountRecord],
+    adapter: &str,
+    key: Option<&str>,
+    reason: &provenant_records::RouteExclusionReason,
+) -> String {
+    let entry = entries
+        .into_iter()
+        .find(|entry| entry.adapter == adapter && Some(entry.key.as_str()) == key);
+    let last = records
+        .iter()
+        .find(|record| {
+            record.account.adapter == adapter && Some(record.account.account_key.as_str()) == key
+        })
+        .and_then(|record| record.snapshot.as_ref())
+        .map(|snapshot| snapshot.observed_unix_seconds);
+    login_diagnostic(entry, last, reason)
 }
 
 /// Diagnostic facts are account-scoped and contain no provider output.
@@ -1118,6 +1182,7 @@ fn decorate_login(
     for row in &mut report.accounts {
         row.login_expiry = Some(login_expiry_at(state, &row.account, warning_seconds, now));
         if row.repair.is_none()
+            && row.error != Some(provenant_quota::ProbeFailure::Network)
             && row.login_expiry.as_ref().is_some_and(|view| {
                 matches!(
                     view.state,
@@ -3263,6 +3328,59 @@ mod tests {
                 .unwrap()
                 .status,
             QuotaStatus::AuthRequired
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn healthy_account_probe_supersedes_only_older_auth_readiness()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let state = temp.path();
+        let directory = state.join("readiness/key");
+        std::fs::create_dir_all(&directory)?;
+        for path in [
+            state,
+            state.join("readiness").as_path(),
+            directory.as_path(),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let scope = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "codex".into(),
+            account_key: "key".into(),
+            route: "codex/model".into(),
+        };
+        let mut file = ReadinessFile::default();
+        let mut account = AccountRecord::empty(provenant_quota::AccountScope {
+            adapter: "codex".into(),
+            account_key: "key".into(),
+            label: "work".into(),
+        });
+        account.backoff_until_unix_seconds = Some(500);
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            100,
+            300,
+            Some(ReadinessReason::SignedOut),
+        )?;
+        let path = directory.join("codex.json");
+        std::fs::write(&path, serde_json::to_vec(&file)?)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        assert_eq!(
+            read_readiness(state, &scope, 150).reason,
+            Some(ReadinessReason::SignedOut)
+        );
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(120)).reason,
+            Some(ReadinessReason::NotProbed)
+        );
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(90)).reason,
+            Some(ReadinessReason::SignedOut)
         );
         Ok(())
     }

@@ -380,18 +380,7 @@ impl ReadinessFile {
         });
         if let Some(reason) = reason {
             let interval = i64::try_from(interval_seconds).unwrap_or(i64::MAX);
-            let mut expires = now.saturating_add(interval.max(1));
-            // A login failure is deliberately retried on the auth backoff;
-            // do not make it disappear from routing before that retry is due.
-            if matches!(
-                reason,
-                ReadinessReason::SignedOut
-                    | ReadinessReason::LoginExpired
-                    | ReadinessReason::AccountMismatch
-            ) && let Some(retry_at) = account.backoff_until_unix_seconds
-            {
-                expires = expires.max(retry_at);
-            }
+            let expires = now.saturating_add(interval.max(1));
             self.records.push(RouteReadiness {
                 schema_version: SCHEMA_VERSION,
                 scope: ReadinessScope {
@@ -508,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn login_failure_remains_visible_until_its_scheduled_retry() {
+    fn login_failure_expires_at_the_probe_interval() {
         let account_scope = crate::AccountScope {
             adapter: "claude".into(),
             account_key: "key".into(),
@@ -532,7 +521,7 @@ mod tests {
             route: "claude/model".into(),
         };
         assert_eq!(
-            file.get(&scope, 499).reason,
+            file.get(&scope, 159).reason,
             Some(ReadinessReason::LoginExpired)
         );
         let account_scope = ReadinessScope {
@@ -540,7 +529,7 @@ mod tests {
             ..scope.clone()
         };
         assert_eq!(
-            file.get(&account_scope, 500).reason,
+            file.get(&account_scope, 160).reason,
             Some(ReadinessReason::Stale)
         );
         file.sync_probe_result(&account, LOCAL_HOST, 501, 60, None)

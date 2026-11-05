@@ -1,4 +1,121 @@
 #[test]
+fn codex_auth_reprobe_uses_selected_home_and_trusts_status()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor, Termination};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Fake {
+        directory: std::path::PathBuf,
+        healthy: AtomicBool,
+    }
+    impl Executor for Fake {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert_eq!(options.argv[1], "login");
+            assert_eq!(options.argv[2], "status");
+            assert!(
+                options
+                    .env
+                    .unwrap()
+                    .iter()
+                    .any(|(key, value)| key == "CODEX_HOME" && value == self.directory.as_os_str())
+            );
+            Ok(ExecOutcome {
+                termination: Termination::Exit(if self.healthy.load(Ordering::Relaxed) {
+                    0
+                } else {
+                    1
+                }),
+                stdout: Default::default(),
+                stderr: Default::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let entry: provenant_providers::accounts::Registration = serde_json::from_value(
+        serde_json::json!({"adapter":"codex","label":"work","key":"fake","directory":temp.path().join("selected")}),
+    )?;
+    let fake = Fake {
+        directory: entry.directory.clone(),
+        healthy: AtomicBool::new(true),
+    };
+    let executor = provenant_providers::host::HostProbeExecutor::new(&fake, temp.path())?;
+    let probe = Probe {
+        roots: None,
+        executor: &executor,
+        home: temp.path(),
+        user: "fake".as_ref(),
+        scratch: temp.path(),
+    };
+    assert!(codex_login_is_healthy(
+        &entry,
+        std::path::Path::new("/fake/codex"),
+        &probe
+    ));
+    fake.healthy.store(false, Ordering::Relaxed);
+    assert!(!codex_login_is_healthy(
+        &entry,
+        std::path::Path::new("/fake/codex"),
+        &probe
+    ));
+    Ok(())
+}
+
+#[test]
+fn cursor_auth_reprobe_accepts_only_selected_host_login() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+    struct Fake;
+    impl Executor for Fake {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert_eq!(options.argv[1], "status");
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                stdout: CapturedStream {
+                    bytes: b"Logged in successfully".to_vec(),
+                    ..Default::default()
+                },
+                stderr: Default::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let mut entry: provenant_providers::accounts::Registration = serde_json::from_value(
+        serde_json::json!({"adapter":"cursor","label":"default","key":"local","directory":temp.path()}),
+    )?;
+    let executor = provenant_providers::host::HostProbeExecutor::new(&Fake, temp.path())?;
+    let probe = Probe {
+        roots: None,
+        executor: &executor,
+        home: temp.path(),
+        user: "fake".as_ref(),
+        scratch: temp.path(),
+    };
+    assert!(cursor_login_is_healthy(
+        &entry,
+        std::path::Path::new("/fake/agent"),
+        &probe
+    ));
+    entry.directory = temp.path().join("another");
+    assert!(!cursor_login_is_healthy(
+        &entry,
+        std::path::Path::new("/fake/agent"),
+        &probe
+    ));
+    Ok(())
+}
+
+#[test]
 fn command_lookup_is_literal_and_preserves_symlink_invocation()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
@@ -1187,7 +1304,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     // inside the fixture assets, independent of host packages and PATH.
     let executable = assets.join("cursor/bin/agent");
     std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
-    std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture-cursor 1.0\\n'\n")?;
+    std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = status ]; then printf 'Logged in successfully\\n'; else printf 'fixture-cursor 1.0\\n'; fi\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
@@ -1259,6 +1376,70 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         host: None,
         cancel: Some(&cancel),
     };
+    // A recorded sign-out followed by a healthy account-scoped status probe
+    // must permit preparation without waiting for the quota backoff.
+    let now = clock.unix_seconds();
+    let stale_scope = provenant_quota::AccountScope {
+        adapter: "cursor".into(),
+        account_key: "local".into(),
+        label: "default".into(),
+    };
+    let stale_account = provenant_quota::AccountRecord::empty(stale_scope);
+    let mut readiness = provenant_quota::ReadinessFile::default();
+    readiness.sync_probe_result(
+        &stale_account,
+        provenant_quota::LOCAL_HOST,
+        now - 1,
+        300,
+        Some(provenant_quota::ReadinessReason::SignedOut),
+    )?;
+    let readiness_dir = state.join("readiness/local");
+    std::fs::create_dir_all(&readiness_dir)?;
+    for dir in [state.join("readiness"), readiness_dir.clone()] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let readiness_path = readiness_dir.join("cursor.json");
+    std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
+    std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
+    let auth_paths = run::LaunchPaths {
+        scratch: attempt.join("auth-scratch"),
+        provider_state: attempt.join("auth-state"),
+        temporary: attempt.join("auth-tmp"),
+        attempt_id: paths.attempt_id,
+        operation_id: paths.operation_id.clone(),
+        task_index: paths.task_index,
+        lane_depth: paths.lane_depth,
+        run_id: paths.run_id,
+        deadline_unix_ms: paths.deadline_unix_ms,
+        temporary_alias: None,
+    };
+    for path in [
+        &auth_paths.scratch,
+        &auth_paths.provider_state,
+        &auth_paths.temporary,
+    ] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let recovered = prepare_with(
+        &registry,
+        &task,
+        "login recovery fixture",
+        &auth_paths,
+        None,
+        |name| {
+            if name == "cursor" {
+                Ok(executable.clone())
+            } else {
+                Err("fixture provider unavailable".into())
+            }
+        },
+        None,
+    )?;
+    assert_eq!(recovered.route.provider.as_deref(), Some("cursor"));
+    drop(recovered);
+    std::fs::remove_file(readiness_path)?;
+    std::fs::remove_file(attempt.join("availability.json"))?;
+
     // A clean writer that moved after graph source preparation must be
     // refused before provider probing or any launch artefact is written.
     let mut stale_source = task.clone();
@@ -2051,6 +2232,11 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             .contains("fixture executable disappeared")
     );
     assert_eq!(calls.get(), 3);
+    let PrepareError::Candidates { skipped_routes, .. } = &refusal else {
+        panic!("budget refusal must retain the skipped candidate")
+    };
+    assert_eq!(skipped_routes.len(), 1);
+    assert_eq!(skipped_routes[0].kind, SkipKind::Unavailable);
     std::fs::write(state.join("config.toml"), saved_config)?;
 
     let mut review_task = task.clone();

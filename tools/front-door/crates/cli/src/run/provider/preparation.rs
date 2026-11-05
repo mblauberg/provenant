@@ -672,6 +672,7 @@ pub(super) fn prepare_candidates(
     .with_derived_accounts();
     let entries: Vec<_> = settings.entries.into_values().collect();
     let timestamp = clock.unix_seconds();
+    let diagnostic_records = crate::quota::read_cache(roots).unwrap_or_default();
     let mut availability = Vec::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
     let mut auth_failures = std::collections::BTreeMap::new();
@@ -689,7 +690,54 @@ pub(super) fn prepare_candidates(
             .and_then(|executable| {
                 observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
             }) {
-            Ok(record) => availability.push(record),
+            Ok(mut record) => {
+                if matches!(entry.adapter.as_str(), "codex" | "agy" | "cursor") {
+                    let scope = provenant_quota::ReadinessScope {
+                        host: provenant_quota::LOCAL_HOST.into(),
+                        adapter: entry.adapter.clone(),
+                        account_key: entry.key.clone(),
+                        route: provenant_quota::ACCOUNT_ROUTE.into(),
+                    };
+                    let recorded =
+                        crate::quota::read_readiness(roots.state.as_path(), &scope, timestamp);
+                    let auth_failure = matches!(
+                        recorded.reason,
+                        Some(
+                            provenant_quota::ReadinessReason::SignedOut
+                                | provenant_quota::ReadinessReason::LoginExpired
+                                | provenant_quota::ReadinessReason::AccountMismatch
+                        )
+                    ) || diagnostic_records.iter().any(|r| {
+                        r.account.adapter == entry.adapter
+                            && r.account.account_key == entry.key
+                            && r.last_error == Some(provenant_quota::ProbeFailure::AccountMismatch)
+                    });
+                    if auth_failure {
+                        let executable = Path::new(&record.executable);
+                        let healthy = if entry.adapter == "codex" {
+                            codex_login_is_healthy(entry, executable, &probe)
+                        } else if entry.adapter == "cursor" {
+                            cursor_login_is_healthy(entry, executable, &probe)
+                        } else {
+                            provenant_providers::accounts::detect_for_registration(
+                                &executor,
+                                &entry.adapter,
+                                executable,
+                                &home,
+                                &user,
+                                &entry.directory,
+                                executor.root(),
+                            )
+                            .is_ok_and(|(key, _)| key == entry.key || entry.key == "local")
+                        };
+                        if healthy {
+                            record.fixture_ref =
+                                format!("installed/{}/login-status", entry.adapter);
+                        }
+                    }
+                }
+                availability.push(record)
+            }
             Err(AccountObservationError::AuthRequired(detail)) => {
                 auth_failures.insert((entry.adapter.clone(), entry.key.clone()), detail.clone());
                 observation_failures.insert((entry.adapter.clone(), entry.key.clone()), detail);
@@ -1059,26 +1107,16 @@ pub(super) fn prepare_candidates(
             if outcome == provenant_routing::FallbackOutcome::AuthRequired {
                 previous_outcome = outcome;
                 let key = selected.or(route.account_key.as_deref());
-                let entry = entries.iter().find(|entry| {
-                    entry.adapter == route.adapter && Some(entry.key.as_str()) == key
-                });
-                let last_success = crate::quota::read_cache(roots).ok().and_then(|records| {
-                    records
-                        .into_iter()
-                        .find(|record| {
-                            record.account.adapter == route.adapter
-                                && Some(record.account.account_key.as_str()) == key
-                        })
-                        .and_then(|record| {
-                            record
-                                .snapshot
-                                .map(|snapshot| snapshot.observed_unix_seconds)
-                        })
-                });
                 reasons.push(skip(
                     &label,
                     SkipKind::AuthRequired,
-                    crate::quota::login_diagnostic(entry, last_success, reason),
+                    crate::quota::account_login_diagnostic(
+                        entries.iter(),
+                        &diagnostic_records,
+                        &route.adapter,
+                        key,
+                        reason,
+                    ),
                 ));
                 continue;
             }

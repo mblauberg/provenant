@@ -1001,6 +1001,7 @@ fn with_context<T>(
     access: &[AccessContext<'_>],
     host: &str,
     requested_models: &[ModelId],
+    revalidated_auth: bool,
     action: impl FnOnce(
         &RoutingContext<'_>,
         &[provenant_quota::AccountRecord],
@@ -1043,6 +1044,40 @@ fn with_context<T>(
     domains
         .quota
         .apply_calibration(&mut quota_records, timestamp.as_second());
+    // Only an account-scoped login probe supersedes older auth evidence.
+    let authenticated_at = |adapter: &str, key: &str, now: i64| {
+        if !revalidated_auth || !matches!(adapter, "claude" | "codex" | "agy" | "cursor") {
+            return None;
+        }
+        availability
+            .iter()
+            .filter(|record| {
+                record.adapter == adapter
+                    && (adapter == "claude"
+                        || record.fixture_ref == format!("installed/{adapter}/login-status"))
+                    && record.account_key.as_deref() == Some(key)
+                    && record.observed_unix_seconds <= now
+                    && record.expires_unix_seconds > now
+            })
+            .map(|record| record.observed_unix_seconds)
+            .max()
+    };
+    for record in &mut quota_records {
+        if record.last_error == Some(provenant_quota::ProbeFailure::AccountMismatch)
+            && authenticated_at(
+                &record.account.adapter,
+                &record.account.account_key,
+                timestamp.as_second(),
+            )
+            .is_some_and(|at| {
+                record
+                    .last_attempt_unix_seconds
+                    .is_none_or(|attempt| at >= attempt)
+            })
+        {
+            record.last_error = None;
+        }
+    }
     let quota = quota_observations(
         &catalogue,
         availability,
@@ -1055,10 +1090,14 @@ fn with_context<T>(
         .flat_map(|record| record.capacity_cooldowns.iter().cloned())
         .collect();
     let now = WallTime::from_micros(timestamp.as_microsecond())?;
-    // Readiness is read from quota's own tree, never probed from here.
     let state = roots.state.as_path();
-    let readiness = |scope: &provenant_quota::ReadinessScope, now: i64| {
-        crate::quota::read_readiness(state, scope, now)
+    let readiness = |scope: &provenant_quota::ReadinessScope, now: i64| match authenticated_at(
+        &scope.adapter,
+        &scope.account_key,
+        now,
+    ) {
+        Some(at) => crate::quota::read_readiness_after_probe(state, scope, now, Some(at)),
+        None => crate::quota::read_readiness(state, scope, now),
     };
     action(
         &RoutingContext {
@@ -1316,6 +1355,7 @@ fn resolve_dispatch_excluding(
         access,
         host,
         &requested_models,
+        true,
         |context, records, policies| {
             let mut excluded_members = initial_exclusions.to_vec();
             let mut refusals = Vec::new();
@@ -1572,16 +1612,24 @@ fn list_data(
     roots: &Roots,
     query: &RouteListRequest,
 ) -> Result<Box<provenant_routing::RouteList>, EdgeError> {
-    with_context(roots, &[], &[], "local-preview", &[], |context, _, _| {
-        Ok(Box::new(provenant_routing::list(
-            &provenant_routing::RouteListQuery {
-                adapter: query.adapter.clone(),
-                pool: query.pool.clone(),
-                valid: query.valid,
-            },
-            context,
-        )?))
-    })
+    with_context(
+        roots,
+        &[],
+        &[],
+        "local-preview",
+        &[],
+        false,
+        |context, _, _| {
+            Ok(Box::new(provenant_routing::list(
+                &provenant_routing::RouteListQuery {
+                    adapter: query.adapter.clone(),
+                    pool: query.pool.clone(),
+                    valid: query.valid,
+                },
+                context,
+            )?))
+        },
+    )
 }
 
 pub(crate) fn effective_members(
@@ -2114,6 +2162,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
             &[],
             "local-preview",
             &[],
+            false,
             |context, records, _| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),
@@ -2168,21 +2217,15 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                             | provenant_records::RouteExclusionReason::AccountMismatch),
                         ..
                     } => {
-                        let selected = route.account_key.as_deref();
                         let config =
                             provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
-                        let entry = config.domains.accounts.entries.values().find(|entry| {
-                            entry.adapter == route.adapter && Some(entry.key.as_str()) == selected
-                        });
-                        let last = records
-                            .iter()
-                            .find(|record| {
-                                record.account.adapter == route.adapter
-                                    && Some(record.account.account_key.as_str()) == selected
-                            })
-                            .and_then(|record| record.snapshot.as_ref())
-                            .map(|snapshot| snapshot.observed_unix_seconds);
-                        Some(crate::quota::login_diagnostic(entry, last, reason))
+                        Some(crate::quota::account_login_diagnostic(
+                            config.domains.accounts.entries.values(),
+                            records,
+                            &route.adapter,
+                            route.account_key.as_deref(),
+                            reason,
+                        ))
                     }
                     _ => None,
                 };
@@ -2356,6 +2399,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
         &[],
         "local-preview",
         &[],
+        false,
         |context, records, policies| {
             let request = resolve_request(&query, context)?;
             let rules = effective_exclusion_rules(exclude, roots)?;
@@ -2808,6 +2852,103 @@ mod route_tests {
         let roots = inputs.resolve(&Resolver)?;
         std::fs::create_dir_all(roots.state.as_path())?;
         Ok(roots)
+    }
+
+    #[test]
+    fn dispatch_rechecks_recorded_auth_with_a_healthy_account_probe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_quota::{
+            AccountRecord, AccountScope, LOCAL_HOST, ReadinessFile, ReadinessReason,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let dir = roots.state.as_path().join("readiness/key");
+        std::fs::create_dir_all(&dir)?;
+        for path in [
+            roots.state.as_path(),
+            roots.state.as_path().join("readiness").as_path(),
+            dir.as_path(),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let account = AccountRecord::empty(AccountScope {
+            adapter: "codex".into(),
+            account_key: "key".into(),
+            label: "work".into(),
+        });
+        let mut file = ReadinessFile::default();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            now - 10,
+            300,
+            Some(ReadinessReason::SignedOut),
+        )?;
+        let path = dir.join("codex.json");
+        std::fs::write(&path, serde_json::to_vec(&file)?)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let catalogue = super::Catalogue::bundled()?;
+        let mut available = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "codex".into(),
+            executable: "/fixture/codex".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "installed/codex/version".into(),
+            catalogue_revision: catalogue.revision().into(),
+            account_key: Some("key".into()),
+            observed_models: Vec::new(),
+            observed_unix_seconds: now,
+            expires_unix_seconds: now + 300,
+        };
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: Some(super::Model("codex/unlisted-exact".into())),
+            route: None,
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        }
+        .to_domain()?;
+        let access = [provenant_routing::AccessContext {
+            adapter: "codex",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        }];
+        let resolve = |record: &provenant_providers::AvailabilityRecord| {
+            super::resolve_dispatch(
+                &request,
+                &roots,
+                Some("key"),
+                ("fixture", 0),
+                std::slice::from_ref(record),
+                &access,
+                "fixture",
+                None,
+                &[],
+            )
+        };
+        let before = resolve(&available)?;
+        assert!(matches!(
+            before.readiness,
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::AuthRequired,
+                ..
+            }
+        ));
+        available.fixture_ref = "installed/codex/login-status".into();
+        let after = resolve(&available)?;
+        assert!(matches!(
+            after.readiness,
+            provenant_records::RouteReadiness::Ready { .. }
+        ));
+        Ok(())
     }
 
     #[test]
