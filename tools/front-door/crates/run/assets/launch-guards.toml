@@ -153,6 +153,16 @@ reason = "Secret roots and provider-private state must not overlap grants that e
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "object_integrity"
+reason = "Write roots cannot overlap protected host objects, and private scratch and provider state must not overlap each other or the approved lane roots."
+
+[[guard]]
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "credentials"
+reason = "Agy's selected home source and private destinations must not overlap secret or protected roots."
+
+[[guard]]
+site = "confinement/src/plan.rs#ConfinedPlan::new"
 boundary = "unclassified"
 reason = "Invalid path shapes and remaining overlapping roots need classification or a tolerant fallback."
 
