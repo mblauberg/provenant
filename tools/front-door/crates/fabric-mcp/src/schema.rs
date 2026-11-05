@@ -643,6 +643,9 @@ fn settle<'a>(root: &'a Value, mut schema: &'a Value, current: &Value) -> &'a Va
 /// The lone closest candidate, when it is within a small edit distance after
 /// case and separator folding. A tie refuses to guess.
 fn nearest<'a>(given: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    if given.len() > 128 || given.chars().any(char::is_control) {
+        return None;
+    }
     let given = fold(given);
     let mut best: Option<(usize, &'a str)> = None;
     let mut tied = false;
@@ -676,6 +679,52 @@ pub fn invalid_path(name: &str, value: &Value) -> Option<String> {
         .iter()
         .find(|tool| tool["name"] == name)?["inputSchema"];
     structural_path(root, root, value, "arguments")
+}
+
+/// Project only catalogue-owned field names and array indices. Unknown object
+/// keys can contain arbitrary caller data and must not enter an error envelope.
+pub(crate) fn safe_argument_path(name: &str, value: &Value, path: &str) -> String {
+    let Some(root) = strict_catalogue()
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .map(|tool| &tool["inputSchema"])
+    else {
+        return "arguments".into();
+    };
+    let normalised = path.replace('[', ".").replace(']', "");
+    let mut schema = root;
+    let mut current = value;
+    let mut safe = String::from("arguments");
+    for segment in normalised.split('.').skip(1) {
+        schema = settle(root, schema, current);
+        if let Ok(index) = segment.parse::<usize>() {
+            if !current.is_array() {
+                break;
+            }
+            safe.push_str(&format!("[{index}]"));
+            current = current.get(index).unwrap_or(&Value::Null);
+            schema = &schema["items"];
+        } else if let Some(field) = schema["properties"].get(segment) {
+            safe.push('.');
+            safe.push_str(segment);
+            current = current.get(segment).unwrap_or(&Value::Null);
+            schema = field;
+        } else if matches!(segment, "op" | "kind" | "scope")
+            && schema["oneOf"].as_array().is_some_and(|variants| {
+                variants
+                    .iter()
+                    .any(|variant| variant["properties"].get(segment).is_some())
+            })
+        {
+            safe.push('.');
+            safe.push_str(segment);
+            break;
+        } else {
+            safe.push_str(".<unknown>");
+            break;
+        }
+    }
+    provenant_records::diagnostic::safe_text(&safe)
 }
 
 /// Describe the schema constraint at a rejected argument path, without echoing input.
@@ -754,6 +803,11 @@ pub fn expected(name: &str, value: &Value, path: &str) -> String {
     }
     if let Some(value) = schema.get("const") {
         return format!("{value}");
+    }
+    if let Some(max) = schema["x-provenant-maxUtf8Bytes"].as_u64()
+        && current.as_str().is_some_and(|text| text.len() as u64 > max)
+    {
+        return format!("a string of at most {max} UTF-8 bytes");
     }
     match schema["type"].as_str() {
         Some("integer") => format!(

@@ -301,16 +301,18 @@ impl Protocol {
                     Ok(call) => call,
                     Err(InvalidInput::UnknownTool) => return refuse(-32602, "Unknown tool name"),
                     Err(InvalidInput::Arguments { path }) => {
+                        let safe_path =
+                            crate::schema::safe_argument_path(&call.name, &call.arguments, &path);
                         let message = match crate::schema::near_argument(
                             &call.name,
                             &call.arguments,
                             &path,
                         ) {
                             Some(near) => {
-                                format!("Invalid argument at {path}; did you mean '{near}'?")
+                                format!("Invalid argument at {safe_path}; did you mean '{near}'?")
                             }
                             None => format!(
-                                "Invalid argument at {path}; expected {}",
+                                "Invalid argument at {safe_path}; expected {}",
                                 crate::schema::expected(&call.name, &call.arguments, &path)
                             ),
                         };
@@ -319,7 +321,7 @@ impl Protocol {
                             tool_error(
                                 Some(&call.name),
                                 "invalid_input",
-                                json!({"code":"invalid_input","message":message,"path":path,"hint":"Correct the argument and retry; use fabric_discover for advanced tool schemas."}),
+                                json!({"code":"invalid_input","message":message,"path":safe_path,"hint":"Correct the argument and retry; use fabric_discover for advanced tool schemas."}),
                             ),
                             modern,
                         ));
