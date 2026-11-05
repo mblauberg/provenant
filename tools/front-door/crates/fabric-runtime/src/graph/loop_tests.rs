@@ -1217,11 +1217,14 @@ fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
             3 => "previous. is reserved for prior round inputs",
             _ => "expanded loop node id exceeds 64 bytes",
         };
-        assert_eq!(
-            validate_plan(&document).unwrap_err(),
-            expected,
-            "case {case}"
-        );
+        let error = validate_plan(&document).unwrap_err();
+        if case == 4 {
+            assert!(error.contains(expected), "case {case}: {error}");
+            assert!(error.contains("identifier_bytes"), "{error}");
+            assert!(error.contains("graph identifier contract"), "{error}");
+        } else {
+            assert_eq!(error, expected, "case {case}");
+        }
     }
 }
 

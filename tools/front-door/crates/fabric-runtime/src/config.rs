@@ -301,6 +301,15 @@ impl GraphBound<'_> {
 }
 
 impl GraphLimits {
+    /// Maximum byte length of graph and node identifiers in persisted records.
+    pub fn identifier_bytes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "identifier_bytes",
+            maximum: 64,
+            owner: "graph identifier contract",
+        }
+    }
+
     /// Maximum size of a persisted graph document accepted by graph readers.
     pub fn document_bytes_bound() -> GraphBound<'static> {
         GraphBound {

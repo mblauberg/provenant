@@ -1782,10 +1782,11 @@ fn continuation(
         .cloned()
         .ok_or("continuation source missing")?;
     child.id = format!("{}--continue", node.id);
-    if child.id.len() > 64 {
+    let bound = crate::config::GraphLimits::identifier_bytes_bound();
+    if let Some(reason) = bound.refusal(child.id.len()) {
         return Err(format!(
-            "continuation {} exceeds the node ID limit of 64 bytes; shorten the source ID",
-            child.id
+            "continuation {} exceeds the node ID limit of {} bytes; shorten the source ID: {reason}",
+            child.id, bound.maximum
         ));
     }
     child.title = None;

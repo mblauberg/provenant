@@ -776,7 +776,9 @@ pub(super) fn validate_flat_plan(
 
 pub(crate) fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 64
+        && crate::config::GraphLimits::identifier_bytes_bound()
+            .refusal(value.len())
+            .is_none()
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))

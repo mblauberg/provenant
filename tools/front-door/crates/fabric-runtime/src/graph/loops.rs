@@ -268,8 +268,16 @@ pub(super) fn check_expanded_ids(
             continue;
         }
         for child in &spec.body {
-            if !valid_identifier(&id(&node.id, rounds, &child.id)) {
-                return Err("expanded loop node id exceeds 64 bytes".into());
+            let expanded_id = id(&node.id, rounds, &child.id);
+            let bound = crate::config::GraphLimits::identifier_bytes_bound();
+            if let Some(reason) = bound.refusal(expanded_id.len()) {
+                return Err(format!(
+                    "expanded loop node id exceeds {} bytes: {reason}",
+                    bound.maximum
+                ));
+            }
+            if !valid_identifier(&expanded_id) {
+                return Err("expanded loop node id is invalid".into());
             }
         }
     }

@@ -114,10 +114,19 @@ fn children(
         let mut node = original.clone();
         node.require_skill_location |= require_skill_location;
         node.id = scoped(prefix, &node.id);
+        let identifier_bound = crate::config::GraphLimits::identifier_bytes_bound();
+        if let Some(reason) = identifier_bound.refusal(node.id.len()) {
+            return Err(format!(
+                "expanded node id {:?} is invalid; use at most {} ASCII letters, digits, dots, underscores or hyphens; shorten the composite or node name: {reason}",
+                bounded(&node.id, 256),
+                identifier_bound.maximum
+            ));
+        }
         if !valid_identifier(&node.id) {
             return Err(format!(
-                "expanded node id {:?} is invalid; use at most 64 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or node name",
-                bounded(&node.id, 256)
+                "expanded node id {:?} is invalid; use at most {} ASCII letters, digits, dots, underscores or hyphens; shorten the composite or node name",
+                bounded(&node.id, 256),
+                identifier_bound.maximum
             ));
         }
         for parent in &mut node.depends_on {
