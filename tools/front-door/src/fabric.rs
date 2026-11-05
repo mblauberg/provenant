@@ -6058,7 +6058,21 @@ impl Factory {
         )
         .map_err(|_| FacadeError::io("access graph journal"))?;
         if let Some(document) = &document {
-            let integration_base = if journal.load(id).map_err(graph_journal_error)?.is_some() {
+            let existing = journal.load(id).map_err(graph_journal_error)?.is_some();
+            let bound_execution = if existing {
+                Some(
+                    FileJournal::execution(
+                        &self.context.roots.state,
+                        self.context.identity.project,
+                        id,
+                    )
+                    .map_err(graph_journal_error)?
+                    .ok_or(FacadeError::StateCorrupt)?,
+                )
+            } else {
+                None
+            };
+            let integration_base = if existing {
                 journal.integration_base()
             } else if let Some(branch) = &document.integration_branch {
                 let reference = match branch.strip_prefix("origin/") {
@@ -6076,9 +6090,9 @@ impl Factory {
             } else {
                 None
             };
-            let review_base = if journal.load(id).map_err(graph_journal_error)?.is_some() {
-                FileJournal::execution(&self.context.roots.state, self.context.identity.project, id)
-                    .map_err(graph_journal_error)?
+            let review_base = if existing {
+                bound_execution
+                    .as_ref()
                     .and_then(|execution| execution.review_base)
             } else if let Some(reference) = document
                 .review_base
@@ -6110,8 +6124,39 @@ impl Factory {
                     }
                     _ => FacadeError::Conflict,
                 })?;
+            // Manual replay must use the same host directory as the original
+            // execution, just as background advancement does.
+            let rebound = if let Some(execution) = bound_execution.as_ref()
+                && execution.directory != self.cwd
+            {
+                let context =
+                    Context::open(self.context.roots.clone(), &self.home, &execution.directory)
+                        .map_err(|_| FacadeError::StateCorrupt)?;
+                if context.identity.project != self.context.identity.project || context.in_lane {
+                    return Err(FacadeError::StateCorrupt);
+                }
+                let mut host_launch = self.host_launch.clone();
+                if let Some(host) = &mut host_launch {
+                    host.cwd = execution.directory.clone();
+                }
+                Some(Factory {
+                    context,
+                    project_attribution: self.project_attribution,
+                    clock: SystemClock::new(),
+                    backoff: ThreadPause,
+                    executor: SystemExecutor::new(4).map_err(|_| FacadeError::StateCorrupt)?,
+                    home: self.home.clone(),
+                    cwd: execution.directory.clone(),
+                    assets: self.assets.clone(),
+                    host_launch,
+                    mcp_project: self.mcp_project.clone(),
+                    workers: self.workers,
+                })
+            } else {
+                None
+            };
             let mut owner = BoundGraphOwner {
-                factory: self,
+                factory: rebound.as_ref().unwrap_or(self),
                 integration_base: Some(BoundGraphBases {
                     integration: integration_base,
                     review: review_base,
