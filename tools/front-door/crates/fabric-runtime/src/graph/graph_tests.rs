@@ -8385,6 +8385,49 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
 }
 
 #[test]
+fn equal_review_range_cannot_pass_a_reduced_panel_gate() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "empty-quick-review", "nodes": [
+            {"id":"lenses", "kind":"composite", "access":"read_only",
+             "composite":{"reduce_verdict":true,"min_successful":1,
+                "nodes":[{"id":"lens","role":"lens.correctness-spec","access":"read_only",
+                          "prompt":"review","route":{"alias":"fixture"}}],
+                "exports":[{"node":"lens","outputs":["result"]}]}},
+            {"id":"accept","kind":"gate","access":"read_only","depends_on":["lenses"],
+             "inputs":[{"node":"lenses","outputs":["verdict"]}],
+             "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+        ]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        equal_range: true,
+        observations: [terminal_from("VERDICT: PASS", "host/one")].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let panel = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "lenses")
+        .unwrap();
+    assert_eq!(
+        panel
+            .outputs
+            .as_ref()
+            .and_then(|output| output.verdict.as_deref()),
+        Some("VERDICT: INCONCLUSIVE")
+    );
+    let gate = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "accept")
+        .unwrap();
+    assert!(!gate.gate.as_ref().unwrap().passed);
+}
+
+#[test]
 fn equal_review_range_warns_on_review_nodes() {
     let mut review = node("review", route("review"));
     review.role = Some("lens.correctness-spec".into());
