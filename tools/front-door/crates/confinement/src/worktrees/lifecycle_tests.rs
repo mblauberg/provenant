@@ -37,7 +37,7 @@ pub(super) struct FreeWorkers;
 #[test]
 fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Error>> {
     for scenario in [
-        "preview", "idle", "unowned", "recent", "index", "live", "unknown",
+        "preview", "idle", "aged", "unowned", "recent", "index", "live", "unknown",
     ] {
         let fixture = Fixture::new()?;
         fs::write(fixture.root.join(".gitignore"), "target/\n")?;
@@ -56,7 +56,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         fs::create_dir(path.join("target"))?;
         fs::write(path.join("target/artifact"), "output")?;
         fs::write(path.join("untracked"), "source")?;
-        if scenario == "index" {
+        if matches!(scenario, "index" | "aged") {
             let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
             let tree = verify_worktree(context.repo, &path)?;
             for item in [
@@ -68,6 +68,10 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                 tree.repo().private_git_dir().join("HEAD"),
             ] {
                 fs::File::open(item)?.set_times(fs::FileTimes::new().set_modified(old))?;
+            }
+            if scenario == "aged" {
+                fs::File::open(tree.repo().private_git_dir().join("index"))?
+                    .set_times(fs::FileTimes::new().set_modified(old))?;
             }
         }
         let mut lane = list(&context, &cancel())?
@@ -99,11 +103,10 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                 keep: &[],
                 written_before_ns: match scenario {
                     "recent" => 0,
-                    "index" => {
-                        (std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
-                            .duration_since(std::time::UNIX_EPOCH)?
-                            .as_nanos() as i128
-                    }
+                    "index" | "aged" => (std::time::SystemTime::now()
+                        - std::time::Duration::from_secs(3600))
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos() as i128,
                     _ => i128::MAX,
                 },
                 dry_run: scenario == "preview",
@@ -115,7 +118,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         assert_eq!(fs::read_to_string(path.join("untracked"))?, "source");
         assert_eq!(
             path.join("target/artifact").exists(),
-            !matches!(scenario, "idle" | "unowned"),
+            !matches!(scenario, "idle" | "aged" | "unowned"),
             "{scenario}"
         );
         if scenario == "preview" {
@@ -125,7 +128,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                 )
             );
         }
-        if matches!(scenario, "idle" | "unowned") {
+        if matches!(scenario, "idle" | "aged" | "unowned") {
             assert!(
                 report
                     .idle_output
