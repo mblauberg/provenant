@@ -1134,19 +1134,33 @@ pub fn expand_with(
             bases.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
-    // A graph that states a review field, including the document-level review
-    // base, is schema 2: the runtime refuses a v1 document that carries one.
-    // Every other preset keeps its v1 document and digest.
-    let mut document = json!({"schema_version":1,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
-    if let Some(base) = bases.into_iter().next() {
-        document["review_base"] = json!(base);
-    }
+    let review_base = bases.into_iter().next();
+    // The structural and schema checks operate on the typed graph, without
+    // decoding a second copy of the fully assembled document.
+    let mut typed = provenant_fabric_runtime::graph::GraphDocument {
+        review_base: review_base.clone(),
+        context: Some(provenant_records::run::WorkContext {
+            preset: Some(name.into()),
+            pattern: Some(name.into()),
+            ..Default::default()
+        }),
+        extra: Default::default(),
+        limits: None,
+        integration_branch: None,
+        delivery: None,
+        decision_session: None,
+        schema_version: 1,
+        graph_id: id.clone(),
+        nodes: serde_json::from_value(Value::Array(nodes.clone()))
+            .map_err(|error| error.to_string())?,
+    };
     let parameters = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),
         "",
         &origins,
     )?;
+    let mut graph_fields = serde_json::Map::new();
     for key in [
         "limits",
         "integration_branch",
@@ -1158,9 +1172,38 @@ pub fn expand_with(
             let value = interpolate(value, &parameters, prompt, 1)?;
             // An empty knob, such as an unset decision session, means unset.
             if value != "" {
-                document[key] = value;
+                match key {
+                    "limits" => typed.limits = Some(value.clone()),
+                    "integration_branch" => {
+                        typed.integration_branch = serde_json::from_value(value.clone())
+                            .map_err(|error| error.to_string())?
+                    }
+                    "delivery" => {
+                        typed.delivery = serde_json::from_value(value.clone())
+                            .map_err(|error| error.to_string())?
+                    }
+                    "decision_session" => {
+                        typed.decision_session = serde_json::from_value(value.clone())
+                            .map_err(|error| error.to_string())?
+                    }
+                    _ => {
+                        typed.extra.insert(key.into(), value.clone());
+                    }
+                }
+                graph_fields.insert(key.into(), value);
             }
         }
+    }
+    typed.check_composites(&layers.graph_limits)?;
+    typed.schema_version = u64::from(provenant_fabric_runtime::graph::minimum_schema_version(
+        &typed,
+    ));
+    let mut document = json!({"schema_version":typed.schema_version,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
+    if let Some(base) = review_base {
+        document["review_base"] = json!(base);
+    }
+    if let Some(map) = document.as_object_mut() {
+        map.extend(graph_fields);
     }
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
     let substitutions = layers.substitutions.take();
@@ -1195,12 +1238,6 @@ pub fn expand_with(
     if let Some(decision) = &plan {
         document["provenance"]["plan"] = decision.to_json();
     }
-    let typed: provenant_fabric_runtime::graph::GraphDocument =
-        serde_json::from_value(document.clone()).map_err(|error| error.to_string())?;
-    typed.check_composites(&layers.graph_limits)?;
-    document["schema_version"] = json!(provenant_fabric_runtime::graph::minimum_schema_version(
-        &typed
-    ));
     if serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
         .len()
