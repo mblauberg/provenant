@@ -1435,10 +1435,10 @@ mod tests {
     #[test]
     fn excess_unix_socket_connection_is_closed_and_slots_reopen() {
         use super::*;
-        let root = tempfile::Builder::new()
-            .prefix("p")
-            .tempdir_in(std::env::temp_dir())
-            .unwrap();
+        let root = provenant_os::fixture::short_tempdir("peer-agent/peer.sock", |parent| {
+            tempfile::Builder::new().prefix("p").tempdir_in(parent)
+        })
+        .unwrap();
         let state = root.path().to_path_buf();
         let program = state.join("echo-peer");
         fs::write(&program, "#!/bin/sh\nexec cat\n").unwrap();
