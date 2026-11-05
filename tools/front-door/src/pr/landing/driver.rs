@@ -957,19 +957,30 @@ mod tests {
             ports::{DeltaFile, DeltaStats},
         };
         let mut outcomes = Vec::new();
-        for classify in [false, true] {
+        for class in [None, Some("A"), Some("B"), Some("C")] {
             let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
             let head = forge.pull_requests[&1].head.clone();
-            if classify {
+            if let Some(class) = class {
                 forge.latest_reviews.insert(
                     1,
                     ReviewedHead {
                         head: "reviewed".into(),
-                        base: None,
-                        valid: true,
+                        base: Some("old-base".into()),
+                        valid: class != "C",
                     },
                 );
-                repo.parents.insert(head.clone(), vec!["reviewed".into()]);
+                if class == "A" {
+                    repo.parents
+                        .insert(head.clone(), vec!["reviewed".into(), "base-side".into()]);
+                    repo.parents
+                        .insert("base-side".into(), vec!["old-base".into()]);
+                    repo.parents
+                        .insert(repo.target.clone(), vec!["base-side".into()]);
+                    repo.trees
+                        .insert(head.clone(), "tree-reviewed-base-side".into());
+                } else {
+                    repo.parents.insert(head.clone(), vec!["reviewed".into()]);
+                }
                 repo.review_deltas.insert(
                     ("reviewed".into(), head),
                     DeltaStats {
@@ -995,20 +1006,17 @@ mod tests {
                 state.path(),
             )?;
             outcomes.push(report.outcomes.clone());
-            if classify {
-                assert!(matches!(
-                    report.head_moves.get(&1),
-                    Some(HeadMove::B { .. })
-                ));
-                assert!(matches!(
-                    report.receipts[0].head_moves.get(&1),
-                    Some(HeadMove::B { .. })
-                ));
-            } else {
-                assert!(report.head_moves.is_empty());
-            }
+            let observed = report.head_moves.get(&1);
+            assert!(match class {
+                None => observed.is_none(),
+                Some("A") => matches!(observed, Some(HeadMove::A { .. })),
+                Some("B") => matches!(observed, Some(HeadMove::B { .. })),
+                Some("C") => matches!(observed, Some(HeadMove::C { .. })),
+                _ => false,
+            });
+            assert_eq!(report.receipts[0].head_moves.get(&1), observed);
         }
-        assert_eq!(outcomes[0], outcomes[1]);
+        assert!(outcomes.windows(2).all(|pair| pair[0] == pair[1]));
         Ok(())
     }
 
