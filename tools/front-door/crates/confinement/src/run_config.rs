@@ -24,6 +24,7 @@ push_conflict_markers = true
 brief_read_root_warnings = true
 profile_limit_bytes = 524288
 grant_limit = 128
+write_grant_limit_bytes = 262144
 argv_prompt_limit_bytes = 65536
 
 [projects]
@@ -68,6 +69,9 @@ pub struct RunConfig {
     /// authentication and native controls retain minimum caps of 16 and 64.
     #[serde(default = "default_grant_limit")]
     pub grant_limit: usize,
+    /// Maximum encoded bytes in the applied write-grant ledger.
+    #[serde(default = "default_write_grant_limit_bytes")]
+    pub write_grant_limit_bytes: u64,
     /// Prompt bytes passed directly to argv before the file-backed fallback.
     #[serde(default = "default_argv_prompt_limit_bytes")]
     pub argv_prompt_limit_bytes: usize,
@@ -79,6 +83,9 @@ fn default_profile_limit_bytes() -> usize {
 }
 fn default_grant_limit() -> usize {
     128
+}
+fn default_write_grant_limit_bytes() -> u64 {
+    provenant_records::run::MAX_WRITE_GRANT_BYTES
 }
 fn default_argv_prompt_limit_bytes() -> usize {
     DEFAULT_ARGV_PROMPT_LIMIT_BYTES
@@ -121,6 +128,7 @@ impl Default for RunConfig {
             admission_seconds: None,
             profile_limit_bytes: default_profile_limit_bytes(),
             grant_limit: default_grant_limit(),
+            write_grant_limit_bytes: default_write_grant_limit_bytes(),
             argv_prompt_limit_bytes: default_argv_prompt_limit_bytes(),
             projects: BTreeMap::new(),
         }
@@ -265,6 +273,14 @@ impl DomainConfig for RunConfig {
                 });
             }
         }
+        if !(1..=provenant_records::run::MAX_WRITE_GRANT_BYTES_CEILING)
+            .contains(&self.write_grant_limit_bytes)
+        {
+            errors.push(SectionError {
+                field: "write_grant_limit_bytes".into(),
+                code: "range",
+            });
+        }
         valid_patterns("review_exempt", &self.review_exempt, &mut errors);
         valid_writer_writes("writer_writes", &self.writer_writes, &mut errors);
         for (project, settings) in &self.projects {
@@ -309,6 +325,11 @@ fn project_key(key: &str) -> bool {
 pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("profile_limit_bytes", "int"),
     FieldMetadata::new("grant_limit", "int"),
+    FieldMetadata::int(
+        "write_grant_limit_bytes",
+        1,
+        provenant_records::run::MAX_WRITE_GRANT_BYTES_CEILING as i64,
+    ),
     FieldMetadata::new("argv_prompt_limit_bytes", "int"),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("brief_read_root_warnings", "bool"),
@@ -344,6 +365,10 @@ mod tests {
         let defaults: RunConfig = toml_edit::de::from_str("")?;
         assert_eq!(defaults.grant_limit, 128);
         assert_eq!(
+            defaults.write_grant_limit_bytes,
+            provenant_records::run::MAX_WRITE_GRANT_BYTES
+        );
+        assert_eq!(
             defaults.argv_prompt_limit_bytes,
             DEFAULT_ARGV_PROMPT_LIMIT_BYTES
         );
@@ -367,6 +392,16 @@ mod tests {
         assert_eq!(
             (loaded.grant_limit, loaded.profile_limit_bytes),
             (2048, 2097152)
+        );
+        let configured: RunConfig = toml_edit::de::from_str("write_grant_limit_bytes = 1048576")?;
+        assert!(configured.validate().is_empty());
+        assert_eq!(configured.write_grant_limit_bytes, 1048576);
+        let invalid: RunConfig = toml_edit::de::from_str("write_grant_limit_bytes = 8388609")?;
+        assert!(
+            invalid
+                .validate()
+                .iter()
+                .any(|error| error.field == "write_grant_limit_bytes")
         );
         let invalid_argv: RunConfig = toml_edit::de::from_str("argv_prompt_limit_bytes = 0")?;
         assert!(

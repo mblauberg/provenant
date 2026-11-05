@@ -2402,7 +2402,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
-fn the_store_initialises_at_version_six_without_spacing() -> TestResult {
+fn the_store_initialises_at_version_nine_without_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -2415,7 +2415,7 @@ fn the_store_initialises_at_version_six_without_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let spacing: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
         [],
@@ -2443,7 +2443,7 @@ fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let operation = OperationId::parse("admit-after-upgrade")?;
     assert!(store.admission_window(&operation, &call)?.is_none());
     let deadline = WallTime::from_micros(1_000_000)?;
@@ -2491,7 +2491,7 @@ fn a_store_failure_names_its_cause_only_on_the_local_host() {
 }
 
 #[test]
-fn the_store_refuses_a_version_newer_than_eight() -> TestResult {
+fn the_store_refuses_a_version_newer_than_nine() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -2499,17 +2499,17 @@ fn the_store_refuses_a_version_newer_than_eight() -> TestResult {
     let call = call(&clock, &cancel);
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("PRAGMA user_version=9;")?;
+        .execute_batch("PRAGMA user_version=10;")?;
     assert!(matches!(
         RunStore::open(&context, &call),
-        Err(RunError::Version(9))
+        Err(RunError::Version(10))
     ));
     let state = context.state_root.as_path();
     let version: i64 = provenant_sqlite::open_connection(&state.join("run.sqlite3"), true)?
         .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
             r.get(0)
         })?;
-    assert_eq!(version, 9, "a refused store stays as it was");
+    assert_eq!(version, 10, "a refused store stays as it was");
     assert!(
         !std::fs::read_dir(state)?
             .filter_map(std::result::Result::ok)
@@ -2707,7 +2707,7 @@ fn version_seven_is_snapshotted_before_admission_windows_are_added() -> TestResu
     let version: i64 = store
         .db
         .pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let backup = context.state_root.as_path().join(format!(
         "run.sqlite3.bak-{}",
         call.clock.wall_now()?.as_micros()

@@ -291,6 +291,35 @@ fn writer_gc_settings(state: &Path) -> provenant_config::GcSettings {
 }
 
 impl run::Providers for Registry<'_> {
+    fn write_grant_limit(&self) -> run::WriteGrantLimit {
+        let Some(roots) = self.roots else {
+            return run::WriteGrantLimit::default();
+        };
+        match provenant_config::read_with_domains(roots, &crate::domains::SECTIONS) {
+            Ok(config) => {
+                let origin = if matches!(
+                    config.origins.get("domains.run.write_grant_limit_bytes"),
+                    Some(provenant_config::Origin::User { .. })
+                ) {
+                    "host configuration"
+                } else {
+                    "compiled default"
+                };
+                run::WriteGrantLimit {
+                    bytes: config.domains.run.write_grant_limit_bytes,
+                    origin,
+                }
+            }
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: domains.run.write_grant_limit_bytes unavailable ({error}); using compiled default"
+                );
+                run::WriteGrantLimit::default()
+            }
+        }
+    }
     fn runtime_cap(&self, provider: &str) -> Option<u64> {
         provenant_config::read_with_domains(self.roots?, &crate::domains::SECTIONS)
             .ok()?

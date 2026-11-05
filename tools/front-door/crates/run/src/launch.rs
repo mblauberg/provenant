@@ -116,15 +116,21 @@ pub struct PreparedLaunch {
 enum WriteGrantError {
     #[error("invalid write grant path")]
     InvalidPath,
-    #[error("encoded write grants exceed the {limit}-byte launch record bound")]
-    Limit { limit: u64 },
+    #[error(
+        "encoded write grants exceed domains.run.write_grant_limit_bytes={limit} (source: {origin})"
+    )]
+    Limit { limit: u64, origin: &'static str },
 }
 
 fn applied_write_grants(
     plan: &PreparedLaunch,
+    limit: WriteGrantLimit,
 ) -> std::result::Result<admission::AppliedWriteGrants, WriteGrantError> {
     let Some(confinement) = &plan.confinement else {
-        return Ok(admission::AppliedWriteGrants::default());
+        return Ok(admission::AppliedWriteGrants {
+            max_bytes: limit.bytes,
+            ..Default::default()
+        });
     };
     let permissions = confinement.plan.permissions();
     let grants = provenant_confinement::write_grants(permissions, &confinement.profile)
@@ -139,9 +145,10 @@ fn applied_write_grants(
             })
         })
         .collect::<std::result::Result<Vec<_>, WriteGrantError>>()?;
-    if !crate::reader::write_grants_fit(&grants) {
+    if !crate::reader::write_grants_fit(&grants, limit.bytes) {
         return Err(WriteGrantError::Limit {
-            limit: provenant_records::run::MAX_WRITE_GRANT_BYTES,
+            limit: limit.bytes,
+            origin: limit.origin,
         });
     }
     let git_grants_digest = match &permissions.mode {
@@ -153,6 +160,7 @@ fn applied_write_grants(
     Ok(admission::AppliedWriteGrants {
         grants,
         git_grants_digest,
+        max_bytes: limit.bytes,
     })
 }
 /// Provider-decoded facts from a completed capture.
@@ -369,10 +377,13 @@ impl RunStore {
                     .prepare(task, &prompt, &paths, None)
                     .map_err(|error| error.to_string())
             })
-            .and_then(|plan| {
-                applied_write_grants(&plan)
-                    .map(|_| plan)
-                    .map_err(|error| error.to_string())
+            .and_then(|mut plan| {
+                let limit = providers.write_grant_limit().checked();
+                applied_write_grants(&plan, limit).map_err(|error| error.to_string())?;
+                plan.route
+                    .extra
+                    .insert("write_grant_limit".into(), limit.receipt());
+                Ok(plan)
             })
             .map_err(|message| RunError::Input {
                 kind: ErrorKind::ContinuationUnsupported,
@@ -386,7 +397,43 @@ impl RunStore {
         ready.retained = ready.run == run;
     }
 }
+/// The host-selected cap and its source, carried into each applied receipt.
+#[derive(Clone, Copy, Debug)]
+pub struct WriteGrantLimit {
+    pub bytes: u64,
+    pub origin: &'static str,
+}
+impl Default for WriteGrantLimit {
+    fn default() -> Self {
+        Self {
+            bytes: provenant_records::run::MAX_WRITE_GRANT_BYTES,
+            origin: "compiled default",
+        }
+    }
+}
+impl WriteGrantLimit {
+    fn checked(self) -> Self {
+        if (1..=provenant_records::run::MAX_WRITE_GRANT_BYTES_CEILING).contains(&self.bytes) {
+            self
+        } else {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: invalid domains.run.write_grant_limit_bytes; using compiled default"
+            );
+            Self::default()
+        }
+    }
+    fn receipt(self) -> serde_json::Value {
+        serde_json::json!({"key": "domains.run.write_grant_limit_bytes", "value": self.bytes, "origin": self.origin})
+    }
+}
+
 pub trait Providers {
+    /// Host cap for the encoded applied write-grant ledger.
+    fn write_grant_limit(&self) -> WriteGrantLimit {
+        WriteGrantLimit::default()
+    }
     /// A host cap, in seconds, on the runtime deadline of lanes on `provider`.
     /// The task's own timeout applies when it is shorter or there is no cap.
     fn runtime_cap(&self, _provider: &str) -> Option<u64> {
@@ -1678,7 +1725,11 @@ impl RunStore {
                 .and_then(|c| c.plan.permissions().read_only.as_ref())
                 .map(|g| g.writable_paths())
                 .unwrap_or_default();
-            let write_grants = applied_write_grants(&plan);
+            let limit = providers.write_grant_limit().checked();
+            plan.route
+                .extra
+                .insert("write_grant_limit".into(), limit.receipt());
+            let write_grants = applied_write_grants(&plan, limit);
             let write_grants = match write_grants {
                 Ok(grants) => grants,
                 Err(error) => {

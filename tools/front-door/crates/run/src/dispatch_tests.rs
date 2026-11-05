@@ -7820,6 +7820,7 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
         &admission::AppliedWriteGrants {
             grants: write_grants.clone(),
             git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
+            ..Default::default()
         },
         Some(observed),
         &call,
@@ -7884,12 +7885,13 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
     let mut applied = admission::AppliedWriteGrants {
         grants: vec![grant.clone(); 1025],
         git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
+        ..Default::default()
     };
     let mut record = store.record(id, &call)?;
     record.write_grants = applied.grants.clone();
     reader::validate_attempt(&record)?;
     assert!(reader::valid_write_grants(&applied.grants));
-    assert!(reader::write_grants_fit(&applied.grants));
+    assert!(reader::write_grants_fit(&applied.grants, applied.max_bytes));
     // Native bytes double in the wire encoding, exceeding the cap even
     // though the raw path is smaller. Existing records remain readable.
     let mut path = b"/fixture/".to_vec();
@@ -7901,7 +7903,10 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
         ))?,
         ..grant.clone()
     }];
-    assert!(!reader::write_grants_fit(&applied.grants));
+    assert!(!reader::write_grants_fit(
+        &applied.grants,
+        applied.max_bytes
+    ));
     assert!(matches!(
         store.mark_starting(&record, &route(), &[], &applied, None, &call),
         Err(RunError::Validation("invalid write grants"))
@@ -9261,5 +9266,93 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
         assert_eq!(store.record(id, &call)?, legacy);
         assert!(store.open_runs(10, &call)?.is_empty());
     }
+    Ok(())
+}
+
+#[test]
+fn raised_write_grant_limit_preserves_large_terminal_ledger() -> TestResult {
+    struct Raised(Confined);
+    impl Providers for Raised {
+        fn write_grant_limit(&self) -> WriteGrantLimit {
+            WriteGrantLimit {
+                bytes: 2 * 1024 * 1024,
+                origin: "host configuration",
+            }
+        }
+        fn prepare(
+            &self,
+            task: &TaskRequest,
+            prompt: &str,
+            paths: &LaunchPaths,
+            resume: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+            self.0.prepare(task, prompt, paths, resume)
+        }
+        fn decode(
+            &self,
+            route: &RouteRecord,
+            output: &[u8],
+            exit: &ExitObservation,
+            path: &std::path::Path,
+        ) -> std::result::Result<Decoded, String> {
+            self.0.decode(route, output, exit, path)
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let prepared = input();
+    store.create(&prepared, &call)?;
+    let id = prepared.attempts[0].attempt_id;
+    let provider = Raised(Confined {
+        writer: false,
+        tool_writes: (0..400)
+            .map(|i| PathGrant {
+                path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
+                scope: PathScope::Subtree,
+            })
+            .collect(),
+    });
+    let started = store.start(
+        prepared.run_id,
+        &provider,
+        &|record, _| {
+            let route = record.applied_route.as_ref().expect("applied route");
+            assert_eq!(route.extra["write_grant_limit"]["value"], 2 * 1024 * 1024);
+            assert_eq!(
+                route.extra["write_grant_limit"]["origin"],
+                "host configuration"
+            );
+            Err(RunError::Validation("fixture holder"))
+        },
+        &call,
+    )?;
+    assert!(matches!(
+        started.as_slice(),
+        [Started::Refused {
+            kind: RefusalKind::Handoff,
+            ..
+        }]
+    ));
+    let record = store.record(id, &call)?;
+    assert!(
+        provenant_records::CanonicalV1::bytes(&record.write_grants)?
+            .as_bytes()
+            .len()
+            > RECORD_LIMIT as usize
+    );
+    let attempt = store.attempt_dir(prepared.run_id, id, false)?;
+    let terminal =
+        crate::artifacts::read_sealed(&attempt, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?
+            .ok_or("terminal decision")?;
+    assert!(terminal.len() > RECORD_LIMIT as usize);
+    drop(store);
+    let reopened = RunStore::open(&context, &call)?;
+    assert_eq!(
+        reopened.record(id, &call)?.write_grants,
+        record.write_grants
+    );
     Ok(())
 }

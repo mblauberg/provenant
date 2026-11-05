@@ -280,7 +280,9 @@ Trace output names the tool and reason without exposing dependency directories.
 An incomplete closure leaves the resolved grants in place and does not itself
 refuse launch. The host dependency-preparation PATH does not grant lane access.
 An optional search-path entry that cannot be encoded is omitted with a warning;
-the writer's private Git binding remains required.
+the writer's private Git binding remains required. The complete applied write-grant
+ledger is bounded by `domains.run.write_grant_limit_bytes`; its effective value
+and origin are reported, and terminal decisions retain space for the ledger.
 
 ### Staged user content
 

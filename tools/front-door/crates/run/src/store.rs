@@ -627,7 +627,7 @@ impl RunStore {
                         parent: input.request.parent.or(input.request.parent_attempt),
                     },
                 };
-                tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, bytes(&attempt)?])?;
+                tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![attempt.attempt_id.to_string(), run.run_id.to_string(), run.project_id.to_string(), task.task_id.to_string(), number, crate::db::attempt_bytes(&attempt)?])?;
                 insert_event(tx, &attempt)?;
                 let local_index = input.request.tasks[..index].iter().filter(|task| task.cloud.is_none()).count() as u64;
                 let waves = local_index / input.request.concurrency.max(1);
@@ -735,7 +735,7 @@ impl RunStore {
                 ),
             );
             match self.write(call, |tx| {
-                let changed = tx.execute("UPDATE attempts SET revision=?1,record=?2 WHERE id=?3 AND project=?4 AND revision=?5 AND terminal=0", params![sql_int(next.revision)?, bytes(&next)?, id.to_string(), self.context.project_id.to_string(), sql_int(old.revision)?])?;
+                let changed = tx.execute("UPDATE attempts SET revision=?1,record=?2 WHERE id=?3 AND project=?4 AND revision=?5 AND terminal=0", params![sql_int(next.revision)?, crate::db::attempt_bytes(&next)?, id.to_string(), self.context.project_id.to_string(), sql_int(old.revision)?])?;
                 if changed != 1 { return Err(RunError::Conflict); }
                 insert_event(tx, &next)?;
                 Ok(())
@@ -1225,7 +1225,7 @@ impl RunStore {
             return Err(RunError::Conflict);
         }
         super::reader::validate_attempt(&next)?;
-        let intent = bytes(&next)?;
+        let intent = crate::db::attempt_bytes(&next)?;
         let attempt_dir = self.attempt_dir(old.run_id, id, false)?;
         // Seal the result, then the exact terminal intent that names it. A
         // crash between them leaves a result-only orphan, which the edge
@@ -1399,7 +1399,12 @@ impl RunStore {
                 saved
             }
             None => {
-                seal(&attempt, name, &bytes(&next)?, TERMINAL_RECORD_LIMIT)?;
+                seal(
+                    &attempt,
+                    name,
+                    &crate::db::attempt_bytes(&next)?,
+                    TERMINAL_RECORD_LIMIT,
+                )?;
                 next
             }
         };
@@ -1553,7 +1558,7 @@ impl RunStore {
             receipts.cancellation = Some(CancellationDisposition::DeliveryEffective);
         }
         self.write(call, |tx| {
-            let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, bytes(next)?, id.to_string(), sql_int(old.revision)?])?;
+            let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, crate::db::attempt_bytes(next)?, id.to_string(), sql_int(old.revision)?])?;
             if changed != 1 { return Err(RunError::Conflict); }
             if next.schema_version >= 2 {
                 tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3)", params![id.to_string(), sql_int(next.generation)?, bytes(&receipts)?])?;

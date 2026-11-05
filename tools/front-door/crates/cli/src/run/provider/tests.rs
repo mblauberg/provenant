@@ -5515,3 +5515,34 @@ fn writer_preparation_refusal_names_setting_and_origin() {
     assert!(configured.contains("lanes.prepare_deps=true (sealed profile focused)"));
     assert!(configured.contains("lanes.prepare_deps=false"));
 }
+
+#[test]
+fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_run::Providers;
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let checkout = temp.path().join("checkout");
+    let state = temp.path().join("state");
+    for path in [&home, &checkout, &state] {
+        std::fs::create_dir_all(path)?;
+    }
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), checkout.clone());
+    inputs.state_dir = Some(state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let registry = Registry {
+        roots: Some(&roots),
+        ..Registry::default()
+    };
+    let default = registry.write_grant_limit();
+    assert_eq!(default.bytes, provenant_records::run::MAX_WRITE_GRANT_BYTES);
+    assert_eq!(default.origin, "compiled default");
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[domains.run]\nwrite_grant_limit_bytes=1048576\n",
+    )?;
+    let configured = registry.write_grant_limit();
+    assert_eq!(configured.bytes, 1048576);
+    assert_eq!(configured.origin, "host configuration");
+    Ok(())
+}

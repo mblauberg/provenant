@@ -650,6 +650,12 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
         "default": "host writer_writes",
         "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>].",
         "type": "string_list"
+      },
+      "write_grant_limit_bytes": {
+        "allowed": "1 to 8388608 bytes",
+        "default": "262144",
+        "effect": "Maximum encoded bytes of applied write grants recorded for a lane. Increase when an otherwise valid grant ledger exceeds the default; terminal records retain bounded headroom.",
+        "type": "int"
       }
     }
   },
