@@ -271,11 +271,20 @@ fn install_git(
         }
     };
     let search_path = &mut env[index].1;
-    if std::env::split_paths(search_path).next().as_deref() != Some(bin) {
-        *search_path = std::env::join_paths(
-            std::iter::once(bin.to_owned()).chain(std::env::split_paths(search_path)),
-        )
-        .map_err(|_| ProviderError::InvalidPath)?;
+    if std::env::split_paths(&*search_path).next().as_deref() != Some(bin) {
+        match std::env::join_paths(
+            std::iter::once(bin.to_owned()).chain(std::env::split_paths(&*search_path)),
+        ) {
+            Ok(value) => *search_path = value,
+            Err(_) if options.bound.is_none() && options.include.is_none() => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: the Git launcher cannot be included in PATH; continuing without it"
+                );
+            }
+            Err(_) => return Err(ProviderError::InvalidPath),
+        }
     }
     Ok(())
 }
@@ -637,6 +646,50 @@ const UNBOUND: [&str; 9] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unencodable_git_path_warns_but_bound_writer_still_refuses() {
+        let bin = Path::new("/fixture/scratch:other/bin");
+        for scrub in [false, true] {
+            let mut env = vec![("PATH".into(), "/usr/bin:/bin".into())];
+            let mut setup = Vec::new();
+            let options = GitWrapper {
+                scrub,
+                ..Default::default()
+            };
+            install_git(
+                bin,
+                Path::new("/fixture/git"),
+                &mut env,
+                &mut setup,
+                &options,
+                scrub,
+            )
+            .unwrap();
+            assert_eq!(env[0].1, "/usr/bin:/bin");
+        }
+        let mut env = vec![("PATH".into(), "/usr/bin:/bin".into())];
+        let mut setup = Vec::new();
+        let options = GitWrapper {
+            scrub: true,
+            bound: Some(BoundGit {
+                worktree: "/fixture/repo".into(),
+                env: vec![],
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            install_git(
+                bin,
+                Path::new("/fixture/git"),
+                &mut env,
+                &mut setup,
+                &options,
+                true
+            ),
+            Err(ProviderError::InvalidPath)
+        ));
+    }
 
     #[test]
     fn missing_search_path_uses_git_wrapper_and_system_defaults() {

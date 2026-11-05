@@ -226,9 +226,20 @@ fn prepare(
     let bin = plan.scratch.path.join("bin");
     let shell = access == Access::WorktreeWrite;
     let defaults = crate::launch::tool_search_path(input.home, shell);
-    let path =
-        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&defaults)))
-            .map_err(|_| ProviderError::InvalidPath)?;
+    let path = match std::env::join_paths(
+        std::iter::once(bin.clone()).chain(std::env::split_paths(&defaults)),
+    ) {
+        Ok(path) => path,
+        Err(_) if !shell => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: the OpenCode Git launcher cannot be included in PATH; continuing without it"
+            );
+            defaults
+        }
+        Err(_) => return Err(ProviderError::InvalidPath),
+    };
     let mut env = base_env(input, &plan.scratch.path, path);
     let xdg = |key, fallback| {
         (input.host_var)(key)
@@ -1609,6 +1620,52 @@ mod tests {
                 .iter()
                 .all(|g| g.scope == provenant_confinement::permissions::PathScope::Exact)
         );
+    }
+
+    #[test]
+    fn read_only_search_path_skips_unencodable_git_directory() {
+        use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+        let base = crate::tests::read_only_plan("/fixture", None);
+        let mut permissions = base.permissions().clone();
+        permissions.scratch.path = "/fixture/scratch:other".into();
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+        .unwrap();
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
+        assert_eq!(
+            std::env::split_paths(path).collect::<Vec<_>>(),
+            [PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
+        );
+        assert!(matches!(
+            prepare(
+                &input,
+                Access::WorktreeWrite,
+                Session::Fresh,
+                OpenCode.stream(None).unwrap()
+            ),
+            Err(ProviderError::InvalidPath)
+        ));
     }
 
     #[test]

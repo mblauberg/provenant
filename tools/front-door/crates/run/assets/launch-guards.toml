@@ -273,8 +273,13 @@ reason = "When a Git-context prompt refers to scratch, OpenCode must receive an 
 
 [[guard]]
 site = "providers/src/opencode.rs#prepare"
-boundary = "unclassified"
-reason = "A required scratch-bin entry that PATH cannot encode still needs a safe fallback or boundary classification."
+boundary = "warning"
+reason = "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
+boundary = "lane_git"
+reason = "A writer must be able to place its private Git launcher in PATH before its Git binding can be enforced."
 
 [[guard]]
 site = "providers/src/command.rs#prepare"
@@ -436,6 +441,16 @@ reason = "The publishing wrapper must preserve the selected GitHub credential po
 site = "providers/src/lane.rs#install_git"
 boundary = "warning"
 reason = "A missing PATH warns and uses system defaults with the private Git launcher first."
+
+[[guard]]
+site = "providers/src/lane.rs#install_git"
+boundary = "warning"
+reason = "An unbound Git launcher whose directory cannot be encoded in PATH is omitted with a warning."
+
+[[guard]]
+site = "providers/src/lane.rs#install_git"
+boundary = "lane_git"
+reason = "A bound writer Git launcher must be placed first in PATH so Git uses its private view."
 
 [[guard]]
 site = "providers/src/lane.rs#LaneRuntime::environment"
