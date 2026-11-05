@@ -2476,6 +2476,13 @@ fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
         .db
         .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
     let store = RunStore::open(&context, &call)?;
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 8);
     let operation = OperationId::parse("admit-after-upgrade")?;
     assert!(store.admission_window(&operation, &call)?.is_none());
     let deadline = WallTime::from_micros(1_000_000)?;
@@ -2536,6 +2543,21 @@ fn the_store_refuses_a_version_newer_than_eight() -> TestResult {
         RunStore::open(&context, &call),
         Err(RunError::Version(9))
     ));
+    let state = context.state_root.as_path();
+    let version: i64 = provenant_sqlite::open_connection(&state.join("run.sqlite3"), true)?
+        .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+            r.get(0)
+        })?;
+    assert_eq!(version, 9, "a refused store stays as it was");
+    assert!(
+        !std::fs::read_dir(state)?
+            .filter_map(std::result::Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run.sqlite3.bak-")),
+        "a refused store takes no backup"
+    );
     Ok(())
 }
 

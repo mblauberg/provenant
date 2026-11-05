@@ -1817,6 +1817,7 @@ impl RunStore {
         } else if cancelled {
             decoded.outcome = Outcome::Cancelled;
         }
+        let decoded_reason = decoded.reason.take().map(bounded_reason);
         let publication = TerminalPublication {
             outcome: decoded.outcome,
             finished_at,
@@ -1825,7 +1826,7 @@ impl RunStore {
                 u64::try_from(finished_at.as_micros().saturating_sub(started.as_micros()) / 1000)
                     .ok()
             }),
-            reason: decoded.reason,
+            reason: decoded_reason,
             result: &result,
             complete: decoded.complete,
             redacted: true,
@@ -1951,6 +1952,20 @@ fn path_denial_hint(stderr: &[u8]) -> Option<String> {
     ))
 }
 
+/// Terminal evidence refuses a longer reason, so every published reason fits.
+const REASON_LIMIT: usize = 4096;
+
+fn bounded_reason(mut reason: String) -> String {
+    if reason.len() > REASON_LIMIT {
+        let mut end = REASON_LIMIT;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+    }
+    reason
+}
+
 /// A lane's own words in a one-line reason: bounded and on one line.
 fn bounded_note(note: &str) -> String {
     provenant_confinement::redact::bounded_line(note, 240)
@@ -1959,6 +1974,15 @@ fn bounded_note(note: &str) -> String {
 #[cfg(test)]
 mod host_clock_tests {
     use super::*;
+
+    #[test]
+    fn a_published_reason_fits_terminal_evidence_on_a_character_boundary() {
+        let long = "é".repeat(REASON_LIMIT);
+        let bounded = bounded_reason(long.clone());
+        assert!(bounded.len() <= REASON_LIMIT);
+        assert!(long.starts_with(&bounded));
+        assert_eq!(bounded_reason("short".into()), "short");
+    }
 
     #[test]
     fn path_denial_hints_require_a_path_and_redact_known_tokens() {
