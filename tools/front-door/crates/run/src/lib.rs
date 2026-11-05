@@ -526,6 +526,11 @@ impl RunError {
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
             Self::Confinement(PermissionError::CredentialGrant { path, access }) => {
+                let access = match *access {
+                    "read" => "read",
+                    "write" => "write",
+                    _ => "requested",
+                };
                 diagnostic = diagnostic
                     .detail(match safe_path(path, destination) {
                         Some(path) => format!("credential root refused for {access} grant: {path}"),
@@ -576,7 +581,9 @@ impl RunError {
                     }
                 }
                 if matches!(error, WorktreeError::BranchCollision { .. }) {
-                    diagnostic = diagnostic.detail("branch name collides with an existing ref");
+                    diagnostic = diagnostic
+                        .detail("branch name collides with an existing ref")
+                        .next("inspect existing Git refs and choose a different branch name");
                 }
                 if let WorktreeError::BranchExistsWithBase { head, base, .. } = error {
                     diagnostic = diagnostic
@@ -893,7 +900,7 @@ mod diagnostic_projection_tests {
             let diagnostic = error.diagnostic(destination);
             assert_eq!(diagnostic.code, "WRITER_SCOPE");
             assert!(diagnostic.detail.as_deref().unwrap().contains("collides"));
-            assert!(diagnostic.next.is_some());
+            assert!(diagnostic.next.as_deref().unwrap().contains("branch"));
             assert!(
                 !serde_json::to_string(&diagnostic)
                     .unwrap()
@@ -962,6 +969,25 @@ mod diagnostic_projection_tests {
         });
         assert!(remote.detail.is_none());
         assert!(remote.next.is_some());
+    }
+
+    #[test]
+    fn credential_grant_does_not_echo_unknown_access_text() {
+        let error = RunError::Confinement(
+            provenant_confinement::permissions::PermissionError::CredentialGrant {
+                path: PathBuf::from("/private/root"),
+                access: "TOKEN_SENTINEL",
+            },
+        );
+        let diagnostic = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert_eq!(diagnostic.code, "CREDENTIAL_ROOT");
+        assert!(diagnostic.next.is_some());
+        let wire = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        assert!(!wire.contains("/private"));
     }
 
     #[test]

@@ -160,11 +160,16 @@ impl Diagnostic {
     }
 }
 
+fn terminal_control(character: char) -> bool {
+    character.is_control()
+        || matches!(character, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
 /// Escape terminal controls and truncate at a UTF-8 boundary after escaping.
 pub fn safe_text(value: &str) -> String {
     let mut output = String::new();
     for character in value.chars() {
-        let part = if character.is_control() {
+        let part = if terminal_control(character) {
             character.escape_default().to_string()
         } else {
             character.to_string()
@@ -206,7 +211,7 @@ pub fn safe_path(path: &Path, destination: Destination<'_>) -> Option<String> {
     if display
         .chars()
         .map(|c| {
-            if c.is_control() {
+            if terminal_control(c) {
                 c.escape_default().to_string().len()
             } else {
                 c.len_utf8()
@@ -222,7 +227,7 @@ pub fn safe_path(path: &Path, destination: Destination<'_>) -> Option<String> {
 
 /// Quote a path as one shell argument after applying destination disclosure.
 pub fn shell_path(path: &Path, destination: Destination<'_>) -> Option<String> {
-    if !matches!(destination, Destination::Local) || path.to_str()?.chars().any(char::is_control) {
+    if !matches!(destination, Destination::Local) || path.to_str()?.chars().any(terminal_control) {
         return None;
     }
     let path = safe_path(path, destination)?;
@@ -242,6 +247,9 @@ mod tests {
         assert!(text.len() <= MAX_DIAGNOSTIC_BYTES);
         assert!(!text.chars().any(char::is_control));
         assert!(text.contains("\\u{1b}"));
+        let bidi = safe_text("before\u{202e}after");
+        assert!(bidi.contains("\\u{202e}"));
+        assert!(!bidi.contains('\u{202e}'));
     }
     #[test]
     fn destination_paths_require_anchors_and_shell_quotes() {
@@ -262,6 +270,13 @@ mod tests {
         assert_eq!(
             shell_path(Path::new("/repo/a'b"), Destination::Local).as_deref(),
             Some("'/repo/a'\\''b'")
+        );
+        let bidi_path = Path::new("/repo/a\u{202e}b");
+        assert_eq!(shell_path(bidi_path, Destination::Local), None);
+        assert!(
+            safe_path(bidi_path, Destination::Local)
+                .unwrap()
+                .contains("\\u{202e}")
         );
     }
 
