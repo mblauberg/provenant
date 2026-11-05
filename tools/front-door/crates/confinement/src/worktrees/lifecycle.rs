@@ -63,6 +63,7 @@ pub fn fast_forward(
         Err(error) => return Err(error),
     }
     if current.head != head {
+        let _ = context.facts.take_inventory(context);
         context.workers.invalidate();
         let outcome = execute_git_mutation(
             context.executor,
@@ -1231,6 +1232,7 @@ pub(super) fn settle_branch(
         }
     }
     context.repo.revalidate()?;
+    let _ = context.facts.take_inventory(context);
     let deleted = execute_git_mutation(
         context.executor,
         context.repo,
