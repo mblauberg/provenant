@@ -644,7 +644,7 @@ pub struct OperationRefusal {
     pub extra: crate::ExtraFields,
     pub diagnostic: crate::diagnostic::Diagnostic,
     /// Registered worktree identifier, when the request names a worktree.
-    pub worktree: Option<String>,
+    pub worktree: Option<PathWire>,
     pub refused_at: WallTime,
 }
 
@@ -1238,6 +1238,27 @@ pub struct RunEvent {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn operation_refusal_preserves_native_worktree_identifier() {
+        use std::os::unix::ffi::OsStringExt;
+        let name = std::ffi::OsString::from_vec(vec![b'w', 0xff]);
+        let relative = provenant_core::RelativePath::parse(std::path::PathBuf::from(name)).unwrap();
+        let refusal = OperationRefusal {
+            extra: Default::default(),
+            diagnostic: crate::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                .next("inspect the worktree"),
+            worktree: Some(PathWire::from_relative(&relative).unwrap()),
+            refused_at: WallTime::from_micros(1).unwrap(),
+        };
+        let value = serde_json::to_value(&refusal).unwrap();
+        assert_eq!(value["worktree"]["encoding"], "native_bytes");
+        assert_eq!(
+            serde_json::from_value::<OperationRefusal>(value).unwrap(),
+            refusal
+        );
+    }
+
     #[test]
     fn operation_refusal_preserves_projection_and_unknown_fields() {
         let record = OperationRecord {
@@ -1256,7 +1277,12 @@ mod tests {
                     .category("integrity")
                     .detail("writer scope refused")
                     .next("inspect the registered worktree"),
-                worktree: Some("writer".into()),
+                worktree: Some(
+                    PathWire::from_relative(
+                        &provenant_core::RelativePath::parse("writer").unwrap(),
+                    )
+                    .unwrap(),
+                ),
                 refused_at: WallTime::from_micros(1).unwrap(),
             }),
         };

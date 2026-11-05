@@ -94,10 +94,11 @@ impl RunStore {
             .as_ref()
             .ok_or(RunError::Validation("refusal missing"))?;
         let valid_worktree = refusal.worktree.as_ref().is_none_or(|name| {
-            let mut components = std::path::Path::new(name).components();
-            matches!(components.next(), Some(std::path::Component::Normal(_)))
-                && components.next().is_none()
-                && provenant_records::diagnostic::safe_text(name) == *name
+            name.to_relative_path().is_ok_and(|path| {
+                let mut components = path.as_path().components();
+                matches!(components.next(), Some(std::path::Component::Normal(_)))
+                    && components.next().is_none()
+            })
         });
         let diagnostic = &refusal.diagnostic;
         let valid_diagnostic = !diagnostic.code.is_empty()
@@ -152,6 +153,7 @@ impl RunStore {
                     Err(RunError::Conflict)
                 };
             }
+            let encoded = bytes(record)?;
             tx.execute(
                 "INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)",
                 params![
@@ -160,10 +162,10 @@ impl RunStore {
                     record.operation_id.as_str(),
                     record.request_digest.to_string(),
                     record.run_id.to_string(),
-                    bytes(record)?
+                    &encoded
                 ],
             )?;
-            Ok(record.clone())
+            decode(&encoded)
         })
     }
 

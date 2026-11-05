@@ -3212,7 +3212,12 @@ fn refused_operation(context: &ExecutionContext) -> OperationRecord {
                 .category("integrity")
                 .detail("writer scope refused")
                 .next("inspect the registered worktree"),
-            worktree: Some("writer".into()),
+            worktree: Some(
+                provenant_records::PathWire::from_relative(
+                    &provenant_core::RelativePath::parse("writer").unwrap(),
+                )
+                .unwrap(),
+            ),
             refused_at: WallTime::from_micros(100).unwrap(),
         }),
     }
@@ -3226,8 +3231,13 @@ fn refused_operation_is_immutable_and_replays_once() -> TestResult {
     let cancel = CancelToken::new();
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
-    let refusal = refused_operation(&context);
-    assert_eq!(store.record_refusal(&refusal, &call)?, refusal);
+    let mut refusal = refused_operation(&context);
+    refusal.refusal.as_mut().unwrap().diagnostic.fact =
+        Some(provenant_records::diagnostic::DiagnosticFact::WorktreeUnregistered);
+    let saved = store.record_refusal(&refusal, &call)?;
+    assert!(saved.refusal.as_ref().unwrap().diagnostic.fact.is_none());
+    refusal.refusal.as_mut().unwrap().diagnostic.fact = None;
+    assert_eq!(saved, refusal);
     let mut replay = refusal.clone();
     replay.run_id = RunId::from_bytes([19; 16]);
     replay.refusal.as_mut().unwrap().refused_at = WallTime::from_micros(200)?;
