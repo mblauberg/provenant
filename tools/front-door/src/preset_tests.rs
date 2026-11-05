@@ -2821,6 +2821,39 @@ fn malformed_graph_settings_name_the_field() {
 }
 
 #[test]
+fn malformed_node_settings_name_the_stage_and_field() {
+    for (field, value) in [
+        ("deadline_seconds", "'not-a-number'"),
+        ("skip_without_findings", "'not-a-boolean'"),
+        ("source", "{ type = 'node', node = 5 }"),
+    ] {
+        let mut layers = Layers::empty();
+        layers
+            .insert(
+                "test",
+                "bad-node-setting",
+                &format!("stages = [{{ id = 'check', {field} = {value} }}]\n"),
+            )
+            .unwrap();
+        let error = expand(&layers, "bad-node-setting", "brief", &[]).unwrap_err();
+        assert!(error.contains("check") && error.contains(field), "{error}");
+    }
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "bad-member",
+            "stages = [{ id = 'group', stages = [{ id = 'member', deadline_seconds = 'bad' }] }]\n",
+        )
+        .unwrap();
+    let error = expand(&layers, "bad-member", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("member") && error.contains("deadline_seconds"),
+        "{error}"
+    );
+}
+
+#[test]
 fn composite_exports_are_checked_when_a_preset_is_compiled() {
     let mut layers = Layers::empty();
     layers.insert("test", "invalid-export", "stages = [{ id = 'group', stages = [{ id = 'member', prompt = 'work' }], exports = [{ node = 'missing', outputs = ['result'] }] }]\n").unwrap();

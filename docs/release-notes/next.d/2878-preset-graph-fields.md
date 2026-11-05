@@ -1,4 +1,4 @@
 ## Fixes
 ### Pipelines and graphs
 
-- Preset compilation names a malformed graph setting in its error (#2878).
+- Preset compilation names malformed graph and node settings in its errors (#2878).

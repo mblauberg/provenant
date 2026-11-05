@@ -92,6 +92,47 @@ pub struct Expansion {
     pub plan: Option<planner::Decision>,
 }
 
+/// Decode a lowered node and attach its stage and field to a type error.
+/// The individual-field probes run only on an error, so valid expansions keep
+/// the normal single decode per node.
+fn decode_lowered_node(
+    value: &Value,
+) -> Result<provenant_fabric_runtime::graph::GraphNode, String> {
+    serde_json::from_value(value.clone()).map_err(|error| {
+        for children in [
+            value.get("composite").and_then(|group| group.get("nodes")),
+            value.get("loop").and_then(|body| body.get("body")),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+        {
+            for child in children {
+                if let Err(error) = decode_lowered_node(child) {
+                    return error;
+                }
+            }
+        }
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        let field = value.as_object().and_then(|fields| {
+            fields.iter().find_map(|(key, value)| {
+                let mut probe = json!({"id": "probe", "access": "read_only"});
+                probe[key] = value.clone();
+                serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(probe)
+                    .is_err()
+                    .then_some(key.as_str())
+            })
+        });
+        match field {
+            Some(field) => format!("node {id}: {field}: {error}"),
+            None => format!("node {id}: {error}"),
+        }
+    })
+}
+
 impl Layers {
     #[allow(
         clippy::expect_used,
@@ -1151,8 +1192,10 @@ pub fn expand_with(
         decision_session: None,
         schema_version: 1,
         graph_id: id.clone(),
-        nodes: serde_json::from_value(Value::Array(nodes.clone()))
-            .map_err(|error| error.to_string())?,
+        nodes: nodes
+            .iter()
+            .map(decode_lowered_node)
+            .collect::<Result<_, _>>()?,
     };
     let parameters = flatten_parameters(
         name,
