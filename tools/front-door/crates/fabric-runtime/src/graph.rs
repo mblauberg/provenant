@@ -716,20 +716,21 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
 /// retry observes an already accepted attempt instead of launching twice.
 fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
     use crate::coordination::facade::FacadeError;
-    let Some(error) = error.downcast_ref::<FacadeError>() else {
-        return false;
-    };
-    matches!(
-        error,
-        FacadeError::Busy
-            | FacadeError::Timeout
-            | FacadeError::HomeUnavailable
+    use provenant_core::retry::{RetryCause, is_transient};
+    let cause = match error.downcast_ref::<FacadeError>() {
+        Some(FacadeError::Busy | FacadeError::WriterUnknown) => RetryCause::Contention,
+        Some(FacadeError::Timeout) => RetryCause::Timeout,
+        Some(
+            FacadeError::HomeUnavailable
             | FacadeError::Io { .. }
             | FacadeError::DispatchUnobserved { .. }
             | FacadeError::HostDeliveryStage { .. }
             | FacadeError::HostDeliveryLimit { .. }
-            | FacadeError::LaunchUnknown { .. }
-    )
+            | FacadeError::LaunchUnknown { .. },
+        ) => RetryCause::Transport,
+        _ => RetryCause::Permanent,
+    };
+    is_transient(cause)
 }
 
 fn launch_diagnostic(error: &(dyn Error + 'static)) -> provenant_records::diagnostic::Diagnostic {

@@ -8462,6 +8462,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     let operation = provenant_core::OperationId::parse("op").unwrap();
     for transient in [
         FacadeError::Busy,
+        FacadeError::WriterUnknown,
         FacadeError::Timeout,
         FacadeError::HomeUnavailable,
         FacadeError::Io {
@@ -8479,6 +8480,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     for permanent in [
         FacadeError::InvalidInput { detail: None },
         FacadeError::ConfinementRefused,
+        FacadeError::WriterBusy,
         FacadeError::DispatchRefused {
             fact: None,
             disk: None,
