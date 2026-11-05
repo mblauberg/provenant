@@ -76,6 +76,9 @@ separately from executable availability; quota and doctor label account-wide
 evidence as such. A route list caches each account file for the display and warns
 when its 256-row readiness display limit is reached. Routing, route commands and
 diagnostics read through the same scoped reader.
+Doctor also runs declared local sign-in status commands for installed adapters
+without account observations. Their fresh sign-in result is shown separately
+from recorded readiness; an incomplete or inconclusive command is unknown.
 
 Receipts. The receipt enum `RouteReadiness` (ready, unavailable) gains no
 variant, because an older reader rejects an unrecognised status. Unknown

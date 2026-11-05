@@ -159,28 +159,17 @@ pub(super) fn codex_login_is_healthy(
     executable: &Path,
     probe: &Probe<'_>,
 ) -> bool {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
-    let argv = [
-        executable.as_os_str().to_owned(),
-        "login".into(),
-        "status".into(),
-    ];
-    let env = [
-        ("HOME".into(), probe.home.as_os_str().to_owned()),
-        ("CODEX_HOME".into(), entry.directory.as_os_str().to_owned()),
-        ("PATH".into(), "/usr/bin:/bin".into()),
-    ];
-    let mut options = ExecOptions::new(&argv, probe.scratch, std::time::Duration::from_secs(4));
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Discard;
-    options.stderr = StreamPolicy::Discard;
-    probe.executor.execute(options).is_ok_and(|out| {
-        out.termination == Termination::Exit(0)
-            && !out.timed_out
-            && !out.cancelled
-            && !out.drain_truncated
-            && !out.overflow_stopped
-    })
+    matches!(
+        provenant_providers::host::local_signin(
+            provenant_records::LoginReprobe::Codex,
+            probe.executor,
+            executable,
+            probe.home,
+            &entry.directory,
+            probe.scratch,
+        ),
+        Some(provenant_providers::host::LocalSignin::SignedIn)
+    )
 }
 
 /// Cursor's status command uses the host login; never substitute it for a
@@ -190,34 +179,17 @@ pub(super) fn cursor_login_is_healthy(
     executable: &Path,
     probe: &Probe<'_>,
 ) -> bool {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
-    if entry.directory != probe.home {
-        return false;
-    }
-    let argv = [executable.as_os_str().to_owned(), "status".into()];
-    let env = [
-        ("HOME".into(), probe.home.as_os_str().to_owned()),
-        ("PATH".into(), "/usr/bin:/bin".into()),
-    ];
-    let mut options = ExecOptions::new(&argv, probe.scratch, std::time::Duration::from_secs(4));
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture { limit: 4096 };
-    options.stderr = StreamPolicy::Discard;
-    probe.executor.execute(options).is_ok_and(|out| {
-        if out.termination != Termination::Exit(0)
-            || out.timed_out
-            || out.cancelled
-            || out.drain_truncated
-            || out.overflow_stopped
-            || out.stdout.truncated
-            || out.stdout.read_failed
-        {
-            return false;
-        }
-        let text = String::from_utf8_lossy(&out.stdout.bytes).to_ascii_lowercase();
-        !text.contains("not logged in")
-            && (text.contains("logged in") || text.contains("login successful"))
-    })
+    matches!(
+        provenant_providers::host::local_signin(
+            provenant_records::LoginReprobe::Cursor,
+            probe.executor,
+            executable,
+            probe.home,
+            &entry.directory,
+            probe.scratch,
+        ),
+        Some(provenant_providers::host::LocalSignin::SignedIn)
+    )
 }
 
 pub(super) fn observe_account(

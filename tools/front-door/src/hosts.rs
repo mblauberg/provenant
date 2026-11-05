@@ -55,6 +55,11 @@ struct LoginAccount {
     readiness: Option<provenant_quota::ReadinessRead>,
     repair: Option<String>,
 }
+#[derive(Serialize, Deserialize)]
+struct InstalledSignin {
+    adapter: String,
+    state: provenant_providers::host::LocalSignin,
+}
 fn login_account(row: provenant_quota::AccountRow) -> LoginAccount {
     LoginAccount {
         adapter: row.account.adapter,
@@ -74,6 +79,9 @@ pub(crate) struct Report {
     /// Installed adapters with no account observation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     unobserved_adapters: Vec<String>,
+    /// Fresh local sign-in checks, separate from recorded account readiness.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    installed_signins: Vec<InstalledSignin>,
     /// The executable lanes can resolve through their read-only Rust toolchain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nextest: Option<String>,
@@ -107,6 +115,41 @@ fn unobserved_adapters(accounts: &[LoginAccount], installed: impl Fn(&str) -> bo
                 && !accounts.iter().any(|row| row.adapter == spec.name)
         })
         .map(|spec| spec.name.to_owned())
+        .collect()
+}
+fn installed_signins(
+    adapters: &[String],
+    home: &Path,
+    executable: impl Fn(&str) -> Option<PathBuf>,
+    host_var: impl Fn(&str) -> Option<OsString>,
+    executor: &dyn Executor,
+) -> Vec<InstalledSignin> {
+    adapters
+        .iter()
+        .filter_map(|name| {
+            let spec = provenant_records::AdapterSpec::get(name)?;
+            let executable = executable(spec.binary)?;
+            let account_dir = spec
+                .default_account_directory
+                .map(|(env, fallback)| {
+                    host_var(env)
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| home.join(fallback))
+                })
+                .unwrap_or_else(|| home.to_owned());
+            let state = provenant_providers::host::local_signin(
+                spec.login_reprobe,
+                executor,
+                &executable,
+                home,
+                &account_dir,
+                Path::new("/"),
+            )?;
+            Some(InstalledSignin {
+                adapter: name.clone(),
+                state,
+            })
+        })
         .collect()
 }
 fn lane_nextest(home: &Path) -> Option<String> {
@@ -313,10 +356,22 @@ pub(crate) fn local(
     };
     let unobserved_adapters =
         unobserved_adapters(&login_accounts, |binary| executable(binary).is_some());
+    let installed_signins = SystemExecutor::new(1)
+        .ok()
+        .map_or_else(Vec::new, |executor| {
+            installed_signins(
+                &unobserved_adapters,
+                home,
+                executable,
+                |name| std::env::var_os(name),
+                &executor,
+            )
+        });
     Ok(Report {
         claude,
         login_accounts,
         unobserved_adapters,
+        installed_signins,
         nextest: lane_nextest(home),
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
         tick_agent: crate::tick_agent::diagnosis(state, home),
@@ -388,6 +443,12 @@ fn valid_remote(report: &Report) -> bool {
         && report.unobserved_adapters.len() <= 128
         && report.unobserved_adapters.iter().all(|name| {
             !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
+        })
+        && report.installed_signins.len() <= 128
+        && report.installed_signins.iter().all(|row| {
+            !row.adapter.is_empty()
+                && row.adapter.len() <= 128
+                && !row.adapter.chars().any(char::is_control)
         })
         && report.login_accounts.len() <= 128
         && report.login_accounts.iter().all(|row| {
@@ -527,6 +588,17 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
             }
             for adapter in &report.unobserved_adapters {
                 text.push_str(&format!("recorded account readiness {}: unknown (no account observation; configure an account if needed, then run `provenant quota tick` to probe)\n", adapter.escape_debug()));
+            }
+            for row in &report.installed_signins {
+                let state = match row.state {
+                    provenant_providers::host::LocalSignin::SignedIn => "signed in",
+                    provenant_providers::host::LocalSignin::SignedOut => "signed out",
+                    provenant_providers::host::LocalSignin::Unknown => "unknown",
+                };
+                text.push_str(&format!(
+                    "installed {} sign-in: {state}\n",
+                    row.adapter.escape_debug()
+                ));
             }
             for row in &report.login_accounts {
                 let reason = row
@@ -680,6 +752,67 @@ mod tests {
             super::unobserved_adapters(&[row], |binary| binary == "agy" || binary == "opencode");
         assert_eq!(names, ["opencode"]);
         assert!(super::unobserved_adapters(&[], |_| false).is_empty());
+    }
+
+    #[test]
+    fn doctor_probes_installed_login_status_without_exposing_output() {
+        use provenant_os::exec::{
+            CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+        };
+        struct Fake;
+        impl Executor for Fake {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let codex = options.argv[0] == "/fixture/codex";
+                if codex {
+                    assert_eq!(options.argv[1..], ["login", "status"]);
+                    assert!(options.env.unwrap().iter().any(|(key, value)| key == "CODEX_HOME" && value == "/fixture/selected"));
+                } else {
+                    assert_eq!(options.argv[1..], ["status"]);
+                }
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(if codex { 0 } else { 1 }),
+                    stdout: CapturedStream::default(),
+                    stderr: CapturedStream {
+                        bytes: if codex {
+                            b"fixture account".to_vec()
+                        } else {
+                            b"Not logged in".to_vec()
+                        },
+                        ..Default::default()
+                    },
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let adapters = [
+            "codex".to_owned(),
+            "cursor".to_owned(),
+            "opencode".to_owned(),
+        ];
+        let rows = super::installed_signins(
+            &adapters,
+            std::path::Path::new("/fixture/home"),
+            |name| Some(std::path::PathBuf::from(format!("/fixture/{name}"))),
+            |name| (name == "CODEX_HOME").then(|| "/fixture/selected".into()),
+            &Fake,
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].adapter, "codex");
+        assert_eq!(
+            rows[0].state,
+            provenant_providers::host::LocalSignin::SignedIn
+        );
+        assert_eq!(rows[1].adapter, "cursor");
+        assert_eq!(
+            rows[1].state,
+            provenant_providers::host::LocalSignin::SignedOut
+        );
+        let json = serde_json::to_string(&rows).unwrap();
+        assert!(!json.contains("fixture account"));
     }
 
     #[test]
