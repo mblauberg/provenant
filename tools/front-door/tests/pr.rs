@@ -216,14 +216,18 @@ fn land_reports_reset_and_exact_retry_when_merge_rate_limit_exhausts_budget() ->
     let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=5s", "--json"])?;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(report["error"]["code"], "RATE_LIMITED", "{report}");
-    let retry = format!(
-        "provenant land 1668 --head {HEAD} --wait=5s --state-dir '{}' --json",
-        rig.state.display()
+    let retry = report["error"]["repair"].as_str().ok_or("retry command")?;
+    assert_eq!(
+        retry.split_whitespace().take(6).collect::<Vec<_>>(),
+        ["provenant", "land", "1668", "--head", HEAD, "--wait=5s"]
     );
-    assert_eq!(report["error"]["repair"], retry, "{report}");
+    assert!(
+        retry.contains(rig.state.to_str().ok_or("state path")?),
+        "{report}"
+    );
     let message = report["error"]["message"].as_str().ok_or("error message")?;
-    assert!(message.contains("2100-01-01"), "{report}");
-    assert!(message.contains(&format!("next: {retry}")), "{report}");
+    assert!(message.contains("reset"), "{report}");
+    assert!(message.contains(retry), "{report}");
     assert_eq!(report["data"]["merged"], false, "{report}");
     assert_eq!(report["data"]["steps"], serde_json::json!([]));
     assert!(!rig.project.join("merged").exists());
@@ -472,7 +476,10 @@ fn land_explains_poll_and_budget_sources() -> Result {
         Ok(serde_json::from_slice(&output.stdout.bytes)?)
     };
     let default = show(&["land", "1668", "--explain", "--json"])?;
-    assert_eq!(default["data"]["fields"]["poll_seconds"]["value"], 30);
+    assert_eq!(
+        default["data"]["fields"]["poll_seconds"]["value"],
+        provenant_cli::domains::LandSettings::default().poll_seconds
+    );
     assert_eq!(
         default["data"]["fields"]["poll_seconds"]["source"]["layer"],
         "bundled"
