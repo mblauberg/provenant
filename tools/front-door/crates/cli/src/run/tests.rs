@@ -1721,6 +1721,36 @@ fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
 }
 
 #[test]
+fn cli_io_projection_omits_untrusted_sources_in_both_formats()
+-> Result<(), Box<dyn std::error::Error>> {
+    for source in [
+        "TOKEN_SENTINEL\u{1b}".to_owned(),
+        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
+    ] {
+        let failure = super::Fail::from(run::RunError::Io(std::io::Error::other(source)));
+        let reply = super::reply("run", Err(failure));
+        for mode in [
+            crate::render::RenderMode::Human {
+                text: &reply.human,
+                summary: None,
+                read_only: false,
+            },
+            crate::render::RenderMode::Json,
+        ] {
+            let mut output = Vec::new();
+            crate::render::render(&reply.result, mode, &mut output)?;
+            let text = String::from_utf8(output)?;
+            assert!(text.contains("IO"));
+            assert!(!text.contains("TOKEN_SENTINEL"));
+            assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+            assert!(text.len() < 4096);
+        }
+        assert!(reply.result.error.as_ref().unwrap().repair.is_some());
+    }
+    Ok(())
+}
+
+#[test]
 fn host_delivery_limit_cli_error_matches_golden() -> Result<(), Box<dyn std::error::Error>> {
     let failure = super::Fail::from(provenant_run::RunError::DeliveryLimit {
         stage: provenant_records::run::WriterDeliveryStage::Integrate,

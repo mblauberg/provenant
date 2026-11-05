@@ -8242,6 +8242,8 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     assert!(text.contains("[io]"));
     assert!(text.contains("git worktree list"));
     assert!(text.contains("8388608"));
+    assert!(text.contains("inspect host delivery"));
+    assert!(!text.contains("host capacity"));
     assert!(!text.contains("TOKEN_SENTINEL"));
     assert!(!text.contains("/private/host"));
 }
@@ -9367,29 +9369,35 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
 #[test]
 fn launch_projection_omits_untrusted_error_sources() {
     let document = graph(vec![node("one", route("first"))]);
-    let mut owner = ErrorLauncher {
-        now: Some(at(0)),
-        errors: [(
-            1,
-            crate::coordination::facade::FacadeError::Io {
-                delivery_limit: None,
-                delivery_stage: None,
-                operation: "TOKEN_SENTINEL\u{1b}".into(),
-                path: Some("/private/host".into()),
-            },
-        )]
-        .into(),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    advance(&document, &mut owner, &mut journal).unwrap();
-    let reason = retry_of(journal.0.as_ref().unwrap())
-        .reason
-        .as_deref()
-        .unwrap();
-    assert!(!reason.contains("TOKEN_SENTINEL"));
-    assert!(!reason.contains("/private/host"));
-    assert!(!reason.chars().any(char::is_control));
+    for operation in [
+        "TOKEN_SENTINEL\u{1b}".to_owned(),
+        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
+    ] {
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: [(
+                1,
+                crate::coordination::facade::FacadeError::Io {
+                    delivery_limit: None,
+                    delivery_stage: None,
+                    operation,
+                    path: Some("/private/host".into()),
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        advance(&document, &mut owner, &mut journal).unwrap();
+        let reason = retry_of(journal.0.as_ref().unwrap())
+            .reason
+            .as_deref()
+            .unwrap();
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        assert!(!reason.contains("/private/host"));
+        assert!(!reason.chars().any(char::is_control));
+        assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+    }
 }
 
 #[test]

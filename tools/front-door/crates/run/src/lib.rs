@@ -853,16 +853,28 @@ mod diagnostic_projection_tests {
 
     #[test]
     fn raw_io_source_is_not_a_safe_fact() {
-        let error = RunError::Io(std::io::Error::other("TOKEN_SENTINEL\u{1b}[31m"));
-        let projection = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        let encoded = serde_json::to_string(&projection).unwrap();
-        assert!(!encoded.contains("TOKEN_SENTINEL"));
-        assert_eq!(projection.code, "IO");
-        assert!(projection.detail.is_none());
-        assert!(projection.next.is_some());
+        for source in [
+            "TOKEN_SENTINEL\u{1b}[31m".to_owned(),
+            format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
+        ] {
+            let error = RunError::Io(std::io::Error::other(source));
+            for destination in [
+                Destination::Local,
+                Destination::Remote {
+                    repository: None,
+                    home: None,
+                },
+            ] {
+                let projection = error.diagnostic(destination);
+                let encoded = serde_json::to_string(&projection).unwrap();
+                assert!(!encoded.contains("TOKEN_SENTINEL"));
+                assert!(encoded.len() < 4096);
+                assert!(!encoded.chars().any(char::is_control));
+                assert_eq!(projection.code, "IO");
+                assert!(projection.detail.is_none());
+                assert!(projection.next.is_some());
+            }
+        }
     }
 
     #[test]

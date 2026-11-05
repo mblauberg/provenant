@@ -816,8 +816,12 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
             let projected = launch_diagnostic(error);
             retry.reason = Some(bounded(
                 &format!(
-                    "[{}] {}",
+                    "[{}] {}; {}",
                     projected.code,
+                    projected
+                        .next
+                        .as_deref()
+                        .unwrap_or("inspect the current state before taking further action"),
                     projected.detail.as_deref().unwrap_or(&projected.code)
                 ),
                 MAX_ADVANCE_ERROR_BYTES,
@@ -1794,17 +1798,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         None => false,
                     };
                     if !accepted {
-                        let reason = retry.reason.clone().unwrap_or_default();
+                        let reason = retry.reason.clone().unwrap_or_else(|| {
+                            "inspect the current state before taking further action".into()
+                        });
                         let progress = &mut checkpoint.nodes[node_index];
                         progress.advance_error_code = Some("launch_retry_exhausted".into());
-                        progress.advance_error = Some(format!(
-                            "node {}: the launch failed: {}; {}",
-                            progress.id,
-                            reason,
-                            launch_diagnostic(&crate::coordination::facade::FacadeError::Busy)
-                                .next
-                                .as_deref()
-                                .unwrap_or("retry the graph advance")
+                        progress.advance_error = Some(bounded(
+                            &format!(
+                                "node {}: the launch failed: {reason}",
+                                provenant_records::diagnostic::safe_text(&progress.id)
+                            ),
+                            MAX_ADVANCE_ERROR_BYTES,
                         ));
                         progress.state = NodeState::Blocked;
                         progress.launch_retry = None;
