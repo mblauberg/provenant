@@ -6414,6 +6414,9 @@ fn live_fallback_without_release_proof_stops() {
     .unwrap();
     assert_eq!(result.checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(owner.calls.len(), 1);
+    let reason = result.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("authentication"));
+    assert!(reason.contains("custody"));
 }
 
 #[test]
@@ -6453,6 +6456,12 @@ fn resumed_fallback_requires_current_local_custody_evidence() {
         Some("fallback_evidence_unavailable")
     );
     assert!(restarted.calls.is_empty());
+    let reason = stopped.checkpoint.nodes[0]
+        .advance_error
+        .as_deref()
+        .unwrap();
+    assert!(reason.contains("authentication"));
+    assert!(reason.contains("custody"));
 }
 
 #[test]
@@ -8193,8 +8202,12 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     )
     .unwrap();
     let reason = fact.detail();
-    let error =
-        || crate::coordination::facade::FacadeError::HostDeliveryLimit { fact: fact.clone() };
+    let error = || crate::coordination::facade::FacadeError::Io {
+        operation: "TOKEN_SENTINEL".into(),
+        path: Some("/private/host".into()),
+        delivery_stage: Some(provenant_records::run::WriterDeliveryStage::Prepare),
+        delivery_limit: Some(fact.clone()),
+    };
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -8205,7 +8218,7 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     advance(&document, &mut owner, &mut journal).unwrap();
     let retry = retry_of(journal.0.as_ref().unwrap());
     assert_eq!(retry.failures, 1);
-    assert_eq!(retry.reason.as_deref(), Some(reason.as_str()));
+    assert!(retry.reason.as_deref().unwrap().contains(&reason));
 
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -8224,6 +8237,11 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     assert_eq!(progress.state, NodeState::Blocked);
     let text = progress.advance_error.as_deref().unwrap();
     assert!(text.contains(&reason), "{text}");
+    assert!(text.contains("[io]"));
+    assert!(text.contains("git worktree list"));
+    assert!(text.contains("8388608"));
+    assert!(!text.contains("TOKEN_SENTINEL"));
+    assert!(!text.contains("/private/host"));
 }
 
 #[test]

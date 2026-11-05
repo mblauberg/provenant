@@ -813,7 +813,11 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
             );
             let projected = launch_diagnostic(error);
             retry.reason = Some(bounded(
-                projected.detail.as_deref().unwrap_or(&projected.code),
+                &format!(
+                    "[{}] {}",
+                    projected.code,
+                    projected.detail.as_deref().unwrap_or(&projected.code)
+                ),
                 MAX_ADVANCE_ERROR_BYTES,
             ));
             asks::refresh_wake(checkpoint);
@@ -1849,11 +1853,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         };
                         if !live_fallback_allowed(outcome, last.launched, node.access, evidence) {
                             let (code, message) =
-                                fallback_denial(last.launched, node.access, unreadable);
+                                fallback_denial(last.launched, node.access, unreadable, outcome);
                             let progress = &mut checkpoint.nodes[node_index];
                             progress.state = NodeState::Failed;
                             progress.advance_error_code = Some(code.into());
-                            progress.advance_error = Some(message.into());
+                            progress.advance_error = Some(message);
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             break;
                         }
@@ -2843,9 +2847,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                                 launched,
                                                 node.access,
                                                 evidence_unreadable,
+                                                outcome,
                                             );
                                             progress.advance_error_code = Some(code.into());
-                                            progress.advance_error = Some(message.into());
+                                            progress.advance_error = Some(message);
                                         }
                                         if review_limit_reached
                                             && route_index + 1 < node.routes.len()
