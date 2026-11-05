@@ -1486,7 +1486,6 @@ mod tests {
     use super::*;
     use crate::{AccessContext, Fallback, RouteChoice, RouteRequest, RoutingContext, resolve};
     use provenant_providers::{AvailabilityRecord, REGISTRY};
-    use provenant_records::{RouteEligibility, RouteReadiness};
 
     #[test]
     fn route_names_include_configured_and_catalogue_pools() -> Result<(), Box<dyn std::error::Error>>
