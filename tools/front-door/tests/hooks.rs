@@ -78,6 +78,43 @@ fn recorded_claude_events_use_native_protocol_and_never_touch_legacy_state() -> 
     }
     rig.assert_legacy_unchanged()
 }
+
+#[test]
+fn session_start_reports_linked_worktree_in_native_context() -> Result {
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "fixture"], None)?;
+    assert_eq!(code(&commit), 0);
+    let lane = rig.root.join("hook-lane");
+    let added = rig.execute(
+        &git,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "hook-lane",
+            lane.to_str().ok_or("worktree path")?,
+        ],
+        None,
+    )?;
+    assert_eq!(code(&added), 0);
+    publish_checkpoint(&rig)?;
+    let mut input: serde_json::Value = serde_json::from_slice(&recording("compact.json")?)?;
+    input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
+    input["source"] = "startup".into();
+    let output = rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["hook", "claude", "session-start"],
+        Some(&serde_json::to_vec(&input)?),
+    )?;
+    assert_eq!(code(&output), 0);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let context = json["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .ok_or("context")?;
+    assert!(context.contains("hook-lane"), "{context}");
+    Ok(())
+}
 #[test]
 fn bash_guard_denies_bad_input_and_allows_process_control() -> Result {
     let rig = TestRig::new()?;

@@ -1258,9 +1258,11 @@ When a downstream node propagates a finding, it declares
 `"propagates": "<input-node-id>:<finding-id>"` on that entry. The named node
 must be an input selecting findings or a result; the finding id may be its stored
 id or the id rendered to the propagator. Resolution follows propagation chains
-to the first root. An unresolved or ambiguous marker leaves the finding
-independent and records a warning in the producing node's outputs. A matching id
-and dependency alone do not establish propagation.
+to the first root. A marker that drops the input prefix or part of the qualified
+id still resolves when it is a colon-delimited suffix of exactly one root's
+marker. An unresolved or ambiguous marker leaves the finding independent and
+records a warning in the producing node's outputs. A matching id and dependency
+alone do not establish propagation.
 
 All selected copies of one root, including originals and intermediate copies,
 remain visible with their own evidence and share one display identity. The root's

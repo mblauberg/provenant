@@ -28,6 +28,16 @@ fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult
         input.created_at,
         &call,
     )?;
+    let terminal = store.record(id, &call)?;
+    crate::artifacts::seal(
+        &attempt,
+        "merge-restored.json",
+        &crate::db::bytes(&crate::writer::MergeRestored {
+            schema_version: 1,
+            scope: RunStore::scope(&terminal),
+        })?,
+        crate::RECORD_LIMIT,
+    )?;
     let service = Service::new(&store);
     let query = LaneQuery {
         targets: vec![],
@@ -49,6 +59,11 @@ fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult
         service.lanes_for_wait(&query, &call)?.lanes[0].custody_pending,
         Some(true)
     );
+    assert!(matches!(
+        &service.lanes(&query, &call)?.lanes[0].state,
+        AttemptState::Terminal { reason: Some(reason), .. }
+            if reason.contains("merge index, parents and working files were retained")
+    ));
     drop(custody);
     let observed = service.status_for_wait(id, &call)?;
     assert!(matches!(observed.state, AttemptState::Terminal { .. }));
@@ -666,6 +681,10 @@ fn each_refusal_has_its_own_stable_code() {
         (
             RunError::WriterRefLocked("ref.lock".into()),
             "WRITER_REF_LOCKED",
+        ),
+        (
+            RunError::SetupLockTimeout { seconds: 1 },
+            "SETUP_LOCK_TIMEOUT",
         ),
         (
             RunError::ObjectImportLimit("fixture"),

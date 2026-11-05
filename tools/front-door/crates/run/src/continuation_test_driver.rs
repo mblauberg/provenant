@@ -67,8 +67,18 @@ pub(super) fn main() -> TestResult {
     }
     provenant_supervisor::fixture::run_libtest(
         &args,
-        &["writer_continuation_launches_pinned_to_predecessor_head"],
-        |_| launches().map_err(|error| std::io::Error::other(error.to_string())),
+        &[
+            "writer_continuation_launches_pinned_to_predecessor_head",
+            "unfinished_writer_continuation_launches_in_previously_owned_worktree",
+        ],
+        |name| {
+            let cause = if name.starts_with("unfinished_") {
+                PolicyCause::Unfinished
+            } else {
+                PolicyCause::Quota
+            };
+            launches(cause).map_err(|error| std::io::Error::other(error.to_string()))
+        },
     )?;
     Ok(())
 }
@@ -261,7 +271,7 @@ fn prepare(task: &TaskRequest, paths: &LaunchPaths) -> TestResult<PreparedLaunch
         }),
     })
 }
-fn launches() -> TestResult {
+fn launches(cause: PolicyCause) -> TestResult {
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let temp = tempfile::tempdir()?;
@@ -343,11 +353,33 @@ fn launches() -> TestResult {
     crate::tests::seal_observation(&store, &input, &crate::tests::exit())?;
     let id = input.attempts[0].attempt_id;
     let old = store.record(id, &call)?;
+    // This worktree was originally created by a different, already settled
+    // lane. The explicitly bound writer must keep that ownership evidence
+    // through its automatic continuation.
+    let writer = input.request.tasks[0].writer.as_ref().ok_or("writer")?;
+    let launch = prepare_writer(writer, &store.writer_registry, context.project_id)?;
+    provenant_confinement::worktrees::save_owner(
+        &launch.worktree,
+        &provenant_confinement::worktrees::WorktreeOwner {
+            attempt_id: Some(provenant_core::AttemptId::from_bytes([110; 16])),
+            operation_id: Some("settled-owner".parse()?),
+            branch: "writer".into(),
+            base: head.to_string(),
+            host: provenant_core::HostId::from_bytes([3; 16]),
+            created_at: input.created_at,
+            origin: provenant_confinement::worktrees::WorktreeOrigin::Lane,
+            label: None,
+        },
+    )?;
+    crate::writer::seal_writer_ownership(
+        &store.attempt_dir(input.run_id, id, false)?,
+        &launch.worktree,
+    )?;
     store.stage_policy_retry(
         &old,
         &PolicyRetry {
             schema_version: 2,
-            cause: PolicyCause::Quota,
+            cause,
             action: PolicyAction::Retry,
             route: old.requested_route.clone(),
             resume: false,
@@ -375,7 +407,11 @@ fn launches() -> TestResult {
         RECORD_LIMIT,
     )?;
     let mut publication = crate::tests::publication();
-    publication.outcome = Outcome::QuotaLimited;
+    publication.outcome = if cause == PolicyCause::Unfinished {
+        Outcome::Failed
+    } else {
+        Outcome::QuotaLimited
+    };
     publication.finished_at = clock.wall_now()?;
     publication.started_at = None;
     publication.provider_ms = None;
@@ -384,6 +420,10 @@ fn launches() -> TestResult {
     let queued = store.pending_attempts(input.run_id, &call)?;
     assert_eq!(queued.len(), 1);
     let successor = queued[0].attempt_id;
+    assert_eq!(
+        store.check_writer_lineage(&queued[0], &launch.worktree, &call)?,
+        provenant_confinement::worktrees::load_owner(&launch.worktree)?
+    );
     match system_backend(&BackendContext {
         executor: &executor,
         cancel: &cancel,

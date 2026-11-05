@@ -103,6 +103,15 @@ fn linked_fixture() -> Result<LinkedFixture, Box<dyn std::error::Error>> {
     })
 }
 
+/// A writer launch measures the real volume against `gc.free_floor`, so a test
+/// about something else must not depend on how full the host's disk is.
+fn allow_any_free_disk(edge: &Edge<'_>) -> std::io::Result<()> {
+    std::fs::write(
+        edge.roots.state.as_path().join("config.toml"),
+        "schema_version = 1\n[gc]\nfree_floor = '1B'\n",
+    )
+}
+
 /// Runs `check` with the edge that `run` would see from `cwd`.
 fn with_edge<T>(
     root: &Path,
@@ -731,9 +740,12 @@ fn model_policy_results_check_sections_and_bound_continuations()
         ..Default::default()
     });
     decoded.result = handoff_result("stopped_early");
-    let continuation = model_assessment(&terra, task, &record, &decoded, record.attempt_number)?
-        .retry
-        .ok_or("missing continuation")?;
+    let decision = model_assessment(&terra, task, &record, &decoded, record.attempt_number)?;
+    assert_eq!(
+        decision.refusal.as_deref(),
+        Some("model reported unfinished work")
+    );
+    let continuation = decision.retry.ok_or("missing continuation")?;
     assert!(continuation.resume);
     assert_eq!(continuation.max_attempts, 3);
     decoded.session = None;
@@ -762,7 +774,11 @@ fn model_policy_results_check_sections_and_bound_continuations()
     decoded.outcome = run::Outcome::Succeeded;
     record.attempt_number = 3;
     let decision = model_assessment(&terra, task, &record, &decoded, record.attempt_number)?;
-    assert!(decision.refusal.is_some() && decision.retry.is_none());
+    assert_eq!(
+        decision.refusal.as_deref(),
+        Some("model reported unfinished work; continuations exhausted")
+    );
+    assert!(decision.retry.is_none());
     decoded.result = handoff_result("done");
     assert!(
         model_assessment(&terra, task, &record, &decoded, record.attempt_number)?
@@ -864,6 +880,20 @@ fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
     assert_eq!(
         assessment.refusal.as_deref(),
         Some("model reported unfinished work")
+    );
+    assert!(assessment.retry.is_none());
+    let assessment = run::Providers::assess_result(
+        &registry,
+        &input.request.tasks[0],
+        &record,
+        &decoded,
+        Some(&handoff),
+        None,
+        3,
+    )?;
+    assert_eq!(
+        assessment.refusal.as_deref(),
+        Some("model reported unfinished work; continuations exhausted")
     );
     assert!(assessment.retry.is_none());
     Ok(())
@@ -1124,6 +1154,22 @@ fn unsafe_store_path_reason_survives_cli_conversion() {
     });
     assert!(failure.message.contains("runs/example/process.json"));
     assert!(failure.message.contains("link count"));
+}
+
+#[test]
+fn setup_lock_timeout_has_its_own_refusal_and_remedy() {
+    let failure = super::Fail::from(provenant_run::RunError::SetupLockTimeout { seconds: 42 });
+    assert_eq!(failure.kind.code(), "SETUP_LOCK_TIMEOUT");
+    assert_eq!(failure.status, Status::Refused);
+    assert!(failure.message.contains("provenant-lane-setup.lock"));
+    assert!(failure.message.contains("42s"));
+    let projection = failure.projection.expect("typed detail");
+    assert!(
+        projection
+            .next
+            .iter()
+            .any(|next| next.contains("setup_lock_wait_seconds"))
+    );
 }
 
 #[test]
@@ -2427,6 +2473,9 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         census_unknown.to_string(),
         worktrees::WorktreeError::UnknownWriter.to_string()
     );
+    let refusal = super::Fail::from(run::RunError::Writer(census_unknown));
+    assert!(refusal.message.contains(&path.display().to_string()));
+    assert!(refusal.message.contains("injected census incomplete"));
 
     let observer = LiveObserver(path.clone(), std::sync::atomic::AtomicUsize::new(0));
     let live_policy = worktrees::CensusPolicyWorkers::for_run(&observer, &roots)?;
@@ -3983,6 +4032,43 @@ fn lanes_give_a_settled_lane_its_settlement_reason() -> Result<(), Box<dyn std::
     assert_eq!(data["lanes"][0]["settlement"]["reason"], "provider failed");
     assert_eq!(data["lanes"][1]["settlement"], Value::Null);
     assert_eq!(data["lanes"][1]["reason"], Value::Null);
+    Ok(())
+}
+
+#[test]
+fn lanes_distinguish_exhausted_continuations_from_a_retry() -> Result<(), Box<dyn std::error::Error>>
+{
+    let now = WallTime::from_micros(100)?;
+    let stopped = |reason: &str| run::AttemptState::Terminal {
+        extra: Default::default(),
+        outcome: run::Outcome::Failed,
+        exit_code: Some(0),
+        finished_at: now,
+        reason: Some(reason.into()),
+    };
+    let pending = lane_fixture(1, 4, stopped("model reported unfinished work"))?;
+    let exhausted = lane_fixture(
+        2,
+        5,
+        stopped("model reported unfinished work; continuations exhausted"),
+    )?;
+    let next = AttemptId::from_bytes([3; 16]);
+    let successors = [(pending.attempt_id, next)].into_iter().collect();
+    let (data, human) = render_lanes_with_lineage(
+        &[pending, exhausted],
+        &[],
+        None,
+        Path::new("/state"),
+        None,
+        &successors,
+    );
+    assert_eq!(data["lanes"][0]["superseded_by"], json!(next));
+    assert_eq!(
+        data["lanes"][1]["reason"],
+        "model reported unfinished work; continuations exhausted"
+    );
+    assert!(human.contains("retrying"));
+    assert!(human.contains("continuations exhausted"));
     Ok(())
 }
 
@@ -6804,6 +6890,7 @@ fn worktrees_lock_held_past_five_seconds_retries_and_admits()
         |edge| -> Result<(), Box<dyn std::error::Error>> {
             crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
             provenant_config::bind_host(edge.roots)?;
+            allow_any_free_disk(edge)?;
 
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
@@ -7043,6 +7130,7 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
         |edge| -> Result<(), Box<dyn std::error::Error>> {
             crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
             provenant_config::bind_host(edge.roots)?;
+            allow_any_free_disk(edge)?;
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
