@@ -945,9 +945,9 @@ pub(crate) mod peer_tests {
         assert!(page.next_after.is_none());
         let second = serde_json::to_value(&page.items[0])?;
         assert_ne!(second["attempt_id"], row["attempt_id"]);
-        assert_eq!(second["state"]["outcome"], "cancelled");
-        assert_eq!(second["state"]["reason"], "fixture");
-        assert!(second["state"]["finished_at"].is_string());
+        assert_eq!(second["state"], "cancelled");
+        assert_eq!(second["reason"], "fixture");
+        assert!(second["finished_at"].is_string());
         let status = owner.run(
             RunInput::Status {
                 extra: Default::default(),

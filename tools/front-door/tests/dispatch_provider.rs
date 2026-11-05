@@ -1357,7 +1357,9 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         assert_eq!(row["substitution"], index == 1);
         assert!(row["run_id"].is_string());
         assert_eq!(row["applied_route"]["model"], "codex/gpt-6-luna");
-        let output = fs::read_to_string(row["result_path"].as_str().ok_or("result path")?)?;
+        let path: provenant_records::StructuredPathWire =
+            serde_json::from_value(row["result_path"].clone())?;
+        let output = fs::read_to_string(path.to_path_buf()?)?;
         assert!(output.contains(&format!("Lens: {lens}")), "{output}");
         assert!(output.contains("write denied: true"), "{output}");
     }

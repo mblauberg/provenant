@@ -182,20 +182,25 @@ fn decode_native_bytes(encoded: &str) -> Result<PathBuf, PathWireError> {
 }
 
 /// A lossless path, absolute or relative to the containing project.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StructuredPathWire {
     Root,
-    Relative {
-        relative: PathWire,
-    },
-    Path {
-        root: &'static str,
-        relative: PathWire,
-    },
+    Relative { relative: PathWire },
+    Path { root: String, relative: PathWire },
 }
 
 impl StructuredPathWire {
+    pub fn to_path_buf(&self) -> Result<PathBuf, PathWireError> {
+        match self {
+            Self::Root => Ok(PathBuf::from("/")),
+            Self::Relative { relative } => Ok(relative.to_relative_path()?.as_path().to_path_buf()),
+            Self::Path { root, relative } if root == "/" => {
+                Ok(PathBuf::from("/").join(relative.to_relative_path()?.as_path()))
+            }
+            Self::Path { .. } => Err(PathWireError::InvalidNativePath),
+        }
+    }
     pub fn from_relative(relative: &RelativePath) -> Result<Self, PathWireError> {
         Ok(Self::Relative {
             relative: PathWire::from_relative(relative)?,
@@ -219,7 +224,7 @@ impl StructuredPathWire {
         let relative =
             RelativePath::parse(relative).map_err(|_| PathWireError::InvalidNativePath)?;
         Ok(Self::Path {
-            root: "/",
+            root: "/".into(),
             relative: PathWire::from_relative(&relative)?,
         })
     }

@@ -391,6 +391,11 @@ pub(super) fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> 
     summary
 }
 
+pub(super) fn structured_path_text(value: &Value) -> Option<String> {
+    let path: provenant_records::StructuredPathWire = serde_json::from_value(value.clone()).ok()?;
+    Some(path.to_path_buf().ok()?.to_string_lossy().into_owned())
+}
+
 /// The lane rows of a `lanes` or `run` reply, in the shape `lane_summary` reads.
 pub(super) fn lane_lines(data: &Value) -> Vec<LaneLine> {
     data["lanes"]
@@ -411,7 +416,7 @@ pub(super) fn lane_lines(data: &Value) -> Vec<LaneLine> {
                             .unwrap_or_default()
                             .to_owned(),
                         provider_error: row["provider_error"].as_str().map(str::to_owned),
-                        result_path: row["result_path"].as_str().map(str::to_owned),
+                        result_path: structured_path_text(&row["result_path"]),
                     })
                 })
                 .collect()

@@ -1708,7 +1708,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let bound = &bound.iter().find(|r| r["id"] == 1).ok_or("cancel")?["result"];
     assert_ne!(bound["isError"], true, "{bound}");
     assert_eq!(
-        bound["structuredContent"]["attempt"]["state"]["outcome"], "cancelled",
+        bound["structuredContent"]["attempt"]["state"], "cancelled",
         "{bound}"
     );
     let replies = mcp(
@@ -1718,7 +1718,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let replay = &replies.iter().find(|r| r["id"] == 2).ok_or("replay")?["result"];
     assert_ne!(replay["isError"], true, "{replay}");
     assert_eq!(
-        replay["structuredContent"]["attempt"]["state"]["outcome"], "cancelled",
+        replay["structuredContent"]["attempt"]["state"], "cancelled",
         "{replay}"
     );
     let conflict = &replies.iter().find(|r| r["id"] == 3).ok_or("conflict")?["result"];

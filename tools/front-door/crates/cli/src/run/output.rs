@@ -82,11 +82,8 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
                     crate::bounded_text(error, 160)
                 ));
             }
-            if data["result_path"]["kind"] == "path"
-                && data["result_path"]["relative"]["encoding"] == "utf8"
-                && let Some(path) = data["result_path"]["relative"]["path"].as_str()
-            {
-                lines.push(format!("result: /{}", crate::bounded_text(path, 511)));
+            if let Some(path) = structured_path_text(&data["result_path"]) {
+                lines.push(format!("result: {}", crate::bounded_text(&path, 512)));
             }
         }
     }
@@ -106,7 +103,7 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
                 let more = total.saturating_sub(paths.len());
                 let listed = paths
                     .iter()
-                    .filter_map(|path| path["relative"]["path"].as_str())
+                    .filter_map(structured_path_text)
                     .collect::<Vec<_>>()
                     .join(", ");
                 let more = if more > 0 {
