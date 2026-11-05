@@ -134,8 +134,10 @@ found.
 
 ## Review ladder
 
-Use `review-council --plan on` by default. The planner reads the pinned diff,
-acceptance criteria, dependency boundaries, reversibility and oracle strength;
+Lens coverage is the primary measure of a review: cover the questions the change
+needs before considering family spread. Use `review-council --plan on` by default.
+The planner reads the pinned diff, acceptance criteria, dependency boundaries,
+reversibility and oracle strength;
 the planner picks lenses and their route tiers from the panel. The chair
 checks that plan against these floors, supplies missing coverage, and records
 the reviewer count, scope and budget. Unknown paths are at least
@@ -164,6 +166,7 @@ only manifests and lockfiles may auto-merge on green CI with no reviewer. A majo
 bump, a new dependency, or any change outside manifests and lockfiles takes at
 least one `routine` reviewer.
 
+Family separation is a recorded bonus, never a substitute for a needed lens.
 Prefer reviewers outside every author and repairer family; at `crucial` use two
 non-author families when available. Record actual `adapter/model@effort`,
 family, lens, scope, unavailable legs, reasons, evidence, expiry and substitutions.

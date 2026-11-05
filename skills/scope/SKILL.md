@@ -75,7 +75,7 @@ provenant run --preset scope-then-run --prompt-file brief.md --params-file lane.
 - `scout-swarm` maps the ground; `fan-out-synthesise` compares options with no oracle.
 - `scope-then-run` goes on to a build, so use it only when the build is authorised.
   Its `plan.scope` node ends `VERDICT: PASS|FAIL` and gates the writer.
-- A read-only `scope-only` preset (scout, `plan.scope`, ready gate) is proposed.
+- The read-only `scope` preset produces a bounded implementation brief.
 
 The role briefs in `references/` (scout-areas, researcher, architect,
 acceptance-writer, critic) are loaded by those presets. Do not rename them.
