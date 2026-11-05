@@ -14,6 +14,35 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
+fn expanded_authentication_family_grants_only_selected_credentials() -> Result<(), PermissionError>
+{
+    let (plan, mut profile) = write_grants_fixture();
+    profile.spec.process_executables.push(PathGrant {
+        path: "/fixture/provider".into(),
+        scope: PathScope::Exact,
+    });
+    for index in 0..20 {
+        profile.spec.authentication.push(AuthenticationProfile {
+            mechanism: format!("extra-{index}"),
+            roots: vec![PathGrant {
+                path: format!("/fixture/credential-{index}").into(),
+                scope: PathScope::Exact,
+            }],
+            in_place_writes: vec![],
+        });
+    }
+    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
+    for auth in &profile.spec.authentication {
+        for root in &auth.roots {
+            assert_eq!(grants.reads.contains(root), auth.mechanism == "selected");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
 fn profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_size()
 -> Result<(), Box<dyn std::error::Error>> {
     let (plan, profile) = write_grants_fixture();

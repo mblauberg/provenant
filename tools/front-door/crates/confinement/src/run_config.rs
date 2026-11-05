@@ -61,7 +61,7 @@ pub struct RunConfig {
     /// Maximum rendered Seatbelt profile size, in bytes.
     #[serde(default = "default_profile_limit_bytes")]
     pub profile_limit_bytes: usize,
-    /// Maximum path grants in each profile family and in the plan.
+    /// Maximum entries in each profile family and path grants in the plan.
     #[serde(default = "default_grant_limit")]
     pub grant_limit: usize,
     #[serde(default)]

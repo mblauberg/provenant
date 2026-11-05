@@ -190,7 +190,7 @@ pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), Pe
     validate_profile_spec_impl(spec, None, MAX_PATH_GRANTS)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn validate_profile_spec_with_home(
     spec: &ProviderProfileSpec,
     home: &Path,
@@ -208,13 +208,13 @@ fn validate_profile_spec_impl(
     if spec.process_executables.len() > grant_limit
         || spec.runtime_reads.len() > grant_limit
         || spec.discovery_reads.len() > grant_limit
-        || spec.authentication.len() > 16
+        || spec.authentication.len() > grant_limit
         || spec.continuation_reads.len() > grant_limit
         || spec.state_writes.len() > grant_limit
         || spec.tool_exec_roots.len() > grant_limit
         || spec.tool_writes.len() > grant_limit
         || spec.provider_api.len() > grant_limit
-        || spec.native_controls.len() > 64
+        || spec.native_controls.len() > grant_limit
     {
         return Err(PermissionError::InvalidFixture);
     }

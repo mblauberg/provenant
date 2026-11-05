@@ -217,6 +217,36 @@ fn codex_standalone_package_is_read_exec_only() {
 }
 
 #[test]
+fn profile_family_limits_follow_configured_grant_limit() {
+    use super::super::validation::validate_profile_spec_with_home;
+    let grant = |path: &str, scope| PathGrant {
+        path: path.into(),
+        scope,
+    };
+    let mut spec = ProviderProfileSpec {
+        process_executables: vec![grant("/fixture/provider", PathScope::Exact)],
+        authentication: (0..17)
+            .map(|index| AuthenticationProfile {
+                mechanism: format!("fixture-{index}"),
+                roots: vec![grant(&format!("/fixture/auth/{index}"), PathScope::Exact)],
+                in_place_writes: vec![],
+            })
+            .collect(),
+        native_controls: (0..65).map(|index| format!("fixture-{index}")).collect(),
+        ..ProviderProfileSpec::default()
+    };
+    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 64).is_err());
+    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 65).is_ok());
+    spec.native_controls.clear();
+    spec.authentication.push(AuthenticationProfile {
+        mechanism: "fixture-extra".into(),
+        roots: vec![grant("/fixture/auth/extra", PathScope::Exact)],
+        in_place_writes: vec![],
+    });
+    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 17).is_err());
+}
+
+#[test]
 fn exact_tool_exec_grants_validate_without_allowing_credential_paths() {
     let mut spec = ProviderProfileSpec {
         process_executables: vec![PathGrant {
