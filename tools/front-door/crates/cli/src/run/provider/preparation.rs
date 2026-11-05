@@ -390,6 +390,7 @@ pub(super) fn prepare_with_wait(
                 resume: resume.is_some(),
                 write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
                 network: task.access.network,
+                skill_location: task.profile.require_skill_location,
                 ..Default::default()
             })
             .map_err(|error| error.to_string())?;

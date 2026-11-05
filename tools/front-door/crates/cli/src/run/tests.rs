@@ -4667,6 +4667,9 @@ fn explicit_write_root_is_checked_at_preflight_and_routing()
     task.access = access;
     assert!(task.writer.is_none());
     assert!(route_request(&task)?.intent.writes);
+    assert!(!route_request(&task)?.intent.skill_location);
+    task.profile.require_skill_location = true;
+    assert!(route_request(&task)?.intent.skill_location);
     Ok(())
 }
 

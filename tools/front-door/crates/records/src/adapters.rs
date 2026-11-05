@@ -197,6 +197,7 @@ pub struct LaunchRequest<'a> {
     pub resume: bool,
     pub network: Option<NetworkAccess>,
     pub write: bool,
+    pub skill_location: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +207,7 @@ pub enum LaunchField {
     Resume,
     Network,
     Write,
+    SkillLocation,
 }
 impl LaunchField {
     pub fn name(self) -> &'static str {
@@ -215,6 +217,7 @@ impl LaunchField {
             Self::Resume => "resume",
             Self::Network => "network",
             Self::Write => "write",
+            Self::SkillLocation => "skill location",
         }
     }
     /// A fixed refusal for callers that cannot carry the adapter name.
@@ -225,6 +228,7 @@ impl LaunchField {
             Self::Resume => "resume is not supported by the route's adapter",
             Self::Network => "network mode is not supported by the route's adapter",
             Self::Write => "worktree-write is not supported by the route's adapter",
+            Self::SkillLocation => "skill location is not supported by the route's adapter",
         }
     }
 }
@@ -265,6 +269,8 @@ impl AdapterSpec {
             Some(LaunchField::Network)
         } else if request.write && !caps.write {
             Some(LaunchField::Write)
+        } else if request.skill_location && self.skills.is_none() {
+            Some(LaunchField::SkillLocation)
         } else {
             None
         };
@@ -1019,6 +1025,7 @@ mod launch_tests {
                 resume: true,
                 network: Some(NetworkAccess::Open),
                 write: true,
+                ..Default::default()
             };
             assert_eq!(
                 spec.check_launch(&request).err().map(|e| e.field),

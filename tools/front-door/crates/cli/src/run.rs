@@ -994,6 +994,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
             writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
             network: Some(task.access.network(task.writer.is_some())),
             image_input: false,
+            skill_location: task.profile.require_skill_location,
             workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
                 provenant_routing::Workload::Review
             } else {

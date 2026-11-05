@@ -5448,6 +5448,7 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         ],
     );
     let narrow = AdapterSpec {
+        skills: None,
         launch: LaunchCapabilities {
             write: false,
             network: &[NetworkAccess::Provider],
@@ -5481,15 +5482,24 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
     ctx.availability = &availability;
     ctx.access = &access;
     ctx.launch_specs = Some(&lookup);
-    for (writes, network, expected) in [
-        (false, NetworkAccess::Provider, "cursor"),
-        (true, NetworkAccess::Provider, "codex"),
-        (false, NetworkAccess::Open, "codex"),
+    for (writes, network, skill_location, expected) in [
+        (false, NetworkAccess::Provider, false, "cursor"),
+        (true, NetworkAccess::Provider, false, "codex"),
+        (false, NetworkAccess::Open, false, "codex"),
+        (false, NetworkAccess::Provider, true, "codex"),
     ] {
         let mut query = request("cursor/gpt-5.3-codex-low")?;
         query.choice = RouteChoice::NamedRoute(RouteName::parse("fixture-capabilities")?);
         query.intent.writes = writes;
         query.intent.network = Some(network);
+        query.intent.skill_location = skill_location;
+        assert_eq!(
+            query
+                .intent
+                .check_launch(&narrow, "gpt-5.3-codex-low", None)
+                .is_ok(),
+            expected == "cursor"
+        );
         let selected = resolve(&query, &ctx)?;
         assert_eq!(
             selected.adapter, expected,

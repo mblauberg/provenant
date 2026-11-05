@@ -505,6 +505,7 @@ pub(super) fn check_flag_capabilities_with_writes(
             resume: false,
             network,
             write: has_writes,
+            ..Default::default()
         })
         .map_err(refused)
     };

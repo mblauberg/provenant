@@ -519,3 +519,5 @@ A route intent with image input prefers ready pool members whose adapter
 advertises image support. The normal weights and zero-weight order apply within
 that subset. If no ready member advertises support, selection is unchanged;
 the preference never refuses an explicit model or creates authority.
+
+A programmatic dispatch profile can require an adapter-owned skill location with `require_skill_location`. Pool selection and launch check that requirement against the adapter registry; the default is false. This capability does not grant access to a skill tree.

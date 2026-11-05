@@ -24,6 +24,9 @@ pub struct RouteIntent {
     /// Prefer adapters that accept image input, without refusing others.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub image_input: bool,
+    /// Require an adapter-owned skill location.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skill_location: bool,
 }
 
 impl RouteIntent {
@@ -40,6 +43,7 @@ impl RouteIntent {
             resume: false,
             network: self.network,
             write: self.writes,
+            skill_location: self.skill_location,
         })
     }
 }
