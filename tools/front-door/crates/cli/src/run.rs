@@ -567,7 +567,7 @@ impl Registry<'_> {
         events.extend(outcome.final_events().iter().cloned());
         // Exit-time stderr quota text is evidence only for a run the adapter
         // did not accept. Live structured refusals trigger cleanup separately.
-        if adapter.id() == provenant_records::Harness::Opencode.spec().name
+        if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.stderr_quota)
             && !matches!(outcome.status(), OutcomeStatus::Success)
             && let Some(event) = provenant_providers::opencode::stderr_quota(stderr)
         {
