@@ -130,6 +130,25 @@ fn slot_reservation_cutover_replays_only_identical_published_evidence() -> TestR
 }
 
 #[test]
+fn slot_reservation_cutover_keeps_conflicting_evidence_fenced() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("writer");
+    std::fs::create_dir(&path)?;
+    let slot = Directory::open_anchor(&path)?;
+    let record = legacy_reservation(scope(), &slot.metadata()?);
+    publish_reservation(&slot, &record)?;
+    let original = std::fs::read(path.join("reservation.json"))?;
+    let child = create_attempt_evidence(&slot, scope())?;
+    let mut conflict = legacy_reservation(scope(), &child.metadata()?);
+    conflict.scope.generation += 1;
+    publish_reservation(&child, &conflict)?;
+    assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
+    assert_eq!(std::fs::read(path.join("reservation.json"))?, original);
+    assert!(reservation_present(&slot, scope())?);
+    Ok(())
+}
+
+#[test]
 fn reservation_listing_isolates_an_inaccessible_slot() -> TestResult {
     let root = tempfile::tempdir()?;
     let blocked = root.path().join("blocked");
