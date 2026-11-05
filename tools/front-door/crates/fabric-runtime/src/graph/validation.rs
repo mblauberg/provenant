@@ -573,6 +573,7 @@ pub(super) fn validate_flat_plan(
             on_fail: node.on_fail.clone(),
             delivery: node.delivery.clone(),
             access: node.access,
+            require_skill_location: node.require_skill_location,
             worktree: node.worktree.clone(),
             id: node.id.clone(),
             title: node.title.clone(),

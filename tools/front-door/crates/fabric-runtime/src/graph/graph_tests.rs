@@ -67,6 +67,7 @@ struct FakeOwner {
     review_expansion: Option<Expansion>,
     review_calls: usize,
     require_distinct: Vec<bool>,
+    skill_requirements: Vec<bool>,
     deadlines: Vec<Option<u64>>,
     families: std::collections::BTreeMap<String, String>,
     answers: std::collections::BTreeMap<String, AskReply>,
@@ -234,6 +235,7 @@ impl AttemptOwner for FakeOwner {
         self.family_peers.push(node.family_peers.to_vec());
         self.prior_attempts.push(node.prior_attempts.to_vec());
         self.require_distinct.push(node.require_distinct);
+        self.skill_requirements.push(node.require_skill_location);
         self.deadlines.push(node.deadline_seconds);
         self.titles.push(node.title.to_owned());
         self.prompts.push(node.prompt.to_owned());
@@ -320,6 +322,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         condition: None,
         on_fail: None,
         delivery: None,
+        require_skill_location: false,
         access: AccessMode::ReadOnly,
         worktree: None,
         id: id.to_owned(),
@@ -349,6 +352,27 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         schema_version: 1,
         graph_id: "g-test".to_owned(),
         nodes,
+    }
+}
+
+#[test]
+fn graph_skill_location_requirement_reaches_the_lane() {
+    for required in [false, true] {
+        let mut lane = node("lane", route("first"));
+        lane.require_skill_location = required;
+        let encoded = serde_json::to_value(&lane).unwrap();
+        let decoded: GraphNode = serde_json::from_value(encoded).unwrap();
+        let mut owner = FakeOwner {
+            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            ..Default::default()
+        };
+        advance(
+            &graph(vec![decoded]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(owner.skill_requirements, vec![required]);
     }
 }
 
@@ -5263,6 +5287,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         condition: None,
         on_fail: None,
         delivery: None,
+        require_skill_location: false,
         access: AccessMode::ReadOnly,
         worktree: None,
         id: "node".to_owned(),
@@ -5537,6 +5562,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             condition: None,
             on_fail: None,
             delivery: None,
+            require_skill_location: false,
             access: AccessMode::ReadOnly,
             worktree: None,
             id: "node".to_owned(),
@@ -6135,6 +6161,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         condition: None,
         on_fail: None,
         delivery: None,
+        require_skill_location: false,
         access: AccessMode::ReadOnly,
         worktree: None,
         id: "node".to_owned(),

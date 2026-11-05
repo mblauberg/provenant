@@ -14,6 +14,8 @@ pub(super) struct ManifestTask {
     pub(super) context: Option<provenant_records::run::WorkContext>,
     #[serde(default)]
     pub(super) build_heavy: bool,
+    #[serde(default)]
+    pub(super) require_skill_location: bool,
     pub(super) title: Option<String>,
     pub(super) base: Option<String>,
     pub(super) task_id: Option<TaskId>,

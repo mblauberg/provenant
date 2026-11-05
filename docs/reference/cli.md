@@ -2373,6 +2373,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--risk-tier` | `{"description": "Risk tier supplied to automatic preset selection", "name": "risk_tier"}` |
 | `--task-kind` | `{"description": "Task kind supplied to automatic preset selection", "name": "task_kind"}` |
 | `--path` | `{"description": "Changed or declared path supplied to automatic preset selection (repeatable)", "name": "selection_paths", "repeatable": true}` |
+| `--require-skill-location` | `{"defaults": ["false"], "description": "Require the selected adapter to provide a skill location", "name": "require_skill_location", "values": ["true", "false"]}` |
 | `--build-heavy` | `{"defaults": ["false"], "description": "Use the build-heavy scheduling priority", "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"description": "Read the prompt from this file", "name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "description": "Read the prompt from standard input", "name": "prompt_stdin", "values": ["true", "false"]}` |
@@ -2624,6 +2625,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--risk-tier` | `{"description": "Risk tier supplied to automatic preset selection", "name": "risk_tier"}` |
 | `--task-kind` | `{"description": "Task kind supplied to automatic preset selection", "name": "task_kind"}` |
 | `--path` | `{"description": "Changed or declared path supplied to automatic preset selection (repeatable)", "name": "selection_paths", "repeatable": true}` |
+| `--require-skill-location` | `{"defaults": ["false"], "description": "Require the selected adapter to provide a skill location", "name": "require_skill_location", "values": ["true", "false"]}` |
 | `--build-heavy` | `{"defaults": ["false"], "description": "Use the build-heavy scheduling priority", "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"description": "Read the prompt from this file", "name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "description": "Read the prompt from standard input", "name": "prompt_stdin", "values": ["true", "false"]}` |

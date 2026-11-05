@@ -931,6 +931,7 @@ pub(super) fn dispatch_inner(
                 task.deliver.or_else(|| flag_delivery.clone()),
                 task.base.or_else(|| command.base.clone()),
                 task.build_heavy || command.build_heavy,
+                task.require_skill_location || command.require_skill_location,
                 task.context,
                 network,
             ));
@@ -959,6 +960,7 @@ pub(super) fn dispatch_inner(
             flag_delivery,
             command.base.clone(),
             command.build_heavy,
+            command.require_skill_location,
             None,
             None,
         ));
@@ -983,6 +985,7 @@ pub(super) fn dispatch_inner(
                 deliver,
                 base,
                 build_heavy,
+                require_skill_location,
                 context,
                 network,
             ),
@@ -1003,6 +1006,7 @@ pub(super) fn dispatch_inner(
             placed.push(remote::Task {
                 context,
                 build_heavy,
+                require_skill_location,
                 title,
                 base,
                 head: command.head.clone(),
@@ -1035,7 +1039,7 @@ pub(super) fn dispatch_inner(
         .operation(&command.operation_id, &call)?
         .is_none()
     {
-        for (_, _, _, _, _, _, _, delivery, _, _, _, _) in &tasks {
+        for (_, _, _, _, _, _, _, delivery, _, _, _, _, _) in &tasks {
             if let Some(delivery) = delivery {
                 check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
@@ -1060,7 +1064,7 @@ pub(super) fn dispatch_inner(
     config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    for (_, title, prompt, _, models, _, _, _, _, _, _, _) in &tasks {
+    for (_, title, prompt, _, models, _, _, _, _, _, _, _, _) in &tasks {
         run::Service::scan(prompt)?;
         if let Some(title) = title {
             provenant_core::validate_task_title(title)
@@ -1335,6 +1339,7 @@ pub(super) fn dispatch_inner(
                 deliver,
                 base,
                 build_heavy,
+                require_skill_location,
                 context,
                 network,
             )| {
@@ -1343,7 +1348,7 @@ pub(super) fn dispatch_inner(
                     access.network = network;
                 }
                 Submitted {
-                    require_skill_location: false,
+                    require_skill_location,
                     settlement_retry_limit: None,
                     context,
                     build_heavy,
@@ -1624,9 +1629,10 @@ pub(super) fn replay_owned_dispatch(
     };
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    let profile = config
+    let mut profile = config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    profile.require_skill_location = command.require_skill_location;
     if task.title != command.title
         || task.build_heavy != command.build_heavy
         || task.prompt_digest != CanonicalV1::file_digest(prompt.as_bytes())

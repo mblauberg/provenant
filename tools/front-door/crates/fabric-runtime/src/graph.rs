@@ -472,6 +472,8 @@ struct PlannedNode {
     on_fail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delivery: Option<provenant_records::run::DeliveryMode>,
+    #[serde(default, skip_serializing_if = "model::is_false")]
+    require_skill_location: bool,
     access: AccessMode,
     worktree: Option<String>,
     id: String,
@@ -2249,6 +2251,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
+                        require_skill_location: node.require_skill_location,
                         settlement_retries,
                         prior_attempts: &prior_attempts,
                         family_peers: &family_peers,
