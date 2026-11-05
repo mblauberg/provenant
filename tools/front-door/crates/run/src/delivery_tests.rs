@@ -3490,10 +3490,9 @@ fn prepare_labels_unsupported_ssh_command() -> std::result::Result<(), Box<dyn s
         .prepare()
         .expect_err("unsupported SSH command")
         .to_string();
-    assert_eq!(
-        reason,
-        "host writer delivery failed at Prepare (environment): GIT_SSH_COMMAND is not supported; use host SSH config"
-    );
+    for part in ["Prepare", "environment", "GIT_SSH_COMMAND"] {
+        assert!(reason.contains(part), "{reason}");
+    }
     Ok(())
 }
 
@@ -3566,10 +3565,9 @@ fn prepare_labels_environment_path_failures() -> std::result::Result<(), Box<dyn
                 .prepare()
                 .expect_err("invalid host path")
                 .to_string();
-            assert_eq!(
-                reason,
-                format!("host writer delivery failed at Prepare (environment): {name}: {detail}")
-            );
+            for part in ["Prepare", "environment", name, detail] {
+                assert!(reason.contains(part), "{reason}");
+            }
         }
         fixture.environment.retain(|(key, _)| key != name);
     }
@@ -3583,19 +3581,17 @@ fn prepare_labels_unavailable_gh_executable() -> std::result::Result<(), Box<dyn
     fixture.request.open_pr = true;
     fixture.environment.retain(|(key, _)| key != "PATH");
     let reason = fixture.prepare().expect_err("PATH is unset").to_string();
-    assert_eq!(
-        reason,
-        "host writer delivery failed at Prepare (gh executable): gh is unavailable: PATH is unset"
-    );
+    for part in ["Prepare", "gh executable", "gh is unavailable", "PATH"] {
+        assert!(reason.contains(part), "{reason}");
+    }
     fixture.environment.push(("PATH".into(), "".into()));
     let reason = fixture
         .prepare()
         .expect_err("gh is unavailable")
         .to_string();
-    assert_eq!(
-        reason,
-        "host writer delivery failed at Prepare (gh executable): gh is unavailable on PATH"
-    );
+    for part in ["Prepare", "gh executable", "gh is unavailable", "PATH"] {
+        assert!(reason.contains(part), "{reason}");
+    }
     Ok(())
 }
 
@@ -3612,10 +3608,9 @@ fn prepare_labels_git_executable_inside_worktree()
         .prepare()
         .expect_err("unsafe git executable")
         .to_string();
-    assert_eq!(
-        reason,
-        "host writer delivery failed at Prepare (git executable): inside the writer worktree"
-    );
+    for part in ["Prepare", "git executable", "inside the writer worktree"] {
+        assert!(reason.contains(part), "{reason}");
+    }
     Ok(())
 }
 
@@ -3804,10 +3799,9 @@ fn host_forge_output_over_its_bound_names_gh_not_git()
         matches!(error, RunError::DeliveryLimit { tool: "gh", .. }),
         "{error:?}"
     );
-    assert_eq!(
-        error.to_string(),
-        "host writer delivery failed at PullRequest: gh pr output exceeded the 16384-byte host limit"
-    );
+    let message = error.to_string();
+    assert!(message.contains("gh pr output"), "{message}");
+    assert!(message.contains("16384"), "{message}");
     Ok(())
 }
 

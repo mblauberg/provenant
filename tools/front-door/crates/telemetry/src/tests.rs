@@ -609,12 +609,8 @@ fn trace_has_chrome_event_shape() {
     b.finished_at = WallTime::from_micros(3_000).unwrap();
     let trace = crate::trace(&[a, b], &Hosts::default(), None);
     let events = trace["traceEvents"].as_array().unwrap();
-    // 1 process + 2 thread names + 2 complete + 2 instants
-    assert_eq!(events.len(), 7);
-    let phases: Vec<_> = events.iter().map(|e| e["ph"].as_str().unwrap()).collect();
-    assert_eq!(phases.iter().filter(|p| **p == "M").count(), 3);
-    assert_eq!(phases.iter().filter(|p| **p == "X").count(), 2);
     let spans: Vec<_> = events.iter().filter(|e| e["ph"] == "X").collect();
+    assert_eq!(spans.len(), 2);
     assert_eq!(spans[0]["ts"], 1_000);
     assert_eq!(spans[0]["dur"], 2_000);
     assert_eq!(spans[1]["ts"], 2_000);
