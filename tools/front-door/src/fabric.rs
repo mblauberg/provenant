@@ -5623,26 +5623,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .map_err(dispatch_refused)?;
             grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
-            let receipt = match owner.submit_with_access(
-                input,
-                self.budget,
-                self.cancel,
-                grants.clone(),
-                retry_limit,
-            ) {
-                Err(FacadeError::OperationConflict) if legacy_input.is_some() => {
-                    // Store admission still requires the reserved digest to match
-                    // exactly. Only legacy metadata is retried, once.
-                    owner.submit_with_access(
-                        legacy_input.ok_or(FacadeError::StateCorrupt)?,
-                        self.budget,
-                        self.cancel,
-                        grants,
-                        retry_limit,
-                    )?
-                }
-                result => result?,
-            };
+            let receipt = owner.submit_with_access(
+                input, self.budget, self.cancel, grants, retry_limit,
+            )?;
             if let Some(reason) = blocked(&owner)? {
                 return Err(FacadeError::DispatchRefused {
                     fact: None,

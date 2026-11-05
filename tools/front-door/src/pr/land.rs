@@ -1944,6 +1944,7 @@ mod graph_land_tests {
                 &project,
                 "feature",
                 HEAD,
+                None,
                 false,
                 &provenant_confinement::worktrees::SystemWorkerObserver,
             );
