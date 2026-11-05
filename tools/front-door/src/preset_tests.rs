@@ -7026,6 +7026,38 @@ fn a_generator_review_defers_its_size_until_the_writer_has_run() {
 }
 
 #[test]
+fn deferred_review_rebinds_stored_template_fields() {
+    use provenant_fabric_runtime::graph::{GraphNode, SourceBinding};
+
+    let expansion = expand(
+        &real_selector("/nonexistent"),
+        "deliver",
+        "brief",
+        &["parameters.worktree='/repo/w'".into()],
+    )
+    .unwrap();
+    let mut node: GraphNode =
+        serde_json::from_value(expansion.document["nodes"][2]["composite"]["nodes"][0].clone())
+            .unwrap();
+    let frame = &mut node.extra.get_mut("panel_templates").unwrap()["frame"];
+    for field in ["id", "source", "read_roots", "depends_on", "inputs"] {
+        frame[field] = json!(false);
+    }
+
+    let subject = "0123456789abcdef0123456789abcdef01234567";
+    let expanded = crate::fabric::fixture_review_expansion(&node, subject, "standard").unwrap();
+    let frame = expanded
+        .nodes
+        .iter()
+        .find(|n| n.id.ends_with("--f"))
+        .unwrap();
+    assert!(matches!(&frame.source, Some(SourceBinding::Commit { commit }) if commit == subject));
+    assert_eq!(frame.read_roots, node.read_roots);
+    assert_eq!(frame.depends_on, node.depends_on);
+    assert_eq!(frame.inputs, node.inputs);
+}
+
+#[test]
 fn deliver_deferred_review_runs_the_resolved_shape_on_the_writer_commit() {
     use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
     let layers = real_selector("/nonexistent");

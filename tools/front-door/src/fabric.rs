@@ -4549,7 +4549,7 @@ impl BoundGraphOwner<'_> {
     > {
         use provenant_fabric_runtime::graph::{
             CompositeSpec, Expansion, GraphInput, GraphNode, OutputKind, ReviewResolution,
-            ReviewResolveError,
+            ReviewResolveError, SourceBinding,
         };
         let failed = |message: String| ReviewResolveError::Failed(message);
         let spec = node
@@ -4698,11 +4698,10 @@ impl BoundGraphOwner<'_> {
                 exports,
             },
         );
-        let pinned = serde_json::json!({"type":"commit","commit":subject});
         let template = |key: &str,
                         id: &str,
                         deps: Vec<String>,
-                        inputs: serde_json::Value|
+                        inputs: Vec<GraphInput>|
          -> Result<GraphNode, ReviewResolveError> {
             let mut value = panel_templates
                 .get(key)
@@ -4712,13 +4711,27 @@ impl BoundGraphOwner<'_> {
             let map = value
                 .as_object_mut()
                 .ok_or_else(|| failed(format!("invalid {key} template")))?;
-            map.insert("id".into(), serde_json::json!(id));
-            map.insert("source".into(), pinned.clone());
-            map.insert("read_roots".into(), serde_json::json!(node.read_roots));
-            map.insert("depends_on".into(), serde_json::json!(deps));
-            map.insert("inputs".into(), inputs);
-            serde_json::from_value(value)
-                .map_err(|error| failed(format!("review {key} does not lower: {error}")))
+            map.insert("id".into(), serde_json::Value::String(id.into()));
+            // These fields are supplied by the pinned execution, so template
+            // values must not affect decoding or survive the binding.
+            for field in ["source", "read_roots", "depends_on", "inputs"] {
+                map.remove(field);
+            }
+            let mut result: GraphNode = serde_json::from_value(value)
+                .map_err(|error| failed(format!("review {key} does not lower: {error}")))?;
+            result.source = Some(SourceBinding::Commit {
+                commit: subject.clone(),
+            });
+            result.read_roots = node.read_roots.clone();
+            result.depends_on = deps;
+            result.inputs = inputs;
+            Ok(result)
+        };
+        let selected = |id: String, outputs: Vec<OutputKind>| GraphInput {
+            extra: Default::default(),
+            node: id,
+            outputs,
+            required_outputs: Vec::new(),
         };
         let mut children = Vec::new();
         if panel.frame {
@@ -4726,7 +4739,7 @@ impl BoundGraphOwner<'_> {
                 "frame",
                 &frame_id,
                 node.depends_on.clone(),
-                serde_json::json!(node.inputs),
+                node.inputs.clone(),
             )?);
         }
         children.push(lens_group);
@@ -4734,7 +4747,10 @@ impl BoundGraphOwner<'_> {
         let mut previous = lens_id.clone();
         for index in 0..verifiers {
             let id = format!("{root_id}--v-{}", index + 1);
-            let inputs = serde_json::json!([{"node":previous,"outputs":["result","findings"]}]);
+            let inputs = vec![selected(
+                previous.clone(),
+                vec![OutputKind::Result, OutputKind::Findings],
+            )];
             children.push(template("verifier", &id, vec![previous], inputs)?);
             previous = id;
         }
@@ -4743,17 +4759,22 @@ impl BoundGraphOwner<'_> {
             lens_id.clone()
         } else {
             let id = format!("{root_id}--s");
-            let mut inputs =
-                vec![serde_json::json!({"node":lens_id,"outputs":["result","findings"]})];
+            let mut inputs = vec![selected(
+                lens_id.clone(),
+                vec![OutputKind::Result, OutputKind::Findings],
+            )];
             if previous != lens_id {
-                inputs.push(serde_json::json!({"node":previous,"outputs":["result","findings"]}));
+                inputs.push(selected(
+                    previous.clone(),
+                    vec![OutputKind::Result, OutputKind::Findings],
+                ));
             }
             let deps = if previous == lens_id {
                 vec![lens_id.clone()]
             } else {
                 vec![lens_id.clone(), previous]
             };
-            children.push(template("synthesis", &id, deps, serde_json::json!(inputs))?);
+            children.push(template("synthesis", &id, deps, inputs)?);
             id
         };
         let mut root_exports = vec![GraphInput {
