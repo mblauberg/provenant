@@ -135,6 +135,31 @@ impl RepoFacts {
         parse_oid(trim_ascii(&outcome.stdout.bytes))
     }
 
+    /// Resolve a commit's tree through the read-only facts boundary.
+    pub fn resolve_read_tree(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        commit: GitOid,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        let budget = budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = crate::utility::run_read_utility(
+            executor,
+            GitRead::ResolveCommitTree { oid: commit },
+            repo,
+            utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
     /// Resolve a revision from fresh Git evidence using this session's scalar cap.
     pub fn resolve_revision(
         &self,

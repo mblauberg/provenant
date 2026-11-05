@@ -60,6 +60,39 @@ impl Git {
         peel: bool,
     ) -> Result<Option<provenant_core::GitOid>> {
         use provenant_confinement::worktrees::WorktreeError;
+        self.with_repo(dir, |repo| {
+            let result = if peel {
+                self.facts.resolve_read_commit(
+                    repo,
+                    &self.executor,
+                    &self.utility,
+                    self.budget,
+                    reference,
+                    &self.cancel,
+                )
+            } else {
+                self.facts.resolve_read_ref(
+                    repo,
+                    &self.executor,
+                    &self.utility,
+                    self.budget,
+                    reference,
+                    &self.cancel,
+                )
+            };
+            match result {
+                Ok(oid) => Ok(Some(oid)),
+                Err(WorktreeError::NotFound) => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+
+    fn with_repo<T>(
+        &self,
+        dir: &Path,
+        action: impl FnOnce(&provenant_confinement::repo::ReadOnlyRepo) -> Result<T>,
+    ) -> Result<T> {
         let mut repositories = self
             .repositories
             .lock()
@@ -71,30 +104,25 @@ impl Git {
                     .open_read_repo(&self.executor, dir, self.budget, &self.cancel)?,
             ),
         };
-        let result = if peel {
-            self.facts.resolve_read_commit(
+        action(repo)
+    }
+
+    /// Resolve the tree of a commit using the same bounded facts session.
+    pub(super) fn commit_tree(
+        &self,
+        dir: &Path,
+        commit: provenant_core::GitOid,
+    ) -> Result<provenant_core::GitOid> {
+        self.with_repo(dir, |repo| {
+            Ok(self.facts.resolve_read_tree(
                 repo,
                 &self.executor,
                 &self.utility,
                 self.budget,
-                reference,
+                commit,
                 &self.cancel,
-            )
-        } else {
-            self.facts.resolve_read_ref(
-                repo,
-                &self.executor,
-                &self.utility,
-                self.budget,
-                reference,
-                &self.cancel,
-            )
-        };
-        match result {
-            Ok(oid) => Ok(Some(oid)),
-            Err(WorktreeError::NotFound) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+            )?)
+        })
     }
 
     /// Resolve a local branch through this command's facts session.

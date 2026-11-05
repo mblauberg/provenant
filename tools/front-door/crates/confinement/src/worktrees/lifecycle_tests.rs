@@ -238,6 +238,32 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
         context.utility_budget,
         &cancel(),
     )?;
+    let tree = fixture.run(&["rev-parse", "facts-ref^{tree}"])?;
+    let tree = GitOid::parse(std::str::from_utf8(&tree.stdout.bytes)?.trim())?;
+    assert_eq!(
+        facts.resolve_read_tree(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            moved,
+            &cancel()
+        )?,
+        tree
+    );
+    assert!(matches!(
+        limited.resolve_read_tree(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            moved,
+            &cancel()
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
     // An existing ref to a non-commit object remains distinct from a missing
     // ref, even when a caller separately asks for a peeled commit.
     fs::write(fixture.root.join("blob-fixture"), b"object")?;

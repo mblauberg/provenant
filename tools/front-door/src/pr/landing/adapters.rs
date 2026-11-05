@@ -1122,8 +1122,14 @@ impl Repo for GitRepo<'_> {
     }
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError> {
         self.ensure(commit)?;
-        let spec = format!("{}^{{tree}}", object_id(commit)?);
-        self.ok(&["rev-parse", "--verify", &spec])
+        let canonical = object_id(commit)?.to_ascii_lowercase();
+        let commit = provenant_core::GitOid::parse(&canonical)
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
+        Ok(self
+            .git
+            .commit_tree(&self.project, commit)
+            .map_err(failed)?
+            .to_string())
     }
     fn parents(&mut self, commit: &str) -> Result<Vec<String>, LandingError> {
         self.ensure(commit)?;
@@ -2006,6 +2012,10 @@ esac
         git(&rig.work, &["checkout", "-q", "-b", "side"]);
         let side = commit_file(&rig.work, "s", "s\n");
         let tree = rig.repo.tree_of(&side).unwrap();
+        assert_eq!(
+            tree,
+            git(&rig.work, &["rev-parse", &format!("{side}^{{tree}}")])
+        );
         let commit = rig
             .repo
             .commit_tree(&tree, &[base.clone(), side.clone()], "candidate")

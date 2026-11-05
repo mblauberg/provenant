@@ -222,6 +222,10 @@ pub enum GitRead {
     ResolveRefOid {
         name: GitRefName,
     },
+    /// Resolve the tree of an already identified commit.
+    ResolveCommitTree {
+        oid: GitOid,
+    },
     ResolveRevision {
         revision: GitRevision,
     },
@@ -1201,6 +1205,12 @@ fn git_args(
             "--verify".into(),
             "--end-of-options".into(),
             format!("{}^{{commit}}", name.as_str()).into(),
+        ],
+        GitRead::ResolveCommitTree { oid } => vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--end-of-options".into(),
+            format!("{oid}^{{tree}}").into(),
         ],
         GitRead::ResolveRevision { revision } => vec![
             "rev-parse".into(),

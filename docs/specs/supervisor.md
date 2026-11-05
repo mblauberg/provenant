@@ -35,7 +35,7 @@ commit after the reachability check. A containing tracking tip must also match
 a currently advertised remote branch tip; deleted tracking refs cannot prove
 reachability. Replacement objects and grafts do not alter that ancestry check.
 Fetch, resolution and advertisement share the peer deadline. Pull-request base
-resolution and landing branch lookups each use a command-scoped facts session
+resolution and landing branch and commit tree reads each use a command-scoped facts session
 and read-only verified checkouts, including when Git uses a separate directory
 or native object alternates.
 
