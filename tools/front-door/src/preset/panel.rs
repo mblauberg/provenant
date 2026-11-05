@@ -138,6 +138,7 @@ fn review_selector_with_git(
         let kind = query.kind.or(task_kind.as_deref());
         let mut warnings = Vec::new();
         let mut paths = Vec::new();
+        let mut paths_unreadable = false;
         let mut test_marker = false;
         let cwd = query
             .worktree
@@ -176,7 +177,10 @@ fn review_selector_with_git(
                         .map(str::to_owned)
                         .collect();
                 }
-                Err(error) => warnings.push(format!("cannot read changed paths: {error}")),
+                Err(error) => {
+                    paths_unreadable = true;
+                    warnings.push(format!("cannot read changed paths: {error}; applying highest configured floor and all required floor lenses"));
+                }
             }
             match run_git(
                 &cwd,
@@ -185,6 +189,10 @@ fn review_selector_with_git(
                 Ok(out) => test_marker = provenant_routing::diff_has_test_markers(&out),
                 Err(error) => warnings.push(format!("cannot scan test markers: {error}")),
             }
+        }
+        if base.is_none() && !query.defer {
+            paths_unreadable = true;
+            warnings.push("cannot resolve review base; applying highest configured floor and all required floor lenses".into());
         }
         let size = match (
             query.size,
@@ -208,6 +216,15 @@ fn review_selector_with_git(
                 measured.size
             }
             _ => None,
+        };
+        let fallback;
+        let review = if paths_unreadable {
+            let (config, unknown_paths) = review.unreadable_paths();
+            paths = unknown_paths;
+            fallback = config;
+            &fallback
+        } else {
+            &review
         };
         let selected = review.select_shape(query.shape, query.risk, kind, &paths, size)?;
         let mut plan = review.lens_plan(kind, &paths, test_marker);
@@ -260,7 +277,7 @@ fn review_selector_with_git(
                 } else {
                     format!("; lenses={}", lens_reason.join(","))
                 },
-                if query.defer { "pending".to_owned() } else if floors.classes.is_empty() { "none".to_owned() } else { floors.classes.join(",") },
+                if query.defer { "pending".to_owned() } else if paths_unreadable { format!("unreadable (highest configured floor: {})", floors.classes.join(",")) } else if floors.classes.is_empty() { "none".to_owned() } else { floors.classes.join(",") },
                 size_text(size, query.defer),
                 kind.unwrap_or("unknown"),
                 query.risk.unwrap_or("unknown")

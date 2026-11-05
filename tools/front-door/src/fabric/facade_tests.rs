@@ -2807,8 +2807,8 @@ pub(crate) mod peer_tests {
         );
         let output = fixture.rig.execute(&git, &["branch", "old-review", &base.to_string()], None)?;
         assert_eq!(crate::worktree_tests::support::code(&output), 0);
-        std::fs::write(fixture.rig.project.join("review-size-fixture.txt"), "small change\n")?;
-        let output = fixture.rig.execute(&git, &["add", "review-size-fixture.txt"], None)?;
+        std::fs::write(fixture.rig.project.join("guide.md"), "small change\n")?;
+        let output = fixture.rig.execute(&git, &["add", "guide.md"], None)?;
         assert_eq!(crate::worktree_tests::support::code(&output), 0);
         for args in [
             vec![
@@ -2932,6 +2932,23 @@ pub(crate) mod peer_tests {
                 "panel_templates": {"frame":{"id":"subject","prompt":"frame","access":"read_only","route":{"alias":"senior"}}, "verifier":{"id":"verify","prompt":"verify","access":"read_only","route":{"alias":"senior"}}, "synthesis":{"id":"synthesis","kind":"synthesise","prompt":"synthesise","access":"read_only","route":{"alias":"senior"}}},
             }))?)
         };
+        let mut unreadable = deferred(None, serde_json::json!([]))?;
+        let unreadable_spec = unreadable.review.as_mut().ok_or("review spec missing")?;
+        unreadable_spec.shape = Some("quick".into());
+        unreadable_spec.worktree = Some("missing-review-directory".into());
+        let unreadable = bound.resolve_review(&unreadable, &head)?;
+        let record = unreadable.review.as_ref().ok_or("review resolution missing")?;
+        assert_eq!(record.shape, "deep");
+        assert!(unreadable.nodes.iter().any(|node| node.id.contains("lens-security-privacy")));
+        assert!(record.source.contains("highest configured floor"));
+        bound.integration_base = None;
+        let mut no_base = deferred(None, serde_json::json!([]))?;
+        no_base.review.as_mut().ok_or("review spec missing")?.shape = Some("quick".into());
+        let no_base = bound.resolve_review(&no_base, &head)?;
+        let record = no_base.review.as_ref().ok_or("review resolution missing")?;
+        assert_eq!(record.shape, "deep");
+        assert!(record.source.contains("cannot resolve review base"));
+        bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
         let small = bound.resolve_review(&deferred(None, serde_json::json!([]))?, &head)?;
         let record = small.review.as_ref().ok_or("review resolution missing")?;
         assert_eq!((record.shape.as_str(), record.measured_size.as_str()), ("quick", "small"));

@@ -505,8 +505,8 @@ impl<T: Clone> Select<T> {
     }
 }
 impl ReviewConfig {
-    /// The configured minimum coverage for each changed path. A path matching
-    /// the routine class stays routine; unmatched paths use the unknown class.
+    /// The configured minimum coverage for each changed path. Routine applies
+    /// only when no other class matches; unmatched paths use unknown.
     pub fn path_floors(&self, paths: &[String]) -> AppliedFloors {
         fn rank(tier: &str) -> usize {
             match tier {
@@ -519,11 +519,13 @@ impl ReviewConfig {
         }
         let mut result = AppliedFloors::default();
         for path in paths {
-            let routine = self.floors.get("routine").is_some_and(|floor| {
-                floor
-                    .paths
-                    .iter()
-                    .any(|pattern| path_matches(pattern, path))
+            let protected = self.floors.iter().any(|(name, floor)| {
+                name != "routine"
+                    && name != "unknown"
+                    && floor
+                        .paths
+                        .iter()
+                        .any(|pattern| path_matches(pattern, path))
             });
             let mut matched = false;
             for (name, floor) in &self.floors {
@@ -532,7 +534,7 @@ impl ReviewConfig {
                         .paths
                         .iter()
                         .any(|pattern| path_matches(pattern, path))
-                    || (routine && name != "routine")
+                    || (protected && name == "routine")
                 {
                     continue;
                 }
@@ -574,6 +576,29 @@ impl ReviewConfig {
             }
         }
         result
+    }
+
+    /// Treat an unreadable path list as potentially matching every floor.
+    /// The returned configuration and path are used together for resolution.
+    pub fn unreadable_paths(&self) -> (Self, Vec<String>) {
+        let mut review = self.clone();
+        // The synthetic path represents floors only, not a real path rule.
+        review.select.by_paths.clear();
+        review.lenses.by_paths.clear();
+        let path = "__provenant_unreadable_paths__";
+        for special in ["unknown", "routine"] {
+            if let Some(floor) = review.floors.remove(special) {
+                let mut name = format!("unreadable-{special}");
+                while review.floors.contains_key(&name) {
+                    name.push('x');
+                }
+                review.floors.insert(name, floor);
+            }
+        }
+        for floor in review.floors.values_mut() {
+            floor.paths.push(path.into());
+        }
+        (review, vec![path.into()])
     }
 
     /// The lens order and additions for one change kind.
@@ -1479,6 +1504,48 @@ mod tests {
             .unwrap();
         assert_eq!(panel.shape, "standard");
         assert!(panel.frame && panel.verifiers > 0);
+    }
+
+    #[test]
+    fn unreadable_paths_include_every_configured_floor() {
+        let mut review = ReviewConfig::default();
+        let routine = review.floors.get_mut("routine").unwrap();
+        routine.tier = "terminal".into();
+        routine.lenses.push("adversarial".into());
+        let (fallback, paths) = review.unreadable_paths();
+        let floors = fallback.path_floors(&paths);
+        assert_eq!(floors.tier.as_deref(), Some("terminal"));
+        assert!(floors.lenses.contains(&"adversarial".into()));
+        assert!(floors.lenses.contains(&"security-privacy".into()));
+    }
+
+    #[test]
+    fn overlapping_markdown_applies_bundled_and_project_floors() {
+        let mut review = ReviewConfig::default();
+        review.floors.insert(
+            "project".into(),
+            ReviewFloor {
+                paths: vec!["docs/private.md".into()],
+                tier: "terminal".into(),
+                lenses: vec!["adversarial".into()],
+            },
+        );
+        let request = ReviewRequest {
+            shape: Some("quick".into()),
+            ..Default::default()
+        };
+        for (path, class, required) in [
+            ("docs/security.md", "security", "security-privacy"),
+            ("docs/private.md", "project", "adversarial"),
+        ] {
+            let paths = vec![path.to_owned()];
+            let floors = review.path_floors(&paths);
+            assert!(floors.classes.contains(&class.to_owned()));
+            assert!(!floors.classes.contains(&"routine".to_owned()));
+            let panel = review.resolve_panel(&request, None, &paths, false).unwrap();
+            assert_ne!(panel.shape, "quick");
+            assert!(panel.slots.iter().any(|slot| slot.lens == required));
+        }
     }
 
     #[test]

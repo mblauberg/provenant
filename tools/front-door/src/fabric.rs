@@ -4312,6 +4312,7 @@ struct ReviewMeasure {
     directory: PathBuf,
     subject: provenant_core::GitOid,
     base: provenant_core::GitOid,
+    base_known: bool,
     measured: provenant_routing::Measured,
 }
 
@@ -4362,6 +4363,7 @@ pub(crate) fn fixture_review_expansion_with_paths(
         directory: PathBuf::new(),
         subject,
         base: subject,
+        base_known: true,
         measured: provenant_routing::Measured {
             size: Some("small"),
             warning: None,
@@ -4442,6 +4444,7 @@ impl BoundGraphOwner<'_> {
             directory,
             subject,
             base,
+            base_known: resolved_base.is_some(),
             measured,
         })
     }
@@ -4781,10 +4784,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .review
             .as_ref()
             .ok_or_else(|| ReviewResolveError::Failed("missing review specification".into()))?;
-        // Changed paths and test markers add lenses; a failed read only costs
-        // those additions, and the reason is recorded with the resolution.
+        // An unreadable path list must retain every potentially applicable floor.
         let mut warnings: Vec<String> = measure.measured.warning.iter().cloned().collect();
         let (mut paths, mut marker) = (Vec::new(), false);
+        let mut paths_unreadable = !measure.base_known;
+        if paths_unreadable {
+            warnings.push("cannot resolve review base; applying highest configured floor and all required floor lenses".into());
+        }
         let range = format!("{}...{}", measure.base, measure.subject);
         if measure.base != measure.subject {
             match self.review_git(
@@ -4798,7 +4804,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         .map(str::to_owned)
                         .collect();
                 }
-                Err(error) => warnings.push(format!("cannot read changed paths: {error}")),
+                Err(error) => {
+                    paths_unreadable = true;
+                    warnings.push(format!("cannot read changed paths: {error}; applying highest configured floor and all required floor lenses"));
+                }
             }
             match self.review_git(
                 &measure.directory,
@@ -4824,9 +4833,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 })
                 .collect(),
         };
-        let mut panel = measure
-            .routing
-            .review
+        let fallback;
+        let review = if paths_unreadable {
+            let (config, unknown_paths) = measure.routing.review.unreadable_paths();
+            paths = unknown_paths;
+            fallback = config;
+            &fallback
+        } else {
+            &measure.routing.review
+        };
+        let mut panel = review
             .resolve_panel(&request, measure.measured.size, &paths, marker)
             .map_err(ReviewResolveError::Failed)?;
         // A graph retains the stage configuration it was lowered with. The
@@ -4855,7 +4871,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         ReviewResolveError::Failed(format!("invalid deferred synthesis: {error}"))
                     })?;
         }
-        let floors = measure.routing.review.path_floors(&paths);
+        let floors = review.path_floors(&paths);
         if !floors.classes.is_empty() {
             warnings.push(format!(
                 "review path floors applied: {}; required lenses: {}",

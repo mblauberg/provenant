@@ -372,3 +372,36 @@ fn caller_lenses_cannot_lower_a_protected_floor() {
             .any(|warning| warning.contains("security"))
     );
 }
+
+#[test]
+fn unreadable_paths_raise_resolved_review_and_explain() {
+    let selector = review_selector_with_git(
+        ReviewConfig::default(),
+        PathBuf::from("/repo"),
+        None,
+        Box::new(|_, args| {
+            if args.contains(&"--name-only") {
+                Err("diff failed".into())
+            } else {
+                Ok("main\n".into())
+            }
+        }),
+    );
+    let hint = selector(&ShapeQuery {
+        shape: Some("quick"),
+        base: Some("main"),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(hint.name, "deep");
+    assert!(hint.source.contains("unreadable"));
+    assert!(
+        hint.warnings
+            .iter()
+            .any(|w| w.contains("highest configured floor"))
+    );
+    assert!(
+        hint.required_floor_lenses
+            .contains(&"security-privacy".into())
+    );
+}

@@ -7052,3 +7052,48 @@ fn file_spec_expansion_golden() {
     }
     assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
 }
+
+#[test]
+fn review_preserves_legacy_council_structure() {
+    // Projection of the pre-rename review-council expansion at 1e2381cb1^.
+    // Prompts, digests and graph IDs are intentionally outside the structure.
+    fn project(value: &Value) -> Value {
+        match value {
+            Value::Object(fields) => Value::Object(
+                fields
+                    .iter()
+                    .filter(|(key, _)| !["prompt", "role_digest", "digest"].contains(&key.as_str()))
+                    .map(|(key, value)| (key.clone(), project(value)))
+                    .collect(),
+            ),
+            Value::Array(items) => Value::Array(items.iter().map(project).collect()),
+            _ => value.clone(),
+        }
+    }
+    let expected: Value = serde_json::from_str(include_str!(
+        "../assets/presets/fixtures/legacy-council-structure.json"
+    ))
+    .unwrap();
+    let current = expand(&Layers::empty(), "review", "brief", &[]).unwrap();
+    assert_eq!(project(&current.document["nodes"]), expected);
+    // The old default fixture has eight lenses. Standard takes its first five;
+    // both shapes retain the old subject, panel, verifier and synthesis wiring.
+    for (risk, count) in [("substantial", 5), ("crucial", 8)] {
+        let graph = council(&[&format!("parameters.risk_tier='{risk}'")], true).unwrap();
+        let old = expected.as_array().unwrap();
+        let actual = graph["nodes"].as_array().unwrap();
+        for (before, after) in old.iter().zip(actual) {
+            for key in ["id", "role", "access", "depends_on", "source"] {
+                assert_eq!(before.get(key), after.get(key), "{risk}: {key}");
+            }
+        }
+        let legacy_lenses = old[1]["composite"]["nodes"].as_array().unwrap();
+        let lenses = actual[1]["composite"]["nodes"].as_array().unwrap();
+        assert_eq!(lenses.len(), count);
+        for (before, after) in legacy_lenses.iter().take(count).zip(lenses) {
+            for key in ["id", "role", "access", "depends_on", "require_findings"] {
+                assert_eq!(before.get(key), after.get(key), "{risk}: {key}");
+            }
+        }
+    }
+}
