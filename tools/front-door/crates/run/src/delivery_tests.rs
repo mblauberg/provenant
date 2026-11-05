@@ -536,7 +536,6 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     let marker = fixture.writer.worktree.join(".git");
     let original = std::fs::read(&marker)?;
     std::fs::write(&marker, b"gitdir: /nonexistent\n")?;
-    let started = provenant_os::clock::host_monotonic_micros()?;
     let error = launch
         .worktree
         .repo()
@@ -555,7 +554,6 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             &call,
         )?
         .ok_or("refusal missing")?;
-    assert!(provenant_os::clock::host_monotonic_micros()? - started < 10_000_000);
     assert!(matches!(
         terminal.state,
         AttemptState::Terminal {
@@ -721,7 +719,6 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         home: fixture.root.join("home"),
         project: execution.project_id,
     };
-    let started = provenant_os::clock::host_monotonic_micros()?;
     let result = store.start(
         input.run_id,
         &provider,

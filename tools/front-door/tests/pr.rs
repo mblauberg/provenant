@@ -174,7 +174,7 @@ fn land_reports_unknown_when_a_failed_merge_cannot_be_confirmed() -> Result {
 fn land_reports_unknown_when_the_merge_exhausts_the_wait_budget() -> Result {
     let rig = self::rig()?;
     fs::write(rig.project.join("merge-delay"), "")?;
-    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=5s", "--json"])?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=1s", "--json"])?;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert!(
         rig.project.join("merge-args").exists(),
