@@ -330,7 +330,7 @@ impl GraphLimits {
         self.expansion_depth.max(64)
     }
 
-    pub fn bound<'a>(&self, name: &'a str, maximum: usize) -> GraphBound<'a> {
+    fn bound<'a>(&self, name: &'a str, maximum: usize) -> GraphBound<'a> {
         GraphBound {
             name,
             maximum,
@@ -340,6 +340,26 @@ impl GraphLimits {
 
     pub fn nodes_bound(&self) -> GraphBound<'static> {
         self.bound("nodes", self.nodes)
+    }
+
+    pub fn edges_bound(&self) -> GraphBound<'static> {
+        self.bound("edges", self.edges)
+    }
+
+    pub fn routes_per_node_bound(&self) -> GraphBound<'static> {
+        self.bound("routes_per_node", self.routes_per_node)
+    }
+
+    pub fn node_prompt_bytes_bound(&self) -> GraphBound<'static> {
+        self.bound("node_prompt_bytes", self.node_prompt_bytes)
+    }
+
+    pub fn graph_prompt_bytes_bound(&self) -> GraphBound<'static> {
+        self.bound("graph_prompt_bytes", self.graph_prompt_bytes)
+    }
+
+    pub fn fan_out_width_bound(&self) -> GraphBound<'static> {
+        self.bound("fan_out_width", self.fan_out_width)
     }
 
     pub fn expansion_depth_bound(&self) -> GraphBound<'static> {

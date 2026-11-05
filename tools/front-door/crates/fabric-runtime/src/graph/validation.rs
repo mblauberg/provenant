@@ -301,7 +301,7 @@ pub(super) fn validate_flat_plan(
     {
         return Err("invalid decision_session");
     }
-    if document.nodes.is_empty() || document.nodes.len() > limits.nodes {
+    if document.nodes.is_empty() || limits.nodes_bound().refusal(document.nodes.len()).is_some() {
         return Err("node count");
     }
 
@@ -401,7 +401,10 @@ pub(super) fn validate_flat_plan(
             }) => {
                 if expected.trim().is_empty()
                     || expected.trim() != expected
-                    || expected.len() > limits.node_prompt_bytes
+                    || limits
+                        .node_prompt_bytes_bound()
+                        .refusal(expected.len())
+                        .is_some()
                     || expected.contains(['\n', '\r'])
                     || node.inputs.is_empty()
                     || node
@@ -447,7 +450,10 @@ pub(super) fn validate_flat_plan(
         }
         if node.required_verdict.as_ref().is_some_and(|line| {
             line.trim().is_empty()
-                || line.len() > limits.node_prompt_bytes
+                || limits
+                    .node_prompt_bytes_bound()
+                    .refusal(line.len())
+                    .is_some()
                 || line.contains(['\n', '\r'])
         }) {
             return Err("required verdict must be a non-empty single line");
@@ -505,20 +511,27 @@ pub(super) fn validate_flat_plan(
             && !is_land
             && node.review.is_none()
             && node.prompt.is_empty()
-            || plans::prompt(node).len() > limits.node_prompt_bytes
+            || limits
+                .node_prompt_bytes_bound()
+                .refusal(plans::prompt(node).len())
+                .is_some()
         {
             return Err("prompt size");
         }
         prompt_bytes = prompt_bytes
             .checked_add(node.content_bytes())
             .ok_or("prompt size")?;
-        if prompt_bytes > limits.graph_prompt_bytes {
+        if limits
+            .graph_prompt_bytes_bound()
+            .refusal(prompt_bytes)
+            .is_some()
+        {
             return Err("total prompt size");
         }
         edge_count = edge_count
             .checked_add(node.dependencies().count())
             .ok_or("edge count")?;
-        if edge_count > limits.edges {
+        if limits.edges_bound().refusal(edge_count).is_some() {
             return Err("edge count");
         }
 
@@ -538,7 +551,11 @@ pub(super) fn validate_flat_plan(
             (Some(_), Some(_)) => return Err("route and routes are exclusive"),
             (None, None) | (None, Some(_)) => return Err("route list is empty"),
         };
-        if routes.len() > limits.routes_per_node {
+        if limits
+            .routes_per_node_bound()
+            .refusal(routes.len())
+            .is_some()
+        {
             return Err("route count");
         }
         if routes

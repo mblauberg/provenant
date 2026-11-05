@@ -13,47 +13,38 @@ pub(super) fn structural_limit_reason(
     plan: &PlannedGraph,
     limits: &crate::config::GraphLimits,
 ) -> Option<String> {
-    let check = |key: &str, actual: usize, max: usize| limits.bound(key, max).refusal(actual);
     limits
         .nodes_bound()
         .refusal(document.nodes.len())
         .or_else(|| {
-            check(
-                "edges",
+            limits.edges_bound().refusal(
                 document
                     .nodes
                     .iter()
                     .map(|node| node.dependencies().count())
                     .sum(),
-                limits.edges,
             )
         })
         .or_else(|| {
             document.nodes.iter().find_map(|node| {
-                check(
-                    "routes_per_node",
+                limits.routes_per_node_bound().refusal(
                     node.routes
                         .as_ref()
                         .map_or(usize::from(node.route.is_some()), Vec::len),
-                    limits.routes_per_node,
                 )
             })
         })
         .or_else(|| {
             document.nodes.iter().find_map(|node| {
-                check(
-                    "node_prompt_bytes",
-                    node.content_bytes(),
-                    limits.node_prompt_bytes,
-                )
+                limits
+                    .node_prompt_bytes_bound()
+                    .refusal(node.content_bytes())
             })
         })
         .or_else(|| {
-            check(
-                "graph_prompt_bytes",
-                document.nodes.iter().map(GraphNode::content_bytes).sum(),
-                limits.graph_prompt_bytes,
-            )
+            limits
+                .graph_prompt_bytes_bound()
+                .refusal(document.nodes.iter().map(GraphNode::content_bytes).sum())
         })
         .or_else(|| {
             let mut children = std::collections::BTreeMap::<&str, usize>::new();
@@ -64,7 +55,7 @@ pub(super) fn structural_limit_reason(
             }
             children
                 .values()
-                .find_map(|width| check("fan_out_width", *width, limits.fan_out_width))
+                .find_map(|width| limits.fan_out_width_bound().refusal(*width))
         })
         .or_else(|| {
             let mut depths = std::collections::BTreeMap::<&str, usize>::new();

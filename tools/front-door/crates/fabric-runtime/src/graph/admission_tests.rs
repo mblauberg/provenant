@@ -351,5 +351,6 @@ fn admission_structural_limits_name_the_key() {
         configure(&mut limits);
         let refusal = graph.admit(&limits).unwrap_err();
         assert!(refusal.contains(&format!("limits.{key}")), "{refusal}");
+        assert!(refusal.contains("domains.fabric.graph.limits"), "{refusal}");
     }
 }
