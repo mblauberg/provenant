@@ -735,17 +735,14 @@ fn detected_batches(
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut batches = Vec::new();
-    for (harness, executable) in [
-        (Harness::Claude, "claude"),
-        (Harness::Codex, "codex"),
-        (Harness::Cursor, "cursor-agent"),
-        (Harness::Agy, "agy"),
-        (Harness::Opencode, "opencode"),
-    ] {
+    for spec in provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| !spec.binary.is_empty())
+    {
         if std::env::split_paths(&path)
-            .any(|dir| provenant_os::sys::is_executable(&dir.join(executable)))
+            .any(|dir| provenant_os::sys::is_executable(&dir.join(spec.binary)))
         {
-            batches.push(selected_targets(globals, &[harness])?.1);
+            batches.push(selected_targets(globals, &[spec.id])?.1);
         }
     }
     let mut directories: Vec<_> = std::fs::read_dir(&environment.home)
