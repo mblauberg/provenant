@@ -374,6 +374,7 @@ impl RunStore {
 
     /// Sample the admission inputs for a fixture timeout. These are current
     /// observations, not a record of which condition held an earlier probe.
+    #[cfg(any(test, feature = "fixture"))]
     pub fn admission_observations(
         &self,
         lane: &AttemptRecord,
