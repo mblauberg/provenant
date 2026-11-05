@@ -3062,6 +3062,10 @@ fn graph_writer_launches_second_eligible_pool_member() -> Result {
     let lanes = rig.command(&["lanes", "--all", "--json"])?;
     assert_eq!(code(&lanes), 0, "{lanes:?}");
     assert_writer_pool_peer_launched(&serde_json::from_slice(&lanes.stdout.bytes)?)?;
+    cleanup.disarm();
+    Ok(())
+}
+
 fn graph_without_deadline_launches_on_tick() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
