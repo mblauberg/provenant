@@ -175,10 +175,10 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert!(text.len() <= 2048, "{text}");
     assert!(text.starts_with("20 lanes"), "{text}");
     assert!(text.contains(&attempts[20][..8]), "{text}");
-    assert!(
-        text.contains("review-exempt paths: docs/release-notes/next.d/, docs/specs/, Cargo.lock, .tracker-input"),
-        "{text}"
-    );
+    let exempt = text.lines().find(|line| line.contains("review-exempt paths:")).ok_or("review-exempt line")?;
+    for path in value["data"]["review_exempt"].as_array().ok_or("review-exempt paths")? {
+        assert!(exempt.contains(path.as_str().ok_or("path")?), "{exempt}");
+    }
     assert!(
         text.contains(&format!("next: provenant output {}", attempts[20])),
         "{text}"

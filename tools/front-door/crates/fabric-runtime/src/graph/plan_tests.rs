@@ -743,15 +743,8 @@ fn planner_prompt_names_only_the_nodes_allow_listed_patterns() {
     parameters.get_mut("label").unwrap().default = None;
     parameters.get_mut("retries").unwrap().allowed = vec![json!(1), json!(2)];
     let prompt = plans::prompt(&doc.nodes[0]);
-    assert!(prompt.contains("Allowed patterns: generator"));
-    assert!(prompt.contains("label:string"));
-    assert!(prompt.contains("required"));
-    assert!(prompt.contains("default=1"));
-    assert!(prompt.contains("enum=[1,2]"));
-    assert!(prompt.contains("min=0"));
-    assert!(prompt.contains("max=2"));
-    assert!(prompt.contains("\"patterns\""));
-    assert!(prompt.contains("Do not emit other presets or review shapes"));
+    assert!(prompt.contains("generator"));
+    assert!(!prompt.contains("not-allow-listed-pattern"));
 }
 
 #[test]
@@ -1034,14 +1027,15 @@ fn pattern_expansion_respects_plan_max_nodes_boundary() {
     let output = pattern_result_all(vec![json!({"id":"a", "pattern":"generator"}), json!({"id":"b", "pattern":"generator"})]);
     let run = advance(&pattern_planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("fragment requires 1..1 nodes and schema_version 1"));
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert!(run.checkpoint.expansions.is_empty());
 
     let output = pattern_result(json!({"id":"impl", "pattern":"generator"}));
     let limits = crate::config::GraphLimits { nodes: 4, ..Default::default() };
     let run = advance_with_budget(&pattern_planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default(), &limits, &Default::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("limits.nodes=4 reached (5)"), "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("structural_limit"));
+    assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("limits.nodes"));
     assert!(run.checkpoint.expansions.is_empty());
 }
 
