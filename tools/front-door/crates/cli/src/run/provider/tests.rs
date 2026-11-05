@@ -3082,14 +3082,14 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     Ok(())
 }
 
-// Exercise the owner-to-preparation path so the dirty brief regression also
+// Exercise the owner-to-preparation path so the dirty refusal regression also
 // fails when launch forgets to mark an unchanged predecessor HEAD.
 fn prepare_policy_writer_successor(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
     prompt: &str,
     executable: &Path,
-) -> Result<(run::PreparedLaunch, PathBuf), Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn std::error::Error>> {
     use provenant_core::{ActorId, CancelToken, Clock};
     use provenant_supervisor::custody::{
         ExitObservation, PublicationState, Scope, SettlementEvidence,
@@ -3210,7 +3210,6 @@ fn prepare_policy_writer_successor(
     struct Capture<'a, 'b> {
         registry: &'a Registry<'b>,
         executable: &'a Path,
-        launch: std::cell::RefCell<Option<(run::PreparedLaunch, PathBuf)>>,
     }
     impl run::Providers for Capture<'_, '_> {
         fn prepare(
@@ -3220,7 +3219,7 @@ fn prepare_policy_writer_successor(
             paths: &run::LaunchPaths,
             _: Option<&run::AttemptRecord>,
         ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
-            let launch = prepare_with(
+            prepare_with(
                 self.registry,
                 task,
                 prompt,
@@ -3229,16 +3228,7 @@ fn prepare_policy_writer_successor(
                 |_| Ok(self.executable.into()),
                 None,
             )
-            .map_err(|e| e.to_string())?;
-            self.launch.replace(Some((
-                launch,
-                paths
-                    .provider_state
-                    .parent()
-                    .ok_or("attempt")?
-                    .join("prompt.md"),
-            )));
-            Err("captured prepared successor".into())
+            .map_err(|e| e.to_string().into())
         }
         fn decode(
             &self,
@@ -3253,7 +3243,6 @@ fn prepare_policy_writer_successor(
     let capture = Capture {
         registry,
         executable,
-        launch: Default::default(),
     };
     let custody = directory.try_lock(
         std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
@@ -3261,18 +3250,14 @@ fn prepare_policy_writer_successor(
     )?;
     drop(custody);
     let started = store.start(input.run_id, &capture, &|_, _| unreachable!(), &call)?;
-    assert!(
-        matches!(started.as_slice(), [run::Started::Refused { reason, .. }] if reason == "captured prepared successor"),
-        "{started:?}"
-    );
-    capture
-        .launch
-        .into_inner()
-        .ok_or_else(|| "successor was not prepared".into())
+    match started.as_slice() {
+        [run::Started::Refused { reason, .. }] => Ok(reason.clone()),
+        _ => Err(format!("expected refusal: {started:?}").into()),
+    }
 }
 
 #[test]
-fn writer_continuation_preserves_uncommitted_edits_and_reports_them_in_brief()
+fn writer_continuation_refuses_and_preserves_uncommitted_edits()
 -> Result<(), Box<dyn std::error::Error>> {
     writer_continuation_dirty_brief(true)
 }
@@ -3451,25 +3436,16 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         host: None,
     };
 
-    let (launch, spilled) = prepare_policy_writer_successor(&registry, &task, prompt, &executable)?;
-
-    // A dirty worktree continues without being reset
-    assert!(worktree.join("uncommitted_leftover.txt").exists());
+    let reason = prepare_policy_writer_successor(&registry, &task, prompt, &executable)?;
+    assert!(
+        reason.contains("uncommitted predecessor edits: uncommitted_leftover.txt"),
+        "{reason}"
+    );
+    assert!(reason.contains(&source_head), "{reason}");
+    assert!(reason.contains(&predecessor_head), "{reason}");
     assert_eq!(
         std::fs::read_to_string(worktree.join("uncommitted_leftover.txt"))?,
         "uncommitted dirty edit"
-    );
-
-    // Spilled prompt contains uncommitted predecessor edits
-    let prompt_content = if spilled.exists() {
-        std::fs::read_to_string(&spilled)?
-    } else {
-        launch.argv.last().unwrap().to_str().unwrap().to_string()
-    };
-    assert!(
-        prompt_content
-            .contains("Uncommitted predecessor edits in worktree:\n- uncommitted_leftover.txt"),
-        "brief must report uncommitted predecessor edits: {prompt_content}"
     );
 
     // If continuation check refuses, uncommitted edits are named in the refusal message
@@ -3616,7 +3592,14 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         agy_state: None,
     };
     // The unbound project is refused, but only after host git has run.
-    let result = read_only_plan(&roots, ProjectId::from_bytes([1; 16]), &repo, &git, request);
+    let result = read_only_plan(
+        &roots,
+        ProjectId::from_bytes([1; 16]),
+        &repo,
+        &git,
+        request,
+        false,
+    );
     assert!(result.is_err());
 
     let seen = std::fs::read_to_string(&record)?;
@@ -4933,5 +4916,418 @@ fn staged_skill_files_are_written_outside_writable_scratch()
     assert_eq!(std::fs::read(stage.join("example/SKILL.md"))?, b"staged");
     assert!(!stage.starts_with(&scratch));
     assert!(!scratch.starts_with(&stage));
+    Ok(())
+}
+
+#[test]
+fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, OperationId, RunId, WallTime};
+    use provenant_os::exec::{ExecOptions, Executor, Termination};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let assets = base.join("assets");
+    let git_home = base.join("git-home");
+    for path in [&home, &state, &project, &assets, &git_home] {
+        std::fs::create_dir(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    std::fs::write(project.join("subject"), "verified checkout")?;
+    for args in [
+        vec!["add", "subject"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "subject",
+        ],
+    ] {
+        let argv: Vec<std::ffi::OsString> = std::iter::once(git.clone().into_os_string())
+            .chain(args.into_iter().map(Into::into))
+            .collect();
+        let result = executor.execute(ExecOptions::new(&argv, &project, Duration::from_secs(5)))?;
+        assert_eq!(result.termination, Termination::Exit(0));
+    }
+    let head = run::resolve_git_base(&git, &project, "HEAD")?;
+    let source = base.join("source");
+    let added_args = vec![
+        git.clone().into_os_string(),
+        "worktree".into(),
+        "add".into(),
+        "--detach".into(),
+        "-q".into(),
+        source.clone().into_os_string(),
+        head.clone().into(),
+    ];
+    let added = executor.execute(ExecOptions::new(
+        &added_args,
+        &project,
+        Duration::from_secs(5),
+    ))?;
+    assert_eq!(added.termination, Termination::Exit(0));
+    std::fs::write(project.join("subject"), "wrong checkout")?;
+    std::fs::write(source.join("subject"), "uncommitted source edit")?;
+    let fake = assets.join("fake-provider");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\ncat subject; : > \"$SOURCE_READY\"; while [ ! -f \"$SOURCE_GO\" ]; do sleep 0.05; done; cat subject\n",
+    )?;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        state.join("config.toml"),
+        format!(
+            "schema_version = 1\n[domains.fabric.commands.fake]\nargv = ['{}']\nruntimes = ['/bin/sh']\n",
+            fake.display()
+        ),
+    )?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let budget = provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?;
+    let cancel = provenant_core::CancelToken::new();
+    let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        assets: Some(&assets),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: Some(binding.project_id()),
+        host: None,
+        cancel: Some(&cancel),
+    };
+    let mut task = super::super::tests::trace_run(
+        50,
+        AttemptId::from_bytes([51; 16]),
+        WallTime::from_micros(100)?,
+    )?
+    .request
+    .tasks
+    .remove(0);
+    task.head = Some(head.clone());
+    task.base = Some(head.clone());
+    task.access.source_root = Some(source.clone());
+    task.access.source_identity = Some(source_identity(&source)?);
+    task.route = run::RequestedRoute::Adapter {
+        extra: Default::default(),
+        provider: "command".into(),
+        name: "fake".into(),
+    };
+    let paths = run::LaunchPaths {
+        attempt_id: AttemptId::from_bytes([52; 16]),
+        operation_id: OperationId::parse("source-test")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id: RunId::from_bytes([53; 16]),
+        deadline_unix_ms: u64::MAX,
+        scratch: base.join("scratch"),
+        provider_state: base.join("provider-state"),
+        temporary: base.join("tmp"),
+        temporary_alias: None,
+    };
+    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+        std::fs::create_dir(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    // A separate Git directory's parent is not the checkout and must never
+    // become an implicit source grant.
+    let separate = base.join("separate-checkout");
+    std::fs::create_dir(&separate)?;
+    let separate_git = base.join(".git");
+    let init_args = vec![
+        git.clone().into_os_string(),
+        "init".into(),
+        "-q".into(),
+        "--separate-git-dir".into(),
+        separate_git.clone().into_os_string(),
+        separate.clone().into_os_string(),
+    ];
+    let init = executor.execute(ExecOptions::new(&init_args, &base, Duration::from_secs(5)))?;
+    assert_eq!(init.termination, Termination::Exit(0));
+    let separate_repo = utility.open_repo(&executor, &separate, budget, &cancel)?;
+    assert_eq!(separate_repo.common_git_dir(), separate_git);
+    assert_eq!(
+        run::resolve_reader_source(&state, &separate, &separate)?,
+        separate
+    );
+    assert!(run::resolve_reader_source(&state, &separate, &base).is_err());
+    let subdir = project.join("nested");
+    std::fs::create_dir(&subdir)?;
+    assert_eq!(
+        run::resolve_reader_source(&state, &subdir, &subdir)?,
+        project
+    );
+    let mut primary = task.clone();
+    primary.access.source_root = Some(project.clone());
+    primary.access.source_identity = Some(source_identity(&project)?);
+    assert_eq!(source_cwd(&registry, &primary)?, project);
+    let mut missing_identity = task.clone();
+    missing_identity.access.source_identity = None;
+    assert!(
+        source_cwd(&registry, &missing_identity)
+            .unwrap_err()
+            .contains("identity changed")
+    );
+    let mut replaced = task.clone();
+    replaced
+        .access
+        .source_identity
+        .as_mut()
+        .ok_or("source identity")?
+        .inode ^= 1;
+    assert!(
+        source_cwd(&registry, &replaced)
+            .unwrap_err()
+            .contains("identity changed")
+    );
+    let mut protected = task.clone();
+    protected.access.source_root = Some(state.clone());
+    assert!(
+        source_cwd(&registry, &protected)
+            .unwrap_err()
+            .contains("not an allowed read root")
+    );
+    let foreign = base.join("foreign");
+    std::fs::create_dir(&foreign)?;
+    init_fixture_repository(&executor, &foreign, &git_home)?;
+    protected.access.source_root = Some(foreign.clone());
+    let error = source_cwd(&registry, &protected).unwrap_err();
+    assert!(error.contains("no longer registered"));
+    assert!(!error.contains(&foreign.to_string_lossy().into_owned()));
+    let launch = prepare_command(
+        &registry,
+        &task,
+        &paths,
+        None,
+        &|_| Ok(fake.clone()),
+        "command",
+        "fake",
+    )?;
+    assert!(launch.cwd.starts_with(&paths.temporary));
+    assert_ne!(launch.cwd, source);
+    let plan = &launch
+        .confinement
+        .as_ref()
+        .ok_or("missing confinement")?
+        .plan;
+    assert!(
+        plan.permissions()
+            .read_roots
+            .iter()
+            .any(|grant| grant.path == launch.cwd)
+    );
+    assert!(
+        !plan
+            .permissions()
+            .read_roots
+            .iter()
+            .any(|grant| grant.path == source)
+    );
+    assert!(
+        !plan
+            .permissions()
+            .read_roots
+            .iter()
+            .any(|grant| grant.path == project)
+    );
+    let git_reads: Vec<_> = plan
+        .permissions()
+        .read_only
+        .as_ref()
+        .ok_or("Git authority")?
+        .git_read_paths()
+        .collect();
+    assert_eq!(
+        git_reads,
+        vec![repo.common_git_dir().join("objects").as_path()]
+    );
+    let live_source = source.clone();
+    let ready = base.join("provider-ready");
+    let proceed = base.join("provider-proceed");
+    let thread_ready = ready.clone();
+    let thread_proceed = proceed.clone();
+    let thread_git = git.clone();
+    let thread_home = git_home.clone();
+    let move_while_running = std::thread::spawn(move || -> std::io::Result<()> {
+        use provenant_core::Clock;
+        let clock = provenant_os::clock::SystemClock::new();
+        let deadline =
+            provenant_core::WaitBudget::cli(clock.mono_now(), 5).map_err(std::io::Error::other)?;
+        let (_sender, wait) = std::sync::mpsc::channel::<()>();
+        while !thread_ready.exists() {
+            if deadline.remaining(clock.mono_now()).as_micros() == 0 {
+                return Err(std::io::Error::other("provider did not start"));
+            }
+            let _ = wait.recv_timeout(Duration::from_millis(10));
+        }
+        std::fs::write(live_source.join("subject"), "changed while provider ran")?;
+        let args: Vec<std::ffi::OsString> = [
+            thread_git.as_os_str(),
+            "-c".as_ref(),
+            "user.name=Fixture".as_ref(),
+            "-c".as_ref(),
+            "user.email=fixture@example.invalid".as_ref(),
+            "-c".as_ref(),
+            "core.hooksPath=/dev/null".as_ref(),
+            "commit".as_ref(),
+            "--allow-empty".as_ref(),
+            "-qm".as_ref(),
+            "concurrent move".as_ref(),
+        ]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect();
+        let env = vec![
+            ("HOME".into(), thread_home.into_os_string()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ];
+        let mut options = ExecOptions::new(&args, &live_source, Duration::from_secs(5));
+        options.env = Some(&env);
+        let result = provenant_os::exec::SystemExecutor::new(1)
+            .map_err(std::io::Error::other)?
+            .execute(options)
+            .map_err(std::io::Error::other)?;
+        if result.termination != Termination::Exit(0) {
+            return Err(std::io::Error::other("source checkout did not advance"));
+        }
+        std::fs::write(thread_proceed, "continue")
+    });
+    let env = vec![
+        ("SOURCE_READY".into(), ready.into_os_string()),
+        ("SOURCE_GO".into(), proceed.into_os_string()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ];
+    let mut options = ExecOptions::new(&launch.argv, &launch.cwd, Duration::from_secs(10));
+    options.env = Some(&env);
+    let output = executor.execute(options)?;
+    move_while_running
+        .join()
+        .map_err(|_| "source mutation thread panicked")??;
+    assert_eq!(output.termination, Termination::Exit(0));
+    assert_eq!(output.stdout.bytes, b"verified checkoutverified checkout");
+    let status_args: Vec<std::ffi::OsString> =
+        [git.as_os_str(), "status".as_ref(), "--porcelain".as_ref()]
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
+    let status = executor.execute(ExecOptions::new(
+        &status_args,
+        &launch.cwd,
+        Duration::from_secs(5),
+    ))?;
+    assert_eq!(status.termination, Termination::Exit(0));
+    assert!(
+        status.stdout.bytes.is_empty(),
+        "snapshot status: {:?}",
+        status.stdout.bytes
+    );
+    let moved_args: Vec<std::ffi::OsString> = [
+        git.as_os_str(),
+        "-c".as_ref(),
+        "user.name=Fixture".as_ref(),
+        "-c".as_ref(),
+        "user.email=fixture@example.invalid".as_ref(),
+        "commit".as_ref(),
+        "--allow-empty".as_ref(),
+        "-qm".as_ref(),
+        "move".as_ref(),
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect();
+    let moved = executor.execute(ExecOptions::new(
+        &moved_args,
+        &source,
+        Duration::from_secs(5),
+    ))?;
+    assert_eq!(moved.termination, Termination::Exit(0));
+    let historical = prepare_command(
+        &registry,
+        &task,
+        &paths,
+        None,
+        &|_| Ok(fake.clone()),
+        "command",
+        "fake",
+    )?;
+    assert_eq!(
+        std::fs::read(historical.cwd.join("subject"))?,
+        b"verified checkout"
+    );
+    // An exception that would grant writes into the live checkout cannot be
+    // carried into an isolated source view.
+    std::fs::create_dir(source.join("mutable"))?;
+    let project_state = state
+        .join("projects")
+        .join(binding.project_id().to_string());
+    std::fs::create_dir_all(&project_state)?;
+    std::fs::set_permissions(&project_state, std::fs::Permissions::from_mode(0o700))?;
+    let policy = project_state.join("read-only.json");
+    std::fs::write(&policy, r#"{"readOnlyWritable":["mutable"]}"#)?;
+    std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o600))?;
+    let refused = prepare_command(
+        &registry,
+        &task,
+        &paths,
+        None,
+        &|_| Ok(fake.clone()),
+        "command",
+        "fake",
+    )
+    .err()
+    .ok_or("live-source write exception was accepted")?;
+    assert!(
+        refused
+            .to_string()
+            .contains("read-only project write policy"),
+        "{refused}"
+    );
+    std::fs::remove_file(policy)?;
+    // Replacing the path with another registered worktree at the same head
+    // must not silently replace the source selected at admission.
+    let moved_path = base.join("moved-source");
+    let move_args = vec![
+        git.clone().into_os_string(),
+        "worktree".into(),
+        "move".into(),
+        source.clone().into_os_string(),
+        moved_path.into_os_string(),
+    ];
+    let moved = executor.execute(ExecOptions::new(
+        &move_args,
+        &project,
+        Duration::from_secs(5),
+    ))?;
+    assert_eq!(moved.termination, Termination::Exit(0));
+    let added = executor.execute(ExecOptions::new(
+        &added_args,
+        &project,
+        Duration::from_secs(5),
+    ))?;
+    assert_eq!(added.termination, Termination::Exit(0));
+    assert!(
+        source_cwd(&registry, &task)
+            .unwrap_err()
+            .contains("identity changed")
+    );
     Ok(())
 }

@@ -237,6 +237,103 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
 }
 
 #[test]
+fn big_batch_default_subject_follows_each_lane_worktree() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    let git = |directory: &std::path::Path,
+               args: &[&str]|
+     -> Result<String, Box<dyn std::error::Error>> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(directory)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    git(&repo, &["init", "-q"])?;
+    git(&repo, &["commit", "--allow-empty", "-qm", "base"])?;
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "first",
+            first.to_str().ok_or("path")?,
+        ],
+    )?;
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "second",
+            second.to_str().ok_or("path")?,
+        ],
+    )?;
+    git(&first, &["commit", "--allow-empty", "-qm", "first"])?;
+    git(&second, &["commit", "--allow-empty", "-qm", "second"])?;
+    let first_head = git(&first, &["rev-parse", "HEAD"])?;
+    let second_head = git(&second, &["rev-parse", "HEAD"])?;
+    assert_ne!(first_head, second_head);
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "Implement the batch")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let lanes = format!(
+        "parameters.lanes=[{{name='one',worktree='{}',scope=['one'],spec=''}},{{name='two',worktree='{}',scope=['two'],spec=''}}]",
+        first.display(),
+        second.display()
+    );
+    let output = fixture_cli()
+        .current_dir(&repo)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args(["--json", "run", "--preset", "big-batch", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--explain", "--set"])
+        .arg(lanes)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    fn find_writer<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+        if value["access"] == "worktree_write" && value["worktree"] == path {
+            return Some(value);
+        }
+        match value {
+            serde_json::Value::Array(values) => values.iter().find_map(|v| find_writer(v, path)),
+            serde_json::Value::Object(values) => values.values().find_map(|v| find_writer(v, path)),
+            _ => None,
+        }
+    }
+    let graph = &result["data"]["graph"];
+    assert_eq!(
+        find_writer(graph, first.to_str().ok_or("path")?).ok_or("first writer")?["source"]["commit"],
+        first_head
+    );
+    assert_eq!(
+        find_writer(graph, second.to_str().ok_or("path")?).ok_or("second writer")?["source"]["commit"],
+        second_head
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("differs from bound worktree HEAD"));
+    Ok(())
+}
+
+#[test]
 fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -293,6 +390,7 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
         .arg(&invoking)
         .args(["--explain", "--set"])
         .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .args(["--set", "parameters.base='HEAD'"])
         .output()?;
     assert!(
         output.status.success(),
@@ -302,6 +400,15 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
     );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let graph = &result["data"]["graph"];
+    // Both the subject and review base bind in the review worktree, not the invoking checkout.
+    let pinned_bases: Vec<_> = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node.get("review_base").and_then(serde_json::Value::as_str))
+        .collect();
+    assert!(!pinned_bases.is_empty());
+    assert!(pinned_bases.iter().all(|base| *base == worktree_head));
     // The subject lane (node 0) source equals the bound worktree HEAD (the subject commit).
     assert_eq!(graph["nodes"][0]["source"]["commit"], worktree_head);
     assert_eq!(

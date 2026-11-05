@@ -36,9 +36,13 @@ impl GraphJournal for MemoryJournal {
 #[derive(Default)]
 struct FakeOwner {
     retry_limit: Option<u8>,
+    input_cap_source: Option<InputCapSource>,
     retry_used: u64,
     retry_budgets: Vec<Option<u8>>,
     deliveries: usize,
+    delivery_effects: usize,
+    delivery_created: bool,
+    delivery_identity: Option<Option<String>>,
     cancelled_attempt_settled: bool,
     cancellation_stops: usize,
     delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
@@ -56,7 +60,17 @@ struct FakeOwner {
     refuse_expansion_target: bool,
     expansion_validations: usize,
     integration_heads: VecDeque<String>,
+    graph_bases: (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ),
+    implicit_head: Option<String>,
+    implicit_bindings: usize,
     source_commits: Vec<Option<String>>,
+    resolved_review_base: Option<String>,
+    review_base_resolutions: usize,
+    review_base_worktrees: Vec<Option<String>>,
+    observed_review_bases: Vec<Option<String>>,
     equal_range: bool,
     read_roots: Vec<Vec<String>>,
     capabilities: Vec<Option<Vec<String>>>,
@@ -67,6 +81,7 @@ struct FakeOwner {
     models: std::collections::BTreeMap<String, String>,
     review_expansion: Option<Expansion>,
     review_calls: usize,
+    review_requested_bases: Vec<Option<String>>,
     require_distinct: Vec<bool>,
     skill_requirements: Vec<bool>,
     deadlines: Vec<Option<u64>>,
@@ -96,6 +111,10 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn input_cap_source(&self) -> InputCapSource {
+        self.input_cap_source
+            .unwrap_or(InputCapSource::EffectiveGraphLimits)
+    }
 
     fn retry_allowance(
         &self,
@@ -112,22 +131,85 @@ impl AttemptOwner for FakeOwner {
         &mut self,
         _key: &AttemptKey,
         reference: &str,
-    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+    ) -> Result<Option<PreparationFallbackEvidence>, Self::Error> {
         if self.fail_fallback_evidence {
             return Err(NoObservation);
         }
-        Ok(self.fallback_evidence.get(reference).copied())
+        Ok(self
+            .fallback_evidence
+            .get(reference)
+            .copied()
+            .map(|failure| PreparationFallbackEvidence {
+                failure,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+            }))
+    }
+
+    fn resolve_review_base(
+        &mut self,
+        reference: &str,
+        worktree: Option<&str>,
+    ) -> Result<Option<String>, Self::Error> {
+        self.review_base_resolutions += 1;
+        self.review_base_worktrees.push(worktree.map(str::to_owned));
+        Ok(self.resolved_review_base.clone().or_else(|| {
+            reference
+                .parse::<provenant_core::GitOid>()
+                .ok()
+                .map(|oid| oid.to_string())
+        }))
     }
 
     fn resolve_review(
         &mut self,
-        _node: &GraphNode,
+        node: &GraphNode,
         _subject: &str,
     ) -> Result<Expansion, ReviewResolveError> {
         self.review_calls += 1;
+        self.review_requested_bases.push(
+            node.extra
+                .get("review_base")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        );
         self.review_expansion
             .clone()
             .ok_or(ReviewResolveError::Unsupported)
+    }
+    fn bind_writer_worktree(
+        &mut self,
+        worktree: &str,
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        self.implicit_bindings += 1;
+        Ok(Some(WriterWorktreeBinding {
+            extra: Default::default(),
+            worktree: if std::path::Path::new(worktree).is_absolute() {
+                worktree.to_owned()
+            } else {
+                format!("/fixture/{worktree}")
+            },
+            head: self.implicit_head.clone().unwrap_or_else(|| "a".repeat(40)),
+        }))
+    }
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        self.graph_bases
+    }
+    fn applied_route(&mut self, attempt: &str) -> Result<Option<GraphRoute>, Self::Error> {
+        Ok(self.models.get(attempt).map(|model| GraphRoute {
+            extra: Default::default(),
+            adapter: Some("fixture".into()),
+            model: Some(model.clone()),
+            name: None,
+            alias: None,
+            effort: None,
+            account: None,
+        }))
     }
     fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
         Ok(attempts
@@ -212,7 +294,14 @@ impl AttemptOwner for FakeOwner {
         _checkpoint: &GraphCheckpoint,
     ) -> Result<Option<String>, Self::Error> {
         self.deliveries += 1;
-        Ok(Some("https://example.invalid/pr/1".into()))
+        if !self.delivery_created {
+            self.delivery_created = true;
+            self.delivery_effects += 1;
+        }
+        Ok(self
+            .delivery_identity
+            .clone()
+            .unwrap_or_else(|| Some("https://example.invalid/pr/1".into())))
     }
 
     fn equal_review_range(&mut self, _: &str) -> Result<bool, Self::Error> {
@@ -230,6 +319,8 @@ impl AttemptOwner for FakeOwner {
     ) -> Result<AttemptObservation, Self::Error> {
         self.source_commits
             .push(node.source_commit.map(str::to_owned));
+        self.observed_review_bases
+            .push(node.review_base.map(str::to_owned));
         self.read_roots.push(node.read_roots.to_vec());
         self.capabilities
             .push(node.capabilities.map(<[String]>::to_vec));
@@ -598,6 +689,7 @@ fn admitted_deferred_review_fits_checkpoint_after_expansion() {
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
@@ -669,6 +761,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         min_successful: Some(1),
         nodes: vec![review],
         exports: vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "review".into(),
             outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -677,6 +770,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
     let mut synthesis = node("synthesis", route("first"));
     synthesis.depends_on = vec!["outer".into()];
     synthesis.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "outer".into(),
         outputs: vec![OutputKind::Findings],
@@ -712,6 +806,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -1463,6 +1558,7 @@ fn identity_only_dispositions_inherit_selected_findings() {
     synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
     synthesis.depends_on = vec!["review".into()];
     synthesis.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
@@ -1566,6 +1662,10 @@ fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
             .iter()
             .find(|node| node.id == "reviews")
             .unwrap();
+        assert_eq!(
+            composite.outputs.as_ref().unwrap().findings_available,
+            Some(true)
+        );
         let ids: Vec<_> = composite
             .outputs
             .as_ref()
@@ -1659,6 +1759,7 @@ fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
         synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
         synthesis.depends_on = vec!["review".into()];
         synthesis.inputs = vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "review".into(),
             outputs: vec![OutputKind::Findings],
@@ -1705,6 +1806,7 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
     let mut verify = node("verify", route("first"));
     verify.depends_on = vec!["lens".into()];
     verify.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "lens".into(),
         outputs: vec![OutputKind::Result],
@@ -1715,6 +1817,7 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
     synthesis.inputs = ["verify", "lens"]
         .into_iter()
         .map(|id| GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: id.into(),
             outputs: vec![OutputKind::Findings],
@@ -1752,6 +1855,7 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
 #[test]
 fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -1838,6 +1942,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
 #[test]
 fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -1994,6 +2099,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
 #[test]
 fn compacted_synthesis_survives_composite_export_and_replay() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2113,6 +2219,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
 #[test]
 fn settled_copies_keep_origin_and_evidence_for_downstream_disposition() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2394,6 +2501,7 @@ fn a_marker_shared_by_several_findings_stays_unresolved() {
 #[test]
 fn qualified_propagations_group_colliding_originals() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2464,6 +2572,7 @@ fn qualified_propagations_group_colliding_originals() {
 #[test]
 fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2535,6 +2644,7 @@ fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
 #[test]
 fn chain_resolves_rendered_markers_and_preserves_every_copy() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2604,6 +2714,7 @@ fn chain_resolves_rendered_markers_and_preserves_every_copy() {
 #[test]
 fn result_only_inputs_do_not_change_rendered_finding_ids() {
     let input = |id: &str, output| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![output],
@@ -2683,6 +2794,7 @@ fn result_only_inputs_do_not_change_rendered_finding_ids() {
 #[test]
 fn qualified_id_collision_requires_three_distinct_dispositions() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2736,6 +2848,7 @@ fn qualified_id_collision_requires_three_distinct_dispositions() {
 #[test]
 fn ambiguous_propagation_warns_and_remains_independent() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2806,6 +2919,7 @@ fn ambiguous_propagation_warns_and_remains_independent() {
 #[test]
 fn unresolved_marker_warns_and_remains_an_independent_identity() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2859,6 +2973,7 @@ fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions()
     let mut b = node("b", route("first"));
     b.depends_on = vec!["a".into()];
     b.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "a".into(),
         outputs: vec![OutputKind::Result],
@@ -2869,6 +2984,7 @@ fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions()
     synthesis.inputs = ["a", "b"]
         .into_iter()
         .map(|id| GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: id.into(),
             outputs: vec![OutputKind::Findings],
@@ -2915,6 +3031,7 @@ fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
     synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
     synthesis.depends_on = vec!["review".into()];
     synthesis.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
@@ -2946,6 +3063,28 @@ fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
 }
 
 #[test]
+fn required_findings_prompt_includes_empty_example_even_when_fence_is_mentioned() {
+    let mut lens = node("lens", route("first"));
+    lens.require_findings = true;
+    lens.prompt = "Review the existing ```findings block.".into();
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal_with_result(
+            AttemptOutcome::Succeeded,
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+        )]),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![lens]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert!(owner.prompts[0].contains("```findings\n{\"schema_version\":1,\"findings\":[]}\n```"));
+}
+
+#[test]
 fn synthesis_recovers_upheld_findings_when_verifier_block_is_truncated() {
     let mut lens = node("lens", route("first"));
     lens.require_findings = true;
@@ -2953,6 +3092,7 @@ fn synthesis_recovers_upheld_findings_when_verifier_block_is_truncated() {
     let mut verify = node("verify", route("first"));
     verify.depends_on = vec!["lens".into()];
     verify.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "lens".into(),
         outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -2964,11 +3104,13 @@ fn synthesis_recovers_upheld_findings_when_verifier_block_is_truncated() {
     synthesis.depends_on = vec!["lens".into(), "verify".into()];
     synthesis.inputs = vec![
         GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Findings],
         },
         GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "verify".into(),
             outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -3067,6 +3209,7 @@ fn synthesis_stops_when_the_pinned_integration_head_moves() {
         synthesis.source = Some(SourceBinding::Integration);
         synthesis.depends_on = vec!["lens".into()];
         synthesis.inputs = vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
@@ -3133,6 +3276,340 @@ fn source_and_read_roots_survive_retry_and_replay() {
     );
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(replay.checkpoint.nodes[0].source_commit, Some(commit));
+}
+
+#[test]
+fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
+    let original = "1".repeat(40);
+    let predecessor = "2".repeat(40);
+    let base = "3".repeat(40);
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    writer.source = Some(SourceBinding::Commit { commit: original });
+    let mut reader = node("reader", route("fixture"));
+    reader.depends_on.push("writer".into());
+    reader.source = Some(SourceBinding::Node {
+        node: "writer".into(),
+    });
+    reader
+        .extra
+        .insert("review_base".into(), serde_json::json!("moving-ref"));
+    let mut document = graph(vec![reader, writer]);
+    document.schema_version = 2;
+    let mut written = terminal(AttemptOutcome::Succeeded);
+    if let AttemptObservation::Terminal { commit, .. } = &mut written {
+        *commit = Some(predecessor.clone());
+    }
+    let mut owner = FakeOwner {
+        resolved_review_base: Some(base.clone()),
+        observations: VecDeque::from([
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/writer".into()),
+            },
+            written,
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/reader".into()),
+            },
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let admitted = advance(&document, &mut owner, &mut journal).unwrap();
+    let reader = admitted
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "reader")
+        .unwrap();
+    assert!(reader.attempts.is_empty());
+    assert_eq!(reader.review_base.as_deref(), Some(base.as_str()));
+    let mut broken = admitted.checkpoint.clone();
+    broken
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "reader")
+        .unwrap()
+        .review_base = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+    owner.resolved_review_base = Some("4".repeat(40));
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    let reader = pending
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "reader")
+        .unwrap();
+    assert_eq!(reader.source_commit.as_deref(), Some(predecessor.as_str()));
+    assert_eq!(reader.review_base.as_deref(), Some(base.as_str()));
+    assert_eq!(
+        reader.attempts[0]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .source_producer
+            .as_ref()
+            .unwrap()
+            .node_id,
+        "writer"
+    );
+    assert_eq!(
+        owner.review_base_worktrees,
+        vec![Some("/fixture/lane".into())]
+    );
+    owner.resolved_review_base = Some("4".repeat(40));
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    let reader = replay
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "reader")
+        .unwrap();
+    assert_eq!(reader.source_commit.as_deref(), Some(predecessor.as_str()));
+    assert_eq!(reader.review_base.as_deref(), Some(base.as_str()));
+    assert_eq!(owner.review_base_resolutions, 1);
+    let reader_locations: Vec<_> = owner
+        .calls
+        .iter()
+        .zip(&owner.permissions)
+        .filter(|((key, _), _)| key.node_id == "reader")
+        .map(|(_, (_, path))| path.as_deref())
+        .collect();
+    assert_eq!(
+        reader_locations,
+        vec![Some("/fixture/lane"), Some("/fixture/lane")]
+    );
+}
+
+#[test]
+fn known_commit_source_is_visible_before_dependencies_settle() {
+    let mut reader = node("reader", route("fixture"));
+    reader.depends_on.push("gate".into());
+    reader.source = Some(SourceBinding::Commit {
+        commit: "1".repeat(40),
+    });
+    let mut document = graph(vec![reader, node("gate", route("fixture"))]);
+    document.schema_version = 2;
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([AttemptObservation::Pending {
+            attempt_ref: Some("host/gate".into()),
+        }]),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let reader = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "reader")
+        .unwrap();
+    assert!(reader.attempts.is_empty());
+    assert_eq!(
+        reader.source_commit.as_deref(),
+        Some("1111111111111111111111111111111111111111")
+    );
+}
+
+#[test]
+fn explicit_writer_source_stays_distinct_from_its_bound_worktree_head() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    writer.source = Some(SourceBinding::Commit {
+        commit: "1".repeat(40),
+    });
+    writer.depends_on.push("gate".into());
+    let mut document = graph(vec![writer, node("gate", route("fixture"))]);
+    document.schema_version = 2;
+    let mut owner = FakeOwner {
+        implicit_head: Some("2".repeat(40)),
+        observations: VecDeque::from([AttemptObservation::Pending {
+            attempt_ref: Some("host/gate".into()),
+        }]),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let writer = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "writer")
+        .unwrap();
+    assert!(writer.attempts.is_empty());
+    assert_eq!(
+        writer.source_commit.as_deref(),
+        Some("1111111111111111111111111111111111111111")
+    );
+    assert_eq!(writer.writer_binding.as_ref().unwrap().head, "2".repeat(40));
+    let mut broken = run.checkpoint.clone();
+    broken
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "writer")
+        .unwrap()
+        .writer_binding = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+}
+
+#[test]
+fn schema_two_refuses_a_host_that_cannot_bind_a_writer() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    let mut document = graph(vec![writer]);
+    document.schema_version = 2;
+    let mut journal = MemoryJournal::default();
+    assert!(matches!(
+        advance(&document, &mut ErrorLauncher::default(), &mut journal),
+        Err(GraphError::Refused(_))
+    ));
+    assert!(journal.0.is_none());
+}
+
+#[test]
+fn implicit_writer_binding_applies_to_schema_one_when_host_supports_it() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    let document = graph(vec![writer]);
+    let mut owner = FakeOwner {
+        implicit_head: Some("1".repeat(40)),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[0].source_commit.as_deref(),
+        Some("1111111111111111111111111111111111111111")
+    );
+    assert_eq!(owner.implicit_bindings, 1);
+}
+
+#[test]
+fn implicit_writer_binds_before_its_dependency_settles() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    writer.depends_on.push("gate".into());
+    let mut document = graph(vec![writer, node("gate", route("fixture"))]);
+    document.schema_version = 2;
+    let first_head = "1".repeat(40);
+    let mut owner = FakeOwner {
+        implicit_head: Some(first_head.clone()),
+        observations: VecDeque::from([
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/gate".into()),
+            },
+            terminal(AttemptOutcome::Succeeded),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = pending
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "writer")
+        .unwrap();
+    assert!(progress.attempts.is_empty());
+    assert_eq!(progress.source_commit.as_deref(), Some(first_head.as_str()));
+    let mut broken = pending.checkpoint.clone();
+    broken
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "writer")
+        .unwrap()
+        .writer_binding = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+    owner.implicit_head = Some("2".repeat(40));
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.implicit_bindings, 1);
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "writer")
+            .unwrap()
+            .source_commit
+            .as_deref(),
+        Some(first_head.as_str())
+    );
+    assert!(owner.source_commits.contains(&Some(first_head)));
+}
+
+#[test]
+fn implicit_writer_source_is_bound_at_admission_and_survives_replay() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    let mut document = graph(vec![writer]);
+    document.schema_version = 2;
+    let first_head = "1".repeat(40);
+    let mut owner = FakeOwner {
+        implicit_head: Some(first_head.clone()),
+        observations: VecDeque::from([
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/attempt".into()),
+            },
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &pending.checkpoint.nodes[0];
+    assert_eq!(progress.source_commit.as_deref(), Some(first_head.as_str()));
+    assert_eq!(
+        progress.writer_binding.as_ref().unwrap().worktree,
+        "/fixture/lane"
+    );
+    assert_eq!(owner.implicit_bindings, 1);
+    owner.implicit_head = Some("2".repeat(40));
+    let done = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.implicit_bindings, 1);
+    assert_eq!(
+        owner.source_commits,
+        vec![Some(first_head.clone()), Some(first_head.clone())]
+    );
+    assert_eq!(owner.permissions[0].1.as_deref(), Some("/fixture/lane"));
+    assert_eq!(
+        done.checkpoint.nodes[0].source_commit.as_deref(),
+        Some(first_head.as_str())
+    );
+    let mut broken = done.checkpoint.clone();
+    broken.nodes[0].writer_binding = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
 }
 
 #[test]
@@ -3205,6 +3682,85 @@ fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
     assert!(result.excerpt.contains("parallel--a:\nevidence A"));
     assert!(result.excerpt.contains("parallel--b:\nevidence B"));
     assert!(!result.truncated);
+}
+
+#[test]
+fn composite_merge_retains_inherited_required_outputs() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2,"graph_id":"required-composite-input","nodes":[
+            {"id":"start","access":"read_only","prompt":"start","route":{"alias":"senior"}},
+            {"id":"parallel","kind":"composite","access":"read_only","depends_on":["start"],
+             "inputs":[{"node":"start","outputs":["findings"],"required_outputs":["findings"]}],
+             "composite":{"nodes":[
+                 {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"},
+                  "depends_on":["start"],"inputs":[{"node":"start","outputs":["result"]}]}
+             ],"exports":[{"node":"a","outputs":["result"]}]}}
+        ]
+    }))
+    .unwrap();
+    let expanded = loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
+    let child = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "parallel--a")
+        .unwrap();
+    let input = child
+        .inputs
+        .iter()
+        .find(|input| input.node == "start")
+        .unwrap();
+    assert!(input.outputs.contains(&OutputKind::Result));
+    assert!(input.outputs.contains(&OutputKind::Findings));
+    assert_eq!(input.required_outputs, vec![OutputKind::Findings]);
+}
+
+#[test]
+fn required_composite_findings_need_complete_member_evidence() {
+    let empty = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```";
+    for (second, succeeds) in [(empty, true), ("missing findings", false)] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2,"graph_id":"required-composite-findings","nodes":[
+                {"id":"reviews","kind":"composite","access":"read_only","composite":{
+                    "nodes":[
+                        {"id":"a","access":"read_only","prompt":"a","route":{"alias":"senior"}},
+                        {"id":"b","access":"read_only","prompt":"b","route":{"alias":"senior"}}
+                    ],"exports":[{"node":"a","outputs":["findings"]},{"node":"b","outputs":["findings"]}]
+                }},
+                {"id":"consumer","access":"read_only","prompt":"check","route":{"alias":"senior"},
+                 "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["findings"],"required_outputs":["findings"]}]}
+            ]
+        })).unwrap();
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal_with_result(AttemptOutcome::Succeeded, empty),
+                terminal_with_result(AttemptOutcome::Succeeded, second),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let consumer = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "consumer")
+            .unwrap();
+        if succeeds {
+            assert_eq!(consumer.state, NodeState::Succeeded);
+            assert_eq!(consumer.attempts.len(), 1);
+        } else {
+            assert_eq!(consumer.state, NodeState::Failed);
+            assert_eq!(
+                consumer.advance_error_code.as_deref(),
+                Some("required_input_unavailable")
+            );
+            assert!(consumer.attempts.is_empty());
+            assert_eq!(owner.calls.len(), 2);
+        }
+        let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        assert_eq!(replay.checkpoint, run.checkpoint);
+    }
 }
 
 #[test]
@@ -3694,6 +4250,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     );
     assert_eq!(node("verify").state, NodeState::Succeeded);
     let lenses = node("lenses").outputs.as_ref().unwrap();
+    assert_eq!(lenses.findings_available, Some(false));
     assert_eq!(lenses.findings.len(), 1);
     let excerpt = &lenses.result.as_ref().unwrap().excerpt;
     assert!(excerpt.starts_with("Unavailable members:"), "{excerpt}");
@@ -3705,6 +4262,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     assert!(excerpt.contains("LENS-A-OK"));
     assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
     let verify_input = &owner.prompts[3];
+    assert!(verify_input.contains("lenses findings availability: unavailable"));
     assert!(verify_input.contains("LENS-A-OK") && verify_input.contains("lens-c"));
     assert!(!verify_input.contains("LENS-B-NO-FINDINGS"));
     let mut outside = run.checkpoint.clone();
@@ -4136,6 +4694,7 @@ fn verdict_fixture(
         let review = node(&format!("review-{i}"), route("fixture"));
         gate.depends_on.push(review.id.clone());
         gate.inputs.push(GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: review.id.clone(),
             outputs: vec![OutputKind::Verdict],
@@ -4256,6 +4815,23 @@ fn gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities() {
         assert_eq!(gate.outputs, Some(gate_outputs(passed)));
         assert!(gate.attempts.is_empty());
         assert_eq!(run.checkpoint.successful(), passed);
+        let mut legacy = serde_json::to_value(&run.checkpoint).unwrap();
+        for node in legacy["nodes"].as_array_mut().unwrap() {
+            if let Some(outputs) = node
+                .get_mut("outputs")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                outputs.remove("findings_available");
+            }
+        }
+        let legacy: GraphCheckpoint = serde_json::from_value(legacy).unwrap();
+        journal.0 = Some(legacy.clone());
+        assert_eq!(
+            advance(&document, &mut owner, &mut journal)
+                .unwrap()
+                .checkpoint,
+            legacy
+        );
         journal.0 =
             Some(serde_json::from_value(serde_json::to_value(&run.checkpoint).unwrap()).unwrap());
         assert_eq!(
@@ -5363,6 +5939,7 @@ fn parent_and_child(
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -5376,6 +5953,193 @@ fn parent_and_child(
         ..Default::default()
     };
     (graph(vec![child, node("parent", route("fixture"))]), owner)
+}
+
+#[test]
+fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
+    let source = "1".repeat(40);
+    let base = "2".repeat(40);
+    let mut child = node("child", route("first"));
+    child.route = None;
+    child.routes = Some(vec![route("first"), route("second")]);
+    child.depends_on.push("parent".into());
+    child.source = Some(SourceBinding::Node {
+        node: "parent".into(),
+    });
+    child
+        .extra
+        .insert("review_base".into(), serde_json::json!(base));
+    child.inputs.push(GraphInput {
+        extra: Default::default(),
+        node: "parent".into(),
+        outputs: vec![OutputKind::Result, OutputKind::Commit],
+        required_outputs: vec![OutputKind::Commit],
+    });
+    let mut producer = node("parent", route("fixture"));
+    producer.source = Some(SourceBinding::Commit {
+        commit: source.clone(),
+    });
+    let mut document = graph(vec![child, producer]);
+    document.schema_version = 2;
+    let mut parent = terminal_from("private input content", "host/parent");
+    if let AttemptObservation::Terminal { commit, .. } = &mut parent {
+        *commit = Some(source.clone());
+    }
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            parent,
+            preparation_refusal("host/first", AttemptOutcome::AuthRequired),
+            terminal_from("done", "host/second"),
+        ]),
+        resolved_review_base: Some(base.clone()),
+        graph_bases: (
+            Some("3".repeat(40).parse().unwrap()),
+            Some("4".repeat(40).parse().unwrap()),
+        ),
+        models: [("host/second".into(), "fixture/model".into())].into(),
+        materialise: Some(|requests| MaterialisedInputs {
+            directory: Some("/private/inputs".into()),
+            index: None,
+            entries: requests
+                .iter()
+                .map(|request| MaterialisedInput::File {
+                    label: request.label.clone(),
+                    path: "/private/inputs/result".into(),
+                    bytes: 3,
+                    omitted: 5,
+                })
+                .collect(),
+        }),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let child = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "child")
+        .unwrap();
+    assert_eq!(child.attempts.len(), 2);
+    for attempt in &child.attempts {
+        let manifest = attempt.input_manifest.as_ref().unwrap();
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.source_commit.as_deref(), Some(source.as_str()));
+        assert_eq!(manifest.review_base.as_deref(), Some(base.as_str()));
+        assert_eq!(
+            manifest.graph_review_base.as_deref(),
+            Some("3333333333333333333333333333333333333333")
+        );
+        assert_eq!(
+            manifest.integration_base.as_deref(),
+            Some("4444444444444444444444444444444444444444")
+        );
+        assert_eq!(manifest.integration_source, None);
+        assert_eq!(manifest.inputs.len(), 2);
+        let input = &manifest.inputs[0];
+        assert_eq!(input.producer_attempt.as_ref().unwrap().node_id, "parent");
+        assert_eq!(
+            input.producer_attempt.as_ref().unwrap().graph_id,
+            document.graph_id
+        );
+        assert!(
+            input
+                .producer_result_digest
+                .as_deref()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_eq!(input.file_delivery, InputDelivery::Capped);
+        assert_eq!(manifest.inputs[1].commit.as_deref(), Some(source.as_str()));
+        assert!(manifest.inputs[1].required);
+        let encoded = serde_json::to_string(manifest).unwrap();
+        assert!(!encoded.contains("private input content"));
+        assert!(!encoded.contains("/private/inputs"));
+    }
+    assert_eq!(
+        child.attempts[1]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .applied_route
+            .as_ref()
+            .and_then(|route| route.model.as_deref()),
+        Some("fixture/model")
+    );
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, run.checkpoint);
+    let mut value =
+        serde_json::to_value(child.attempts[1].input_manifest.as_ref().unwrap()).unwrap();
+    value["future_field"] = serde_json::json!({"kept":true});
+    let decoded: AttemptInputManifest = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+    let mut broken = run.checkpoint.clone();
+    broken
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "child")
+        .unwrap()
+        .attempts[0]
+        .input_manifest = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+}
+
+#[test]
+fn attempt_manifest_bounds_the_number_of_selected_values() {
+    let count = outputs::MANIFEST_INPUT_LIMIT + 1;
+    let mut consumer = node("consumer", route("fixture"));
+    let mut nodes = Vec::new();
+    for index in 0..count {
+        let id = format!("producer-{index}");
+        consumer.depends_on.push(id.clone());
+        consumer.inputs.push(GraphInput {
+            extra: Default::default(),
+            node: id.clone(),
+            outputs: vec![OutputKind::Result],
+            required_outputs: Vec::new(),
+        });
+        nodes.push(node(&id, route("fixture")));
+    }
+    nodes.push(consumer);
+    let document = graph(nodes);
+    let mut owner = FakeOwner {
+        observations: (0..=count)
+            .map(|_| terminal_with_result(AttemptOutcome::Succeeded, "private body"))
+            .collect(),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &plans::generous(),
+        &Default::default(),
+    )
+    .unwrap();
+    let manifest = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "consumer")
+        .unwrap()
+        .attempts[0]
+        .input_manifest
+        .as_ref()
+        .unwrap();
+    assert_eq!(manifest.inputs.len(), outputs::MANIFEST_INPUT_LIMIT);
+    assert_eq!(manifest.omitted, 1);
+    assert!(
+        !serde_json::to_string(manifest)
+            .unwrap()
+            .contains("private body")
+    );
 }
 
 #[test]
@@ -5412,6 +6176,48 @@ fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() 
     assert!(excerpt_at < files_at, "{prompt}");
     assert!(prompt.contains("- parent: /state/graph-inputs/child-0/parent.md (9000 bytes)"));
     assert!(!owner.prompts[0].contains("UPSTREAM_FILES"));
+}
+
+#[test]
+fn file_notices_must_fit_the_prompt_before_a_consumer_attempt() {
+    let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        directory: Some("/inputs".into()),
+        index: None,
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::File {
+                label: request.label.clone(),
+                path: format!("/inputs/{}", "x".repeat(1000)).into(),
+                bytes: 20,
+                omitted: 0,
+            })
+            .collect(),
+    }));
+    let limits = crate::config::GraphLimits {
+        node_prompt_bytes: 500,
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    let consumer = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "child")
+        .unwrap();
+    assert_eq!(consumer.state, NodeState::Failed);
+    assert_eq!(
+        consumer.advance_error_code.as_deref(),
+        Some("upstream_outputs_too_large")
+    );
+    assert!(consumer.attempts.is_empty());
+    assert_eq!(owner.calls.len(), 1);
 }
 
 #[test]
@@ -5464,6 +6270,31 @@ fn capped_upstream_results_are_named_in_the_prompt() {
         "{prompt}"
     );
     assert!(prompt.contains("- later: CAPPED: not written"), "{prompt}");
+}
+
+#[test]
+fn manifest_reports_a_file_omitted_at_the_delivery_cap() {
+    let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        directory: None,
+        index: None,
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::Capped {
+                label: request.label.clone(),
+            })
+            .collect(),
+    }));
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let child = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "child")
+        .unwrap();
+    let input = &child.attempts[0].input_manifest.as_ref().unwrap().inputs[0];
+    assert_eq!(input.file_delivery, InputDelivery::Omitted);
+    assert_eq!(input.delivery, InputDelivery::Delivered);
+    assert!(owner.prompts[1].contains("CAPPED"));
 }
 
 #[test]
@@ -5632,6 +6463,154 @@ fn graph_delivers_nodes_and_opens_one_final_pr_only_after_success() {
     document.nodes[0].access = AccessMode::ReadOnly;
     document.nodes[0].worktree = None;
     assert!(validate_plan(&document).is_err());
+}
+
+#[test]
+fn graph_pr_identity_save_failure_reconciles_without_a_second_creation() {
+    use provenant_records::run::DeliveryMode;
+    #[derive(Default)]
+    struct FailingJournal {
+        checkpoint: Option<GraphCheckpoint>,
+        before_failure: Option<Vec<u8>>,
+        failed: bool,
+    }
+    impl GraphJournal for FailingJournal {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.checkpoint.clone())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if checkpoint.delivered && !self.failed {
+                self.failed = true;
+                self.before_failure = Some(serde_json::to_vec(&self.checkpoint).unwrap());
+                return Err(std::io::Error::other("injected PR identity save failure"));
+            }
+            self.checkpoint = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/writer".into());
+    writer.delivery = Some(DeliveryMode::Integrate("integration".into()));
+    let mut document = graph(vec![writer]);
+    document.integration_branch = Some("integration".into());
+    document.delivery = Some(DeliveryMode::Pr);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = FailingJournal::default();
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Journal(_))
+    ));
+    assert_eq!(
+        serde_json::to_vec(&journal.checkpoint).unwrap(),
+        journal.before_failure.clone().unwrap()
+    );
+    let saved = journal.checkpoint.as_ref().unwrap();
+    assert!(!saved.delivered && saved.pull_request.is_none());
+    assert_eq!(owner.delivery_effects, 1);
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(replay.checkpoint.delivered);
+    assert_eq!(
+        replay.checkpoint.pull_request.as_deref(),
+        Some("https://example.invalid/pr/1")
+    );
+    assert_eq!(owner.delivery_effects, 1);
+    assert_eq!(owner.deliveries, 2);
+}
+
+#[test]
+fn graph_pr_delivery_never_saves_missing_or_clipped_identity() {
+    use provenant_records::run::DeliveryMode;
+    for identity in [
+        None,
+        Some("x".repeat(OUTPUT_FIELD_BYTES + 1)),
+        Some("bad\nurl".into()),
+    ] {
+        let mut writer = node("writer", route("fixture"));
+        writer.access = AccessMode::WorktreeWrite;
+        writer.worktree = Some(".worktrees/writer".into());
+        writer.delivery = Some(DeliveryMode::Integrate("integration".into()));
+        let mut document = graph(vec![writer]);
+        document.integration_branch = Some("integration".into());
+        document.delivery = Some(DeliveryMode::Pr);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+            delivery_identity: Some(identity),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        assert!(matches!(
+            advance(&document, &mut owner, &mut journal),
+            Err(GraphError::Refused(_))
+        ));
+        let saved = journal.0.as_ref().unwrap();
+        assert!(!saved.delivered && saved.pull_request.is_none());
+        assert_eq!(saved.nodes[0].state, NodeState::Succeeded);
+    }
+}
+
+#[test]
+fn legacy_checkpoint_keeps_its_digest_without_delivery_fields() {
+    let fixture = include_str!("../fixtures/legacy-graph-checkpoint.json");
+    for field in [
+        "delivery_required",
+        "delivered",
+        "pull_request",
+        "integration_branch",
+        "delivery",
+        "kind",
+        "condition",
+        "on_fail",
+        "gate",
+        "verdict_error",
+        "ci",
+        "first_observed_stamp",
+        "clock_reanchor_reason",
+        "clock_reanchors",
+    ] {
+        assert!(!fixture.contains(&format!("\"{field}\"")));
+    }
+    let temp = crate::test_support::tempdir().expect("legacy fixture directory");
+    std::fs::write(temp.path().join("graph-g-test.json"), fixture).expect("write frozen fixture");
+    let directory = Directory::open_anchor(temp.path()).expect("fixture directory");
+    let stored = load_checkpoint(&directory, "g-test")
+        .expect("verify original digest")
+        .expect("legacy checkpoint");
+    assert_eq!(
+        stored.digest,
+        "sha256:9e6f6b7b7d78fee26418cb7ff5ef4e8e1149f7ba733514184259a680d8ecfa77"
+    );
+    let mut journal = MemoryJournal(Some(stored.checkpoint));
+    let mut owner = FakeOwner::default();
+    let result =
+        advance(&stored.execution.document, &mut owner, &mut journal).expect("resume legacy graph");
+    assert_eq!(result.status, GraphStatus::Complete);
+    assert_eq!(
+        result.checkpoint.plan_digest,
+        "sha256:2f7f01c7804da30a4f2c2f8ed9dc458e8b239bf79ad491babe15c9c82bb9b014"
+    );
+    let mut explicit_task = stored.execution.document.clone();
+    explicit_task.nodes[0].kind = Some(NodeKind::Task);
+    assert_eq!(
+        advance(&explicit_task, &mut owner, &mut journal).unwrap(),
+        result
+    );
+    assert!(owner.calls.is_empty());
+    let mut corrupt: serde_json::Value = serde_json::from_str(fixture).expect("fixture JSON");
+    corrupt["execution"]["document"]["nodes"][0]["prompt"] = serde_json::json!("tampered");
+    std::fs::write(
+        temp.path().join("graph-g-test.json"),
+        serde_json::to_vec(&corrupt).expect("corrupt JSON"),
+    )
+    .expect("write corrupt fixture");
+    assert!(matches!(
+        load_checkpoint(&directory, "g-test"),
+        Err(JournalError::BadDigest)
+    ));
 }
 
 #[test]
@@ -6778,6 +7757,7 @@ fn deferred_lens_substitution_keeps_panel_topology() {
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
+            required_outputs: Vec::new(),
         }],
     });
     let expansion = Expansion {
@@ -7184,6 +8164,7 @@ fn outputs_feed_direct_dependants_and_survive_replay() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -7230,6 +8211,7 @@ fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -7261,6 +8243,284 @@ fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
         run.checkpoint.nodes[1].advance_error_code.as_deref(),
         Some("upstream_outputs_too_large")
     );
+}
+
+#[test]
+fn optional_findings_distinguish_missing_invalid_and_valid_empty() {
+    for (result, expected, available) in [
+        ("no findings", "parent findings: null", false),
+        ("```findings\nnot json\n```", "parent findings: null", false),
+        (
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+            "parent findings: []",
+            true,
+        ),
+    ] {
+        let mut child = node("child", route("fixture"));
+        child.depends_on.push("parent".into());
+        child.inputs.push(GraphInput {
+            required_outputs: Vec::new(),
+            extra: Default::default(),
+            node: "parent".into(),
+            outputs: vec![OutputKind::Findings],
+        });
+        let document = graph(vec![child, node("parent", route("fixture"))]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal_with_result(AttemptOutcome::Succeeded, result),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert!(owner.prompts[1].contains(expected), "{}", owner.prompts[1]);
+        let output = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "parent")
+            .unwrap()
+            .outputs
+            .as_ref()
+            .unwrap();
+        assert_eq!(output.findings_available, Some(available));
+        let mut stored = serde_json::to_value(output).unwrap();
+        let decoded: NodeOutputs = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(decoded.findings_available, Some(available));
+        stored.as_object_mut().unwrap().remove("findings_available");
+        let older: NodeOutputs = serde_json::from_value(stored).unwrap();
+        assert_eq!(older.findings_available, None);
+        let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        let replayed = replay
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "parent")
+            .unwrap();
+        assert_eq!(
+            replayed.outputs.as_ref().unwrap().findings_available,
+            Some(available)
+        );
+    }
+}
+
+#[test]
+fn required_inputs_stop_before_consumer_attempt_when_unavailable() {
+    let valid_oid = "a".repeat(40);
+    for (kind, text, commit, expected) in [
+        (OutputKind::Findings, "no block", None, false),
+        (
+            OutputKind::Findings,
+            "```findings\ninvalid\n```",
+            None,
+            false,
+        ),
+        (
+            OutputKind::Findings,
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+            None,
+            true,
+        ),
+        (OutputKind::Verdict, "no verdict", None, false),
+        (
+            OutputKind::Verdict,
+            "VERDICT: PASS\nVERDICT: FAIL",
+            None,
+            false,
+        ),
+        (OutputKind::Verdict, "VERDICT: PASS", None, true),
+        (OutputKind::Commit, "result", None, false),
+        (OutputKind::Commit, "result", Some("bad".to_owned()), false),
+        (OutputKind::Commit, "result", Some(valid_oid.clone()), true),
+    ] {
+        let mut parent = node("parent", route("fixture"));
+        if kind == OutputKind::Commit {
+            parent.source = Some(SourceBinding::Commit {
+                commit: valid_oid.clone(),
+            });
+        }
+        let mut child = node("child", route("fixture"));
+        child.depends_on.push("parent".into());
+        child.inputs.push(GraphInput {
+            extra: Default::default(),
+            node: "parent".into(),
+            outputs: vec![kind],
+            required_outputs: vec![kind],
+        });
+        let mut document = graph(vec![child, parent]);
+        document.schema_version = 2;
+        let mut first = terminal_with_result(AttemptOutcome::Succeeded, text);
+        if let AttemptObservation::Terminal { commit: output, .. } = &mut first {
+            *output = commit;
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let child = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "child")
+            .unwrap();
+        if expected {
+            assert_eq!(child.state, NodeState::Succeeded, "{kind:?} {text}");
+            assert_eq!(child.attempts.len(), 1);
+        } else {
+            assert_eq!(child.state, NodeState::Failed, "{kind:?} {text}");
+            assert_eq!(
+                child.advance_error_code.as_deref(),
+                Some("required_input_unavailable")
+            );
+            assert!(child.attempts.is_empty());
+            assert_eq!(owner.calls.len(), 1);
+        }
+        let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        assert_eq!(replay.checkpoint, run.checkpoint);
+    }
+}
+
+#[test]
+fn required_findings_that_do_not_fit_are_not_partially_delivered() {
+    let mut child = node("child", route("fixture"));
+    child.depends_on.push("parent".into());
+    child.inputs.push(GraphInput {
+        extra: Default::default(),
+        node: "parent".into(),
+        outputs: vec![OutputKind::Findings],
+        required_outputs: vec![OutputKind::Findings],
+    });
+    let mut document = graph(vec![child, node("parent", route("fixture"))]);
+    document.schema_version = 2;
+    let text = format!(
+        "```findings\n{}\n```",
+        serde_json::json!({
+            "schema_version":1,
+            "findings":[{"id":"F1","severity":"high","file":"a.rs","summary":"x".repeat(300),"status":"open"}]
+        })
+    );
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal_with_result(AttemptOutcome::Succeeded, &text)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let limits = crate::config::GraphLimits {
+        node_prompt_bytes: 220,
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    let child = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "child")
+        .unwrap();
+    assert_eq!(child.state, NodeState::Failed);
+    assert_eq!(
+        child.advance_error_code.as_deref(),
+        Some("upstream_outputs_too_large")
+    );
+    assert!(child.attempts.is_empty());
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+fn required_values_do_not_trust_a_truncated_source() {
+    for kind in [OutputKind::Findings, OutputKind::Verdict] {
+        let mut child = node("child", route("fixture"));
+        child.depends_on.push("parent".into());
+        child.inputs.push(GraphInput {
+            extra: Default::default(),
+            node: "parent".into(),
+            outputs: vec![kind],
+            required_outputs: vec![kind],
+        });
+        let mut document = graph(vec![child, node("parent", route("fixture"))]);
+        document.schema_version = 2;
+        let mut first = terminal_with_result(
+            AttemptOutcome::Succeeded,
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS",
+        );
+        if let AttemptObservation::Terminal {
+            result: Some(result),
+            ..
+        } = &mut first
+        {
+            result.source_truncated = true;
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([first]),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let child = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "child")
+            .unwrap();
+        assert_eq!(
+            child.advance_error_code.as_deref(),
+            Some("required_input_unavailable")
+        );
+        assert!(child.attempts.is_empty());
+        assert_eq!(owner.calls.len(), 1);
+    }
+}
+
+#[test]
+fn optional_invalid_commit_and_verdict_are_visible_as_unavailable() {
+    let valid_oid = "a".repeat(40);
+    for (kind, text, commit, expected) in [
+        (
+            OutputKind::Verdict,
+            "VERDICT: PASS\nVERDICT: FAIL",
+            None,
+            "parent verdict: null",
+        ),
+        (
+            OutputKind::Commit,
+            "result",
+            Some("not-an-oid".to_owned()),
+            "parent commit: null",
+        ),
+    ] {
+        let mut parent = node("parent", route("fixture"));
+        if kind == OutputKind::Commit {
+            parent.source = Some(SourceBinding::Commit {
+                commit: valid_oid.clone(),
+            });
+        }
+        let mut child = node("child", route("fixture"));
+        child.depends_on.push("parent".into());
+        child.inputs.push(GraphInput {
+            extra: Default::default(),
+            node: "parent".into(),
+            outputs: vec![kind],
+            required_outputs: Vec::new(),
+        });
+        let document = graph(vec![child, parent]);
+        let mut first = terminal_with_result(AttemptOutcome::Succeeded, text);
+        if let AttemptObservation::Terminal { commit: output, .. } = &mut first {
+            *output = commit;
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
+            ..Default::default()
+        };
+        advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert!(owner.prompts[1].contains(expected), "{}", owner.prompts[1]);
+    }
 }
 
 #[test]
@@ -7352,6 +8612,7 @@ fn upstream_data_boundary_cannot_be_closed_by_result_content() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -7390,6 +8651,7 @@ fn synthesise_receives_selected_reviewer_findings_and_emits_typed_output() {
     synthesis.inputs = ["one", "two", "three"]
         .iter()
         .map(|id| GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: (*id).into(),
             outputs: vec![OutputKind::Findings],
@@ -7476,6 +8738,7 @@ fn result_path_is_visible_in_status_but_not_in_input() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -7511,6 +8774,7 @@ fn selected_inputs_without_room_fail_before_launch() {
     child.prompt = "x".repeat(90);
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -7556,6 +8820,7 @@ fn oversized_prompt_with_inputs_pauses_and_resumes_after_extension() {
     child.prompt = "x".repeat(300);
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -7672,6 +8937,7 @@ fn no_input_prompt_does_not_change_on_resume_with_lower_cap() {
     root.prompt = "x".repeat(300);
     let document = graph(vec![root]);
     let mut owner = FakeOwner {
+        input_cap_source: Some(InputCapSource::Default),
         observations: VecDeque::from([
             AttemptObservation::Pending { attempt_ref: None },
             terminal(AttemptOutcome::Succeeded),
@@ -7704,6 +8970,9 @@ fn no_input_prompt_does_not_change_on_resume_with_lower_cap() {
     )
     .unwrap();
     assert_eq!(owner.prompts, vec!["x".repeat(300), "x".repeat(300)]);
+    let attempt = &journal.0.as_ref().unwrap().nodes[0].attempts[0];
+    assert_eq!(attempt.input_cap, Some(500));
+    assert_eq!(attempt.input_cap_source, Some(InputCapSource::Default));
 }
 
 #[test]
@@ -7713,6 +8982,7 @@ fn cap_failure_on_fallback_preserves_prior_attempt_outcome() {
     child.routes = Some(vec![route("first"), route("second")]);
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -7836,12 +9106,14 @@ fn replay_keeps_the_admission_input_cap() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
     });
     let document = graph(vec![child, node("parent", route("fixture"))]);
     let mut owner = FakeOwner {
+        input_cap_source: Some(InputCapSource::Configured),
         observations: VecDeque::from([
             terminal_with_result(AttemptOutcome::Succeeded, &"x".repeat(150)),
             AttemptObservation::Pending { attempt_ref: None },
@@ -7864,6 +9136,7 @@ fn replay_keeps_the_admission_input_cap() {
     .unwrap();
     let original = owner.prompts[1].clone();
     assert!(original.len() > 100);
+    owner.input_cap_source = Some(InputCapSource::Default);
     let changed = crate::config::GraphLimits {
         node_prompt_bytes: 100,
         ..Default::default()
@@ -7877,12 +9150,25 @@ fn replay_keeps_the_admission_input_cap() {
     )
     .unwrap();
     assert_eq!(owner.prompts[2], original);
+    let child = journal
+        .0
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .find(|node| node.id == "child")
+        .unwrap();
+    assert_eq!(
+        child.attempts[0].input_cap_source,
+        Some(InputCapSource::Configured)
+    );
 }
 
 #[test]
 fn inputs_require_unique_direct_dependencies() {
     let mut child = node("child", route("fixture"));
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -8031,6 +9317,7 @@ struct ErrorLauncher {
     now: Option<provenant_core::WallTime>,
     now_after_error: Option<provenant_core::WallTime>,
     admission_seconds: Option<u64>,
+    launch_policy: Option<LaunchRetryPolicy>,
     accepted: bool,
 }
 
@@ -8045,6 +9332,14 @@ impl AttemptOwner for ErrorLauncher {
     }
     fn admission_timeout_seconds(&self) -> Option<u64> {
         Some(self.admission_seconds.unwrap_or(3600))
+    }
+    fn launch_retry_policy(&self) -> LaunchRetryPolicy {
+        self.launch_policy
+            .clone()
+            .unwrap_or_else(|| LaunchRetryPolicy {
+                limit: 20,
+                ..Default::default()
+            })
     }
     fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
         Ok(self.accepted)
@@ -8086,6 +9381,105 @@ fn retry_of(checkpoint: &GraphCheckpoint) -> &LaunchRetry {
         .launch_retry
         .as_ref()
         .expect("a pending launch retry")
+}
+
+#[test]
+fn launch_retry_save_failure_keeps_the_prior_checkpoint() {
+    #[derive(Default)]
+    struct FailingJournal {
+        checkpoint: Option<GraphCheckpoint>,
+        before_failure: Option<Vec<u8>>,
+    }
+    impl GraphJournal for FailingJournal {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.checkpoint.clone())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if checkpoint.nodes.iter().any(|node| {
+                node.launch_retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.failures > 0)
+            }) {
+                self.before_failure = Some(serde_json::to_vec(&self.checkpoint).unwrap());
+                return Err(std::io::Error::other("injected retry save failure"));
+            }
+            self.checkpoint = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: busy_times(1),
+        ..Default::default()
+    };
+    let mut journal = FailingJournal::default();
+    let error = advance(&document, &mut owner, &mut journal).unwrap_err();
+    assert!(
+        matches!(error, GraphError::Journal(ref error) if error.to_string().contains("injected retry save"))
+    );
+    assert_eq!(
+        serde_json::to_vec(&journal.checkpoint).unwrap(),
+        journal.before_failure.unwrap()
+    );
+    let saved = journal.checkpoint.as_ref().unwrap();
+    assert_eq!(saved.nodes[0].state, NodeState::Running);
+    assert_eq!(retry_of(saved).failures, 0);
+    assert!(retry_of(saved).wake_at.is_none());
+    assert!(saved.nodes[0].advance_error_code.is_none());
+}
+
+#[test]
+fn launch_retry_policy_limits_failures_and_persists_the_source() {
+    for limit in [0, 1] {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: busy_times(2),
+            launch_policy: Some(LaunchRetryPolicy {
+                limit,
+                limit_source: "override".into(),
+                first_seconds: 5,
+                max_seconds: 2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let first = advance(&document, &mut owner, &mut journal).unwrap();
+        if limit == 1 {
+            let retry = retry_of(&first.checkpoint);
+            assert_eq!(retry.policy.limit_source, "override");
+            assert_eq!(
+                retry.wake_at,
+                Some(at(5)),
+                "cap cannot undercut first delay"
+            );
+            // A configuration change cannot widen the in-flight retry budget.
+            owner.launch_policy = Some(LaunchRetryPolicy {
+                limit: 20,
+                ..Default::default()
+            });
+            owner.now = Some(at(5));
+            advance(&document, &mut owner, &mut journal).unwrap();
+        }
+        let node = &journal.0.as_ref().unwrap().nodes[0];
+        assert_eq!(node.state, NodeState::Blocked);
+        assert_eq!(
+            node.advance_error_code.as_deref(),
+            Some("launch_retry_exhausted")
+        );
+        let last = node
+            .last_launch_retry
+            .as_ref()
+            .expect("exhausted retry evidence");
+        assert_eq!(last.policy.limit, limit);
+        assert_eq!(last.policy.limit_source, "override");
+        assert_eq!(last.failures, limit + 1);
+        assert!(last.wake_at.is_none());
+        assert_eq!(owner.calls.len(), usize::from(limit) + 1);
+    }
 }
 
 #[test]
@@ -8153,6 +9547,154 @@ fn launch_retry_backoff_starts_after_a_slow_failed_submission() {
     let mut journal = MemoryJournal::default();
     advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(retry_of(journal.0.as_ref().unwrap()).wake_at, Some(at(35)));
+}
+
+#[test]
+fn node_review_base_is_pinned_before_launch_and_reused_on_replay() {
+    let mut reviewer = node("review", route("first"));
+    reviewer
+        .extra
+        .insert("review_base".into(), serde_json::json!("moving-ref"));
+    let mut document = graph(vec![reviewer]);
+    document.schema_version = 2;
+    let pinned = "1".repeat(40);
+    let mut owner = FakeOwner {
+        resolved_review_base: Some(pinned.clone()),
+        observations: VecDeque::from([
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/review".into()),
+            },
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        pending.checkpoint.nodes[0].review_base.as_deref(),
+        Some(pinned.as_str())
+    );
+    owner.resolved_review_base = Some("2".repeat(40));
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.review_base_resolutions, 1);
+    assert_eq!(
+        owner.observed_review_bases,
+        vec![Some(pinned.clone()), Some(pinned)]
+    );
+    let mut broken = journal.0.clone().unwrap();
+    broken.nodes[0].state = NodeState::Running;
+    broken.nodes[0].review_base = None;
+    journal.0 = Some(broken);
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+    assert_eq!(owner.review_base_resolutions, 1);
+}
+
+#[test]
+fn review_base_save_failure_prevents_attempt_creation() {
+    #[derive(Default)]
+    struct FailingJournal(Option<GraphCheckpoint>);
+    impl GraphJournal for FailingJournal {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.0.clone())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if checkpoint.nodes[0].review_base.is_some() {
+                return Err(std::io::Error::other("injected review-base save failure"));
+            }
+            self.0 = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let mut reviewer = node("review", route("first"));
+    reviewer
+        .extra
+        .insert("review_base".into(), serde_json::json!("moving-ref"));
+    let mut document = graph(vec![reviewer]);
+    document.schema_version = 2;
+    let mut owner = FakeOwner {
+        resolved_review_base: Some("1".repeat(40)),
+        ..Default::default()
+    };
+    let mut journal = FailingJournal::default();
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Journal(_))
+    ));
+    assert!(owner.calls.is_empty());
+    assert!(
+        journal.0.is_none(),
+        "failed admission must not save a partial graph"
+    );
+}
+
+#[test]
+fn launch_disposition_transition_needs_no_owner_or_journal() {
+    let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"g-test","plan_digest":"digest",
+        "nodes":[{"id":"one","state":"running","worktree":null,"attempts":[]}]
+    }))
+    .unwrap();
+    let before = checkpoint.clone();
+    let busy = crate::coordination::facade::FacadeError::WriterLockBusy;
+    assert!(
+        apply_launch_disposition(
+            &mut checkpoint,
+            0,
+            &busy,
+            None,
+            60,
+            LaunchRetryPolicy::default()
+        )
+        .is_err()
+    );
+    assert_eq!(checkpoint, before);
+    let policy = LaunchRetryPolicy {
+        limit: 1,
+        ..Default::default()
+    };
+    apply_launch_disposition(&mut checkpoint, 0, &busy, Some(at(0)), 60, policy.clone()).unwrap();
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(retry_of(&checkpoint).failures, 1);
+    assert_eq!(retry_of(&checkpoint).wake_at, Some(at(5)));
+    apply_launch_disposition(&mut checkpoint, 0, &busy, Some(at(5)), 60, policy).unwrap();
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
+    assert_eq!(
+        checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("launch_retry_exhausted")
+    );
+    assert_eq!(
+        checkpoint.nodes[0]
+            .last_launch_retry
+            .as_ref()
+            .unwrap()
+            .failures,
+        2
+    );
+}
+
+#[test]
+fn writer_lock_contention_retries_the_same_attempt_after_release() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, crate::coordination::facade::FacadeError::WriterLockBusy)].into(),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(pending.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(retry_of(&pending.checkpoint).wake_at, Some(at(5)));
+    owner.now = Some(at(5));
+    let completed = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(completed.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(completed.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0], owner.calls[1]);
 }
 
 #[test]
@@ -8347,7 +9889,7 @@ fn launch_wake_is_capped_by_the_original_deadline() {
 }
 
 #[test]
-fn launch_with_an_admission_window_continues_without_a_wall_clock() {
+fn launch_retry_without_a_wall_clock_keeps_the_prior_checkpoint() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         errors: busy_times(1),
@@ -8355,18 +9897,17 @@ fn launch_with_an_admission_window_continues_without_a_wall_clock() {
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
-    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
-    assert!(
-        retry_of(&waiting.checkpoint)
-            .reason
-            .as_deref()
-            .unwrap()
-            .contains("wall clock unavailable")
-    );
+    let error = advance(&document, &mut owner, &mut journal).unwrap_err();
+    assert!(matches!(error, GraphError::Refused(ref reason) if reason.contains("wall clock")));
+    let prior = journal.0.as_ref().unwrap().clone();
+    assert_eq!(prior.nodes[0].state, NodeState::Running);
+    assert_eq!(retry_of(&prior).failures, 0);
+    assert!(retry_of(&prior).wake_at.is_none());
+    owner.now = Some(at(1));
     let result = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(result.checkpoint.nodes[0].state, NodeState::Succeeded);
     assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0], owner.calls[1]);
 }
 
 #[test]
@@ -8464,6 +10005,8 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
         FacadeError::Busy,
         FacadeError::Timeout,
         FacadeError::HomeUnavailable,
+        FacadeError::WriterUnknown,
+        FacadeError::WriterLockBusy,
         FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
@@ -8479,6 +10022,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     for permanent in [
         FacadeError::InvalidInput { detail: None },
         FacadeError::ConfinementRefused,
+        FacadeError::WriterBusy,
         FacadeError::DispatchRefused {
             fact: None,
             disk: None,
@@ -8710,6 +10254,7 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
             .unwrap();
         assert_eq!(composite.state, NodeState::Succeeded);
         let outputs = composite.outputs.as_ref().unwrap();
+        assert_eq!(outputs.findings_available, Some(false));
         assert!(outputs.findings.len() < 2 * count);
         assert!(outputs.findings.len() <= MAX_FINDINGS);
         assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
@@ -8894,6 +10439,7 @@ fn identity_dispositions_preserve_large_inherited_fields() {
     synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
     synthesis.depends_on = vec!["review".into()];
     synthesis.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
@@ -8948,6 +10494,7 @@ fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
     synthesis.inputs = ["a", "b"]
         .into_iter()
         .map(|id| GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: id.into(),
             outputs: vec![OutputKind::Findings],
@@ -9046,6 +10593,10 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
     for invalid in [false, true] {
         let mut review = node("review", route("first"));
         review.kind = Some(NodeKind::Plan);
+        review.extra.insert(
+            "review_base".into(),
+            serde_json::json!("moving-review-base"),
+        );
         review.route = None;
         review.source = Some(SourceBinding::Commit {
             commit: oid.clone(),
@@ -9077,6 +10628,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
             exports: lenses
                 .iter()
                 .map(|lens| GraphInput {
+                    required_outputs: Vec::new(),
                     extra: Default::default(),
                     node: lens.id.clone(),
                     outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -9110,6 +10662,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
         let mut evaluate = node("evaluate", route("first"));
         evaluate.depends_on = vec!["review".into()];
         evaluate.inputs = vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "review".into(),
             outputs: vec![OutputKind::Findings],
@@ -9130,6 +10683,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
         let mut owner = FakeOwner {
             observations,
             review_expansion: Some(addition),
+            resolved_review_base: Some("2".repeat(40)),
             materialise: Some(|requests| MaterialisedInputs {
                 directory: Some("/inputs".into()),
                 index: Some("/inputs/index.json".into()),
@@ -9157,6 +10711,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
             &Default::default(),
         )
         .unwrap();
+        assert_eq!(owner.review_requested_bases, vec![Some("2".repeat(40))]);
         assert_eq!(
             run.checkpoint
                 .nodes
@@ -9224,6 +10779,7 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],

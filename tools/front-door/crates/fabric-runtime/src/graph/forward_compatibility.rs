@@ -65,6 +65,27 @@ record_cases! {
 }
 
 #[test]
+fn source_binding_and_prompt_origin_preserve_unknown_fields() {
+    let binding = json!({
+        "worktree":"/fixture/source",
+        "head":"1".repeat(40),
+        "source_directory_identity":{"device":7,"inode":9},
+        "future_binding":{"owner":"later"}
+    });
+    preserves_digest::<WriterWorktreeBinding>(binding);
+
+    let mut attempt = stored()["checkpoint"]["nodes"][0]["attempts"][0].clone();
+    attempt["input_cap"] = json!(262144);
+    attempt["input_cap_source"] = json!("configured");
+    attempt["input_manifest"] = json!({
+        "schema_version":1,"source_commit":"1".repeat(40),
+        "review_base":null,"integration_base":null,"applied_route":null,
+        "inputs":[],"omitted":0,"future_manifest":{"revision":2}
+    });
+    preserves_digest::<GraphAttempt>(attempt);
+}
+
+#[test]
 fn normalised_plan_retains_document_and_node_extras() {
     let mut value = stored()["execution"]["document"].clone();
     value["future_document"] = json!({"token":u64::MAX});
@@ -217,6 +238,7 @@ fn journal_accepts_v2_and_rejects_v1_review_fields() {
     let mut record: StoredCheckpoint = serde_json::from_value(stored()).unwrap();
     record.execution.document.review_base = Some("base".into());
     record.execution.document.schema_version = 2;
+    record.execution.review_base = Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap());
     record.digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",
         2,
@@ -226,6 +248,18 @@ fn journal_accepts_v2_and_rejects_v1_review_fields() {
     .to_string();
     let bytes = serde_json::to_vec(&record).unwrap();
     assert!(decode_checkpoint(&bytes, "g-test").is_ok());
+    record.execution.review_base = None;
+    record.digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&record.checkpoint, &record.execution),
+    )
+    .unwrap()
+    .to_string();
+    assert!(matches!(
+        decode_checkpoint(&serde_json::to_vec(&record).unwrap(), "g-test"),
+        Err(JournalError::BadEnvelope)
+    ));
     record.execution.document.schema_version = 1;
     let bytes = serde_json::to_vec(&record).unwrap();
     assert!(matches!(

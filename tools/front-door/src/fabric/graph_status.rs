@@ -24,10 +24,23 @@ pub(super) fn graph_status_elapsed(
     }
 }
 
+/// Paths are retained in the journal for replay, but not in graph responses.
+pub(super) fn redact_checkout_paths(
+    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+) {
+    for node in &mut checkpoint.nodes {
+        if let Some(binding) = &mut node.writer_binding {
+            binding.worktree = "[redacted]".into();
+            binding.extra.remove("source_directory_identity");
+        }
+    }
+}
+
 pub(super) fn graph_snapshot(
     mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
 ) -> provenant_fabric_runtime::graph::GraphRun {
     use provenant_fabric_runtime::graph::{GraphRun, GraphStatus, NodeState};
+    redact_checkout_paths(&mut checkpoint);
     let unfinished = checkpoint
         .nodes
         .iter()

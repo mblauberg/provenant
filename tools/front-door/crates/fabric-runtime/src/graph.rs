@@ -38,6 +38,7 @@ mod outputs;
 mod pattern_plan;
 mod plans;
 mod validation;
+mod wait_view;
 #[doc(hidden)]
 pub use plans::prompt as rendered_prompt;
 pub use validation::minimum_schema_version;
@@ -49,6 +50,7 @@ pub use model::*;
 pub use observation::*;
 use outputs::*;
 pub(crate) use validation::*;
+pub use wait_view::{GraphNodeWait, graph_waits};
 #[cfg(test)]
 #[path = "graph/journal_tests.rs"]
 mod file_tests;
@@ -190,11 +192,6 @@ const HOST_ID_BYTES: usize = 256;
 const MAX_UNKNOWN_USAGE: usize = 64;
 const MAX_USAGE_EVENTS: usize = 128;
 
-/// Seconds before the first launch retry; each further failure doubles it.
-const LAUNCH_RETRY_FIRST_SECONDS: u64 = 5;
-/// The longest launch retry wait.
-const LAUNCH_RETRY_MAX_SECONDS: u64 = 600;
-
 /// Entries a prompt lists before referring to the complete input index.
 pub const UPSTREAM_INPUT_LIST_LIMIT: usize = 64;
 
@@ -242,6 +239,16 @@ pub trait AttemptOwner {
         Ok(0)
     }
 
+    /// Origin of the effective node prompt limit, sealed with the attempt.
+    fn input_cap_source(&self) -> InputCapSource {
+        InputCapSource::EffectiveGraphLimits
+    }
+
+    /// Effective launch retry budget and timing, sealed before launch.
+    fn launch_retry_policy(&self) -> LaunchRetryPolicy {
+        LaunchRetryPolicy::default()
+    }
+
     /// Maximum time to admit a launch, measured from its first submission.
     fn admission_timeout_seconds(&self) -> Option<u64> {
         None
@@ -253,7 +260,7 @@ pub trait AttemptOwner {
         &mut self,
         _key: &AttemptKey,
         _reference: &str,
-    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+    ) -> Result<Option<PreparationFallbackEvidence>, Self::Error> {
         Ok(None)
     }
 
@@ -264,6 +271,19 @@ pub trait AttemptOwner {
         _subject: &str,
     ) -> Result<Expansion, ReviewResolveError> {
         Err(ReviewResolveError::Unsupported)
+    }
+
+    /// Resolve a node-specific review base in its bound execution context.
+    /// A host without Git may only accept an already pinned object ID.
+    fn resolve_review_base(
+        &mut self,
+        reference: &str,
+        _worktree: Option<&str>,
+    ) -> Result<Option<String>, Self::Error> {
+        Ok(reference
+            .parse::<provenant_core::GitOid>()
+            .ok()
+            .map(|oid| oid.to_string()))
     }
 
     /// Pin the integration branch at the instant this node is first admitted.
@@ -304,6 +324,8 @@ pub trait AttemptOwner {
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         None
     }
+    /// Reconcile any earlier delivery before creating a PR. A retry after a
+    /// checkpoint write failure must return the existing identity.
     fn deliver_graph(
         &mut self,
         _document: &GraphDocument,
@@ -332,6 +354,29 @@ pub trait AttemptOwner {
     /// Model families that served these attempts. Unknown attempts are skipped.
     fn attempt_families(&mut self, _attempts: &[String]) -> Result<Vec<String>, Self::Error> {
         Ok(Vec::new())
+    }
+
+    /// Verify a registered writer and bind its current source before admission.
+    fn bind_writer_worktree(
+        &mut self,
+        _worktree: &str,
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Graph-wide review and integration bases bound by the execution owner.
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        (None, None)
+    }
+
+    /// The route recorded by the host for an accepted attempt, when known.
+    fn applied_route(&mut self, _attempt: &str) -> Result<Option<GraphRoute>, Self::Error> {
+        Ok(None)
     }
 
     /// Models that served the referenced attempts, in attempt order.
@@ -600,6 +645,43 @@ impl PlannedNode {
     }
 }
 
+/// The verified writer location on a reader's source chain, when known.
+fn source_worktree<'a>(
+    node: &'a PlannedNode,
+    plan: &'a PlannedGraph,
+    checkpoint: &'a GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<&'a str> {
+    let mut current = node;
+    if matches!(node.source, Some(SourceBinding::Commit { .. }))
+        && let Some(origin) = checkpoint
+            .expansions
+            .iter()
+            .find(|expansion| {
+                expansion.review.is_some()
+                    && expansion.nodes.iter().any(|member| member.id == node.id)
+            })
+            .and_then(|expansion| positions.get(&expansion.source))
+    {
+        current = &plan.nodes[*origin];
+    }
+    for _ in 0..plan.nodes.len() {
+        let source = match &current.source {
+            Some(SourceBinding::Node { node } | SourceBinding::Head { node }) => node,
+            _ => return None,
+        };
+        let index = *positions.get(source)?;
+        current = &plan.nodes[index];
+        if plans::writer(current) {
+            return checkpoint.nodes[index]
+                .writer_binding
+                .as_ref()
+                .map(|binding| binding.worktree.as_str());
+        }
+    }
+    None
+}
+
 /// The verifier belongs to the same panel when it follows the deferred lens
 /// group in the same composite scope. Lens members belong directly.
 fn review_panel_contains(
@@ -716,20 +798,28 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
 /// retry observes an already accepted attempt instead of launching twice.
 fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
     use crate::coordination::facade::FacadeError;
-    let Some(error) = error.downcast_ref::<FacadeError>() else {
-        return false;
-    };
-    matches!(
-        error,
-        FacadeError::Busy
-            | FacadeError::Timeout
-            | FacadeError::HomeUnavailable
+    use provenant_core::retry::{RetryCause, is_transient};
+    let cause = match error.downcast_ref::<FacadeError>() {
+        Some(FacadeError::Busy | FacadeError::WriterLockBusy | FacadeError::WriterUnknown) => {
+            RetryCause::Contention
+        }
+        Some(FacadeError::Timeout) => RetryCause::Timeout,
+        Some(
+            FacadeError::HomeUnavailable
             | FacadeError::Io { .. }
             | FacadeError::DispatchUnobserved { .. }
             | FacadeError::HostDeliveryStage { .. }
             | FacadeError::HostDeliveryLimit { .. }
-            | FacadeError::LaunchUnknown { .. }
-    )
+            | FacadeError::LaunchUnknown { .. },
+        ) => RetryCause::Transport,
+        _ => RetryCause::Permanent,
+    };
+    is_transient(cause)
+}
+
+fn bounded_launch_retry_policy(mut policy: LaunchRetryPolicy) -> LaunchRetryPolicy {
+    policy.limit_source = bounded(&policy.limit_source, 32);
+    policy
 }
 
 fn launch_diagnostic(error: &(dyn Error + 'static)) -> provenant_records::diagnostic::Diagnostic {
@@ -749,31 +839,33 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     error: &R::Error,
     clock: Option<provenant_core::WallTime>,
     admission_seconds: u64,
+    policy: LaunchRetryPolicy,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
+    apply_launch_disposition(checkpoint, index, error, clock, admission_seconds, policy)
+        .map_err(GraphError::Refused)?;
+    journal.save(checkpoint).map_err(GraphError::Journal)
+}
+
+/// Pure transition: callers persist the resulting checkpoint before reporting it.
+fn apply_launch_disposition(
+    checkpoint: &mut GraphCheckpoint,
+    index: usize,
+    error: &(dyn Error + 'static),
+    clock: Option<provenant_core::WallTime>,
+    admission_seconds: u64,
+    policy: LaunchRetryPolicy,
+) -> Result<(), String> {
     let retrying = launch_retry_kind(error);
     if retrying {
         let Some(now) = clock else {
-            let retry = checkpoint.nodes[index]
-                .launch_retry
-                .get_or_insert_with(|| LaunchRetry {
-                    extra: Default::default(),
-                    failures: 0,
-                    deadline: None,
-                    wake_at: None,
-                    reason: None,
-                });
-            retry.failures = retry.failures.saturating_add(1);
-            retry.wake_at = None;
-            retry.reason =
-                Some("wall clock unavailable; launch retry timing is unavailable".into());
-            asks::refresh_wake(checkpoint);
-            return journal.save(checkpoint).map_err(GraphError::Journal);
+            return Err("wall clock unavailable; cannot record a launch retry wake".into());
         };
         let retry = checkpoint.nodes[index]
             .launch_retry
             .get_or_insert_with(|| LaunchRetry {
                 extra: Default::default(),
+                policy: bounded_launch_retry_policy(policy),
                 failures: 0,
                 deadline: None,
                 wake_at: None,
@@ -787,22 +879,26 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                     .ok()
                     .and_then(|duration| now.checked_add(duration).ok())
                 else {
-                    retry.wake_at = None;
-                    retry.reason = Some(
-                        "launch retry deadline unavailable; retry timing is unavailable".into(),
+                    return Err(
+                        "launch retry deadline unavailable; cannot record a retry wake".into(),
                     );
-                    asks::refresh_wake(checkpoint);
-                    return journal.save(checkpoint).map_err(GraphError::Journal);
                 };
                 retry.deadline = Some(deadline);
                 deadline
             }
         };
-        if now < deadline {
+        let projected = launch_diagnostic(error);
+        retry.reason = Some(bounded(
+            projected.detail.as_deref().unwrap_or(&projected.code),
+            MAX_ADVANCE_ERROR_BYTES,
+        ));
+        if now < deadline && retry.failures <= retry.policy.limit {
             let delay = provenant_core::retry::Backoff::new(
-                std::time::Duration::from_secs(LAUNCH_RETRY_FIRST_SECONDS),
+                std::time::Duration::from_secs(retry.policy.first_seconds),
                 2,
-                std::time::Duration::from_secs(LAUNCH_RETRY_MAX_SECONDS),
+                std::time::Duration::from_secs(
+                    retry.policy.max_seconds.max(retry.policy.first_seconds),
+                ),
             )
             .delay(u64::from(retry.failures) - 1);
             retry.wake_at = Some(
@@ -811,13 +907,8 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                     .and_then(|duration| now.checked_add(duration).ok())
                     .map_or(deadline, |wake| wake.min(deadline)),
             );
-            let projected = launch_diagnostic(error);
-            retry.reason = Some(bounded(
-                projected.detail.as_deref().unwrap_or(&projected.code),
-                MAX_ADVANCE_ERROR_BYTES,
-            ));
             asks::refresh_wake(checkpoint);
-            return journal.save(checkpoint).map_err(GraphError::Journal);
+            return Ok(());
         }
     }
     // A permanent refusal, or a retry budget spent: block the node with the
@@ -837,7 +928,6 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         .next
         .as_deref()
         .unwrap_or("inspect the node's inputs and state before retrying");
-    let error: &(dyn Error + 'static) = error;
     let recovery = if error
         .downcast_ref::<crate::coordination::facade::FacadeError>()
         .is_some_and(|e| {
@@ -868,9 +958,15 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     progress.state = NodeState::Blocked;
     // Keep the attempt row even when launch handoff is uncertain. A guardian
     // may already exist, and cancellation needs its identity and custody.
-    progress.launch_retry = None;
+    let prior_retry = progress.launch_retry.take();
+    if retrying {
+        progress.last_launch_retry = prior_retry.map(|mut retry| {
+            retry.wake_at = None;
+            retry
+        });
+    }
     asks::refresh_wake(checkpoint);
-    journal.save(checkpoint).map_err(GraphError::Journal)
+    Ok(())
 }
 
 /// Revert cancellation-only state changes without altering attempt records.
@@ -1054,7 +1150,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 return Err(GraphError::Invalid(reason));
             }
             let asks = may_ask(&plan);
-            let checkpoint = GraphCheckpoint {
+            let (bound_review_base, bound_integration_base) = owner.bound_graph_bases();
+            let mut checkpoint = GraphCheckpoint {
+                bound_review_base: bound_review_base.map(|base| base.to_string()),
+                bound_integration_base: bound_integration_base.map(|base| base.to_string()),
                 extra: Default::default(),
                 expansions: Vec::new(),
                 remaining: None,
@@ -1098,7 +1197,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .composite
                             .as_ref()
                             .and_then(|spec| spec.min_successful),
-                        source_commit: None,
+                        source_binding: node.source.clone(),
+                        source_commit: match &node.source {
+                            Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+                            _ => None,
+                        },
+                        writer_binding: None,
+                        writer_binding_pending: plans::writer(node),
+                        review_base: None,
+                        review_base_pending: node.access == AccessMode::ReadOnly
+                            && node.extra.contains_key("review_base"),
                         fragment: None,
                         handoff: None,
                         expansion_pause: None,
@@ -1118,11 +1226,87 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         advance_error: None,
                         advance_error_code: None,
                         launch_retry: None,
+                        last_launch_retry: None,
                         outputs: None,
                         attempts: Vec::new(),
                     })
                     .collect(),
             };
+            {
+                for (node, progress) in plan.nodes.iter().zip(&mut checkpoint.nodes) {
+                    // A loop round's worktree is advanced by earlier rounds;
+                    // its starting head becomes known only at that round.
+                    if plans::writer(node) && node.round.is_none() {
+                        let worktree = node
+                            .worktree
+                            .as_deref()
+                            .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
+                        let binding = match owner.bind_writer_worktree(worktree) {
+                            Ok(binding) => binding,
+                            Err(error) => {
+                                progress.state = NodeState::Failed;
+                                progress.advance_error_code =
+                                    Some("writer_binding_unavailable".into());
+                                progress.advance_error = Some(bounded(
+                                    &format!("node {}: cannot bind writer: {error}", node.id),
+                                    MAX_ADVANCE_ERROR_BYTES,
+                                ));
+                                continue;
+                            }
+                        };
+                        let Some(binding) = binding else {
+                            if document.schema_version >= 2 {
+                                return Err(GraphError::Refused(format!(
+                                    "node {}: host cannot bind the writer source",
+                                    node.id
+                                )));
+                            }
+                            progress.writer_binding_pending = false;
+                            continue;
+                        };
+                        if !std::path::Path::new(&binding.worktree).is_absolute()
+                            || binding.worktree.len() > 4096
+                            || binding.head.parse::<provenant_core::GitOid>().is_err()
+                        {
+                            return Err(GraphError::Refused(format!(
+                                "node {}: writer binding is invalid",
+                                node.id
+                            )));
+                        }
+                        if node.source.is_none() && node.continues.is_none() {
+                            progress.source_commit = Some(binding.head.clone());
+                        }
+                        progress.writer_binding = Some(binding);
+                        progress.writer_binding_pending = false;
+                    }
+                }
+            }
+            // Pin named review bases while the admitted source locations are
+            // still the ones selected for this execution.
+            for index in 0..plan.nodes.len() {
+                if !checkpoint.nodes[index].review_base_pending {
+                    continue;
+                }
+                let node = &plan.nodes[index];
+                let location = source_worktree(node, &plan, &checkpoint, &positions);
+                if matches!(
+                    node.source,
+                    Some(SourceBinding::Node { .. } | SourceBinding::Head { .. })
+                ) && location.is_none()
+                {
+                    continue;
+                }
+                let reference = node
+                    .extra
+                    .get("review_base")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| GraphError::Invalid("node review base missing".into()))?;
+                let base = owner.resolve_review_base(reference, location).map_err(GraphError::Run)?
+                    .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
+                    .ok_or_else(|| GraphError::Refused(format!("node {}: review base could not be bound; correct the reference and rerun", node.id)))?;
+                checkpoint.nodes[index].review_base = Some(base);
+                checkpoint.nodes[index].review_base_pending = false;
+            }
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
             checkpoint
         }
@@ -1558,10 +1742,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     reason: reason.map(|reason| bounded(&reason, OUTPUT_FIELD_BYTES)),
                     on_fail: node.on_fail.clone(),
                 });
-                progress.outputs = Some(ci::outputs(
-                    progress.state == NodeState::Succeeded,
-                    progress.ci.as_ref(),
-                ));
+                let passed = progress.state == NodeState::Succeeded;
+                progress.outputs = Some(if matches!(condition, GateCondition::Ci { .. }) {
+                    ci::outputs(passed, progress.ci.as_ref())
+                } else {
+                    gate_outputs(passed)
+                });
                 if let Some(ci) = progress.ci.as_mut() {
                     ci.wake_at = None;
                 }
@@ -1579,6 +1765,50 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     serde_json::json!({"retries":retries,"origin":origin}),
                 );
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            }
+            let requested_review_base = (node.access == AccessMode::ReadOnly)
+                .then(|| {
+                    node.extra
+                        .get("review_base")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .flatten()
+                .filter(|base| !base.is_empty());
+            if let Some(reference) = requested_review_base {
+                let progress = &checkpoint.nodes[node_index];
+                if progress.review_base.is_none() && !progress.attempts.is_empty() {
+                    return Err(GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "node review base must be bound before its first attempt",
+                    });
+                }
+                if let Some(base) = &progress.review_base {
+                    if base.parse::<provenant_core::GitOid>().is_err() {
+                        return Err(GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "node review base must be a full object ID",
+                        });
+                    }
+                } else {
+                    let base = owner
+                        .resolve_review_base(
+                            reference,
+                            source_worktree(node, &plan, &checkpoint, &positions)
+                                .or(node.worktree.as_deref()),
+                        )
+                        .map_err(GraphError::Run)?;
+                    let Some(base) =
+                        base.filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
+                    else {
+                        return Err(GraphError::Refused(format!(
+                            "node {}: review base could not be bound; correct the reference and rerun",
+                            node.id
+                        )));
+                    };
+                    checkpoint.nodes[node_index].review_base = Some(base);
+                    checkpoint.nodes[node_index].review_base_pending = false;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
             }
             if node.review.is_some() {
                 if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
@@ -1628,17 +1858,23 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         node: node.id.clone(),
                         invariant: "deferred review node must have a source commit",
                     })?;
-                let original = expanded
+                let mut original = expanded
                     .nodes
                     .iter()
                     .find(|candidate| candidate.id == node.id)
+                    .cloned()
                     .ok_or_else(|| GraphError::BadCheckpoint {
                         node: node.id.clone(),
                         invariant: "deferred review node must exist in the expanded plan",
                     })?;
+                if let Some(base) = &checkpoint.nodes[node_index].review_base {
+                    original
+                        .extra
+                        .insert("review_base".into(), serde_json::json!(base));
+                }
                 let mut resolution_error_code = "review_resolution_failed";
                 let result = owner
-                    .resolve_review(original, subject)
+                    .resolve_review(&original, subject)
                     .map_err(|error| {
                         if matches!(error, ReviewResolveError::Unsupported) {
                             resolution_error_code = "review_resolution_unsupported";
@@ -1660,20 +1896,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 child.source = Some(SourceBinding::Commit {
                                     commit: subject.to_owned(),
                                 });
+                                if let Some(base) = &checkpoint.nodes[node_index].review_base {
+                                    child.extra.insert("review_base".into(), serde_json::json!(base));
+                                }
                             }
                         }
-                        if checkpoint
-                            .expansions
-                            .iter()
-                            .filter_map(|item| item.review.as_ref())
-                            .any(|review| {
-                                addition
-                                    .review
-                                    .as_ref()
-                                    .is_some_and(|next| review.base != next.base)
-                            })
-                        {
-                            return Err("review expansions disagree on the base".into());
+                        let expected_base = checkpoint.nodes[node_index].review_base.as_deref()
+                            .or(checkpoint.bound_review_base.as_deref())
+                            .or(checkpoint.bound_integration_base.as_deref());
+                        if expected_base.is_some_and(|base| addition.review.as_ref().is_none_or(|review| review.base.to_string() != base)) {
+                            return Err("review expansion base does not match its bound base".into());
                         }
                         plans::validate_review_addition(&expanded, &addition)?;
                         if addition.source != node.id
@@ -1802,7 +2034,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 .unwrap_or("retry the graph advance")
                         ));
                         progress.state = NodeState::Blocked;
-                        progress.launch_retry = None;
+                        progress.last_launch_retry =
+                            progress.launch_retry.take().map(|mut retry| {
+                                retry.wake_at = None;
+                                retry
+                            });
                         asks::refresh_wake(&mut checkpoint);
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
@@ -1953,10 +2189,58 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .map_err(|_| GraphError::Invalid(String::from("route count")))?,
                 };
 
+                // Expanded writers acquire their binding as soon as they exist.
+                if plans::writer(node)
+                    && checkpoint.nodes[node_index].writer_binding.is_none()
+                    && checkpoint.nodes[node_index].attempts.is_empty()
+                {
+                    let path = node
+                        .worktree
+                        .as_deref()
+                        .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
+                    let binding = match owner.bind_writer_worktree(path) {
+                        Ok(binding) => binding,
+                        Err(error) => {
+                            let progress = &mut checkpoint.nodes[node_index];
+                            progress.state = NodeState::Failed;
+                            progress.advance_error_code = Some("writer_binding_unavailable".into());
+                            progress.advance_error = Some(bounded(
+                                &format!("node {}: cannot bind writer: {error}", node.id),
+                                MAX_ADVANCE_ERROR_BYTES,
+                            ));
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            break;
+                        }
+                    };
+                    if binding.is_none() && document.schema_version >= 2 {
+                        return Err(GraphError::Refused(format!(
+                            "node {}: host cannot bind the writer source",
+                            node.id
+                        )));
+                    }
+                    if let Some(binding) = binding {
+                        if !std::path::Path::new(&binding.worktree).is_absolute()
+                            || binding.worktree.len() > 4096
+                            || binding.head.parse::<provenant_core::GitOid>().is_err()
+                        {
+                            return Err(GraphError::Refused(format!(
+                                "node {}: writer binding is invalid",
+                                node.id
+                            )));
+                        }
+                        if node.source.is_none() && node.continues.is_none() {
+                            checkpoint.nodes[node_index].source_commit = Some(binding.head.clone());
+                        }
+                        checkpoint.nodes[node_index].writer_binding = Some(binding);
+                    }
+                    checkpoint.nodes[node_index].writer_binding_pending = false;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
                 let needs_record = checkpoint.nodes[node_index]
                     .attempts
                     .last()
                     .is_none_or(|last| last.state == AttemptState::Terminal);
+                let mut prepared_inputs = None;
                 if needs_record {
                     let cap = limits.node_prompt_bytes;
                     if node.access == AccessMode::WorktreeWrite
@@ -1998,6 +2282,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         checkpoint
                             .pause_code
                             .get_or_insert_with(|| "budget_exceeded".into());
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
+                    if let Some(missing) =
+                        required_input_unavailable(node, &plan, &checkpoint, &positions)
+                    {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some("required_input_unavailable".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: required input {missing} is unavailable or invalid; repair the producer and rerun the graph",
+                            node.id
+                        ));
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
@@ -2140,6 +2437,40 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
+                    // File pointers are part of the prompt cap too. Stage them
+                    // before recording an attempt so a delivery that cannot fit
+                    // fails the consumer without launching it.
+                    let requests = upstream_results(node, &plan, &checkpoint, &positions);
+                    let materialised = if requests.is_empty() {
+                        None
+                    } else {
+                        owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
+                    };
+                    let files = materialised.as_ref().map_or_else(String::new, |files| {
+                        render_files(&files.entries, &requests, files.index.as_deref())
+                    });
+                    let prompt_bytes = render_input(node, &plan, &checkpoint, &positions, cap)
+                        .0
+                        .len();
+                    if !node.inputs.is_empty() && prompt_bytes.saturating_add(files.len()) > cap {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some("upstream_outputs_too_large".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: selected upstream file notices do not fit; increase node_prompt_bytes and restart the graph",
+                            node.id
+                        ));
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
+                    prepared_inputs = Some((requests, materialised));
+                    let mut initial_manifest =
+                        attempt_input_manifest(node, &plan, &checkpoint, &positions, &[], None);
+                    for input in &mut initial_manifest.inputs {
+                        if matches!(input.kind, OutputKind::Result | OutputKind::Findings) {
+                            input.file_delivery = InputDelivery::Pending;
+                        }
+                    }
                     let review_substitution = checkpoint.nodes[node_index]
                         .attempts
                         .last()
@@ -2171,7 +2502,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         launched: true,
                         launch_actor: owner.actor(),
                         settled: 0,
-                        input_cap: (!node.inputs.is_empty()).then_some(cap),
+                        input_cap: Some(cap),
+                        input_cap_source: Some(owner.input_cap_source()),
+                        input_manifest: Some(initial_manifest),
                         usage: None,
                     });
                     checkpoint.nodes[node_index].state = NodeState::Running;
@@ -2183,6 +2516,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         });
                         checkpoint.nodes[node_index].launch_retry = Some(LaunchRetry {
                             extra: Default::default(),
+                            policy: bounded_launch_retry_policy(owner.launch_retry_policy()),
                             failures: 0,
                             deadline,
                             wake_at: None,
@@ -2210,17 +2544,32 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .and_then(|attempt| attempt.input_cap)
                     .unwrap_or(limits.node_prompt_bytes);
                 let mut prompt = render_input(node, &plan, &checkpoint, &positions, input_cap).0;
-                // An accepted attempt is only observed, so its files exist
-                // already and its prompt is not sent again.
-                let requests = if stored_ref.is_some() {
-                    Vec::new()
+                let accepted = if stored_ref.is_some() {
+                    true
                 } else {
-                    upstream_results(node, &plan, &checkpoint, &positions)
+                    let attempt =
+                        checkpoint.nodes[node_index]
+                            .attempts
+                            .last()
+                            .ok_or_else(|| GraphError::BadCheckpoint {
+                                node: node.id.clone(),
+                                invariant: "an observed attempt must have a checkpoint row",
+                            })?;
+                    owner.launch_accepted(attempt).map_err(GraphError::Run)?
                 };
-                let materialised = if requests.is_empty() {
-                    None
+                // Accepted attempts are observed with their immutable run input.
+                let (requests, materialised) = if stored_ref.is_some() {
+                    (Vec::new(), None)
+                } else if let Some(prepared) = prepared_inputs {
+                    prepared
                 } else {
-                    owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
+                    let requests = upstream_results(node, &plan, &checkpoint, &positions);
+                    let materialised = if requests.is_empty() {
+                        None
+                    } else {
+                        owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
+                    };
+                    (requests, materialised)
                 };
                 if let Some(materialised) = &materialised {
                     prompt.push_str(&render_files(
@@ -2228,6 +2577,32 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &requests,
                         materialised.index.as_deref(),
                     ));
+                }
+                if !accepted && !node.inputs.is_empty() && prompt.len() > input_cap {
+                    return Err(GraphError::Refused(format!(
+                        "node {}: selected upstream file notices no longer fit the saved node_prompt_bytes; restore the original delivery or restart with a larger limit",
+                        node.id
+                    )));
+                }
+                if !accepted {
+                    let manifest = attempt_input_manifest(
+                        node,
+                        &plan,
+                        &checkpoint,
+                        &positions,
+                        &requests,
+                        materialised.as_ref(),
+                    );
+                    checkpoint.nodes[node_index]
+                        .attempts
+                        .last_mut()
+                        .ok_or_else(|| GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "an observed attempt must have a checkpoint row",
+                        })?
+                        .input_manifest = Some(manifest);
+                    // Evidence is durable before the owner can submit the attempt.
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
                 // The writer is the nearest writing node along the source chain,
                 // so a framing node between a lens and the writer is skipped.
@@ -2426,10 +2801,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         distinct_from_attempts: &distinct_attempts,
                         require_distinct,
                         source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
-                        review_base: node
-                            .extra
-                            .get("review_base")
-                            .and_then(serde_json::Value::as_str),
+                        review_base: checkpoint.nodes[node_index].review_base.as_deref(),
                         title: node.title.as_deref().unwrap_or(&node.id),
                         prompt: &prompt,
                         required_verdict: node.required_verdict.as_deref(),
@@ -2440,7 +2812,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     },
                     &route,
                     node.access,
-                    node.worktree.as_deref(),
+                    if node.access == AccessMode::ReadOnly {
+                        source_worktree(node, &plan, &checkpoint, &positions)
+                            .or(node.worktree.as_deref())
+                    } else {
+                        checkpoint.nodes[node_index]
+                            .writer_binding
+                            .as_ref()
+                            .map(|binding| binding.worktree.as_str())
+                            .or(node.worktree.as_deref())
+                    },
                     Replay {
                         delivery: land::delivery(node),
                         branch: continued.as_deref(),
@@ -2467,12 +2848,65 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             &error,
                             owner.wall_now(),
                             owner.admission_timeout_seconds().unwrap_or(3600),
+                            owner.launch_retry_policy(),
                             journal,
                         )?;
                         break;
                     }
                     Err(error) => return Err(GraphError::Run(error)),
                 };
+                let applied_route = match &observation {
+                    AttemptObservation::Pending { attempt_ref }
+                    | AttemptObservation::Unknown { attempt_ref }
+                    | AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref
+                        .as_ref()
+                        .and_then(|reference| owner.applied_route(reference).ok().flatten()),
+                };
+                if let Some(mut route) = applied_route {
+                    let clean = |value: &mut Option<String>| {
+                        if value.as_ref().is_some_and(|value| {
+                            value.is_empty()
+                                || value.len() > HOST_ID_BYTES
+                                || value.starts_with('/')
+                                || !value.bytes().all(|b| {
+                                    b.is_ascii_alphanumeric()
+                                        || matches!(
+                                            b,
+                                            b'/' | b'-' | b'_' | b'.' | b':' | b'@' | b'+'
+                                        )
+                                })
+                        }) {
+                            *value = None;
+                        }
+                    };
+                    for value in [
+                        &mut route.adapter,
+                        &mut route.name,
+                        &mut route.model,
+                        &mut route.alias,
+                        &mut route.effort,
+                        &mut route.account,
+                    ] {
+                        clean(value);
+                    }
+                    // An applied route identifies one selection. Keep its concrete
+                    // model when present, otherwise retain the alias before a name.
+                    // This also bounds the retained selection to four fields.
+                    if route.model.is_some() {
+                        route.alias = None;
+                        route.name = None;
+                    } else if route.alias.is_some() {
+                        route.name = None;
+                    }
+                    route.extra.clear();
+                    if let Some(manifest) = checkpoint.nodes[node_index]
+                        .attempts
+                        .last_mut()
+                        .and_then(|attempt| attempt.input_manifest.as_mut())
+                    {
+                        manifest.applied_route = Some(route);
+                    }
+                }
                 let (fallback_evidence, evidence_unreadable) = match &observation {
                     AttemptObservation::Terminal {
                         attempt_ref: Some(reference),
@@ -2684,6 +3118,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             }
                             outputs.warnings.truncate(MAX_WARNINGS);
                             if outcome == AttemptOutcome::UsageLimited {
+                                outputs.findings_available = Some(false);
                                 outputs
                                     .warnings
                                     .retain(|warning| !warning.starts_with(FINDINGS_INVALID));
@@ -3007,10 +3442,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             && !checkpoint.delivered
             && checkpoint.successful()
         {
-            checkpoint.pull_request = owner
+            let url = owner
                 .deliver_graph(&expanded, &checkpoint)
                 .map_err(GraphError::Run)?
-                .map(|url| bounded(&url, OUTPUT_FIELD_BYTES));
+                .ok_or_else(|| {
+                    GraphError::Refused(
+                        "PR delivery returned no identity; reconcile delivery before retrying"
+                            .into(),
+                    )
+                })?;
+            if url.trim().is_empty()
+                || url.chars().any(char::is_control)
+                || encoded_len(&url) > OUTPUT_FIELD_BYTES
+            {
+                return Err(GraphError::Refused("PR delivery identity is invalid or exceeds its bound; reconcile delivery before retrying".into()));
+            }
+            checkpoint.pull_request = Some(url);
             checkpoint.delivered = true;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
@@ -3170,6 +3617,7 @@ fn gate_outputs(passed: bool) -> NodeOutputs {
         result: None,
         verdict: Some(if passed { "PASS" } else { "FAIL" }.to_owned()),
         findings: Vec::new(),
+        findings_available: Some(true),
         branch: None,
         commit: None,
         warnings: Vec::new(),

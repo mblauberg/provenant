@@ -156,6 +156,7 @@
         },
         "verdict": null,
         "findings": [],
+        "findings_available": false,
         "branch": null,
         "commit": null,
         "warnings": [
@@ -196,6 +197,7 @@
         },
         "verdict": null,
         "findings": [],
+        "findings_available": false,
         "branch": null,
         "commit": null,
         "warnings": [
@@ -236,6 +238,7 @@
         },
         "verdict": null,
         "findings": [],
+        "findings_available": false,
         "branch": null,
         "commit": null,
         "warnings": [
@@ -276,6 +279,7 @@
         },
         "verdict": null,
         "findings": [],
+        "findings_available": false,
         "branch": null,
         "commit": null,
         "warnings": [

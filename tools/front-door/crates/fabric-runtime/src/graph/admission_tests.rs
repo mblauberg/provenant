@@ -11,6 +11,127 @@ fn document(version: u32, nodes: Value) -> GraphDocument {
 }
 
 #[test]
+fn admission_refuses_unenforced_required_output_fields() {
+    {
+        let key = "required";
+        let mut selector = json!({"node":"source", "outputs":["findings"]});
+        selector[key] = json!(["findings"]);
+        let graph = document(
+            2,
+            json!([
+            {"id":"source","prompt":"source","access":"read_only","routes":[{"alias":"senior"}]},
+            {"id":"consumer","prompt":"consumer","access":"read_only", "routes":[{"alias":"senior"}], "depends_on":["source"], "inputs":[selector]}
+            ]),
+        );
+        let error = graph
+            .admit(&crate::config::GraphLimits::default())
+            .unwrap_err();
+        assert!(error.contains("required output"), "{key}: {error}");
+        let round_trip: GraphDocument =
+            serde_json::from_value(serde_json::to_value(&graph).unwrap()).unwrap();
+        assert_eq!(
+            round_trip.nodes[1].inputs[0].extra[key],
+            json!(["findings"])
+        );
+    }
+}
+
+#[test]
+fn node_review_base_requires_v2_and_a_nonempty_reference() {
+    for (version, base, allowed) in [
+        (1, json!("main"), false),
+        (2, json!("main"), true),
+        (2, json!(""), false),
+        (2, json!(7), false),
+    ] {
+        let graph = document(
+            version,
+            json!([
+                {"id":"review","prompt":"review","access":"read_only","route":{"alias":"senior"},"review_base":base}
+            ]),
+        );
+        assert_eq!(
+            graph.admit(&crate::config::GraphLimits::default()).is_ok(),
+            allowed
+        );
+    }
+}
+
+#[test]
+fn required_output_contract_requires_v2_and_selected_supported_kinds() {
+    let make = |version, required: Value| {
+        document(
+            version,
+            json!([
+                {"id":"source","prompt":"source","access":"read_only","routes":[{"alias":"senior"}]},
+                {"id":"consumer","prompt":"consumer","access":"read_only","routes":[{"alias":"senior"}],"depends_on":["source"],"inputs":[{"node":"source","outputs":["findings"],"required_outputs":required}]}
+            ]),
+        )
+    };
+    let limits = crate::config::GraphLimits::default();
+    assert!(make(1, json!(["findings"])).admit(&limits).is_err());
+    assert!(make(2, json!(["findings"])).admit(&limits).is_ok());
+    for required in [
+        json!(["verdict"]),
+        json!(["findings", "findings"]),
+        json!(["result"]),
+    ] {
+        assert!(make(2, required).admit(&limits).is_err());
+    }
+    let composite = document(
+        2,
+        json!([
+            {"id":"source","kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":"member","prompt":"x","access":"read_only","routes":[{"alias":"senior"}]}],
+                "exports":[{"node":"member","outputs":["findings"]}]
+            }},
+            {"id":"consumer","prompt":"consumer","access":"read_only","routes":[{"alias":"senior"}],"depends_on":["source"],"inputs":[{"node":"source","outputs":["findings"],"required_outputs":["findings"]}]}
+        ]),
+    );
+    assert!(composite.admit(&limits).is_ok());
+    let mut unsupported = composite.clone();
+    unsupported.nodes[1].inputs[0].outputs = vec![OutputKind::Verdict];
+    unsupported.nodes[1].inputs[0].required_outputs = vec![OutputKind::Verdict];
+    assert!(
+        unsupported
+            .admit(&limits)
+            .unwrap_err()
+            .contains("cannot yet be verified")
+    );
+    let planner = document(
+        2,
+        json!([{
+            "id":"plan", "kind":"plan", "access":"read_only", "plan":{
+                "kinds":[], "max_nodes":1,
+                "patterns":[{"name":"p", "nodes":[], "exports":[{"node":"x","outputs":["findings"],"required_outputs":["findings"]}]}]
+            }
+        }]),
+    );
+    assert!(
+        validate_output_kinds(&planner)
+            .unwrap_err()
+            .contains("planner exports")
+    );
+    let prior_round = document(
+        2,
+        json!([{
+            "id":"loop", "kind":"loop", "access":"read_only", "loop":{
+                "max_rounds":2, "until":"work", "body":[{
+                    "id":"work", "prompt":"work", "access":"read_only", "routes":[{"alias":"senior"}],
+                    "inputs":[{"node":"previous.work","outputs":["findings"],"required_outputs":["findings"]}]
+                }]
+            }
+        }]),
+    );
+    assert!(
+        prior_round
+            .admit(&limits)
+            .unwrap_err()
+            .contains("previous-round")
+    );
+}
+
+#[test]
 fn admission_schema_matrix() {
     let plain = json!([{"id":"n","prompt":"x","access":"read_only"}]);
     assert!(validate_schema(&document(1, plain.clone())).is_ok());
