@@ -102,7 +102,7 @@ boundary = "unclassified"
 reason = "Authentication, token identity, continuation and private-state checks can refuse preparation; classify each case separately."
 
 [[guard]]
-site = "run/src/launch.rs#Service::start_inner"
+site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "authority"
 reason = "Request digest and host-owned retry checks bind launch to the validated request and caller."
 
@@ -135,3 +135,13 @@ reason = "Invalid build-slot paths or environment values refuse setup."
 site = "providers/src/identity.rs#RegisteredAccount::validate_route"
 boundary = "authority"
 reason = "The selected account must match the route it authorises."
+
+[[guard]]
+site = "run/src/launch.rs#RunStore::check_child_attempt_id"
+boundary = "authority"
+reason = "Child attempts must be host-derived members of the validated request."
+
+[[guard]]
+site = "run/src/launch.rs#RunStore::validate_child"
+boundary = "authority"
+reason = "Child parent, depth, attempts and permitted delegation must match host authority."
