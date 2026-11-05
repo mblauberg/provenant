@@ -22,7 +22,9 @@ switch routes. A quota-stopped writer may continue on another eligible account
 with an unfinished handoff.
 
 Admission keeps `--wait` as settlement observation timeout. `--admission-timeout`
-defaults from the run admission policy. An admission window has one persisted absolute deadline and next wake under the same
+defaults from the run admission policy. A shorter `--wait` shortens the window to
+no less than 60 seconds, so a short observation does not refuse a lane over lock
+contention. An admission window has one persisted absolute deadline and next wake under the same
 operation key; restart and reprobe do not renew it or allocate an attempt.
 Typed lock contention and scoped uncertainty may use bounded backoff; live
 foreign writers, dirty trees and unknown ownership remain fail-closed. Census
