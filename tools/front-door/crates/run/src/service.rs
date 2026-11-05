@@ -643,7 +643,8 @@ error_kinds! {
     Timeout => "TIMEOUT", "The wait budget expired.";
     Peer => "PEER", "The peer host returned an error.";
     WriterScope => "WRITER_SCOPE", "The writer worktree scope was refused.";
-    WriterBusy => "WRITER_BUSY", "The writer or its lock is held by another operation.";
+    WriterBusy => "WRITER_BUSY", "A live writer holds the worktree.";
+    WriterLockBusy => "WRITER_LOCK_BUSY", "The writer custody or registry lock is contended.";
     WriterUnknown => "WRITER_UNKNOWN", "Writer custody could not be determined.";
     CredentialRoot => "CREDENTIAL_ROOT", "A requested grant overlaps a credential root.";
     WriterProjectMismatch => "WRITER_PROJECT_MISMATCH", "The writer worktree belongs to a different project than the selected one.";
@@ -671,6 +672,7 @@ impl ErrorKind {
             | Self::Refused
             | Self::WriterScope
             | Self::WriterBusy
+            | Self::WriterLockBusy
             | Self::WriterUnknown
             | Self::SetupLockTimeout
             | Self::RetainedWriterImport
@@ -705,6 +707,7 @@ impl ErrorKind {
             }
             Self::WriterScope
             | Self::WriterBusy
+            | Self::WriterLockBusy
             | Self::WriterUnknown
             | Self::WriterProjectMismatch
             | Self::LaneCoordinationRefused => B::Authority,
@@ -722,7 +725,10 @@ impl From<&RunError> for ErrorKind {
             RunError::WriterProjectMismatch { .. } => Self::WriterProjectMismatch,
             RunError::Writer(
                 provenant_confinement::worktrees::WorktreeError::LockBusy
-                | provenant_confinement::worktrees::WorktreeError::LiveWriter
+                | provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout,
+            ) => Self::WriterLockBusy,
+            RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::LiveWriter
                 | provenant_confinement::worktrees::WorktreeError::WriterBusy { .. },
             ) => Self::WriterBusy,
             RunError::Writer(
@@ -868,6 +874,25 @@ mod target_tests {
     use super::*;
     use crate::tests::{call, clock, context, input};
     use provenant_core::CancelToken;
+
+    #[test]
+    fn writer_lock_contention_has_distinct_error_kind() {
+        use provenant_confinement::worktrees::WorktreeError;
+        for error in [WorktreeError::LockBusy, WorktreeError::RegistryLockTimeout] {
+            assert_eq!(
+                ErrorKind::from(&RunError::Writer(error)),
+                ErrorKind::WriterLockBusy
+            );
+        }
+        assert_eq!(
+            ErrorKind::from(&RunError::Writer(WorktreeError::LiveWriter)),
+            ErrorKind::WriterBusy
+        );
+        assert_eq!(
+            ErrorKind::from(&RunError::Writer(WorktreeError::UnknownWriter)),
+            ErrorKind::WriterUnknown
+        );
+    }
 
     #[test]
     fn bare_target_resolves_attempts_and_unambiguous_runs()

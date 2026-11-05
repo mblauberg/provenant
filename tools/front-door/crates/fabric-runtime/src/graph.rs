@@ -735,7 +735,9 @@ fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
     use crate::coordination::facade::FacadeError;
     use provenant_core::retry::{RetryCause, is_transient};
     let cause = match error.downcast_ref::<FacadeError>() {
-        Some(FacadeError::Busy | FacadeError::WriterUnknown) => RetryCause::Contention,
+        Some(FacadeError::Busy | FacadeError::WriterLockBusy | FacadeError::WriterUnknown) => {
+            RetryCause::Contention
+        }
         Some(FacadeError::Timeout) => RetryCause::Timeout,
         Some(
             FacadeError::HomeUnavailable

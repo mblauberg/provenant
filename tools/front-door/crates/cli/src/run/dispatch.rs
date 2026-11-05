@@ -659,7 +659,12 @@ impl WorktreeAdmissionError {
             Self::Own(worktree::OwnWorktreeError::Other(run::RunError::Writer(err)))
             | Self::Run(run::RunError::Writer(err)) => matches!(
                 err,
-                WorktreeError::RegistryLockTimeout | WorktreeError::UnknownWriter
+                WorktreeError::RegistryLockTimeout
+                    | WorktreeError::LockBusy
+                    | WorktreeError::UnknownWriter
+                    | WorktreeError::UnknownWriterAt { .. }
+                    | WorktreeError::CensusUnknown { .. }
+                    | WorktreeError::IncompleteCensus { .. }
             ),
             _ => false,
         }
@@ -1384,6 +1389,24 @@ pub(super) fn dispatch_inner(
     // Preflight is complete: create or claim the owned tree, then admit.
     let mut pinned_base = None;
     let worktree = if owned.is_some() || command.access.worktree.is_some() {
+        let wait_deadline = match command.wait {
+            Some(seconds) => {
+                let now = clock
+                    .wall_now()
+                    .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
+                let duration = DurationMicros::from_seconds(seconds).map_err(|_| {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid wait deadline")
+                })?;
+                Some(
+                    now.checked_add(duration)
+                        .map_err(|_| {
+                            Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid wait deadline")
+                        })?
+                        .min(admission_window.deadline),
+                )
+            }
+            None => None,
+        };
         let backoff = provenant_core::retry::Backoff::new(
             Duration::from_millis(100),
             2,
@@ -1398,11 +1421,11 @@ pub(super) fn dispatch_inner(
                     "cancelled",
                 ));
             }
-            if let Some(wake) = admission_window.wake_at {
+            if let Some(wake) = admission_window.wake_at.filter(|_| wait_deadline.is_some()) {
                 let now = clock
                     .wall_now()
                     .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
-                let until = wake.min(admission_window.deadline);
+                let until = wake.min(wait_deadline.unwrap_or(admission_window.deadline));
                 if now < until {
                     let micros = u64::try_from(until.as_micros() - now.as_micros()).unwrap_or(0);
                     let target = clock
@@ -1425,8 +1448,13 @@ pub(super) fn dispatch_inner(
                     "admission deadline exceeded",
                 ));
             }
-            let remaining =
-                u64::try_from(admission_window.deadline.as_micros() - now.as_micros()).unwrap_or(0);
+            let remaining = u64::try_from(
+                wait_deadline
+                    .unwrap_or(admission_window.deadline)
+                    .as_micros()
+                    .saturating_sub(now.as_micros()),
+            )
+            .unwrap_or(0);
             let lock_budget = provenant_core::WaitBudget::up_to(
                 clock.mono_now(),
                 DurationMicros::from_micros(remaining.min(5_000_000)),
@@ -1550,30 +1578,25 @@ pub(super) fn dispatch_inner(
                     break Some(value);
                 }
                 Err(err) => {
-                    if !err.is_transient() {
+                    if !err.is_transient() || wait_deadline.is_none() {
                         return Err(err.into());
                     }
+                    let deadline = wait_deadline.unwrap_or(admission_window.deadline);
                     let now = clock
                         .wall_now()
                         .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
-                    if now >= admission_window.deadline {
+                    if now >= deadline {
                         return Err(err.into());
                     }
                     let delay = backoff.delay(retries);
-                    let left_micros = u64::try_from(
-                        admission_window
-                            .deadline
-                            .as_micros()
-                            .saturating_sub(now.as_micros()),
-                    )
-                    .unwrap_or(0);
+                    let left_micros =
+                        u64::try_from(deadline.as_micros().saturating_sub(now.as_micros()))
+                            .unwrap_or(0);
                     let pause = delay.min(Duration::from_micros(left_micros));
                     let wake_micros = u64::try_from(pause.as_micros()).unwrap_or(u64::MAX);
                     let wake_at = now
                         .checked_add(DurationMicros::from_micros(wake_micros))
-                        .map_or(admission_window.deadline, |w| {
-                            w.min(admission_window.deadline)
-                        });
+                        .map_or(deadline, |w| w.min(deadline));
                     admission_window.wake_at = Some(wake_at);
                     admission_window = session.store.save_admission_window(
                         &command.operation_id,
@@ -1587,6 +1610,9 @@ pub(super) fn dispatch_inner(
                     clock
                         .wait_until(wait_deadline)
                         .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wait until"))?;
+                    if wake_at >= deadline {
+                        return Err(err.into());
+                    }
                     retries = retries.saturating_add(1);
                 }
             }

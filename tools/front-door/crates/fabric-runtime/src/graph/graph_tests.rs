@@ -8096,6 +8096,25 @@ fn retry_of(checkpoint: &GraphCheckpoint) -> &LaunchRetry {
 }
 
 #[test]
+fn writer_lock_contention_retries_the_same_attempt() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, crate::coordination::facade::FacadeError::WriterLockBusy)].into(),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
+    owner.now = Some(at(5));
+    let done = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(done.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0], owner.calls[1]);
+}
+
+#[test]
 fn launch_retry_limit_blocks_after_configured_failures() {
     for limit in [0, 1] {
         let document = graph(vec![node("one", route("first"))]);
@@ -8499,6 +8518,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     let operation = provenant_core::OperationId::parse("op").unwrap();
     for transient in [
         FacadeError::Busy,
+        FacadeError::WriterLockBusy,
         FacadeError::WriterUnknown,
         FacadeError::Timeout,
         FacadeError::HomeUnavailable,

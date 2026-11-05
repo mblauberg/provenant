@@ -229,6 +229,9 @@ impl WorktreeError {
             Self::LiveProcess(_) => {
                 "stop that process or change its directory out of the tree, then run `provenant worktree list` and retry"
             }
+            Self::RegistryLockTimeout => {
+                "wait for the worktree registry lock to become available, then retry"
+            }
             Self::LockBusy | Self::LiveWriter | Self::WriterBusy { .. } => {
                 "run `provenant status` and wait for the writer holding the lock to finish, then retry"
             }

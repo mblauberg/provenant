@@ -101,6 +101,12 @@ checkout; for an absolute path or a path below `.worktrees/`, use
 `--branch BRANCH` to create it. Git's worktree inventory establishes membership,
 so native linked checkouts and checkouts recreated at a previously used path
 need no registration or adoption. Another project's checkout is refused.
+A contended worktree registry or custody lock reports `WRITER_LOCK_BUSY`.
+With `--wait`, admission retries lock contention and unknown writer observations
+until the wait or admission deadline, whichever is sooner; without `--wait`,
+it refuses after the existing lock budget. A live writer is refused immediately
+with `WRITER_BUSY`. Inspect custody when writer state remains unknown.
+
 A held writer lock reports busy; lifecycle removal and admission refuse an observed
 live process and name its pid, command and working directory when available.
 

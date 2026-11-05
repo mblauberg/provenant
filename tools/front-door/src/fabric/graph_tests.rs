@@ -14,15 +14,16 @@ mod graph_writer_admission_tests {
         });
         assert!(matches!(
             graph_writer_initialisation_error("head", WorktreeError::RegistryLockTimeout),
-            FacadeError::Busy
+            FacadeError::WriterLockBusy
         ));
+        assert!(matches!(graph_writer_initialisation_error("head", WorktreeError::LockBusy), FacadeError::WriterLockBusy));
+        assert!(matches!(graph_writer_initialisation_error("head", WorktreeError::UnknownWriter), FacadeError::WriterUnknown));
         for error in [
             lock("writer.lock"),
             WorktreeError::LiveWriter,
             WorktreeError::WriterBusy {
                 holder: Some(provenant_core::AttemptId::from_bytes([7; 16])),
             },
-            WorktreeError::UnknownWriter,
             WorktreeError::Dirty(String::new()),
         ] {
             assert!(matches!(

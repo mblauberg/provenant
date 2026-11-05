@@ -7678,7 +7678,7 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
                 "--admission-timeout",
                 "60s",
             ])?;
-            cmd.wait = None;
+            cmd.wait = Some(60);
 
             let reply = dispatch_with_workers(cmd, edge, &Free);
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
@@ -7792,7 +7792,7 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
                 "--admission-timeout",
                 "1s",
             ])?;
-            cmd.wait = None;
+            cmd.wait = Some(1);
 
             let reply = dispatch_with_workers(cmd, edge, &Free);
             release.send(())?;
@@ -7802,6 +7802,14 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
                 Status::Refused,
                 "{:?}",
                 reply.result.error
+            );
+            let error = reply.result.error.as_ref().ok_or("lock refusal")?;
+            assert_eq!(error.code, "WRITER_LOCK_BUSY");
+            assert!(
+                error
+                    .repair
+                    .as_deref()
+                    .is_some_and(|next| next.contains("lock"))
             );
             let window = session
                 .store
@@ -7864,7 +7872,7 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
                 &call,
             )?;
             let make = |id: &str| {
-                parsed_run(&[
+                let mut cmd = parsed_run(&[
                     "--operation-id",
                     id,
                     "--model",
@@ -7877,7 +7885,9 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
                     prompt.to_str().unwrap(),
                     "--admission-timeout",
                     "60s",
-                ])
+                ])?;
+                cmd.wait = Some(5);
+                Ok::<_, Box<dyn std::error::Error>>(cmd)
             };
             let workers = Counting(AtomicUsize::new(0));
             let start = clock.mono_now();
