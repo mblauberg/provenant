@@ -273,7 +273,7 @@ The console may list, show and answer requests on a configured owner host
 using the inbox CLI's `--host` or a `host:request` ID. Answers are human acts
 recorded by the owner with source host and peer actor provenance. Operation IDs
 bind retries and changed content conflicts. Close and acknowledgement remain
-owner-local operations and remote attempts return `owner_local_only`; run them
+owner-local operations and remote attempts return `OWNER_LOCAL_ONLY`; run them
 on the owner or in the owning chair session. No delegation is implied.
 
 `console overview` combines local pending request titles and recent lane

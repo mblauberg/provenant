@@ -437,8 +437,8 @@ impl Error {
             Self::Remote { code, .. } => (
                 Outcome::Error,
                 match code.as_str() {
-                    "owner_local_only" => "owner_local_only",
-                    "unsupported_owner" => "unsupported_owner",
+                    "OWNER_LOCAL_ONLY" => "OWNER_LOCAL_ONLY",
+                    "UNSUPPORTED_OWNER" => "UNSUPPORTED_OWNER",
                     "owner_unavailable" => "owner_unavailable",
                     "ambiguous_outcome" => "ambiguous_outcome",
                     "conflict" => "conflict",
@@ -460,7 +460,7 @@ impl Error {
                     | "operation_conflict"
                     | "cursor_expired"
                     | "lane_coordination_refused"
-                    | "unsupported_owner"
+                    | "UNSUPPORTED_OWNER"
                     | "request_limit" => Outcome::Refused,
                     "cancelled" => Outcome::Cancelled,
                     _ => Outcome::Error,
@@ -569,7 +569,7 @@ fn is_local_host(name: &str, own: Option<provenant_core::HostId>) -> bool {
 
 fn owner_local_only(host: &str) -> Error {
     Error::Remote {
-        code: "owner_local_only".into(),
+        code: "OWNER_LOCAL_ONLY".into(),
         message: format!(
             "inbox owner {host}: run this operation on the owner host or from the owning chair session"
         ),
@@ -1135,7 +1135,7 @@ fn execute(
                 ..
             }) => Err(remote_error(code, message, operation_id.clone())),
             Ok(_) => Err(Error::Remote {
-                code: "unsupported_owner".into(),
+                code: "UNSUPPORTED_OWNER".into(),
                 message: "peer does not support inbox operations".into(),
                 operation_id: None,
             }),
@@ -1144,7 +1144,7 @@ fn execute(
                 let code = match failure.error {
                     FacadeError::LaunchUnknown { .. } => "ambiguous_outcome",
                     FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } => {
-                        "unsupported_owner"
+                        "UNSUPPORTED_OWNER"
                     }
                     _ => "owner_unavailable",
                 };

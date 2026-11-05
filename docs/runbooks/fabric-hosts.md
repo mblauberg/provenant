@@ -617,7 +617,7 @@ and the agent runs it in a fresh `fabric peer --in-process` child inside the
 login session, where the keychain is readable. When the agent is not
 listening, `fabric peer` handles the request itself as before. A request that
 reached the agent is never retried in process; a lost reply surfaces as an
-error and, for a mutation, as `launch_unknown`. The agent runs at most 64
+error and, for a mutation, as `LAUNCH_UNKNOWN`. The agent runs at most 64
 requests concurrently. Excess connections close immediately and surface as
 the peer agent's stable empty-reply error.
 
@@ -680,7 +680,7 @@ the other hosts. Unprobed or unreachable peers omit `protocol`.
 
 The released v1 peer-agent can hide a decode refusal in its log and close
 without a reply. This ambiguous failure remains `home_unavailable` for reads
-and `launch_unknown` for mutations, since it can also follow execution. Inspect
+and `LAUNCH_UNKNOWN` for mutations, since it can also follow execution. Inspect
 the peer-agent log and upgrade both hosts before retrying.
 
 Readers in this release report `upgrade_required` when a stored record,
@@ -829,7 +829,7 @@ grammar `RUN[/TASK[/ATTEMPT]]`, also accepting `RUN/ATTEMPT` and unique hex
 prefixes of at least eight characters. An ambiguous prefix lists candidates.
 
 The peer transport does not silently fall back to local placement. A mutation
-whose reply is lost can return `launch_unknown`; retain its operation ID and
+whose reply is lost can return `LAUNCH_UNKNOWN`; retain its operation ID and
 reconcile the recorded outcome before submitting replacement work. The host
 owner also reports `peer_version`, `home_unavailable` and `state_corrupt` for
 version, reachability and frame failures.

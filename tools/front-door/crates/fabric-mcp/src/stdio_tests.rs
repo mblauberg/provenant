@@ -334,7 +334,7 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
         }
         for (index, (id, name, arguments, code, detail)) in [
             ("identity", "fabric_context", json!({"op":"inspect"}), "not_found", "not_found"),
-            ("submit", "fabric_run", json!({"op":"submit","operation_id":"unknown-launch-17", "tasks":[{"prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]}), "launch_unknown", "unknown-launch-17"),
+            ("submit", "fabric_run", json!({"op":"submit","operation_id":"unknown-launch-17", "tasks":[{"prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]}), "LAUNCH_UNKNOWN", "unknown-launch-17"),
             ("bad-identity", "fabric_context", json!({"op":"inspect","extra":true}), "invalid_input", "arguments.extra"),
             ("bad-submit", "fabric_run", json!({"op":"submit","operation_id":"invalid", "tasks":[]}), "invalid_input", "arguments.tasks"),
         ].into_iter().enumerate() {
