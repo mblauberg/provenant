@@ -1565,8 +1565,9 @@ pub(super) fn await_terminal(
             &poll,
             &FixtureResources,
         );
+        let observations = store.admission_observations(&record, &poll, &FixtureResources);
         return Err(format!(
-            "writer attempt did not reach terminal state: {:?}; admission: {waits:?}; settlement: {progress}",
+            "writer attempt did not reach terminal state: {:?}; admission: {waits:?}; current admission observations: {observations:?}; settlement: {progress}",
             record.state
         )
         .into());
@@ -3075,21 +3076,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
     }
     let worktree_arg = worktree.to_str().ok_or("worktree path")?;
     git(&rig, &["-C", worktree_arg, "add", ".cargo"])?;
-    git(
-        &rig,
-        &[
-            "-C",
-            worktree_arg,
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "-q",
-            "-m",
-            "wrapper",
-        ],
-    )?;
+    git(&rig, &["-C", worktree_arg, "commit", "-q", "-m", "wrapper"])?;
     let (roots, context) = writer_context(&rig)?;
     let identity = command(&rig, &["fabric", "identity", "--json"])?;
     assert_eq!(
