@@ -140,7 +140,7 @@ fn review_preset_launches_read_only_from_detached_head() -> Result {
     fs::create_dir_all(&settings)?;
     fs::write(
         settings.join("roles.toml"),
-        "[roles.\"lens.correctness-spec\"]\ntier = [{ adapter = 'command', name = 'review-pass' }]\n",
+        "[roles.\"lens.correctness-spec\"]\ntier = [{ adapter = 'command', name = 'review-pass' }]\n[roles.\"plan.review\"]\ntier = [{ adapter = 'command', name = 'review-pass' }]\n[roles.\"review.synthesis\"]\ntier = [{ adapter = 'command', name = 'review-pass' }]\n",
     )?;
     let brief = rig.root.join("review-brief");
     fs::write(&brief, "Review the pinned subject")?;
@@ -191,7 +191,13 @@ fn review_preset_launches_read_only_from_detached_head() -> Result {
         "--set",
         &format!("parameters.base='{head}'"),
         "--set",
-        "parameters.review_shape='quick'",
+        "parameters.review_shape='standard'",
+        "--set",
+        "parameters.lenses=[{name='correctness-spec',tier='',when=''}]",
+        "--set",
+        "parameters.min_reviews=1",
+        "--set",
+        "parameters.verifiers=0",
         "--plan",
         "off",
         "--wait",
@@ -217,6 +223,22 @@ fn review_preset_launches_read_only_from_detached_head() -> Result {
     let warning = format!("base {head}, head {head}");
     assert!(
         lens["outputs"]["warnings"].to_string().contains(&warning),
+        "{equal}"
+    );
+    let synthesis = checkpoint["nodes"]
+        .as_array()
+        .ok_or("equal nodes")?
+        .iter()
+        .find(|n| n["id"] == "synthesis")
+        .ok_or("synthesis")?;
+    assert_eq!(
+        synthesis["outputs"]["verdict"], "VERDICT: INCONCLUSIVE",
+        "{equal}"
+    );
+    assert!(
+        synthesis["outputs"]["warnings"]
+            .to_string()
+            .contains(&warning),
         "{equal}"
     );
     let id = checkpoint["graph_id"].as_str().ok_or("graph id")?;
