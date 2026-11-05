@@ -267,6 +267,54 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn cached_inventory_is_reused_until_a_worktree_mutation() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingGit<'a> {
+        inner: &'a dyn Executor,
+        listings: AtomicUsize,
+    }
+    impl Executor for CountingGit<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
+            {
+                self.listings.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.execute(options)
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let git = CountingGit {
+        inner: context.executor,
+        listings: AtomicUsize::new(0),
+    };
+    context.executor = &git;
+    assert_eq!(list_cached(&context, &cancel())?.len(), 1);
+    assert_eq!(list_cached(&context, &cancel())?.len(), 1);
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    create(
+        &context,
+        WorktreeCreate {
+            branch: "cache-mutation".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let after_mutation = git.listings.load(Ordering::SeqCst);
+    assert_eq!(list_cached(&context, &cancel())?.len(), 2);
+    assert_eq!(list_cached(&context, &cancel())?.len(), 2);
+    assert_eq!(git.listings.load(Ordering::SeqCst), after_mutation + 1);
+    Ok(())
+}
+
+#[test]
 fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountingGit<'a> {

@@ -1151,7 +1151,7 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                         facts: &facts,
                         ..*context
                     };
-                    if let Some(info) = worktrees::list(context, cancel)?
+                    if let Some(info) = worktrees::list_cached(context, cancel)?
                         .into_iter()
                         .find(|w| w.branch.as_deref().map(short_branch).as_ref() == Some(branch))
                     {

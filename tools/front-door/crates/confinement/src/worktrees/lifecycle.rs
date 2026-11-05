@@ -115,6 +115,18 @@ pub fn list_with_observation(
     list_streaming(context, cancel, |_, _| {})
 }
 
+/// List using this command's advisory inventory snapshot where available.
+/// Any mutation still rechecks the inventory under custody.
+pub fn list_cached(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    Ok(list_impl(context, cancel, |_, _| {}, true, true)?
+        .into_iter()
+        .map(|observation| observation.info)
+        .collect())
+}
+
 /// Report the inventory size before the census and each completed row after
 /// its normal checks. A caller can retain these advisory rows if its deadline
 /// expires; the complete inventory still follows the ordinary safety path.
@@ -123,7 +135,7 @@ pub fn list_streaming(
     cancel: &CancelToken,
     report: impl FnMut(usize, Option<&WorktreeInfo>),
 ) -> Result<Vec<WorktreeObservation>, WorktreeError> {
-    list_impl(context, cancel, report, true, context.facts)
+    list_impl(context, cancel, report, true, false)
 }
 
 /// Inventory for GC. Cleanliness is checked only for candidates after the
@@ -132,7 +144,7 @@ pub fn list_for_gc(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    Ok(list_impl(context, cancel, |_, _| {}, false, context.facts)?
+    Ok(list_impl(context, cancel, |_, _| {}, false, false)?
         .into_iter()
         .map(|observation| observation.info)
         .collect())
@@ -143,13 +155,19 @@ fn list_impl(
     cancel: &CancelToken,
     mut report: impl FnMut(usize, Option<&WorktreeInfo>),
     eager_git: bool,
-    facts: &RepoFacts,
+    reuse_inventory: bool,
 ) -> Result<Vec<WorktreeObservation>, WorktreeError> {
     validate_binding(context)?;
     let entries = {
         let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
         context.repo.revalidate()?;
-        facts.capture_inventory(context, cancel)?
+        match reuse_inventory
+            .then(|| context.facts.cached_inventory(context))
+            .flatten()
+        {
+            Some(entries) => entries,
+            None => context.facts.capture_inventory(context, cancel)?,
+        }
     };
     // A stale Git registration must not hide the remaining worktrees from GC.
     let candidates: Vec<_> = entries

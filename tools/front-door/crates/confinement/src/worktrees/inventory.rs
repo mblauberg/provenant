@@ -194,6 +194,22 @@ impl RepoFacts {
         }
     }
 
+    /// Reuse an advisory inventory while the repository identity is unchanged.
+    /// Mutation paths invalidate it and perform their own guarded rereads.
+    pub(super) fn cached_inventory(
+        &self,
+        context: &WorktreeContext<'_>,
+    ) -> Option<Vec<GitWorktree>> {
+        let inventories = self
+            .inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let snapshot = inventories.get(context.repo.common_git_dir())?;
+        let metadata = std::fs::metadata(context.repo.common_git_dir()).ok()?;
+        (snapshot.device == metadata.dev() && snapshot.inode == metadata.ino())
+            .then(|| snapshot.entries.clone())
+    }
+
     pub(super) fn take_inventory(&self, context: &WorktreeContext<'_>) -> Option<Vec<GitWorktree>> {
         let snapshot = self
             .inventories
