@@ -14,6 +14,9 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         .flat_map(|node| node.children.iter())
         .collect();
     let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
+    if let Some(outcome) = run.outcome {
+        human.push_str(&format!("Outcome: {outcome:?}\n"));
+    }
     if run.status == provenant_fabric_runtime::graph::GraphStatus::Paused
         && let Some(reason) = &run.checkpoint.pause_reason
     {

@@ -3367,6 +3367,80 @@ fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
 }
 
 #[test]
+fn fan_in_requires_all_members_unless_a_minimum_is_declared() {
+    for minimum in [None, Some(2)] {
+        let (mut document, mut owner) = partial_review(2);
+        document.nodes[0].composite.as_mut().unwrap().min_successful = minimum;
+        owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let synthesis = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "verify")
+            .unwrap();
+        if minimum.is_some() {
+            assert_eq!(synthesis.state, NodeState::Succeeded);
+            assert_eq!(run.outcome, Some(GraphOutcome::Partial));
+            assert!(owner.prompts[3].contains("Unavailable members:"));
+        } else {
+            assert_eq!(synthesis.state, NodeState::Blocked);
+            assert_eq!(run.outcome, Some(GraphOutcome::Failed));
+        }
+    }
+}
+
+#[test]
+fn a_failed_nested_minimum_cannot_be_hidden_by_an_outer_group() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "nested-minimum", "nodes": [
+            {"id":"outer", "kind":"composite", "access":"read_only", "composite": {
+                "min_successful":1, "nodes":[
+                    {"id":"inner", "kind":"composite", "access":"read_only", "composite": {
+                        "min_successful":2, "nodes":[
+                            {"id":"a", "access":"read_only", "prompt":"a", "route":{"alias":"fixture"}},
+                            {"id":"b", "access":"read_only", "prompt":"b", "route":{"alias":"fixture"}}
+                        ], "exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]
+                    }},
+                    {"id":"c", "access":"read_only", "prompt":"c", "route":{"alias":"fixture"}}
+                ], "exports":[{"node":"inner","outputs":["result"]},{"node":"c","outputs":["result"]}]
+            }}
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal(AttemptOutcome::OtherFailure),
+            terminal_with_result(AttemptOutcome::Succeeded, "b"),
+            terminal_with_result(AttemptOutcome::Succeeded, "c"),
+        ]),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "outer")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert_eq!(run.outcome, Some(GraphOutcome::Failed));
+}
+
+#[test]
+fn cancelled_member_counts_against_the_group_minimum() {
+    // The host maps a cancelled attempt to OtherFailure.
+    for (minimum, outcome) in [(2, GraphOutcome::Partial), (3, GraphOutcome::Failed)] {
+        let (document, mut owner) = partial_review(minimum);
+        owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+        owner.observations[2] = terminal(AttemptOutcome::OtherFailure);
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.outcome, Some(outcome));
+    }
+}
+
+#[test]
 fn review_fail_and_one_unavailable_reach_evaluator() {
     let (mut document, mut owner) = partial_review(2);
     let spec = document.nodes[0].composite.as_mut().unwrap();
@@ -3556,6 +3630,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
             .unwrap()
     };
     assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(run.outcome, Some(GraphOutcome::Partial));
     assert_eq!(node("lens-a").state, NodeState::Succeeded);
     assert_eq!(node("lens-b").state, NodeState::Failed);
     assert_eq!(
@@ -3566,7 +3641,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     let lenses = node("lenses").outputs.as_ref().unwrap();
     assert_eq!(lenses.findings.len(), 1);
     let excerpt = &lenses.result.as_ref().unwrap().excerpt;
-    assert!(excerpt.starts_with("Unavailable lenses:"), "{excerpt}");
+    assert!(excerpt.starts_with("Unavailable members:"), "{excerpt}");
     assert!(
         excerpt
             .contains("lens-b: findings block missing or invalid: field findings: block missing")
@@ -3577,6 +3652,159 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     let verify_input = &owner.prompts[3];
     assert!(verify_input.contains("LENS-A-OK") && verify_input.contains("lens-c"));
     assert!(!verify_input.contains("LENS-B-NO-FINDINGS"));
+    let mut outside = run.checkpoint.clone();
+    let mut failed = node("lens-b").clone();
+    failed.id = "outside".into();
+    outside.nodes.push(failed);
+    assert_eq!(outside.outcome(), GraphOutcome::Failed);
+}
+
+#[test]
+fn partial_composite_replay_recovers_legacy_minimum_and_wording() {
+    let (document, mut owner) = partial_review(1);
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let checkpoint = journal.0.as_mut().unwrap();
+    let group = checkpoint
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "lenses")
+        .unwrap();
+    group.min_successful = None;
+    let result = group.outputs.as_mut().unwrap().result.as_mut().unwrap();
+    result.excerpt = result
+        .excerpt
+        .replace("Unavailable members:", "Unavailable lenses:");
+    result.digest = CanonicalV1::file_digest(result.excerpt.as_bytes()).to_string();
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    assert_eq!(replay.outcome, Some(GraphOutcome::Partial));
+    assert_eq!(
+        replay
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "lenses")
+            .unwrap()
+            .min_successful,
+        Some(1)
+    );
+}
+
+#[test]
+fn status_recovers_old_partial_composite_minimum() {
+    let (document, mut owner) = partial_review(1);
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    checkpoint
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "lenses")
+        .unwrap()
+        .min_successful = None;
+    assert_eq!(checkpoint.outcome(), GraphOutcome::Failed);
+    use provenant_core::Clock;
+    let temp = crate::test_support::tempdir().unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver).unwrap();
+    let project = provenant_core::ProjectId::from_bytes([1; 16]);
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut journal =
+        FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    journal
+        .bind(GraphExecution {
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: base,
+            document: document.clone(),
+        })
+        .unwrap();
+    journal.save(&checkpoint).unwrap();
+    let display = FileJournal::read_status_checkpoint(&root, project, &document.graph_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(display.outcome(), GraphOutcome::Partial);
+    assert_eq!(
+        FileJournal::read_checkpoint(&root, project, &document.graph_id)
+            .unwrap()
+            .unwrap()
+            .outcome(),
+        GraphOutcome::Failed
+    );
+}
+
+#[test]
+fn legacy_partial_output_replays_with_warnings_and_truncated_authored_text() {
+    let mut members: Vec<_> = (0..17).map(|i| serde_json::json!({
+        "id":format!("worker-{i}"), "access":"read_only", "prompt":"work", "route":{"alias":"fixture"}
+    })).collect();
+    members.push(serde_json::json!({"id":"failed", "access":"read_only", "prompt":"work", "route":{"alias":"fixture"}}));
+    let exports: Vec<_> = members
+        .iter()
+        .map(|member| serde_json::json!({"node":member["id"],"outputs":["result"]}))
+        .collect();
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1, "graph_id":"legacy-partial", "nodes":[{
+            "id":"group", "kind":"composite", "access":"read_only",
+            "composite":{"min_successful":1,"nodes":members,"exports":exports}
+        }]
+    }))
+    .unwrap();
+    let body = format!("member failed {}", "x".repeat(4096));
+    let mut observations: VecDeque<_> = (0..17)
+        .map(|_| terminal_with_result(AttemptOutcome::Succeeded, &body))
+        .collect();
+    observations.push_back(terminal(AttemptOutcome::TaskFailed));
+    let mut owner = FakeOwner {
+        observations,
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let checkpoint = journal.0.as_mut().unwrap();
+    let mut body = String::new();
+    for i in 0..17 {
+        let id = format!("group--worker-{i}");
+        let member = checkpoint.nodes.iter().find(|node| node.id == id).unwrap();
+        body.push_str(&format!(
+            "{id}:\n{}\n",
+            member
+                .outputs
+                .as_ref()
+                .unwrap()
+                .result
+                .as_ref()
+                .unwrap()
+                .excerpt
+        ));
+    }
+    let group = checkpoint
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "group")
+        .unwrap();
+    let output = group.outputs.as_mut().unwrap();
+    assert_eq!(
+        output.warnings,
+        ["unavailable group--failed: member failed"]
+    );
+    output.warnings[0] = "unavailable group--failed: lens failed".into();
+    let header = "Unavailable lenses:\ngroup--failed: lens failed";
+    let room = COMPOSITE_EXCERPT_BYTES - header.len() - 2;
+    assert!(body.len() > room);
+    let body = bounded(&body, COMPOSITE_EXCERPT_BYTES);
+    let excerpt = format!("{header}\n\n{}", bounded(&body, room));
+    let result = output.result.as_mut().unwrap();
+    assert!(result.truncated);
+    result.digest = CanonicalV1::file_digest(excerpt.as_bytes()).to_string();
+    result.excerpt = excerpt;
+    assert!(result.excerpt.contains("member failed"));
+    advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
 }
 
 #[test]
@@ -3667,7 +3895,7 @@ fn partial_composite_below_its_minimum_fails_with_the_recorded_reason() {
     );
     let reason = lenses.advance_error.as_deref().unwrap();
     assert!(
-        reason.contains("1 of 3 lenses succeeded, minimum 2"),
+        reason.contains("1 of 3 members succeeded, minimum 2"),
         "{reason}"
     );
     assert!(
@@ -3676,6 +3904,7 @@ fn partial_composite_below_its_minimum_fails_with_the_recorded_reason() {
     );
     assert_eq!(owner.prompts.len(), 3, "verify must not run");
     assert!(!run.checkpoint.successful());
+    assert_eq!(run.outcome, Some(GraphOutcome::Failed));
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(replay.checkpoint, run.checkpoint);
 }

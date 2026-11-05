@@ -284,6 +284,7 @@ fn node_bound(
         .into_iter()
         .collect(),
         children: node.composite_members.clone(),
+        min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
         source_commit: node.source.as_ref().map(|_| String::new()),
         fragment: (node.plan.is_some() && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
