@@ -333,8 +333,11 @@ pub(super) fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), Work
 
 pub(crate) fn combine_worker_state(state: WorkerState, native: WorkerState) -> WriterState {
     match (state, native) {
+        // A held lease is authoritative even when the census also sees a
+        // process. Preserve contention so callers can name the lease holder.
+        (WorkerState::Busy, _) => WriterState::Busy,
         (WorkerState::Live, _) | (_, WorkerState::Live) => WriterState::Live,
-        (WorkerState::Busy, _) | (_, WorkerState::Busy) => WriterState::Busy,
+        (_, WorkerState::Busy) => WriterState::Busy,
         (WorkerState::Unknown, _) | (_, WorkerState::Unknown) => WriterState::Unknown,
         (WorkerState::Free, WorkerState::Free) => WriterState::Free,
     }

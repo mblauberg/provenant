@@ -728,6 +728,56 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
 }
 
 #[test]
+fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn Error>> {
+    struct Live;
+    impl WorkerObserver for Live {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, WorkerState::Live))
+                .collect()
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "lease-priority".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let attempt = provenant_core::AttemptId::from_bytes([42; 16]);
+    let owner = WorktreeOwner {
+        attempt_id: Some(attempt),
+        operation_id: Some("lease-priority".parse()?),
+        branch: "lease-priority".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    save_owner(&tree, &owner)?;
+    let _held = cache_writer_guard(context.project_state, &info.path).map_err(|_| "lease")?;
+    context.workers = &Live;
+    let listed = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("missing worktree")?;
+    assert_eq!(listed.writer, WriterState::Busy);
+    assert_eq!(
+        load_owner(&tree)?.and_then(|owner| owner.attempt_id),
+        Some(attempt)
+    );
+    Ok(())
+}
+
+#[test]
 fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Result<(), Box<dyn Error>>
 {
     let fixture = Fixture::new()?;
