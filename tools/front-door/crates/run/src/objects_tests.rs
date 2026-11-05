@@ -427,7 +427,19 @@ impl Fixture {
     }
 
     fn git_overlay(&self, scratch: &Path, args: &[&str]) -> TestResult<Output> {
-        let output = provenant_os::fixture::git_command_at(&self.git)
+        let output = self.git_overlay_raw(scratch, args)?;
+        if !output.status.success() {
+            return Err(format!(
+                "overlay Git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(output)
+    }
+
+    fn git_overlay_raw(&self, scratch: &Path, args: &[&str]) -> TestResult<Output> {
+        Ok(provenant_os::fixture::git_command_at(&self.git)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
@@ -449,15 +461,7 @@ impl Fixture {
             ])
             .args(args)
             .current_dir(&self.lane)
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "overlay Git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        Ok(output)
+            .output()?)
     }
 
     fn import(&self) -> crate::Result<()> {
@@ -1356,6 +1360,60 @@ fn unmerged_private_index_does_not_replace_host_index() -> TestResult {
             .stdout
             .is_empty()
     );
+    Ok(())
+}
+
+#[test]
+fn stopped_merge_retains_private_state_when_host_index_is_not_restored() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    fs::write(fixture.project.join("file"), "conflicting main change\n")?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["add", "file"],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["commit", "-qm", "main change"],
+    )?;
+    let merge_head = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    let (attempt, scratch) = fixture.overlay()?;
+    let merge =
+        fixture.git_overlay_raw(&scratch, &["merge", "--no-edit", &merge_head.to_string()])?;
+    assert!(!merge.status.success(), "fixture merge must conflict");
+    let metadata = scratch.join("git-common/MERGE_HEAD");
+    let parent = fs::read(&metadata)?;
+    assert_eq!(std::str::from_utf8(&parent)?.trim(), merge_head.to_string());
+    let stages = fixture
+        .git_overlay(&scratch, &["ls-files", "--unmerged", "-z"])?
+        .stdout;
+    assert!(!stages.is_empty());
+    let working = fs::read(fixture.lane.join("file"))?;
+    assert!(working.windows(7).any(|bytes| bytes == b"<<<<<<<"));
+    let host_index = fixture.worktree.repo().private_git_dir().join("index");
+    let before = fs::read(&host_index)?;
+    let source = super::bound_source(&attempt)?.ok_or("private source")?;
+    assert!(super::restore_index(&source, fixture.worktree.repo()).is_err());
+    assert_eq!(fs::read(host_index)?, before);
+    assert_eq!(fs::read(metadata)?, parent);
+    assert_eq!(
+        fixture
+            .git_overlay(&scratch, &["ls-files", "--unmerged", "-z"])?
+            .stdout,
+        stages
+    );
+    assert_eq!(fs::read(fixture.lane.join("file"))?, working);
     Ok(())
 }
 
