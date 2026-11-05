@@ -7385,6 +7385,28 @@ fn request_bindings_follow_declarations_and_warn_when_missing() {
 }
 
 #[test]
+fn dispatch_parameters_apply_each_layer_once_in_order() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "binding-order", "stages = [{ id = 'task', prompt = '${priority}' }]\n[parameters]\npriority = { type = 'string', bind = 'risk_tier' }\n").unwrap();
+    let selected = vec![("priority".into(), json!("selected"))];
+    let file = vec![("priority".into(), json!("file"))];
+    let (parameters, warnings) = super::preset::dispatch_parameters(
+        &layers,
+        "binding-order",
+        selected,
+        Some("routine"),
+        None,
+        &file,
+    )
+    .unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(parameters, file);
+    let expansion =
+        super::preset::expand_with(&layers, "binding-order", "brief", &parameters, &[]).unwrap();
+    assert_eq!(expansion.document["nodes"][0]["prompt"], "file");
+}
+
+#[test]
 fn copied_generator_evaluator_receives_the_same_request_and_nodes() {
     let mut layers = Layers::empty();
     layers.review = Some(shapes());

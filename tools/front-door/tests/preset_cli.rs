@@ -2732,6 +2732,78 @@ impl ExperimentProject {
 const WORK_ITEM: &str = "0123456789abcdef0123456789abcdef";
 
 #[test]
+fn experiment_arm_eligibility_receives_declared_request_bindings()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = ExperimentProject::new(
+        "[domains.fabric.pipelines.experiment.trial]\ncontrol = 'gate-only'\narms = { candidate = 'gate-alt' }\nassign = 'epsilon'\nepsilon = 1.0\n",
+    )?;
+    std::fs::write(
+        fixture.project.join(".provenant/presets/gate-alt.toml"),
+        "stages = [{ id = 'task', prompt = 'risk=${priority}; kind=${category}' }]\n[parameters]\npriority = { type = 'string', bind = 'risk_tier' }\ncategory = { type = 'string', bind = 'kind' }\n",
+    )?;
+    let (document, stderr) = fixture.document(&[
+        "--task-id",
+        WORK_ITEM,
+        "--risk-tier",
+        "routine",
+        "--task-kind",
+        "docs",
+    ])?;
+    assert_eq!(
+        document["context"]["experiment_arm"], "candidate",
+        "{stderr}"
+    );
+    assert_eq!(document["nodes"][0]["prompt"], "risk=routine; kind=docs");
+    assert!(!stderr.contains("--risk-tier"), "{stderr}");
+    assert!(!stderr.contains("--task-kind"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn parameter_file_overrides_request_binding() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = ExperimentProject::new("")?;
+    std::fs::write(
+        fixture.project.join(".provenant/presets/gate-alt.toml"),
+        "stages = [{ id = 'task', prompt = 'risk=${priority}; kind=${category}' }]\n[parameters]\npriority = { type = 'string', bind = 'risk_tier' }\ncategory = { type = 'string', bind = 'kind' }\n",
+    )?;
+    std::fs::write(
+        fixture.project.join(".provenant/preset-rules.toml"),
+        "[select]\ndefault = { preset = 'gate-alt', parameters = { priority = 'selected' } }\n",
+    )?;
+    let (selected, _) = fixture.document(&["--risk-tier", "routine", "--task-kind", "docs"])?;
+    assert_eq!(selected["nodes"][0]["prompt"], "risk=routine; kind=docs");
+    let file = fixture.project.join("params.toml");
+    std::fs::write(&file, "priority = 'from-file'\n")?;
+    let file = file.to_str().ok_or("parameter path is not UTF-8")?;
+    let args = [
+        "--preset",
+        "gate-alt",
+        "--risk-tier",
+        "routine",
+        "--task-kind",
+        "docs",
+        "--params-file",
+        file,
+    ];
+    let (document, _) = fixture.document(&args)?;
+    assert_eq!(document["nodes"][0]["prompt"], "risk=from-file; kind=docs");
+    let (document, _) = fixture.document(&[
+        "--preset",
+        "gate-alt",
+        "--risk-tier",
+        "routine",
+        "--task-kind",
+        "docs",
+        "--params-file",
+        file,
+        "--set",
+        "parameters.priority='from-set'",
+    ])?;
+    assert_eq!(document["nodes"][0]["prompt"], "risk=from-set; kind=docs");
+    Ok(())
+}
+
+#[test]
 fn task_id_assigns_the_candidate_arm_and_labels_the_run() -> Result<(), Box<dyn std::error::Error>>
 {
     let fixture = ExperimentProject::new(

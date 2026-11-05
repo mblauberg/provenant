@@ -653,6 +653,28 @@ pub(super) fn request_bindings(
     Ok((bindings, warnings))
 }
 
+/// Resolve request and parameter-file values in dispatch order for both
+/// experiment eligibility and the graph that will actually run.
+pub(super) fn dispatch_parameters(
+    layers: &Layers,
+    name: &str,
+    selected: impl IntoIterator<Item = (String, Value)>,
+    risk: Option<&str>,
+    kind: Option<&str>,
+    file_params: &[(String, Value)],
+) -> Result<RequestBindings, String> {
+    let (bindings, warnings) = request_bindings(layers, name, risk, kind)?;
+    let mut values = selected.into_iter().collect::<Vec<_>>();
+    for (key, value) in bindings.into_iter().chain(file_params.iter().cloned()) {
+        if let Some(existing) = values.iter_mut().find(|(name, _)| name == &key) {
+            existing.1 = value;
+        } else {
+            values.push((key, value));
+        }
+    }
+    Ok((values, warnings))
+}
+
 pub(super) fn tracker_advice_parameter(config: &Value) -> Option<&str> {
     config
         .get("parameters")?
@@ -4880,13 +4902,20 @@ pub(crate) fn run_with_review(
                 let preset_check = |preset: &str| layers.resolve(preset).map(|_| ());
                 // An arm is accepted only when the normal selection and expansion accept it.
                 let arm_check = |preset: &str| {
-                    let chosen =
-                        crate::preset_select::select(Some(&rules_path), &context, Some(preset))?;
+                    let chosen = selection.choice.clone().for_preset(preset);
+                    let (params, _) = dispatch_parameters(
+                        &layers,
+                        &chosen.preset,
+                        chosen.parameters,
+                        request.risk_tier.as_deref(),
+                        request.task_kind.as_deref(),
+                        &file_params,
+                    )?;
                     expand_with(
                         &layers,
-                        &chosen.choice.preset,
+                        &chosen.preset,
                         prompt,
-                        &file_params,
+                        &params,
                         &request.preset_set,
                     )
                     .map(|_| ())
@@ -4938,21 +4967,14 @@ pub(crate) fn run_with_review(
             selection.source = crate::preset_select::PresetSelectionSource::Experiment;
         }
         let name = selection.choice.preset.as_str();
-        let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
-        let (bindings, binding_warnings) = request_bindings(
+        let (params, binding_warnings) = dispatch_parameters(
             &layers,
             name,
+            selection.choice.parameters,
             request.risk_tier.as_deref(),
             request.task_kind.as_deref(),
+            &file_params,
         )?;
-        params.extend(bindings);
-        file_params.into_iter().for_each(|(key, value)| {
-            if let Some(existing) = params.iter_mut().find(|(name, _)| name == &key) {
-                existing.1 = value;
-            } else {
-                params.push((key, value));
-            }
-        });
         let explicit_subject = params.iter().any(|(key, _)| key == "subject")
             || request.preset_set.iter().any(|item| {
                 item.split_once('=').is_some_and(|(path, _)| {
