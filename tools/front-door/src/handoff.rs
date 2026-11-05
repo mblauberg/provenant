@@ -148,74 +148,61 @@ pub(crate) fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refusal> {
-    let project = src.cwd.as_path();
-    let infos = crate::worktrees::with_context(
+fn inspect(
+    src: &Source,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+) -> Result<Vec<Tree>, Refusal> {
+    crate::worktrees::with_context(
         &src.roots,
         &src.home,
-        project,
+        &src.cwd,
         GIT_TIMEOUT,
         workers,
-        |context, cancel| Ok(worktrees::list(context, cancel)?),
-    )?;
-    let common =
-        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)
-            .map_err(|error| {
-            if matches!(
-                error
-                    .get_ref()
-                    .and_then(|cause| cause.downcast_ref::<provenant_os::git::DiscoveryError>()),
-                Some(provenant_os::git::DiscoveryError::TimedOut)
-            ) {
-                Refusal::new(
-                    Outcome::Timeout,
-                    "GIT",
-                    "git rev-parse --path-format=absolute --git-common-dir timed out",
-                )
-            } else if matches!(
-                error
-                    .get_ref()
-                    .and_then(|cause| cause.downcast_ref::<provenant_os::git::DiscoveryError>()),
-                Some(provenant_os::git::DiscoveryError::Unavailable)
-            ) {
-                Refusal::new(Outcome::Error, "GIT", error.to_string())
-            } else {
-                Refusal::from(error)
-            }
-        })?;
+        |context, cancel| inspect_context(context, facts, cancel),
+    )
+    .map_err(|error| {
+        if matches!(
+            error,
+            crate::worktrees::Error::Worktree(worktrees::WorktreeError::Utility(
+                provenant_confinement::utility::UtilityError::TimedOut
+            ))
+        ) {
+            Refusal::new(Outcome::Timeout, "GIT", "repository fact read timed out")
+        } else {
+            Refusal::from(error)
+        }
+    })
+}
+
+fn inspect_context(
+    context: &worktrees::WorktreeContext<'_>,
+    facts: &worktrees::RepoFacts,
+    cancel: &CancelToken,
+) -> Result<Vec<Tree>, crate::worktrees::Error> {
+    let infos = worktrees::list_with_facts(context, facts, cancel)?;
+    let common = context.repo.common_git_dir();
     let primary = common
         .file_name()
         .is_some_and(|name| name == ".git")
-        .then(|| common.parent().map(fs::canonicalize))
-        .flatten()
-        .transpose()?;
+        .then(|| common.parent())
+        .flatten();
     let mut trees = Vec::with_capacity(infos.len());
     for info in infos {
-        let head = info.head.to_string();
-        // Worktree listings carry full refs; the hand-off speaks branch names.
         let branch = info.branch.as_deref().map(short_branch);
         let (upstream, pushed) = match branch.as_deref() {
             Some(branch) => {
-                let remote = format!("refs/remotes/origin/{branch}");
-                let (found, oid) = git(
-                    project,
-                    &[
-                        "rev-parse",
-                        "--verify",
-                        "--quiet",
-                        &format!("{remote}^{{commit}}"),
-                    ],
-                    GIT_TIMEOUT,
-                )?;
-                if found {
-                    let (contained, _) = git(
-                        project,
-                        &["merge-base", "--is-ancestor", &head, &remote],
-                        GIT_TIMEOUT,
-                    )?;
-                    (Some(oid.trim().to_owned()), contained)
-                } else {
-                    (None, false)
+                let remote = provenant_confinement::repo::GitRefName::remote_tracking(format!(
+                    "origin/{branch}"
+                ))
+                .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+                match facts.resolve_commit(context, remote, cancel) {
+                    Ok(oid) => (
+                        Some(oid.to_string()),
+                        worktrees::is_ancestor(context, info.head, oid, cancel)?,
+                    ),
+                    Err(worktrees::WorktreeError::NotFound) => (None, false),
+                    Err(error) => return Err(error.into()),
                 }
             }
             None => (None, false),
@@ -223,12 +210,10 @@ fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refu
         let path = fs::canonicalize(&info.path).unwrap_or(info.path);
         let (live_writer, writer_unknown) = handoff_writer_state(info.writer);
         trees.push(Tree {
-            primary: primary.as_deref() == Some(path.as_path()),
+            primary: primary == Some(path.as_path()),
             path,
             branch,
-            head,
-            // Ignored files, such as build output and `.worktrees/`, are not
-            // lost work.
+            head: info.head.to_string(),
             dirty: info.dirty == WorktreeCondition::Dirty,
             unknown: matches!(
                 info.dirty,
@@ -663,7 +648,8 @@ fn execute(
     };
 
     // 2. Worktrees must be clean and pushed, unless the caller says otherwise.
-    let mut trees = inspect(&src, workers)?;
+    let facts = worktrees::RepoFacts::default();
+    let mut trees = inspect(&src, workers, &facts)?;
     let mut input = request(&trees)?;
     let problems: Vec<Tree> = trees
         .iter()
@@ -713,7 +699,6 @@ fn execute(
             }
             committed = problems.iter().map(Tree::describe).collect();
             if !args.dry_run {
-                let facts = worktrees::RepoFacts::default();
                 let mut pushed: Vec<String> = Vec::new();
                 for tree in &problems {
                     if let Err(mut refusal) = wip(&src, workers, &facts, tree) {
@@ -728,7 +713,7 @@ fn execute(
                     }
                     pushed.push(tree.branch.clone().unwrap_or_default());
                 }
-                trees = inspect(&src, workers)?;
+                trees = inspect(&src, workers, &facts)?;
                 let left: Vec<String> = trees
                     .iter()
                     .filter(|t| !t.problems().is_empty())
@@ -1402,6 +1387,42 @@ mod tests {
             pushed: false,
         };
         let facts = worktrees::RepoFacts::default();
+        provenant_os::fixture::run_git(
+            &project,
+            &["update-ref", "refs/remotes/origin/wip-custody", &tree.head],
+        )?;
+        let inspected = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, cancel| inspect_context(context, &facts, cancel),
+        )?;
+        let row = inspected
+            .iter()
+            .find(|row| row.path == tree.path)
+            .ok_or("missing lane")?;
+        assert_eq!(row.upstream.as_deref(), Some(tree.head.as_str()));
+        assert!(row.pushed);
+        let limited =
+            worktrees::RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+        let overflow = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, cancel| inspect_context(context, &limited, cancel),
+        );
+        assert!(matches!(
+            overflow,
+            Err(crate::worktrees::Error::Worktree(
+                worktrees::WorktreeError::Utility(
+                    provenant_confinement::utility::UtilityError::Truncated { stream: "stdout" }
+                )
+            ))
+        ));
         let held = crate::worktrees::with_context(
             &roots,
             &home,
@@ -1423,6 +1444,19 @@ mod tests {
         assert!(!called.get());
         drop(held);
         provenant_os::fixture::run_git(&tree.path, &["commit", "--allow-empty", "-qm", "moved"])?;
+        let refreshed = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, cancel| inspect_context(context, &facts, cancel),
+        )?;
+        let row = refreshed
+            .iter()
+            .find(|row| row.path == tree.path)
+            .ok_or("missing lane")?;
+        assert!(!row.pushed, "inspection must refresh after HEAD moves");
         let refused = with_wip_custody(&roots, &home, &project, &Free, &facts, &tree, || {
             called.set(true);
             Ok(())

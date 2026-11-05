@@ -23,7 +23,9 @@ each repository. The snapshot is tied to the common Git directory identity and
 is consumed once. Applied cleanup discards the snapshot and reads Git again
 under the repository lock before authorising mutations. Ref resolution uses
 fresh bounded evidence after fetch. The facts session's inventory and scalar
-caps are configurable and never widen the caller's utility budget.
+caps are configurable and never widen the caller's utility budget. Session
+handoff uses one facts session for its inventory, upstream commit reads and
+WIP rechecks, refreshing mutable evidence after its own Git writes.
 
 ### Worktree census sessions
 

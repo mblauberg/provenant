@@ -123,6 +123,18 @@ pub fn list_streaming(
     list_impl(context, cancel, report, true, None)
 }
 
+/// Read a complete worktree inventory through the command's facts session.
+pub fn list_with_facts(
+    context: &WorktreeContext<'_>,
+    facts: &RepoFacts,
+    cancel: &CancelToken,
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    Ok(list_impl(context, cancel, |_, _| {}, true, Some(facts))?
+        .into_iter()
+        .map(|observation| observation.info)
+        .collect())
+}
+
 /// Inventory for GC. Cleanliness is checked only for candidates after the
 /// policy and custody checks, rather than running Git in every checkout.
 pub fn list_for_gc(
