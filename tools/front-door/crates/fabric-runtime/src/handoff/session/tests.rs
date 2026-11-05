@@ -19,6 +19,7 @@ fn tree(branch: Option<&str>, primary: bool, dirty: bool, pushed: bool) -> Tree 
         dirty,
         unknown: false,
         live_writer: false,
+        writer_unknown: false,
         upstream: branch.filter(|_| pushed).map(|_| "a".repeat(40)),
         pushed,
     }

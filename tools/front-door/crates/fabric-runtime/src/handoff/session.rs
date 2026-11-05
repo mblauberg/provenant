@@ -101,6 +101,8 @@ pub struct Tree {
     pub dirty: bool,
     pub unknown: bool,
     pub live_writer: bool,
+    /// Writer custody could not be determined; this only blocks Git mutations.
+    pub writer_unknown: bool,
     /// `origin/<branch>` when it exists locally.
     pub upstream: Option<String>,
     /// The head is on `origin/<branch>`.

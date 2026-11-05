@@ -62,6 +62,11 @@ scope and evidence. Reassignment rechecks the owner and HEAD under repository
 and writer custody, and still refuses dirty trees, Git operations and retained
 writer fences.
 
+Session handoff holds writer custody through WIP Git operations. It rechecks
+registration, branch, HEAD, Git operation markers and untracked files before
+writing; an unresolved writer observation prevents WIP but does not by itself
+prevent an observation-only handoff.
+
 ### Closed stop reasons; natural exit wins
 
 Only `ProviderGroup::stop(StopReason)` signals a provider: explicit cancellation, wall deadline, protocol rejection, supervisor signal or post-terminal

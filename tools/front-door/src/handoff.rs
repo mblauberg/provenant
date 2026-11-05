@@ -221,6 +221,7 @@ fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refu
             None => (None, false),
         };
         let path = fs::canonicalize(&info.path).unwrap_or(info.path);
+        let (live_writer, writer_unknown) = handoff_writer_state(info.writer);
         trees.push(Tree {
             primary: primary.as_deref() == Some(path.as_path()),
             path,
@@ -233,7 +234,8 @@ fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refu
                 info.dirty,
                 WorktreeCondition::Unknown | WorktreeCondition::GitOperationInProgress
             ),
-            live_writer: info.writer == WriterState::Live,
+            live_writer,
+            writer_unknown,
             upstream,
             pushed,
         });
@@ -241,8 +243,102 @@ fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refu
     Ok(trees)
 }
 
+fn handoff_writer_state(writer: WriterState) -> (bool, bool) {
+    (
+        matches!(writer, WriterState::Busy | WriterState::Live),
+        writer == WriterState::Unknown,
+    )
+}
+
+/// WIP mutates Git, so an unresolved writer state cannot grant custody.
+fn unsafe_wip(tree: &Tree) -> bool {
+    tree.primary || tree.branch.is_none() || tree.live_writer || tree.writer_unknown || tree.unknown
+}
+
+/// Hold writer custody through WIP Git operations, not just the earlier preview.
+fn with_wip_custody(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    project: &Path,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+    tree: &Tree,
+    action: impl FnOnce() -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
+    crate::worktrees::with_context(
+        roots,
+        home,
+        project,
+        GIT_TIMEOUT,
+        workers,
+        |context, cancel| {
+            let verified = provenant_confinement::verify_worktree(context.repo, &tree.path)
+                .map_err(worktrees::WorktreeError::from)?;
+            let _writer = worktrees::cache_writer_guard(context.project_state, verified.path())
+                .map_err(|state| match state {
+                    worktrees::WorkerState::Busy => worktrees::WorktreeError::LockBusy,
+                    _ => worktrees::WorktreeError::UnknownWriter,
+                })?;
+            worktrees::check_writer_terminal(verified.repo())?;
+            let branch = tree
+                .branch
+                .as_deref()
+                .ok_or(worktrees::WorktreeError::IdentityChanged)?;
+            let reference = provenant_confinement::repo::GitRefName::branch(branch)
+                .map_err(|_| worktrees::WorktreeError::IdentityChanged)?;
+            let head = verified
+                .repo()
+                .private_dir()
+                .read_stable(std::ffi::OsStr::new("HEAD"), 4096)
+                .map_err(worktrees::WorktreeError::from)?;
+            if head != format!("ref: {}\n", reference.as_str()).as_bytes()
+                || facts
+                    .resolve_commit(context, reference, cancel)?
+                    .to_string()
+                    != tree.head
+            {
+                return Err(worktrees::WorktreeError::IdentityChanged.into());
+            }
+            Ok(action())
+        },
+    )
+    .map_err(|error| Refusal::refused("WIP_REFUSED", error.to_string()))?
+}
+
 /// Commit a dirty tree as WIP and push its branch. Hooks run as usual.
-fn wip(tree: &Tree) -> Result<(), Refusal> {
+fn wip(
+    src: &Source,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+    tree: &Tree,
+) -> Result<(), Refusal> {
+    with_wip_custody(
+        &src.roots,
+        &src.home,
+        &src.cwd,
+        workers,
+        facts,
+        tree,
+        || {
+            if tree.dirty {
+                let files = untracked(tree)?;
+                if !files.is_empty() {
+                    return Err(Refusal::refused(
+                        "WIP_REFUSED",
+                        format!(
+                            "untracked files in {}: {}",
+                            tree.path.display(),
+                            files.join(", ")
+                        ),
+                    ));
+                }
+            }
+            wip_git(tree)
+        },
+    )
+}
+
+fn wip_git(tree: &Tree) -> Result<(), Refusal> {
     let branch = tree.branch.as_deref().ok_or_else(|| {
         Refusal::refused("WIP_REFUSED", "a detached worktree has no branch to push")
     })?;
@@ -584,8 +680,15 @@ fn execute(
         if args.wip {
             let mut unsafe_trees: Vec<String> = problems
                 .iter()
-                .filter(|t| t.primary || t.branch.is_none() || t.live_writer || t.unknown)
-                .map(|t| format!("  {}", t.describe()))
+                .filter(|tree| unsafe_wip(tree))
+                .map(|tree| {
+                    let detail = if tree.writer_unknown {
+                        "; writer custody unknown"
+                    } else {
+                        ""
+                    };
+                    format!("  {}{detail}", tree.describe())
+                })
                 .collect();
             for tree in problems.iter().filter(|t| t.dirty) {
                 let files = untracked(tree)?;
@@ -610,9 +713,10 @@ fn execute(
             }
             committed = problems.iter().map(Tree::describe).collect();
             if !args.dry_run {
+                let facts = worktrees::RepoFacts::default();
                 let mut pushed: Vec<String> = Vec::new();
                 for tree in &problems {
-                    if let Err(mut refusal) = wip(tree) {
+                    if let Err(mut refusal) = wip(&src, workers, &facts, tree) {
                         if !pushed.is_empty() {
                             let _ = write!(
                                 refusal.message,
@@ -1208,6 +1312,148 @@ mod tests {
         // Output within the bound is still returned whole.
         let text = git_text(temp.path(), &["--version"]).unwrap();
         assert!(text.starts_with("git version"), "{text}");
+    }
+
+    #[test]
+    fn wip_refuses_held_or_uncertain_writer_custody() {
+        let mut tree = Tree {
+            path: "/repo/lane".into(),
+            branch: Some("lane".into()),
+            head: "a".repeat(40),
+            primary: false,
+            dirty: true,
+            unknown: false,
+            live_writer: false,
+            writer_unknown: false,
+            upstream: None,
+            pushed: false,
+        };
+        for state in [WriterState::Busy, WriterState::Live, WriterState::Unknown] {
+            (tree.live_writer, tree.writer_unknown) = handoff_writer_state(state);
+            assert!(unsafe_wip(&tree), "{state:?} must not permit Git writes");
+        }
+        (tree.live_writer, tree.writer_unknown) = handoff_writer_state(WriterState::Free);
+        assert!(!unsafe_wip(&tree));
+        tree.writer_unknown = true;
+        tree.dirty = false;
+        tree.upstream = Some("b".repeat(40));
+        tree.pushed = true;
+        assert!(
+            tree.problems().is_empty(),
+            "observation alone must not block handoff"
+        );
+    }
+
+    #[test]
+    fn wip_holds_the_writer_lease_during_git_mutation() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+        use std::collections::BTreeMap;
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, WorkerState::Free))
+                    .collect()
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&state)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir_all(&project)?;
+        provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let info = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, cancel| {
+                Ok(worktrees::create(
+                    context,
+                    WorktreeCreate {
+                        branch: "wip-custody".into(),
+                        base: None,
+                    },
+                    cancel,
+                )?)
+            },
+        )?;
+        let mut tree = Tree {
+            path: info.path.clone(),
+            branch: Some("wip-custody".into()),
+            head: info.head.to_string(),
+            primary: false,
+            dirty: true,
+            unknown: false,
+            live_writer: false,
+            writer_unknown: false,
+            upstream: None,
+            pushed: false,
+        };
+        let facts = worktrees::RepoFacts::default();
+        let held = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, _| {
+                worktrees::cache_writer_guard(context.project_state, &tree.path)
+                    .map_err(|_| worktrees::WorktreeError::UnknownWriter.into())
+            },
+        )?;
+        let called = std::cell::Cell::new(false);
+        let refused = with_wip_custody(&roots, &home, &project, &Free, &facts, &tree, || {
+            called.set(true);
+            Ok(())
+        })
+        .expect_err("held writer must refuse WIP");
+        assert_eq!(refused.code(), "WIP_REFUSED");
+        assert!(!called.get());
+        drop(held);
+        provenant_os::fixture::run_git(&tree.path, &["commit", "--allow-empty", "-qm", "moved"])?;
+        let refused = with_wip_custody(&roots, &home, &project, &Free, &facts, &tree, || {
+            called.set(true);
+            Ok(())
+        })
+        .expect_err("moved HEAD must refuse WIP");
+        assert_eq!(refused.code(), "WIP_REFUSED");
+        assert!(!called.get());
+        tree.head = String::from_utf8(provenant_os::fixture::run_git(
+            &tree.path,
+            &["rev-parse", "HEAD"],
+        )?)?
+        .trim()
+        .to_owned();
+        with_wip_custody(&roots, &home, &project, &Free, &facts, &tree, || {
+            let held = crate::worktrees::with_context(
+                &roots,
+                &home,
+                &project,
+                GIT_TIMEOUT,
+                &Free,
+                |context, _| {
+                    Ok(worktrees::cache_writer_probe(context.project_state, &tree.path).is_err())
+                },
+            )?;
+            assert!(held, "the writer lock must cover the mutation");
+            called.set(true);
+            Ok(())
+        })
+        .map_err(|error| error.message)?;
+        assert!(called.get());
+        Ok(())
     }
 
     #[test]
