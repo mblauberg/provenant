@@ -2797,7 +2797,6 @@ fn graph_fixture_available() -> Result<bool> {
     Ok(true)
 }
 
-<<<<<<< HEAD
 fn graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -2898,7 +2897,10 @@ fn graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts() -> Re
         "--json",
     ])?;
     assert_eq!(code(&replay), 0, "{replay:?}");
-=======
+    cleanup.disarm();
+    Ok(())
+}
+
 fn review_council_overcap_runs_through_fake_providers() -> Result {
     if !graph_fixture_available().map_err(|e| format!("fixture availability: {e}"))? {
         return Ok(());
@@ -3012,7 +3014,6 @@ fn review_council_overcap_runs_through_fake_providers() -> Result {
         assert!(std::time::Instant::now() < deadline, "{status}");
         std::thread::park_timeout(std::time::Duration::from_millis(100));
     }
->>>>>>> origin/main
     cleanup.disarm();
     Ok(())
 }
