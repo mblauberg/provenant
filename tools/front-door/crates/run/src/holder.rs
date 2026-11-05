@@ -2218,7 +2218,10 @@ mod writer_recovery_tests {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
         use std::ffi::OsString;
-        for mode in ["no_summary_terminal_modern", "no_summary_terminal_other_generation"] {
+        for mode in [
+            "no_summary_terminal_modern",
+            "no_summary_terminal_other_generation",
+        ] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
             let (clock, cancel) = (clock(), CancelToken::new());
@@ -2391,7 +2394,8 @@ mod writer_recovery_tests {
             );
             assert!(
                 matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Lost, reason: Some(ref reason), .. } if reason.contains("never spawned")),
-                "{:?}", terminal.state
+                "{:?}",
+                terminal.state
             );
             assert!(store.writer_fences()?.is_empty());
             assert!(store.writer_fence_listing()?.issues.is_empty());
