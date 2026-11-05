@@ -463,13 +463,18 @@ pub(crate) fn recover_pending_with(
                         Some(commit)
                     }
                     (PullRequestState::Closed, _) => None,
-                    (_, _) if pr.head != step.pr.head => None,
                     (PullRequestState::Open, _) => {
                         let expected = landed_prs
                             .last()
                             .and_then(|pr: &EligiblePr| mapping.get(&pr.head))
                             .unwrap_or(&attempt.candidate.base);
-                        if can_retry && !unproven && landed_prs.len() == index && &tip == expected {
+                        if can_retry
+                            && pr.stack.is_none()
+                            && pr.head == step.pr.head
+                            && !unproven
+                            && landed_prs.len() == index
+                            && &tip == expected
+                        {
                             // A previous recovered merge may have advanced the target; read it
                             // again before each ordered retry to detect intervening movement.
                             tip = repo.fetch_target(target).map_err(|_| unknown())?;
@@ -482,10 +487,7 @@ pub(crate) fn recover_pending_with(
                                     settings.publish_settle_seconds,
                                 ));
                                 match forge.pull_request(step.pr.number) {
-                                    Ok(pr)
-                                        if pr.state == PullRequestState::Open
-                                            || pr.state == PullRequestState::Closed =>
-                                    {
+                                    Ok(pr) if pr.state == PullRequestState::Closed => {
                                         outcomes.insert(step.pr.number, Outcome::Excluded);
                                     }
                                     _ => {
@@ -527,29 +529,11 @@ pub(crate) fn recover_pending_with(
                                     continue;
                                 }
                             }
-                        } else if settled {
-                            None
                         } else {
-                            #[allow(
-                                clippy::disallowed_methods,
-                                reason = "allow the original publication to settle"
-                            )]
-                            sleep(std::time::Duration::from_secs(
-                                settings.publish_settle_seconds,
-                            ));
-                            match forge.pull_request(step.pr.number) {
-                                Ok(pr)
-                                    if pr.state == PullRequestState::Open
-                                        || pr.state == PullRequestState::Closed =>
-                                {
-                                    None
-                                }
-                                _ => {
-                                    unproven = true;
-                                    outcomes.insert(step.pr.number, Outcome::PendingUnknown);
-                                    continue;
-                                }
-                            }
+                            // An open PR may still have an asynchronous merge in flight.
+                            unproven = true;
+                            outcomes.insert(step.pr.number, Outcome::PendingUnknown);
+                            continue;
                         }
                     }
                     _ => {

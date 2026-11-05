@@ -3,13 +3,9 @@ use super::{
     model::*,
     ports::{Forge, MergeTree, PullRequestState, Repo},
 };
-use std::time::{Duration, Instant};
+use provenant_core::{Clock, MonoTime};
 
 /// Select eligible pull requests in requested order, up to the configured batch limit.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "batch collection is a wall-clock boundary"
-)]
 pub fn select_batch(
     forge: &mut dyn Forge,
     numbers: &[u64],
@@ -31,8 +27,9 @@ pub fn select_batch_with_dependencies(
     if limit == 0 || numbers.is_empty() {
         return Ok(Vec::new());
     }
-    let start = Instant::now();
-    let budget = Duration::from_secs(batch_wait_seconds);
+    let clock = provenant_os::clock::SystemClock::new();
+    let start = clock.mono_now().as_micros();
+    let budget = batch_wait_seconds.saturating_mul(1_000_000);
     loop {
         let mut selected = Vec::new();
         for &number in numbers {
@@ -101,10 +98,19 @@ pub fn select_batch_with_dependencies(
                 }
             }
         }
-        if selected.len() == limit || selected.len() == numbers.len() || start.elapsed() >= budget {
+        if selected.len() == limit
+            || selected.len() == numbers.len()
+            || clock.mono_now().as_micros().saturating_sub(start) >= budget
+        {
             return Ok(selected);
         }
-        std::thread::sleep(Duration::from_secs(1).min(budget.saturating_sub(start.elapsed())));
+        let now = clock.mono_now().as_micros();
+        let deadline = start
+            .saturating_add(budget)
+            .min(now.saturating_add(1_000_000));
+        clock
+            .wait_until(MonoTime::from_micros(deadline))
+            .map_err(|error| LandingError::Failed(format!("batch wait: {error}")))?;
     }
 }
 /// Build and push an exact candidate chain from the fetched target and approved heads.

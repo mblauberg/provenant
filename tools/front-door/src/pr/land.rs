@@ -1935,16 +1935,26 @@ esac
             dir.path().display(),
             std::env::var("PATH").unwrap()
         );
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "pr::land::graph_land_tests::graph_land_resolves_its_pull_request_via_rest",
-                "--nocapture",
-            ])
-            .env(MARKER, dir.path())
-            .env("PATH", path)
-            .output()
-            .unwrap();
+        let argv = [
+            std::env::current_exe().unwrap().into_os_string(),
+            "--exact".into(),
+            "pr::land::graph_land_tests::graph_land_resolves_its_pull_request_via_rest".into(),
+            "--nocapture".into(),
+        ];
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| key != MARKER && key != "PATH")
+            .collect();
+        env.push((MARKER.into(), dir.path().into()));
+        env.push(("PATH".into(), path.into()));
+        let output = provenant_os::sys::fixture_command(
+            &argv,
+            &env,
+            &std::env::current_dir().unwrap(),
+            false,
+        )
+        .unwrap()
+        .output()
+        .unwrap();
         assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
         assert!(
             output.status.success(),

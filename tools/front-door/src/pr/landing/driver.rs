@@ -1907,8 +1907,19 @@ mod tests {
         );
         assert!(forge.merges.is_empty());
         assert!(repo.pushes.is_empty());
-        result?;
-        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        if mode == PublishMode::RestOrdered && change != "closed" {
+            assert!(matches!(
+                result,
+                Err(LandingError::PublicationUnknownAt { .. })
+            ));
+            assert_eq!(
+                receipt::pending(state.path(), "fake-repository", "main")?.len(),
+                1
+            );
+        } else {
+            result?;
+            assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        }
         Ok(())
     }
     #[test]
@@ -1942,7 +1953,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_settles_open_prs_after_target_or_sibling_moves()
+    fn recovery_retains_open_prs_after_target_or_sibling_moves()
     -> Result<(), Box<dyn std::error::Error>> {
         for changed_sibling in [false, true] {
             let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
@@ -2003,7 +2014,7 @@ mod tests {
                 },
             )?;
             let mut recovered = Vec::new();
-            reconcile::recover_pending(
+            let result = reconcile::recover_pending(
                 &mut forge,
                 &mut repo,
                 &mut gate,
@@ -2013,11 +2024,16 @@ mod tests {
                 "main",
                 false,
                 &mut recovered,
-            )?;
-            assert_eq!(recovered[0].outcomes[&1], Outcome::Excluded);
-            assert_eq!(recovered[0].outcomes[&2], Outcome::Excluded);
+            );
+            assert!(matches!(
+                result,
+                Err(LandingError::PublicationUnknownAt { .. })
+            ));
             assert!(forge.merge_attempts.is_empty());
-            assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+            assert_eq!(
+                receipt::pending(state.path(), "fake-repository", "main")?.len(),
+                1
+            );
         }
         Ok(())
     }
@@ -2096,7 +2112,8 @@ mod tests {
     }
 
     #[test]
-    fn recovery_observes_open_pr_after_settle_window() -> Result<(), Box<dyn std::error::Error>> {
+    fn recovery_retains_ambiguous_stack_merge_until_it_is_observed()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(1);
         settings.publish_settle_seconds = 7;
         let mut attempt = super::super::receipt::tests::attempt("main", "candidate");
@@ -2119,13 +2136,25 @@ mod tests {
             commit: "candidate".into(),
             tree: "tree".into(),
         }];
+        use super::super::ports::{Forge, PullRequestState, StackMembership};
+        forge.pull_requests.get_mut(&1).unwrap().stack = Some(StackMembership {
+            number: 42,
+            size: 1,
+            position: 1,
+            base_branch: "main".into(),
+        });
+        let head = forge.pull_requests[&1].head.clone();
+        attempt.candidate.steps[0].pr.approval = "approval-1".into();
         let state = tempfile::tempdir()?;
         receipt::record_pending(state.path(), &attempt)?;
+        forge.fail_merge = Some(1);
+        assert!(forge.merge_stack(1, &head, settings.method).is_err());
+        forge.approvals_at_head.clear();
         let waited = std::rc::Rc::new(std::cell::Cell::new(false));
         let reads = std::rc::Rc::new(std::cell::Cell::new(0));
         forge.after_wait_reads = Some((waited.clone(), reads.clone()));
         let mut recovered = Vec::new();
-        reconcile::recover_pending_with(
+        let result = reconcile::recover_pending_with(
             &mut forge,
             &mut repo,
             &mut gate,
@@ -2139,11 +2168,38 @@ mod tests {
                 assert_eq!(duration, std::time::Duration::from_secs(7));
                 waited.set(true);
             },
-        )?;
+        );
+        assert!(matches!(
+            result,
+            Err(LandingError::PublicationUnknownAt { .. })
+        ));
         assert!(waited.get());
         assert!(reads.get() > 0);
-        assert_eq!(recovered[0].outcomes[&1], Outcome::Excluded);
-        assert!(forge.merge_attempts.is_empty());
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
+        assert_eq!(forge.merge_attempts, vec![1]);
+        let pr = forge.pull_requests.get_mut(&1).unwrap();
+        pr.state = PullRequestState::Merged;
+        pr.merged_commit = Some("landed-1".into());
+        repo.trees.insert("landed-1".into(), "tree".into());
+        reconcile::recover_pending_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut recovered,
+            &|_| {},
+        )?;
+        assert_eq!(recovered[0].outcomes[&1], Outcome::Landed);
+        assert_eq!(recovered[0].approved_to_landed[&head], "landed-1");
+        assert!(repo.local_followed.contains(&1));
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
         Ok(())
     }
 
@@ -2247,7 +2303,7 @@ mod tests {
             },
         )?;
         let mut recovered = Vec::new();
-        reconcile::recover_pending(
+        let result = reconcile::recover_pending(
             &mut forge,
             &mut repo,
             &mut gate,
@@ -2257,14 +2313,21 @@ mod tests {
             "main",
             false,
             &mut recovered,
-        )?;
+        );
+        assert!(matches!(
+            result,
+            Err(LandingError::PublicationUnknownAt { .. })
+        ));
         assert_eq!(
             forge.merges.iter().map(|merge| merge.0).collect::<Vec<_>>(),
             [1]
         );
         assert_eq!(recovered[0].pull_requests.len(), 1);
-        assert_eq!(recovered[0].outcomes[&2], Outcome::Excluded);
-        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        assert_eq!(recovered[0].outcomes[&2], Outcome::PendingUnknown);
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
         Ok(())
     }
 
