@@ -4400,18 +4400,39 @@ pub(crate) fn fixture_review_expansion_with_paths(
         .map_err(ReviewResolveError::Failed)?;
     let subject = provenant_core::GitOid::parse(subject)
         .map_err(|error| ReviewResolveError::Failed(error.to_string()))?;
+    let base = node
+        .extra
+        .get("review_base")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| provenant_core::GitOid::parse(value).ok())
+        .unwrap_or(subject);
     let measure = ReviewMeasure {
         routing,
         directory: PathBuf::new(),
         subject,
-        base: subject,
+        base,
         base_known: true,
         measured: provenant_routing::Measured {
             size: Some("small"),
             warning: None,
         },
     };
-    BoundGraphOwner::review_expansion(node, &measure, &panel, "fixture".into())
+    let floors = measure.routing.review.path_floors(paths);
+    let floor_min = if floors.tier.is_some() {
+        measure
+            .routing
+            .review
+            .select_shape(Some(shape), None, None, paths, None)
+            .map_err(ReviewResolveError::Failed)?
+            .shape
+            .reviewers
+            .iter()
+            .map(|row| row.count)
+            .sum()
+    } else {
+        0
+    };
+    BoundGraphOwner::review_expansion(node, &measure, &panel, &floors, floor_min, "fixture".into())
 }
 
 impl BoundGraphOwner<'_> {
@@ -4505,6 +4526,8 @@ impl BoundGraphOwner<'_> {
         node: &provenant_fabric_runtime::graph::GraphNode,
         measure: &ReviewMeasure,
         panel: &provenant_routing::PanelResolution,
+        floors: &provenant_routing::AppliedFloors,
+        floor_min: usize,
         source: String,
     ) -> Result<
         provenant_fabric_runtime::graph::Expansion,
@@ -4594,6 +4617,121 @@ impl BoundGraphOwner<'_> {
         if members.is_empty() {
             return Err(failed("the review panel selected no lenses".into()));
         }
+        if let Some(captured) = node.extra.get("review_planner") {
+            let catalogue = captured
+                .pointer("/catalogue/patterns")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| failed("deferred review lacks its planner catalogue".into()))?;
+            let mut patterns = Vec::new();
+            for slot in &panel.slots {
+                let name = format!("lens-{}", slot.lens);
+                let mut pattern = catalogue
+                    .iter()
+                    .find(|pattern| pattern["name"] == name)
+                    .cloned()
+                    .ok_or_else(|| failed(format!("review catalogue lacks {name}")))?;
+                if let Some(tier) = slot.tier.as_str() {
+                    pattern["parameters"]["tier"]["default"] = serde_json::json!(tier);
+                    if let Some(allowed) = pattern["parameters"]["tier"]["enum"].as_array_mut()
+                        && !allowed.iter().any(|value| value == tier)
+                    {
+                        allowed.push(serde_json::json!(tier));
+                    }
+                }
+                if slot.distinct_families {
+                    for leaf in pattern["nodes"].as_array_mut().into_iter().flatten() {
+                        leaf["family_group"] =
+                            serde_json::json!(crate::preset::format_family_group(slot.group_index));
+                    }
+                }
+                if let Some(base) = node.extra.get("review_base") {
+                    for leaf in pattern["nodes"].as_array_mut().into_iter().flatten() {
+                        leaf["review_base"] = base.clone();
+                    }
+                }
+                patterns.push(pattern);
+            }
+            let mut fallback_members = members.clone();
+            let prefix = format!("{lens_id}--");
+            let mut fallback_exports = Vec::new();
+            for (index, member) in fallback_members.iter_mut().enumerate() {
+                if !member.id.starts_with(&prefix) {
+                    return Err(failed("invalid lens identity".into()));
+                }
+                member.id = format!("l{}", index + 1);
+                member.depends_on.clear();
+                member.inputs.clear();
+                if let Some(base) = node.extra.get("review_base") {
+                    member.extra.insert("review_base".into(), base.clone());
+                }
+                let outputs = if index == 0 {
+                    serde_json::json!(["result", "findings", "commit"])
+                } else {
+                    serde_json::json!(["result", "findings"])
+                };
+                fallback_exports.push(serde_json::json!({"node":member.id,"outputs":outputs}));
+            }
+            let minimum = spec.min_successful.map(|n| {
+                if n == 0 {
+                    members.len().saturating_sub(1).max(1)
+                } else {
+                    n
+                }
+            });
+            let required: Vec<_> = floors
+                .lenses
+                .iter()
+                .map(|name| format!("lens-{name}"))
+                .collect();
+            let candidates: Vec<String> = patterns
+                .iter()
+                .filter_map(|pattern| pattern["name"].as_str().map(str::to_owned))
+                .collect();
+            let floor_count = floor_min.max(minimum.unwrap_or(0));
+            let reserve = required.len().max(floor_count) as u64;
+            let max_nodes = captured
+                .get("max_nodes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(24)
+                .min(512_u64.saturating_sub(reserve))
+                .max(1);
+            let mut plan: provenant_fabric_runtime::graph::PlanSpec = serde_json::from_value(serde_json::json!({
+                "kinds":["task","synthesise"], "max_nodes":max_nodes.saturating_add(reserve),
+                "model_max_nodes":max_nodes, "patterns_only":true, "wire_exports":true,
+                "patterns":patterns, "floor_candidate_patterns":candidates,
+                "required_floor_patterns":required, "floor_min_reviewers":floor_count,
+                "floor_classes":floors.classes,
+                "planned_review":true, "review_min_successful":minimum,
+                "fallback": {"nodes":[{"id":"static", "kind":"composite", "access":"read_only",
+                    "composite":{"nodes":fallback_members,"exports":fallback_exports,"min_successful":minimum,
+                        "reduce_verdict": true}}],
+                    "exports":[{"node":"static","outputs":["result","findings","verdict","commit"]}]}
+            })).map_err(|error| failed(format!("invalid review planner: {error}")))?;
+            plan.pin_review_subject(&subject).map_err(failed)?;
+            let mut template = captured
+                .get("template")
+                .cloned()
+                .ok_or_else(|| failed("deferred review lacks its planner template".into()))?;
+            template["id"] = serde_json::json!(format!("{lens_id}--plan"));
+            template["source"] = serde_json::json!({"type":"commit","commit":subject});
+            template["depends_on"] = serde_json::json!(if panel.frame {
+                vec![frame_id.clone()]
+            } else {
+                node.depends_on.clone()
+            });
+            template["inputs"] = if panel.frame {
+                serde_json::json!([{"node":frame_id,"outputs":["result"]}])
+            } else {
+                serde_json::json!(node.inputs)
+            };
+            template["read_roots"] = serde_json::json!(node.read_roots);
+            template["plan"] =
+                serde_json::to_value(plan).map_err(|error| failed(error.to_string()))?;
+            members = vec![
+                serde_json::from_value(template)
+                    .map_err(|error| failed(format!("invalid review planner node: {error}")))?,
+            ];
+        }
         let verifiers = node
             .extra
             .get("panel_verifiers")
@@ -4621,8 +4759,14 @@ impl BoundGraphOwner<'_> {
             .enumerate()
             .map(|(index, member)| {
                 let mut outputs = vec![OutputKind::Result, OutputKind::Findings];
+                if node.extra.contains_key("review_planner") {
+                    outputs.push(OutputKind::Verdict);
+                    outputs.push(OutputKind::Commit);
+                }
                 if index == 0 {
-                    if panel.synthesis == provenant_routing::ReviewSynthesis::Reduce {
+                    if panel.synthesis == provenant_routing::ReviewSynthesis::Reduce
+                        && !outputs.contains(&OutputKind::Commit)
+                    {
                         outputs.push(OutputKind::Commit);
                     }
                     for output in &spec.export_first {
@@ -4645,17 +4789,22 @@ impl BoundGraphOwner<'_> {
         } else {
             node.depends_on.clone()
         };
+        let min_successful = if node.extra.contains_key("review_planner") {
+            Some(1)
+        } else {
+            spec.min_successful.map(|n| {
+                if n == 0 {
+                    members.len().saturating_sub(1).max(1)
+                } else {
+                    n
+                }
+            })
+        };
         let lens_group = GraphNode::composite(
             lens_id.clone(),
             lens_deps,
             CompositeSpec {
-                min_successful: spec.min_successful.map(|n| {
-                    if n == 0 {
-                        members.len().saturating_sub(1).max(1)
-                    } else {
-                        n
-                    }
-                }),
+                min_successful,
                 reduce_verdict: reduction,
                 nodes: Vec::new(),
                 exports,
@@ -5101,7 +5250,25 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         if !warnings.is_empty() {
             source.push_str(&format!("; warnings={}", warnings.join(" | ")));
         }
-        Self::review_expansion(node, &measure, &panel, source)
+        let floor_min = if floors.tier.is_some() {
+            review
+                .select_shape(
+                    spec.shape.as_deref(),
+                    spec.risk_tier.as_deref(),
+                    spec.kind.as_deref(),
+                    &paths,
+                    spec.size.as_deref().or(measure.measured.size),
+                )
+                .map_err(ReviewResolveError::Failed)?
+                .shape
+                .reviewers
+                .iter()
+                .map(|row| row.count)
+                .sum()
+        } else {
+            0
+        };
+        Self::review_expansion(node, &measure, &panel, &floors, floor_min, source)
     }
 
     fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {

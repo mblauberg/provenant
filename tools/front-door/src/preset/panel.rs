@@ -658,6 +658,57 @@ impl StageBuilder<'_> {
         }
         let spec = self.review_spec(object)?;
         let names = self.review_candidates(&spec.lenses)?;
+        let planned = if let Some(context) = self.layers.plan.as_ref().filter(|context| {
+            context.mode == provenant_fabric_runtime::config::PlanMode::On
+                && context.unavailable.is_none()
+                && self.layers.delegated_plan_stage.borrow().as_deref() == Some(self.scope)
+        }) {
+            let capture = (|| -> Result<Value, String> {
+                let catalogue = super::planner::deferred_review_catalogue(self, &names)?;
+                let mut values = self.parameters.clone();
+                values["plan_max_nodes"] = json!(context.max_nodes);
+                values["plan_lane_deadline_seconds"] = json!(context.lane_deadline_seconds);
+                values["plan_routes"] = json!(
+                    self.layers
+                        .known_routes
+                        .as_ref()
+                        .map(|routes| routes.iter().cloned().collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default()
+                );
+                values["plan_worktrees"] = json!("none registered");
+                values["plan_guidance"] = catalogue
+                    .get("guidance")
+                    .filter(|guidance| !guidance.is_null())
+                    .cloned()
+                    .unwrap_or_else(|| json!(""));
+                let entry =
+                    json!({"role":"plan.shape", "tier":context.route, "access":"read_only"});
+                let planner = super::lower_leaf(
+                    self.layers,
+                    entry.as_object().ok_or("invalid planner template")?,
+                    self.roles,
+                    &values,
+                    self.prompt,
+                    1,
+                    "plan",
+                    &[],
+                )?;
+                Ok(
+                    json!({"template":planner, "catalogue":catalogue, "max_nodes":context.max_nodes}),
+                )
+            })();
+            match capture {
+                Ok(captured) => Some(captured),
+                Err(error) => {
+                    self.layers.warnings.borrow_mut().push(format!(
+                        "review planner unavailable ({error}); using the deterministic panel"
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let items: Vec<Value> = names
             .iter()
             .map(|name| json!({"name": name, "tier": "senior"}))
@@ -713,6 +764,9 @@ impl StageBuilder<'_> {
             "review": spec,
             "lens_templates": templates,
         });
+        if let Some(planned) = planned {
+            node["review_planner"] = planned;
+        }
         if !deps.is_empty() {
             node["inputs"] = super::selected_inputs(deps, outputs);
         }

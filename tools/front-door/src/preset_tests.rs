@@ -1305,6 +1305,7 @@ struct PresetOwner {
     captured_results: std::collections::BTreeMap<String, String>,
     launched: Vec<String>,
     planner_fragment: Option<String>,
+    fail_planner: bool,
     deferred_shape: Option<String>,
     deferred_paths: Vec<String>,
     allow_land: bool,
@@ -1538,7 +1539,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         }
         Ok(AttemptObservation::Terminal {
             attempt_ref: Some(format!("fixture/{}", key.node_id)),
-            outcome: AttemptOutcome::Succeeded,
+            outcome: if self.fail_planner && key.node_id.ends_with("--plan") {
+                AttemptOutcome::OtherFailure
+            } else {
+                AttemptOutcome::Succeeded
+            },
             launched: true,
             result: Some(Box::new(result.finish())),
             result_warning: None,
@@ -5157,6 +5162,303 @@ mod planner_front_end {
             .iter()
             .map(|node| node["id"].as_str().unwrap().to_owned())
             .collect()
+    }
+
+    #[test]
+    fn deliver_plans_its_pinned_review_and_falls_back() {
+        use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+        let mut configured = super::real_selector("/nonexistent");
+        configured.plan = layers(PlanMode::On, None).plan;
+        let fragment = "Correctness covers the change.\n```fragment\n{\"schema_version\":1,\"nodes\":[],\"patterns\":[{\"id\":\"one\",\"pattern\":\"lens-correctness-spec\",\"parameters\":{\"tier\":\"principal\"}}]}\n```";
+        for (response, floor, shape, fail) in [
+            (fragment, false, "quick", false),
+            ("invalid plan", false, "quick", false),
+            (fragment, false, "standard", true),
+            (fragment, true, "quick", false),
+            (fragment, false, "standard", false),
+        ] {
+            let land = shape == "quick" && response == fragment && !floor && !fail;
+            let mut expansion = run(
+                &configured,
+                "deliver",
+                "brief",
+                vec![
+                    ("worktree".into(), json!("/repo/lane")),
+                    (
+                        "base".into(),
+                        json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    ),
+                    ("land".into(), json!(usize::from(land))),
+                    ("checks".into(), json!(["ci"])),
+                ],
+            );
+            assert_eq!(
+                expansion.plan.as_ref().unwrap().reason,
+                "review panel planned at launch"
+            );
+            super::pin_fixture_sources(&mut expansion.document);
+            let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+            let config = provenant_fabric_runtime::config::GraphConfig::default();
+            let mut owner = super::PresetOwner {
+                deferred_shape: Some(shape.into()),
+                deferred_paths: if floor {
+                    vec!["src/credentials.rs".into()]
+                } else {
+                    vec![]
+                },
+                planner_fragment: Some(response.into()),
+                fail_planner: fail,
+                allow_land: land,
+                ..Default::default()
+            };
+            let mut journal = super::PresetJournal::default();
+            let run = advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &config.limits,
+                &config.budget,
+            )
+            .unwrap();
+            assert!(
+                run.checkpoint.successful(),
+                "pause: {:?}; nodes: {:?}",
+                run.checkpoint.pause_reason,
+                run.checkpoint
+                    .nodes
+                    .iter()
+                    .map(|n| (&n.id, n.state, &n.expansion_pause))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(owner.lands, usize::from(land));
+            let planner = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id.ends_with("--p--plan"))
+                .unwrap();
+            let planner_index = owner
+                .launched
+                .iter()
+                .position(|id| id == &planner.id)
+                .unwrap();
+            let lens_index = owner
+                .launched
+                .iter()
+                .position(|id| {
+                    id.contains("--p--plan--")
+                        && (id.ends_with("--lens") || id.contains("--fallback--static--l"))
+                })
+                .unwrap();
+            assert!(planner_index < lens_index);
+            if response == fragment && !fail {
+                assert!(
+                    planner
+                        .outputs
+                        .as_ref()
+                        .unwrap()
+                        .result
+                        .as_ref()
+                        .unwrap()
+                        .excerpt
+                        .contains("Correctness covers")
+                );
+                let expansion = run
+                    .checkpoint
+                    .expansions
+                    .iter()
+                    .find(|expansion| expansion.source == planner.id)
+                    .unwrap();
+                assert!(
+                    expansion
+                        .patterns
+                        .iter()
+                        .any(|pattern| pattern.name == "lens-correctness-spec")
+                );
+                assert_eq!(
+                    expansion
+                        .patterns
+                        .iter()
+                        .find(|pattern| pattern.name == "lens-correctness-spec")
+                        .unwrap()
+                        .parameters["tier"],
+                    "principal"
+                );
+                if floor {
+                    assert!(
+                        expansion
+                            .patterns
+                            .iter()
+                            .any(|pattern| pattern.name == "lens-security-privacy")
+                    );
+                    assert!(expansion.patterns.len() > 1);
+                } else {
+                    assert_eq!(expansion.patterns.len(), 1);
+                }
+            } else {
+                assert!(
+                    !planner
+                        .outputs
+                        .as_ref()
+                        .unwrap()
+                        .plan
+                        .as_ref()
+                        .unwrap()
+                        .fallback_reason
+                        .is_empty()
+                );
+                if shape == "standard" {
+                    assert!(
+                        owner
+                            .launched
+                            .iter()
+                            .filter(|id| id.contains("--fallback--static--l"))
+                            .count()
+                            > 1
+                    );
+                }
+            }
+            let writer = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "write")
+                .unwrap()
+                .outputs
+                .as_ref()
+                .unwrap()
+                .commit
+                .as_ref()
+                .unwrap();
+            for node in run
+                .checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.id.contains("--p--plan") && !node.attempts.is_empty())
+            {
+                assert_eq!(node.source_commit.as_ref(), Some(writer));
+                assert_eq!(
+                    node.review_base.as_deref(),
+                    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                );
+            }
+            let mut replay = super::PresetOwner::default();
+            let restored = advance_with_budget(
+                &document,
+                &mut replay,
+                &mut journal,
+                &config.limits,
+                &config.budget,
+            )
+            .unwrap();
+            assert!(restored.checkpoint.successful());
+            assert!(replay.launched.is_empty());
+            let mut changed = journal.0.clone().unwrap();
+            let review = changed
+                .expansions
+                .iter_mut()
+                .find(|expansion| expansion.review.is_some())
+                .unwrap();
+            let planned_node = review
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == planner.id)
+                .unwrap();
+            let fallback = planned_node
+                .plan
+                .as_mut()
+                .unwrap()
+                .fallback
+                .as_mut()
+                .unwrap();
+            let fallback_lens = &mut fallback.nodes[0].composite.as_mut().unwrap().nodes[0];
+            fallback_lens.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
+                commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            });
+            let error = advance_with_budget(
+                &document,
+                &mut replay,
+                &mut super::PresetJournal(Some(changed)),
+                &config.limits,
+                &config.budget,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code(),
+                if response == fragment && !fail {
+                    "invalid_graph"
+                } else {
+                    "bad_checkpoint"
+                }
+            );
+            if response == fragment && !fail {
+                let mut changed = journal.0.clone().unwrap();
+                let lens = changed
+                    .expansions
+                    .iter_mut()
+                    .find(|expansion| expansion.source == planner.id)
+                    .unwrap()
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id.ends_with("--lens"))
+                    .unwrap();
+                lens.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
+                    commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                });
+                let error = advance_with_budget(
+                    &document,
+                    &mut replay,
+                    &mut super::PresetJournal(Some(changed)),
+                    &config.limits,
+                    &config.budget,
+                )
+                .unwrap_err();
+                assert_eq!(error.code(), "bad_checkpoint");
+            }
+        }
+    }
+
+    #[test]
+    fn deliver_plan_off_keeps_the_deferred_review() {
+        let mut off = super::real_selector("/nonexistent");
+        off.plan = layers(PlanMode::Off, None).plan;
+        let baseline = super::real_selector("/nonexistent");
+        let params = vec![("worktree".into(), json!("/repo/lane"))];
+        let actual = run(&off, "deliver", "brief", params.clone());
+        let expected = run(&baseline, "deliver", "brief", params);
+        assert_eq!(actual.document["nodes"], expected.document["nodes"]);
+        let panel = &actual.document["nodes"][2]["composite"]["nodes"][0];
+        assert!(panel.get("review").is_some());
+        assert!(panel.get("review_planner").is_none());
+    }
+
+    #[test]
+    fn deliver_warns_and_keeps_review_when_catalogue_cannot_supply_lenses() {
+        let mut configured = super::real_selector("/nonexistent");
+        configured.plan = layers(PlanMode::On, None).plan;
+        let review = include_str!("../assets/presets/review.toml").replace(
+            "name = \"lens-${item.name}\"",
+            "name = \"other-${item.name}\"",
+        );
+        configured.insert("test", "review", &review).unwrap();
+        let expansion = run(
+            &configured,
+            "deliver",
+            "brief",
+            vec![("worktree".into(), json!("/repo/lane"))],
+        );
+        assert!(!expansion.plan.as_ref().unwrap().applied);
+        assert!(
+            expansion
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("review planner unavailable"))
+        );
+        assert!(
+            expansion.document["nodes"][2]["composite"]["nodes"][0]
+                .get("review_planner")
+                .is_none()
+        );
     }
 
     #[test]

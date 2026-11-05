@@ -613,6 +613,14 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
     let context = node.context.as_ref().unwrap_or(&defaults);
     provenant_records::run::WorkContext {
         extra: Default::default(),
+        risk_tier: context
+            .risk_tier
+            .clone()
+            .or_else(|| graph.risk_tier.clone()),
+        task_kind: context
+            .task_kind
+            .clone()
+            .or_else(|| graph.task_kind.clone()),
         graph_id: Some(plan.graph_id.clone()),
         node_id: Some(node.id.clone()),
         role: context

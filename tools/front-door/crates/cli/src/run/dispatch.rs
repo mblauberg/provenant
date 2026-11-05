@@ -1710,6 +1710,16 @@ pub(super) fn dispatch_inner(
                 if network.is_some() {
                     access.network = network;
                 }
+                let mut context = context;
+                if command.risk_tier.is_some() || command.task_kind.is_some() {
+                    let labels = context.get_or_insert_with(Default::default);
+                    if labels.risk_tier.is_none() {
+                        labels.risk_tier = command.risk_tier.clone();
+                    }
+                    if labels.task_kind.is_none() {
+                        labels.task_kind = command.task_kind.clone();
+                    }
+                }
                 Submitted {
                     cloud: cloud.clone(),
                     require_skill_location,

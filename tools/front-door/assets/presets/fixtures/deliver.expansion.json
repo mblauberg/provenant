@@ -813,6 +813,7 @@
       "pattern.select_when": "bundled",
       "pattern.summary": "bundled",
       "pattern.tags": "bundled",
+      "plan.delegate": "bundled",
       "roles.lens.conventions-readability": "bundled",
       "roles.lens.correctness-spec": "bundled",
       "roles.lens.design-fit-reuse": "bundled",

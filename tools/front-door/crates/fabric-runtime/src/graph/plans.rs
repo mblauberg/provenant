@@ -41,6 +41,40 @@ pub struct PlanSpec {
     pub fallback_title: Option<String>,
 }
 
+impl PlanSpec {
+    /// Bind review catalogue leaves to the commit resolved at review launch.
+    /// The catalogue is host-authored, but it may have been captured before the
+    /// writer's head existed. A lens must never inherit a framing node as its
+    /// source or retain the writer's moving head binding.
+    pub fn pin_review_subject(&mut self, commit: &str) -> Result<(), String> {
+        for pattern in &mut self.patterns {
+            for node in &mut pattern.nodes {
+                pin_review_node(node, commit)
+                    .map_err(|error| format!("review pattern {}: {error}", pattern.name))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn pin_review_node(node: &mut serde_json::Value, commit: &str) -> Result<(), &'static str> {
+    let object = node.as_object_mut().ok_or("node must be an object")?;
+    object.insert(
+        "source".into(),
+        serde_json::json!({"type":"commit", "commit":commit}),
+    );
+    if let Some(children) = object
+        .get_mut("composite")
+        .and_then(|composite| composite.get_mut("nodes"))
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for child in children {
+            pin_review_node(child, commit)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatternSpec {
     #[serde(flatten)]
@@ -486,6 +520,22 @@ fn derive_topology(
                 "composite topology requires a planner specification",
             )
         })?;
+        if spec
+            .extra
+            .get("planned_review")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && addition
+                .nodes
+                .iter()
+                .filter(|node| node.composite.is_none())
+                .any(|node| node.source != planner.source)
+        {
+            return Err((
+                addition.source.clone(),
+                "planned review lenses must retain the pinned subject",
+            ));
+        }
         if !fallback
             && let Some(required) = spec
                 .extra
@@ -651,6 +701,23 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
         .and_then(|fallback| fallback.nodes[0].composite.as_ref())
         .filter(|inner| inner.reduce_verdict)
         .map(|inner| inner.min_successful);
+    let review_minimum = document
+        .nodes
+        .iter()
+        .find(|node| node.id == expansion.source)
+        .and_then(|node| node.plan.as_ref())
+        .filter(|plan| {
+            plan.extra
+                .get("planned_review")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .map(|plan| {
+            plan.extra
+                .get("review_min_successful")
+                .and_then(serde_json::Value::as_u64)
+                .map(|n| n as usize)
+        });
     for node in &mut document.nodes {
         if node.dependencies().any(|name| name == &expansion.source) {
             if expansion.review.is_some() {
@@ -667,18 +734,22 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                 wire_exports(node, &expansion.source, &exported);
                 if expansion.review.is_none()
                     && let Some(composite) = &mut node.composite
-                    && composite.reduce_verdict
+                    && (composite.reduce_verdict || review_minimum.is_some())
                     && composite
                         .exports
                         .iter()
                         .any(|item| item.node == expansion.source)
                 {
+                    if let Some(minimum) = review_minimum {
+                        composite.min_successful = minimum;
+                    }
                     composite
                         .exports
                         .retain(|item| item.node != expansion.source);
                     // The fallback's own reduced panel enforces the original
                     // minimum, so its enclosing boundary counts that receipt.
-                    let reduced_fallback = fallback_minimum == Some(composite.min_successful)
+                    let reduced_fallback = (fallback_minimum == Some(composite.min_successful)
+                        || review_minimum.is_some())
                         && exported.len() == 1
                         && exported[0].node == format!("{}--fallback", expansion.source);
                     if reduced_fallback {
@@ -803,6 +874,7 @@ pub(super) fn validate_review_addition(
         .as_ref()
         .map(|review| review.subject.to_string());
     let whole_panel = source.extra.contains_key("panel_templates");
+    let planned = source.extra.contains_key("review_planner");
     let lenses = if whole_panel {
         addition
             .nodes
@@ -961,7 +1033,7 @@ pub(super) fn validate_review_addition(
         || lens_root.composite.as_ref().is_none_or(|composite| {
             let mut exported = std::collections::BTreeSet::new();
             (!whole_panel && composite.reduce_verdict != spec.reduce_verdict)
-                || composite.min_successful != spec.min_successful.map(|n| if n == 0 { composite.exports.len().saturating_sub(1).max(1) } else { n })
+                || composite.min_successful != if planned { Some(1) } else { spec.min_successful.map(|n| if n == 0 { composite.exports.len().saturating_sub(1).max(1) } else { n }) }
                 || composite.exports.is_empty()
                 || composite.exports.first().is_none_or(|first| spec.export_first.iter().any(|output| !first.outputs.contains(output)))
                 || (whole_panel && addition.nodes.iter().filter(|member| member.id.starts_with(&format!("{}--", lens_root.id))).count() != composite.exports.len())
@@ -989,10 +1061,99 @@ pub(super) fn validate_review_addition(
             .iter()
             .any(|node| node.access != AccessMode::ReadOnly || node.review.is_some()
                 || node.read_roots.iter().any(|root| !source.read_roots.contains(root)))
+        || (planned && !addition.nodes.iter().any(|node| {
+            node.id == format!("{}--plan", lens_root.id)
+                && node.plan.as_ref().is_some_and(|plan| {
+                    review_fallback_pinned(plan, subject.as_deref())
+                        && plan.extra.get("planned_review").and_then(serde_json::Value::as_bool) == Some(true)
+                        && review_catalogue_matches(source, plan, subject.as_deref(), node.extra.get("review_base"))
+                })
+        }))
     {
         return Err("invalid review expansion".into());
     }
     Ok(())
+}
+
+fn review_fallback_pinned(plan: &PlanSpec, commit: Option<&str>) -> bool {
+    fn pinned(node: &GraphNode, commit: &str) -> bool {
+        node.access == AccessMode::ReadOnly
+            && node.review.is_none()
+            && node.plan.is_none()
+            && node
+                .kind
+                .is_none_or(|kind| matches!(kind, NodeKind::Task | NodeKind::Composite))
+            && if let Some(composite) = &node.composite {
+                composite.nodes.iter().all(|child| pinned(child, commit))
+            } else {
+                matches!(&node.source, Some(SourceBinding::Commit { commit: actual }) if actual == commit)
+            }
+    }
+    commit
+        .zip(plan.fallback.as_ref())
+        .is_some_and(|(commit, fallback)| {
+            !fallback.nodes.is_empty() && fallback.nodes.iter().all(|node| pinned(node, commit))
+        })
+}
+
+/// The host may narrow the captured catalogue and set each tier default at
+/// launch. Everything else, including the pinned source, remains fixed.
+fn review_catalogue_matches(
+    source: &GraphNode,
+    plan: &PlanSpec,
+    commit: Option<&str>,
+    base: Option<&serde_json::Value>,
+) -> bool {
+    let Some(commit) = commit else { return false };
+    let Some(catalogue) = source
+        .extra
+        .get("review_planner")
+        .and_then(|value| value.pointer("/catalogue/patterns"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    let mut names = std::collections::BTreeSet::new();
+    !plan.patterns.is_empty()
+        && plan.patterns.iter().all(|pattern| {
+            if !names.insert(&pattern.name) {
+                return false;
+            }
+            let Some(raw) = catalogue.iter().find(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str) == Some(&pattern.name)
+            }) else {
+                return false;
+            };
+            let Ok(mut expected) = serde_json::from_value::<PatternSpec>(raw.clone()) else {
+                return false;
+            };
+            for (node, actual) in expected.nodes.iter_mut().zip(&pattern.nodes) {
+                if pin_review_node(node, commit).is_err() {
+                    return false;
+                }
+                let Some(object) = node.as_object_mut() else {
+                    return false;
+                };
+                if let Some(base) = base {
+                    object.insert("review_base".into(), base.clone());
+                }
+                if let Some(group) = actual.get("family_group") {
+                    object.insert("family_group".into(), group.clone());
+                }
+            }
+            if let (Some(expected_tier), Some(actual_tier)) = (
+                expected.parameters.get_mut("tier"),
+                pattern.parameters.get("tier"),
+            ) {
+                expected_tier.default = actual_tier.default.clone();
+                if let Some(default) = &actual_tier.default
+                    && !expected_tier.allowed.contains(default)
+                {
+                    expected_tier.allowed.push(default.clone());
+                }
+            }
+            &expected == pattern
+        })
 }
 
 /// The flat nodes and outputs that a fragment's pattern instances export, in
@@ -1064,7 +1225,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
             outputs,
         }];
     }
-    expansion
+    let mut exports: Vec<GraphInput> = expansion
         .patterns
         .iter()
         .filter_map(|instance| {
@@ -1077,7 +1238,21 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
             }))
         })
         .flatten()
-        .collect()
+        .collect();
+    if spec
+        .extra
+        .get("planned_review")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        for (index, export) in exports.iter_mut().enumerate() {
+            export.outputs.retain(|kind| {
+                matches!(kind, OutputKind::Result | OutputKind::Findings)
+                    || (index == 0 && *kind == OutputKind::Commit)
+            });
+        }
+    }
+    exports
 }
 
 /// Add the exported nodes a consumer asked of the planner, keeping only the

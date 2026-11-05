@@ -608,7 +608,14 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
         .nodes
         .iter()
         .map(|n| {
-            prior.remove(&n.id).unwrap_or_else(|| NodeProgress {
+            if let Some(mut progress) = prior.remove(&n.id) {
+                if let Some(composite) = &n.composite {
+                    progress.children.clone_from(&n.composite_members);
+                    progress.min_successful = composite.min_successful;
+                }
+                return progress;
+            }
+            NodeProgress {
                 extra: Default::default(),
                 children: n.composite_members.clone(),
                 min_successful: n.composite.as_ref().and_then(|spec| spec.min_successful),
@@ -644,7 +651,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 last_launch_retry: None,
                 outputs: None,
                 attempts: vec![],
-            })
+            }
         })
         .collect();
 }

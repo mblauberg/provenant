@@ -112,6 +112,60 @@ fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
         .saturating_mul(REVIEW_NODE_RESERVE)
         .saturating_add(REVIEW_RECORD_RESERVE)
         .saturating_add(templates.saturating_mul(2))
+        // A planned review persists the captured catalogue in the review
+        // expansion and again in the planner's bounded fragment and fallback.
+        .saturating_add(
+            node.extra
+                .get("review_planner")
+                .map_or(0, |planner| canonical_len(planner).saturating_mul(4)),
+        )
+        .saturating_add(if node.extra.contains_key("review_planner") {
+            fn pattern_nodes(node: &serde_json::Value) -> usize {
+                1_usize.saturating_add(
+                    node.pointer("/composite/nodes")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, |children| {
+                            children.iter().fold(0_usize, |total, child| {
+                                total.saturating_add(pattern_nodes(child))
+                            })
+                        }),
+                )
+            }
+            let model_nodes = node
+                .extra
+                .get("review_planner")
+                .and_then(|planner| planner.get("max_nodes"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(review.max_nodes);
+            let pattern_width = node
+                .extra
+                .get("review_planner")
+                .and_then(|planner| planner.pointer("/catalogue/patterns"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|pattern| {
+                    1_usize.saturating_add(
+                        pattern
+                            .get("nodes")
+                            .and_then(serde_json::Value::as_array)
+                            .map_or(0, |nodes| {
+                                nodes.iter().fold(0_usize, |total, node| {
+                                    total.saturating_add(pattern_nodes(node))
+                                })
+                            }),
+                    )
+                })
+                .max()
+                .unwrap_or(2);
+            model_nodes
+                .saturating_add(review.max_nodes)
+                .saturating_mul(pattern_width)
+                .saturating_mul(REVIEW_NODE_RESERVE)
+        } else {
+            0
+        })
         // Verifier templates can be instantiated more than once.
         .saturating_add(panel_bytes.saturating_mul(2))
         .saturating_add(if panel_templates.is_some() {
