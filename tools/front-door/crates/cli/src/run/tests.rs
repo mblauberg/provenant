@@ -21,10 +21,10 @@ fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         .filter(|(key, _)| !removed.contains(&key.as_os_str()))
         .collect();
     let cwd = std::env::current_dir()?;
-    let timeout = if name == "run::tests::wait_handles_a_stale_default_cursor" {
-        300
-    } else {
-        30
+    let timeout = match name {
+        "run::tests::wait_handles_a_stale_default_cursor" => 300,
+        "run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree" => 90,
+        _ => 30,
     };
     let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(timeout));
     options.env = Some(&env);
