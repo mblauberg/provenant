@@ -181,18 +181,31 @@ fn decode_native_bytes(encoded: &str) -> Result<PathBuf, PathWireError> {
     }
 }
 
-/// A filesystem path anchored at the host root, with a lossless relative path.
+/// A lossless path, absolute or relative to the containing project.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AbsolutePathWire {
+pub enum StructuredPathWire {
     Root,
+    Relative {
+        relative: PathWire,
+    },
     Path {
         root: &'static str,
         relative: PathWire,
     },
 }
 
-impl AbsolutePathWire {
+impl StructuredPathWire {
+    pub fn from_relative(relative: &RelativePath) -> Result<Self, PathWireError> {
+        Ok(Self::Relative {
+            relative: PathWire::from_relative(relative)?,
+        })
+    }
+    pub fn from_wire(relative: &PathWire) -> Self {
+        Self::Relative {
+            relative: relative.clone(),
+        }
+    }
     pub fn from_path(path: &std::path::Path) -> Result<Self, PathWireError> {
         if !path.is_absolute() {
             return Err(PathWireError::InvalidNativePath);

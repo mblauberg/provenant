@@ -615,6 +615,42 @@ pub(super) fn render_lanes(
     render_lanes_with_lineage(lanes, waits, next, root, cooldowns, &Default::default())
 }
 
+fn project_route(route: Option<&run::RouteRecord>) -> Value {
+    let mut value = json!(route);
+    let Some(skills) = value.get_mut("user_skills") else {
+        return value;
+    };
+    let path = |value: &mut Value| {
+        let Some(text) = value.as_str() else {
+            return;
+        };
+        let path = Path::new(text);
+        let projected = if path.is_absolute() {
+            provenant_records::StructuredPathWire::from_path(path).ok()
+        } else if text.starts_with('~') {
+            None
+        } else {
+            provenant_core::RelativePath::parse(path)
+                .ok()
+                .and_then(|relative| {
+                    provenant_records::StructuredPathWire::from_relative(&relative).ok()
+                })
+        };
+        *value = json!(projected);
+    };
+    if let Some(directory) = skills.get_mut("directory") {
+        path(directory);
+    }
+    if let Some(warnings) = skills.get_mut("warnings").and_then(Value::as_array_mut) {
+        for warning in warnings {
+            if let Some(value) = warning.get_mut("path") {
+                path(value);
+            }
+        }
+    }
+    value
+}
+
 pub fn project_lane(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
@@ -666,9 +702,49 @@ pub fn project_lane(
                 adapter: adapter.to_owned(),
                 session: session.to_owned(),
                 path: path
-                    .and_then(|path| provenant_records::AbsolutePathWire::from_path(&path).ok()),
+                    .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok()),
             }
         });
+    let write_grants: Vec<Value> =
+        lane.write_grants
+            .iter()
+            .map(|grant| {
+                let mut value = json!(grant);
+                value["path"] = json!(grant.path.to_path_buf().ok().and_then(|path| {
+                    provenant_records::StructuredPathWire::from_path(&path).ok()
+                }));
+                value
+            })
+            .collect();
+    let read_only_writable: Vec<Value> = lane
+        .read_only_writable
+        .iter()
+        .map(|path| {
+            let relative = provenant_core::RelativePath::parse(path).ok();
+            json!(relative.as_ref().and_then(|path| {
+                provenant_records::StructuredPathWire::from_relative(path).ok()
+            }))
+        })
+        .collect();
+    let protected_paths: Vec<_> = lane
+        .protected_paths
+        .iter()
+        .map(provenant_records::StructuredPathWire::from_wire)
+        .collect();
+    let mut delivery = json!(lane.delivery);
+    if let Some(acceptance) = lane
+        .delivery
+        .as_ref()
+        .and_then(|delivery| delivery.review_acceptance.as_ref())
+    {
+        delivery["review_acceptance"]["protected_paths"] = json!(
+            acceptance
+                .protected_paths
+                .iter()
+                .map(provenant_records::StructuredPathWire::from_wire)
+                .collect::<Vec<_>>()
+        );
+    }
     let settlement = matches!(lane.state, run::AttemptState::Terminal { .. }).then_some(
         provenant_records::wire::LaneSettlement {
             reason: terminal_reason,
@@ -694,8 +770,8 @@ pub fn project_lane(
         waiting_for,
         requested_route: json!(lane.requested_route),
         host: None,
-        resolved_route: Some(json!(lane.resolved_route)),
-        applied_route: json!(lane.applied_route),
+        resolved_route: Some(project_route(lane.resolved_route.as_ref())),
+        applied_route: project_route(lane.applied_route.as_ref()),
         skipped_routes: json!(lane.skipped_routes),
         account: json!(account),
         observed_route: json!(lane.observed_route),
@@ -709,12 +785,12 @@ pub fn project_lane(
         stale: observe_host.then(|| run::holder_absent(root, lane)),
         partial_signals: json!(lane.partial_signals),
         delivery_id: lane.delivery_id.map(|id| id.to_string()),
-        write_grants: json!(lane.write_grants),
-        read_only_writable: json!(lane.read_only_writable),
+        write_grants: json!(write_grants),
+        read_only_writable: json!(read_only_writable),
         git_grants_digest: lane.git_grants_digest.map(|digest| digest.to_string()),
         head: lane.head.map(|head| head.to_string()),
-        protected_paths: json!(lane.protected_paths),
-        delivery: json!(lane.delivery),
+        protected_paths: json!(protected_paths),
+        delivery,
         continuation: json!(lane.continuation),
         cache_read_share: provenant_routing::cache_read_share(
             lane.usage.uncached_input,
@@ -725,7 +801,7 @@ pub fn project_lane(
             result
                 .as_deref()
                 .filter(|_| observe_host)
-                .and_then(|path| { provenant_records::AbsolutePathWire::from_path(path).ok() })
+                .and_then(|path| { provenant_records::StructuredPathWire::from_path(path).ok() })
         ),
         transcript,
         title: lane.title.clone(),

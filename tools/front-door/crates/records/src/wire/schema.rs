@@ -103,6 +103,10 @@ pub fn worktree_path() -> Value {
     one_of(vec![
         object(&[("kind", constant("root"))], &[]),
         object(
+            &[("kind", constant("relative")), ("relative", path_wire())],
+            &[],
+        ),
+        object(
             &[
                 ("kind", constant("path")),
                 ("root", constant("/")),

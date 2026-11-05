@@ -36,7 +36,7 @@ pub use finding::Finding;
 pub use input::{InputWarning, decode_input};
 pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};
 pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
-pub use path_wire::{AbsolutePathWire, PathWire, PathWireError};
+pub use path_wire::{PathWire, PathWireError, StructuredPathWire};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
 

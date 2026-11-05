@@ -60,7 +60,7 @@ pub enum OutputData {
         #[serde(flatten)]
         lane: super::LaneRow,
         part: String,
-        path: crate::AbsolutePathWire,
+        path: crate::StructuredPathWire,
     },
     /// `--part events`: state-change events from a cursor.
     Events {
@@ -118,7 +118,10 @@ pub fn output_chunk_schema() -> Value {
         &[
             ("tail", unsigned()),
             ("tail_clamped", boolean()),
-            ("changed_files", any()),
+            (
+                "changed_files",
+                nullable(array(nullable(super::schema::worktree_path()))),
+            ),
             ("changed_files_total", any()),
             ("selected", any()),
         ],

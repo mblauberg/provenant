@@ -48,11 +48,20 @@ pub struct CancelRowError {
 pub enum CancelRow {
     Receipt {
         attempt_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
         receipt: CancelReceiptWire,
     },
     Error {
         attempt_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
         error: CancelRowError,
+    },
+    Observation {
+        attempt_id: String,
+        host: String,
+        state: String,
     },
 }
 
@@ -72,11 +81,15 @@ pub enum ReconciledWire {
     DeadlineStop,
     Settling {
         phase: String,
+        blocking_reason: Option<String>,
+    },
+    Abandoned {
+        reason: String,
     },
     Finished,
     TemporaryRemoved,
     TemporaryRetained {
-        path: crate::AbsolutePathWire,
+        path: crate::StructuredPathWire,
         reason: String,
     },
     Withdrawn,
@@ -104,11 +117,22 @@ pub fn reconciled_schema() -> Value {
             )],
             &[],
         ),
-        object(&[("state", constant("settling")), ("phase", string())], &[]),
+        object(
+            &[
+                ("state", constant("settling")),
+                ("phase", string()),
+                ("blocking_reason", super::schema::nullable(string())),
+            ],
+            &[],
+        ),
+        object(
+            &[("state", constant("abandoned")), ("reason", string())],
+            &[],
+        ),
         object(
             &[
                 ("state", constant("temporary_retained")),
-                ("path", string()),
+                ("path", super::schema::worktree_path()),
                 ("reason", string()),
             ],
             &[],
@@ -131,6 +155,8 @@ pub fn reconciled_schema() -> Value {
 pub struct CancelData {
     pub operation_id: String,
     pub receipts: Vec<CancelRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovered: Option<Vec<CancelRecovered>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,10 +193,18 @@ pub fn cancel_data_schema() -> Value {
                 ("attempt_id", string()),
                 ("receipt", cancel_receipt_schema()),
             ],
-            &[],
+            &[("host", string())],
         ),
         object(
             &[("attempt_id", string()), ("error", row_error_schema())],
+            &[("host", string())],
+        ),
+        object(
+            &[
+                ("attempt_id", string()),
+                ("host", string()),
+                ("state", string()),
+            ],
             &[],
         ),
     ]);
@@ -185,6 +219,7 @@ pub fn cancel_data_schema() -> Value {
                 )),
             ),
             ("lanes", array(super::lane::lane_row_schema())),
+            ("host", string()),
             ("condition_met", boolean()),
             ("timed_out", boolean()),
             ("reason", string()),

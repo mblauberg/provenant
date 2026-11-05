@@ -33,7 +33,7 @@ use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, can
 use provenant_os::pid::{
     CensusIgnoreEntry, CwdObservation, CwdObserver, ProcessUids, SystemCwdObserver,
 };
-use provenant_records::{AbsolutePathWire, PathWireError};
+use provenant_records::{PathWireError, StructuredPathWire};
 use provenant_supervisor::census::{
     Ancestry, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
     SystemProcessObserver, current_process,
@@ -453,7 +453,7 @@ impl Serialize for WorktreeInfo {
     where
         S: Serializer,
     {
-        let path = AbsolutePathWire::from_path(&self.path).map_err(serde::ser::Error::custom)?;
+        let path = StructuredPathWire::from_path(&self.path).map_err(serde::ser::Error::custom)?;
         let mut state = serializer.serialize_struct("WorktreeInfo", 7)?;
         state.serialize_field("path", &path)?;
         state.serialize_field("branch", &self.branch)?;

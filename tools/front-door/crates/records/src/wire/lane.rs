@@ -51,11 +51,11 @@ lane_row! {
         stale: Option<bool> => nullable(boolean());
         partial_signals: Value => any();
         delivery_id: Option<String> => nullable(string());
-        write_grants: Value => any();
-        read_only_writable: Value => any();
+        write_grants: Value => array(grant_schema());
+        read_only_writable: Value => array(nullable(super::schema::worktree_path()));
         git_grants_digest: Option<String> => nullable(string());
         head: Option<String> => nullable(string());
-        protected_paths: Value => any();
+        protected_paths: Value => array(super::schema::worktree_path());
         delivery: Value => any();
         continuation: Value => any();
         cache_read_share: Option<f64> => nullable(number());
@@ -71,6 +71,13 @@ lane_row! {
         handoff: Value => any();
         provider_error: String => string();
     }
+}
+
+pub(super) fn grant_schema() -> Value {
+    let mut grant = open_object();
+    grant["properties"] = serde_json::json!({"path": nullable(super::schema::worktree_path())});
+    grant["required"] = serde_json::json!(["path"]);
+    grant
 }
 
 impl LaneRow {
@@ -114,7 +121,7 @@ pub struct LaneSettlement {
 pub struct LaneTranscript {
     pub adapter: String,
     pub session: String,
-    pub path: Option<crate::AbsolutePathWire>,
+    pub path: Option<crate::StructuredPathWire>,
 }
 
 /// Planned `data` of `lanes` and `status`. Current status emits raw attempt

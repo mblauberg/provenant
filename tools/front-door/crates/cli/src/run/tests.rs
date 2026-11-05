@@ -3837,10 +3837,13 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
     assert_eq!(data["lanes"][0]["write_grants"][0]["source"], "write_root");
     assert_eq!(data["lanes"][0]["write_grants"][0]["scope"], "subtree");
     assert_eq!(
-        data["lanes"][0]["write_grants"][0]["path"]["relative_to_root"]["path"],
+        data["lanes"][0]["write_grants"][0]["path"]["relative"]["path"],
         "work/shared"
     );
-    assert_eq!(data["lanes"][0]["read_only_writable"], json!(["locks"]));
+    assert_eq!(
+        data["lanes"][0]["read_only_writable"],
+        json!([{"kind":"relative", "relative":{"encoding":"utf8", "path":"locks"}}])
+    );
     assert_eq!(
         data["lanes"][0]["git_grants_digest"],
         json!(provenant_core::Digest::from_bytes([6; 32]))
@@ -3902,7 +3905,7 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
     assert_eq!(data["lanes"][0]["state"], "review_required");
     assert_eq!(data["lanes"][0]["head"], "a".repeat(40));
     assert_eq!(
-        data["lanes"][0]["protected_paths"][0]["path"],
+        data["lanes"][0]["protected_paths"][0]["relative"]["path"],
         ".github/unsafe\npath.yml"
     );
     assert!(human.contains(&format!(
@@ -4152,9 +4155,7 @@ fn render_lanes_points_at_the_provider_transcript() -> Result<(), Box<dyn std::e
     assert_eq!(found["session"], "sess-1848");
     assert_eq!(
         found["path"],
-        json!(provenant_records::AbsolutePathWire::from_path(
-            &transcript.join("sess-1848.jsonl")
-        )?)
+        json!({"kind":"path", "root":"/", "relative":{"encoding":"utf8", "path":transcript.join("sess-1848.jsonl").strip_prefix("/")?.to_str().unwrap()}})
     );
     // Read-only Claude records its selected account's exact state-write path.
     // The lookup never follows links, so build the grant from the resolved temp root.

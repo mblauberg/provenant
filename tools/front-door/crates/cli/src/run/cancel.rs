@@ -123,7 +123,7 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                             let mut found = json!(state);
                             if let run::Reconciled::TemporaryRetained { path, .. } = state {
                                 found["path"] = json!(
-                                    provenant_records::AbsolutePathWire::from_path(path).ok()
+                                    provenant_records::StructuredPathWire::from_path(path).ok()
                                 );
                             }
                             rows.push(json!({ "attempt_id": id, "found": found }));

@@ -185,7 +185,8 @@ fn every_output_mode_matches_exactly_one_variant() {
         OutputData::Path {
             lane: row(),
             part: "result".into(),
-            path: crate::AbsolutePathWire::from_path(std::path::Path::new("/s/result.md")).unwrap(),
+            path: crate::StructuredPathWire::from_path(std::path::Path::new("/s/result.md"))
+                .unwrap(),
         },
         OutputData::Events {
             lane: row(),
@@ -217,11 +218,12 @@ fn chunk_optional_members_and_encodings() {
     full.bytes = ChunkBytes::Base64("//8=".into());
     full.tail = Some(20);
     full.tail_clamped = Some(true);
-    full.changed_files = Some(json!(["a.rs"]));
+    full.changed_files =
+        Some(json!([{"kind":"relative", "relative":{"encoding":"utf8", "path":"a.rs"}}]));
     full.changed_files_total = Some(json!(1));
     full.lane.provider_error = Some("failed".into());
     full.lane.result_path =
-        json!(crate::AbsolutePathWire::from_path(std::path::Path::new("/s/result.md")).unwrap());
+        json!(crate::StructuredPathWire::from_path(std::path::Path::new("/s/result.md")).unwrap());
     full.selected = Some(json!({"attempt": "x"}));
     accepted(&schema, &OutputData::Chunk(Box::new(full)));
     let plain = serde_json::to_value(chunk()).unwrap();
@@ -259,12 +261,14 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         );
         rows.push(CancelRow::Receipt {
             attempt_id: id.clone(),
+            host: None,
             receipt,
         });
     }
     assert_eq!(names, CANCEL_STATES);
     rows.push(CancelRow::Error {
         attempt_id: id.clone(),
+        host: None,
         error: CancelRowError {
             code: "NOT_FOUND".into(),
             message: "gone".into(),
@@ -276,6 +280,7 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
     let mut data = CancelData {
         operation_id: "op-1".into(),
         receipts: rows,
+        host: None,
         recovered: None,
         lanes: None,
         condition_met: None,
@@ -293,6 +298,7 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         attempt_id: id,
         found: cancel::ReconciledWire::Settling {
             phase: "delivering".into(),
+            blocking_reason: None,
         },
     }]);
     data.lanes = Some(vec![row()]);
@@ -305,7 +311,8 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         json!({"state": "queued"}),
         json!({"state": "held"}),
         json!({"state": "deadline_stop"}),
-        json!({"state": "settling", "phase": "delivery"}),
+        json!({"state": "settling", "phase": "delivery", "blocking_reason": null}),
+        json!({"state": "abandoned", "reason": "released"}),
         json!({"state": "finished"}),
         json!({"state": "temporary_removed"}),
         json!({"state": "temporary_retained", "path": {"kind":"path", "root":"/", "relative":{"encoding":"utf8", "path":"tmp/a"}}, "reason": "retained"}),
