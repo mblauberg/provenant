@@ -1548,9 +1548,7 @@ impl RunStore {
                 decoded.reason = Some(format!("cancelled: {reason}"));
             }
         }
-        let diagnostic = denial.map(|note| format!("\n\n{note}\n"));
-        let answer_limit =
-            (RESULT_LIMIT as usize).saturating_sub(diagnostic.as_ref().map_or(0, String::len));
+        let answer_limit = RESULT_LIMIT as usize;
         if decoded.result.len() > answer_limit {
             let mut end = answer_limit;
             while !decoded.result.is_char_boundary(end) {
@@ -1664,11 +1662,6 @@ impl RunStore {
             decoded.outcome = Outcome::Failed;
             decoded.reason = Some("provider result is empty or incomplete".into());
         }
-        // Diagnostics are not provider answers. Add them only after answer
-        // validation, and reserve room so a full capture cannot hide the path.
-        if let Some(note) = diagnostic {
-            decoded.result.push_str(&note);
-        }
         // Decoding can reveal credential markers hidden by JSON escapes in
         // the already-filtered capture. Seal only a filtered rendering.
         // A filter failure withholds the result instead of blocking settlement
@@ -1768,6 +1761,14 @@ impl RunStore {
             partial.dedup();
         } else {
             partial.clear();
+        }
+        // A denial is a diagnostic, not part of the provider's answer: the
+        // handoff, findings and verdict blocks must stay as the provider wrote them.
+        if let Some(note) = denial {
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note,
+            });
         }
         // External delivery runs only from the committed decision below.
         let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
