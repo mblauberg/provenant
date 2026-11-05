@@ -356,7 +356,7 @@ impl std::fmt::Display for GraphStructuralLimit {
 }
 
 /// Worst-case checkpoint size that exceeded the fixed graph envelope.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphEnvelopeLimit {
     pub bound: usize,
 }
@@ -825,6 +825,76 @@ pub(super) fn not_delivered(delivered: &bool) -> bool {
     !delivered
 }
 
+/// Approved planner failure facts, without captured fragment text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "limit", rename_all = "snake_case")]
+pub enum PlanFailureFact {
+    MissingBlock,
+    MissingResult,
+    InvalidBlock,
+    InvalidFragment,
+    InvalidContinuation,
+    Schema,
+    InvalidGraph,
+    OutputKind,
+    Structural(GraphStructuralLimit),
+    Envelope(GraphEnvelopeLimit),
+}
+
+impl std::fmt::Display for PlanFailureFact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingBlock => f.write_str("fragment block missing"),
+            Self::MissingResult => f.write_str("planner result missing"),
+            Self::InvalidBlock => f.write_str("invalid fragment block; check its format and size"),
+            Self::InvalidFragment => {
+                f.write_str("invalid fragment; check the declared graph constraints")
+            }
+            Self::InvalidContinuation => {
+                f.write_str("invalid writer continuation; inspect the handoff")
+            }
+            Self::Schema => f.write_str("schema version"),
+            Self::InvalidGraph => {
+                f.write_str("expanded graph is invalid; check the declared graph constraints")
+            }
+            Self::OutputKind => f.write_str("expanded graph selects an unavailable output kind"),
+            Self::Structural(limit) => write!(f, "{limit}"),
+            Self::Envelope(limit) => write!(f, "{limit}"),
+        }
+    }
+}
+
+/// Scheduler-owned causes whose decisions must not depend on rendered prose.
+/// Paused or truncated checkpoints require a finish-first drain before this
+/// checkpoint meaning is installed; no legacy cause reader is provided.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NodeDecisionCause {
+    LoopPaused,
+    LoopAskClosed,
+    InvalidLoopDecision,
+    PlanExpansionPaused {
+        active: bool,
+        fallback: bool,
+        fragment_error: Option<PlanFailureFact>,
+    },
+    CompositeFindingsTruncated {
+        warning_indices: Vec<usize>,
+        notice_lines: usize,
+    },
+}
+
+impl NodeDecisionCause {
+    pub(super) fn from_loop_code(code: &str) -> Option<Self> {
+        match code {
+            "loop_paused" => Some(Self::LoopPaused),
+            "loop_ask_closed" => Some(Self::LoopAskClosed),
+            "invalid_loop_decision" => Some(Self::InvalidLoopDecision),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeProgress {
     #[serde(flatten)]
@@ -846,9 +916,15 @@ pub struct NodeProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expansion_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expansion_cause: Option<NodeDecisionCause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_pause_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_cause: Option<NodeDecisionCause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_cause: Option<NodeDecisionCause>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<LoopRound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -968,6 +1044,28 @@ impl NodeState {
 }
 
 impl GraphCheckpoint {
+    pub(super) fn deactivate_expansion_pauses(&mut self) {
+        for node in &mut self.nodes {
+            if let Some(NodeDecisionCause::PlanExpansionPaused { active, .. }) =
+                &mut node.expansion_cause
+            {
+                *active = false;
+                if node.expansion_pause.is_none() {
+                    node.expansion_cause = None;
+                }
+            }
+        }
+    }
+
+    pub(super) fn activate_expansion_pause(&mut self, index: usize) {
+        self.deactivate_expansion_pauses();
+        if let Some(NodeDecisionCause::PlanExpansionPaused { active, .. }) =
+            &mut self.nodes[index].expansion_cause
+        {
+            *active = true;
+        }
+    }
+
     /// Classify settled work without relaxing the strict delivery gate.
     pub fn outcome(&self) -> GraphOutcome {
         if self.successful() {
@@ -1042,6 +1140,41 @@ impl GraphCheckpoint {
 }
 
 impl NodeProgress {
+    pub(super) fn truncation(&self) -> Option<(&[usize], usize)> {
+        match self.truncation_cause.as_ref()? {
+            NodeDecisionCause::CompositeFindingsTruncated {
+                warning_indices,
+                notice_lines,
+            } => Some((warning_indices, *notice_lines)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn truncation_warnings(&self) -> Vec<&String> {
+        let Some((indices, _)) = self.truncation() else {
+            return Vec::new();
+        };
+        let Some(outputs) = &self.outputs else {
+            return Vec::new();
+        };
+        indices
+            .iter()
+            .filter_map(|index| outputs.warnings.get(*index))
+            .collect()
+    }
+
+    pub(super) fn truncation_notices(&self) -> Vec<&str> {
+        let Some((_, lines)) = self.truncation() else {
+            return Vec::new();
+        };
+        self.outputs
+            .as_ref()
+            .and_then(|outputs| outputs.result.as_ref())
+            .map_or_else(Vec::new, |result| {
+                result.excerpt.lines().take(lines).collect()
+            })
+    }
+
     /// Attempt-less evidence for final graph delivery.
     pub fn deterministic_summary(&self) -> Option<String> {
         if let Some(reason) = self

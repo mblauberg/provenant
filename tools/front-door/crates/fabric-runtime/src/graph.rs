@@ -1121,8 +1121,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         fragment: None,
                         handoff: None,
                         expansion_pause: None,
+                        expansion_cause: None,
                         loop_pause: None,
                         loop_pause_code: None,
+                        loop_cause: None,
+                        truncation_cause: None,
                         round: node.round.clone(),
                         gate: None,
                         separation: None,
@@ -1283,6 +1286,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 checkpoint.extensions.push(extension.clone());
             }
         }
+        checkpoint.deactivate_expansion_pauses();
         checkpoint.pause_reason = None;
         checkpoint.pause_code = None;
         if extensions.iter().any(|e| e.starts_with("loop.")) {
@@ -1304,6 +1308,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 if let Some(node) = checkpoint.nodes.iter_mut().find(|n| n.id == name) {
                     node.loop_pause = None;
                     node.loop_pause_code = None;
+                    node.loop_cause = None;
                 }
             }
             loops::reconcile(&mut checkpoint, &extended);
@@ -1356,11 +1361,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 continue 'schedule;
             }
         }
-        if let Some(reason) = checkpoint.nodes.iter().find_map(|node| {
-            node.expansion_pause
-                .as_deref()
-                .map(plans::pause_reason_for_display)
-        }) {
+        if let Some((index, reason)) =
+            checkpoint
+                .nodes
+                .iter()
+                .enumerate()
+                .find_map(|(index, node)| {
+                    node.expansion_pause
+                        .as_ref()
+                        .map(|reason| (index, reason.clone()))
+                })
+        {
+            checkpoint.activate_expansion_pause(index);
             checkpoint.pause_reason = Some(reason);
             checkpoint.pause_code = Some("invalid_plan_expansion".into());
         }
@@ -1374,6 +1386,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             })
         };
         if let Some(reason) = &structural_pause {
+            checkpoint.deactivate_expansion_pauses();
             checkpoint.pause_reason = Some(bounded(reason, PAUSE_REASON_BYTES));
             checkpoint.pause_code = Some("structural_limit".into());
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -3033,6 +3046,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             && checkpoint.nodes.iter().all(|n| n.expansion_pause.is_none())
             && checkpoint.pause_reason.take().is_some()
         {
+            checkpoint.deactivate_expansion_pauses();
             checkpoint.pause_code = None;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }

@@ -300,11 +300,30 @@ fn node_bound(
         fragment: (node.plan.is_some() && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
         expansion_pause: expands.then(String::new),
+        expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
+            active: false,
+            fallback: false,
+            fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit {
+                key: GraphLimitKey::GraphPromptBytes,
+                actual: usize::MAX,
+                max: usize::MAX,
+            })),
+        }),
         loop_pause: node.loop_body.as_ref().map(|_| String::new()),
         loop_pause_code: node
             .loop_body
             .as_ref()
             .map(|_| "c".repeat(REFUSAL_CODE_BYTES)),
+        loop_cause: node
+            .loop_body
+            .as_ref()
+            .map(|_| NodeDecisionCause::InvalidLoopDecision),
+        truncation_cause: node.composite.as_ref().map(|_| {
+            NodeDecisionCause::CompositeFindingsTruncated {
+                warning_indices: vec![usize::MAX; MAX_WARNINGS],
+                notice_lines: usize::MAX,
+            }
+        }),
         round: node.round.clone(),
         gate: gate.then(|| GateResult {
             extra: Default::default(),

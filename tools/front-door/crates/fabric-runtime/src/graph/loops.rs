@@ -584,8 +584,11 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 fragment: None,
                 handoff: None,
                 expansion_pause: None,
+                expansion_cause: None,
                 loop_pause: None,
                 loop_pause_code: None,
+                loop_cause: None,
+                truncation_cause: None,
                 round: n.round.clone(),
                 gate: None,
                 separation: None,
@@ -732,11 +735,13 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         progress.outputs = Some(gate_outputs(state == NodeState::Succeeded));
         checkpoint.nodes[index].loop_pause = None;
         checkpoint.nodes[index].loop_pause_code = None;
+        checkpoint.nodes[index].loop_cause = None;
         refresh_pause(checkpoint);
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     } else if settled && dependency_state(node, plan, checkpoint, positions).is_none() {
         if checkpoint.nodes[index].loop_pause.is_none() {
             checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
+            checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
             checkpoint.nodes[index].loop_pause = Some(format!(
                 "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
                 node.id
@@ -764,12 +769,9 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
             if let Some(answer) = checkpoint.asks[position].answer.clone() {
                 return apply(&node.id, rounds, &answer, checkpoint, journal);
             }
-            if checkpoint.nodes[index]
-                .loop_pause
-                .as_ref()
-                .is_none_or(|reason| !reason.contains("graph resume"))
-            {
+            if checkpoint.nodes[index].loop_cause != Some(NodeDecisionCause::LoopAskClosed) {
                 checkpoint.nodes[index].loop_pause_code = Some("loop_ask_closed".into());
+                checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopAskClosed);
                 checkpoint.nodes[index].loop_pause = Some(format!(
                     "loop {} exhausted after {rounds} rounds; ask closed; use graph resume --extend loop.{}.rounds=N or --extend loop.{}.decision=stop|accept",
                     node.id, node.id, node.id
@@ -782,6 +784,7 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         match asks::poll(checkpoint, position, owner) {
             Ok(reply) => {
                 checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
+                checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
                 checkpoint.nodes[index].loop_pause = Some(format!(
                     "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
                     node.id
@@ -864,6 +867,7 @@ pub(super) fn pause_invalid_decision<R: Error + 'static, J: GraphJournal>(
 ) -> Result<(), GraphError<R, J::Error>> {
     if let Some(progress) = checkpoint.nodes.iter_mut().find(|n| n.id == node) {
         progress.loop_pause_code = Some("invalid_loop_decision".into());
+        progress.loop_cause = Some(NodeDecisionCause::InvalidLoopDecision);
         progress.loop_pause = Some(format!(
             "loop {node} exhausted; decision cannot be applied: {}; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept",
             bounded(reason, MAX_ADVANCE_ERROR_BYTES)
@@ -924,10 +928,12 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
         .iter()
         .filter_map(|n| n.loop_pause.as_deref())
         .collect();
-    if checkpoint
-        .pause_reason
-        .as_ref()
-        .is_none_or(|r| r.starts_with("loops paused:") || r.starts_with("loop "))
+    if checkpoint.pause_reason.is_none()
+        || checkpoint
+            .pause_code
+            .as_deref()
+            .and_then(NodeDecisionCause::from_loop_code)
+            .is_some()
     {
         checkpoint.pause_code = if reasons.is_empty() {
             None
@@ -936,8 +942,14 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
                 checkpoint
                     .nodes
                     .iter()
-                    .filter_map(|node| node.loop_pause_code.as_deref())
-                    .find(|code| *code != "loop_paused")
+                    .filter_map(|node| node.loop_cause.as_ref())
+                    .find_map(|cause| match cause {
+                        NodeDecisionCause::LoopAskClosed => Some("loop_ask_closed"),
+                        NodeDecisionCause::InvalidLoopDecision => Some("invalid_loop_decision"),
+                        NodeDecisionCause::LoopPaused
+                        | NodeDecisionCause::PlanExpansionPaused { .. }
+                        | NodeDecisionCause::CompositeFindingsTruncated { .. } => None,
+                    })
                     .unwrap_or("loop_paused")
                     .into(),
             )

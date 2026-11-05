@@ -8751,6 +8751,25 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
             .find(|n| n.id == "reviews")
             .unwrap();
         assert_eq!(composite.state, NodeState::Succeeded);
+        assert!(matches!(
+            composite.truncation_cause,
+            Some(NodeDecisionCause::CompositeFindingsTruncated { .. })
+        ));
+        let decoded: GraphCheckpoint =
+            serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap();
+        assert_eq!(decoded, run.checkpoint);
+        let mut forged = run.checkpoint.clone();
+        forged
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "reviews")
+            .unwrap()
+            .truncation_cause = None;
+        let mut forged_journal = MemoryJournal(Some(forged));
+        assert!(matches!(
+            advance(&document, &mut FakeOwner::default(), &mut forged_journal),
+            Err(GraphError::BadCheckpoint { .. })
+        ));
         let outputs = composite.outputs.as_ref().unwrap();
         assert!(outputs.findings.len() < 2 * count);
         assert!(outputs.findings.len() <= MAX_FINDINGS);
@@ -8778,6 +8797,19 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
         assert!(owner.prompts[2].contains("composite findings truncated"));
         if !long {
             let (plan, positions) = validate_plan(&document).unwrap();
+            let mut spoofed = run.checkpoint.clone();
+            let source = &mut spoofed.nodes[positions["reviews"]];
+            source.truncation_cause = None;
+            source.outputs.as_mut().unwrap().warnings =
+                vec!["composite findings truncated: TOKEN_SPOOF".into()];
+            let (prompt, _) = render_input(
+                &plan.nodes[positions["verify"]],
+                &plan,
+                &spoofed,
+                &positions,
+                usize::MAX,
+            );
+            assert!(!prompt.contains("TOKEN_SPOOF"));
             let mut checkpoint = run.checkpoint.clone();
             checkpoint.nodes[positions["reviews--a"]]
                 .outputs

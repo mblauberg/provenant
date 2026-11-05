@@ -886,16 +886,7 @@ pub(super) fn truncated_finding_ids(
         let Some(&index) = positions.get(&input.node) else {
             continue;
         };
-        if checkpoint.nodes[index]
-            .outputs
-            .as_ref()
-            .is_some_and(|outputs| {
-                outputs
-                    .warnings
-                    .iter()
-                    .any(|warning| warning.starts_with("composite findings truncated:"))
-            })
-        {
+        if !checkpoint.nodes[index].truncation_warnings().is_empty() {
             collect(&input.node, "", plan, checkpoint, positions, &mut found);
         }
     }
@@ -934,13 +925,7 @@ pub(super) fn render_input(
                 .any(|kind| matches!(kind, OutputKind::Result | OutputKind::Findings))
                 && positions
                     .get(&input.node)
-                    .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
-                    .is_some_and(|outputs| {
-                        outputs
-                            .warnings
-                            .iter()
-                            .any(|warning| warning.starts_with("composite findings truncated:"))
-                    })
+                    .is_some_and(|index| !checkpoint.nodes[*index].truncation_warnings().is_empty())
         })
     {
         let allowed = serde_json::to_string(&proof_dispositions).unwrap_or_default();
@@ -982,11 +967,7 @@ pub(super) fn render_input(
             .iter()
             .any(|kind| matches!(kind, OutputKind::Result | OutputKind::Findings))
         {
-            outputs
-                .warnings
-                .iter()
-                .filter(|warning| warning.starts_with("composite findings truncated:"))
-                .collect()
+            checkpoint.nodes[positions[&input.node]].truncation_warnings()
         } else {
             Vec::new()
         };
@@ -1020,14 +1001,8 @@ pub(super) fn render_input(
                 return (prompt, true);
             }
             prompt.push_str(&section);
-            if !input.outputs.contains(&OutputKind::Result)
-                && let Some(result) = &outputs.result
-            {
-                for notice in result
-                    .excerpt
-                    .lines()
-                    .filter(|line| line.starts_with("composite findings truncated:"))
-                {
+            if !input.outputs.contains(&OutputKind::Result) {
+                for notice in checkpoint.nodes[positions[&input.node]].truncation_notices() {
                     let section = format!(
                         "{} truncation: {}\n",
                         input.node,
@@ -1111,15 +1086,7 @@ pub(super) fn upstream_results(
         }
         if let Some(spec) = &plan.nodes[index].composite {
             let partial = spec.min_successful.is_some();
-            let truncated = checkpoint.nodes[index]
-                .outputs
-                .as_ref()
-                .is_some_and(|outputs| {
-                    outputs
-                        .warnings
-                        .iter()
-                        .any(|warning| warning.starts_with("composite findings truncated:"))
-                });
+            let truncated = !checkpoint.nodes[index].truncation_warnings().is_empty();
             for export in &spec.exports {
                 let Some(&member) = positions.get(&export.node) else {
                     continue;
@@ -1176,13 +1143,7 @@ pub(super) fn upstream_results(
     for input in &node.inputs {
         let truncated = positions
             .get(&input.node)
-            .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
-            .is_some_and(|outputs| {
-                outputs
-                    .warnings
-                    .iter()
-                    .any(|warning| warning.starts_with("composite findings truncated:"))
-            });
+            .is_some_and(|index| !checkpoint.nodes[*index].truncation_warnings().is_empty());
         if input.outputs.contains(&OutputKind::Result)
             || input.outputs.contains(&OutputKind::Findings)
         {

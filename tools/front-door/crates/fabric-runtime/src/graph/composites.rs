@@ -357,7 +357,7 @@ fn outputs(
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
     legacy: bool,
-) -> Result<NodeOutputs, String> {
+) -> Result<(NodeOutputs, Option<NodeDecisionCause>), String> {
     let mut selected = NodeOutputs {
         extra: Default::default(),
         schema_version: 2,
@@ -375,6 +375,7 @@ fn outputs(
     let mut finding_members = Vec::new();
     let mut truncation_header = None;
     let mut inherited_notices = Vec::new();
+    let mut truncation_warning_indices = Vec::new();
     let partial = spec.min_successful.is_some();
     let unavailable = unavailable_with_wording(spec, checkpoint, positions, legacy);
     selected.warnings = unavailable
@@ -403,18 +404,10 @@ fn outputs(
                     selected.verdict_error = source.verdict_error.clone();
                 }
                 OutputKind::Findings => {
-                    if source
-                        .warnings
-                        .iter()
-                        .any(|warning| warning.starts_with("composite findings truncated:"))
-                        && let Some(notice) = source.result.as_ref().and_then(|result| {
-                            result
-                                .excerpt
-                                .lines()
-                                .find(|line| line.starts_with("composite findings truncated:"))
-                        })
+                    if !member.truncation_warnings().is_empty()
+                        && let Some(notice) = member.truncation_notices().first()
                     {
-                        inherited_notices.push(notice.to_owned());
+                        inherited_notices.push((*notice).to_owned());
                     }
                     let findings =
                         materialised_findings(positions[&export.node], plan, checkpoint, positions);
@@ -481,6 +474,9 @@ fn outputs(
                 bounded(last, WARNING_BYTES - 40)
             );
         }
+        if !notices.is_empty() {
+            truncation_warning_indices.push(0);
+        }
         notices.extend(selected.warnings);
         notices.truncate(MAX_WARNINGS);
         selected.warnings = notices;
@@ -490,6 +486,7 @@ fn outputs(
         let inherited = inherited_notices.join("\n");
         for notice in &inherited_notices {
             if selected.warnings.len() < MAX_WARNINGS {
+                truncation_warning_indices.push(selected.warnings.len());
                 selected.warnings.push(bounded(notice, WARNING_BYTES));
             }
         }
@@ -520,6 +517,13 @@ fn outputs(
             })
         }
     };
+    let truncation_cause =
+        truncation_header
+            .as_ref()
+            .map(|header| NodeDecisionCause::CompositeFindingsTruncated {
+                warning_indices: truncation_warning_indices,
+                notice_lines: bounded(header, COMPOSITE_EXCERPT_BYTES).lines().count(),
+            });
     if !unavailable.is_empty() || truncation_header.is_some() {
         // The unavailable list leads and is bounded on its own, so a long
         // review body can never truncate it away.
@@ -564,7 +568,7 @@ fn outputs(
             path: None,
         });
     }
-    Ok(selected)
+    Ok((selected, truncation_cause))
 }
 
 /// Reserve each member's strongest finding when all such reservations fit,
@@ -756,10 +760,16 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
             }
         }
     }
+    let (exported, truncation_cause) =
+        exported.map_or((None, None), |(output, cause)| (Some(output), cause));
     let progress = &mut checkpoint.nodes[index];
-    if progress.state != state || progress.outputs != exported {
+    if progress.state != state
+        || progress.outputs != exported
+        || progress.truncation_cause != truncation_cause
+    {
         progress.state = state;
         progress.outputs = exported;
+        progress.truncation_cause = truncation_cause;
         if let Some(reason) = export_error {
             progress.advance_error_code = Some("composite_findings_exceed_cap".into());
             progress.advance_error = Some(reason);
@@ -879,6 +889,7 @@ pub(super) fn validate_progress(
         && progress.advance_error_code.as_deref() == Some("composite_findings_exceed_cap")
         && matches!(&export, Some(Err(reason)) if progress.advance_error.as_ref() == Some(reason));
     let valid = progress.attempts.is_empty()
+        && (progress.state == NodeState::Succeeded || progress.truncation_cause.is_none())
         && progress.gate.is_none()
         && progress.ci.is_none()
         && (progress.advance_error.is_none() || failed_for_coverage || failed_for_export)
@@ -891,12 +902,17 @@ pub(super) fn validate_progress(
             NodeState::Running => state == NodeState::Running && progress.outputs.is_none(),
             NodeState::Succeeded => {
                 state == NodeState::Succeeded && shortfall.is_none() && {
-                    progress.outputs == export.and_then(Result::ok)
-                        || node.composite.as_ref().is_some_and(|spec| {
-                            outputs(spec, plan, checkpoint, positions, true)
-                                .ok()
-                                .is_some_and(|legacy| progress.outputs.as_ref() == Some(&legacy))
-                        })
+                    export.and_then(Result::ok).is_some_and(|(output, cause)| {
+                        progress.outputs.as_ref() == Some(&output)
+                            && progress.truncation_cause == cause
+                    }) || node.composite.as_ref().is_some_and(|spec| {
+                        outputs(spec, plan, checkpoint, positions, true)
+                            .ok()
+                            .is_some_and(|(output, cause)| {
+                                progress.outputs.as_ref() == Some(&output)
+                                    && progress.truncation_cause == cause
+                            })
+                    })
                 }
             }
             NodeState::Blocked | NodeState::Skipped => {

@@ -960,12 +960,105 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .enumerate()
         .map(|(i, node)| (node.id.clone(), i))
         .collect();
+    let active_expansions = checkpoint
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.expansion_cause,
+                Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+            )
+        })
+        .count();
+    if active_expansions > 1
+        || (active_expansions == 1)
+            != (checkpoint.pause_code.as_deref() == Some("invalid_plan_expansion")
+                && checkpoint.pause_reason.is_some())
+    {
+        return Err(GraphError::BadCheckpoint {
+            node: checkpoint.graph_id.clone(),
+            invariant: "active expansion pause must own the graph pause",
+        });
+    }
+    if let Some(cause) = checkpoint
+        .pause_code
+        .as_deref()
+        .and_then(NodeDecisionCause::from_loop_code)
+        && (checkpoint.pause_reason.is_none()
+            || !checkpoint
+                .nodes
+                .iter()
+                .any(|node| node.loop_cause.as_ref() == Some(&cause)))
+    {
+        return Err(GraphError::BadCheckpoint {
+            node: checkpoint.graph_id.clone(),
+            invariant: "loop pause code must have a matching typed node cause",
+        });
+    }
     for (index, (progress, node)) in checkpoint.nodes.iter().zip(&plan.nodes).enumerate() {
         let bad = |invariant| GraphError::BadCheckpoint {
             node: node.id.clone(),
             invariant,
         };
+        let valid_loop_cause = match (
+            &progress.loop_cause,
+            progress.loop_pause_code.as_deref(),
+            &progress.loop_pause,
+        ) {
+            (None, None, None) => true,
+            (Some(NodeDecisionCause::LoopPaused), Some("loop_paused"), Some(_)) => {
+                node.loop_body.is_some()
+            }
+            (Some(NodeDecisionCause::LoopAskClosed), Some("loop_ask_closed"), Some(_)) => {
+                node.loop_body.is_some()
+            }
+            (
+                Some(NodeDecisionCause::InvalidLoopDecision),
+                Some("invalid_loop_decision"),
+                Some(_),
+            ) => node.loop_body.is_some(),
+            _ => false,
+        };
+        let valid_expansion_cause = match (&progress.expansion_cause, &progress.expansion_pause) {
+            (None, None) => true,
+            (
+                Some(NodeDecisionCause::PlanExpansionPaused {
+                    active,
+                    fallback,
+                    fragment_error,
+                }),
+                pause,
+            ) => {
+                (node.plan.is_some() || plans::writer(node))
+                    && (pause.is_some() || (*active && *fallback))
+                    && fragment_error.is_none_or(|fact| match fact {
+                        PlanFailureFact::Structural(limit) => limit.actual > limit.max,
+                        PlanFailureFact::Envelope(limit) => {
+                            limit.bound > MAX_CHECKPOINT_BYTES as usize
+                        }
+                        _ => true,
+                    })
+            }
+            _ => false,
+        };
+        let valid_truncation_owner = match &progress.truncation_cause {
+            None => true,
+            Some(NodeDecisionCause::CompositeFindingsTruncated { .. }) => node.composite.is_some(),
+            _ => false,
+        };
         for (invalid, invariant) in [
+            (
+                !valid_expansion_cause,
+                "expansion pause cause must match its node",
+            ),
+            (
+                !valid_loop_cause,
+                "loop pause cause must match its code and loop boundary",
+            ),
+            (
+                !valid_truncation_owner,
+                "truncation cause requires a composite boundary",
+            ),
             (
                 !valid_compacted_findings(index, plan, checkpoint, &positions),
                 "compacted findings must reconstruct from the node inputs",
