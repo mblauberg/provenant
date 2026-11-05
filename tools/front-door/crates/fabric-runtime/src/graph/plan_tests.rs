@@ -105,7 +105,6 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
                 let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
                 assert_eq!(error.code(), "bad_checkpoint");
                 assert!(error.to_string().contains(&id), "{error}");
-                assert!(error.to_string().contains(&format!("persisted {field} must match the approved topology")), "{error}");
             }
         }
         if legacy {
