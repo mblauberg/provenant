@@ -104,6 +104,7 @@ pub(super) fn own_worktree(
                 lock_budget: lock_budget.unwrap_or(context.lock_budget),
                 ..*context
             };
+            let facts = worktrees::RepoFacts::default();
             let requested_base_oid = if let Some(base) = requested_base {
                 let git = provenant_os::git::git_executable()
                     .ok_or(worktrees::WorktreeError::InvalidRequest)?;
@@ -118,7 +119,7 @@ pub(super) fn own_worktree(
             } else {
                 None
             };
-            let existing = worktrees::list_with_observation(context, cancel)?
+            let existing = worktrees::list_with_observation_and_facts(context, &facts, cancel)?
                 .into_iter()
                 .find(|observation| {
                     observation.info.branch.as_deref()
@@ -222,14 +223,17 @@ pub(super) fn own_worktree(
                         // An unowned existing tree: nothing was created, so
                         // a base that does not resolve leaves no side effect.
                         (None, None, None) => {
-                            let git = provenant_os::git::git_executable()
-                                .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-                            run::resolve_git_base(
-                                &git,
-                                context.repo.root_path(),
-                                requested_base.unwrap_or("HEAD"),
-                            )
-                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?
+                            let head = provenant_confinement::repo::GitRevision::new("HEAD")
+                                .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+                            facts
+                                .resolve_revision(context, head, cancel)
+                                .map_err(|error| match error {
+                                    worktrees::WorktreeError::NotFound => {
+                                        worktrees::WorktreeError::InvalidRequest
+                                    }
+                                    other => other,
+                                })?
+                                .to_string()
                         }
                     },
                     host: *host,
