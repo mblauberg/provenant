@@ -558,3 +558,9 @@ scripts, prompts or result artifacts.
 
 This checklist does not dispatch or monitor cloud jobs. Cloud execution remains
 advisory and does not replace exact-head required CI.
+
+Named cloud target settings can be recorded under `domains.lanes.cloud_targets`
+with `provider`, `environment`, `repository`, `model` and optional `effort`.
+`domains.lanes.projects.<project>.cloud_target` names a target. These settings
+are reserved for the adapter: dispatch and project selection do not yet use
+them. Do not put credentials in these fields.
