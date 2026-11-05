@@ -749,7 +749,10 @@ mod tests {
         let oid = head();
         let read = |args: &[&str]| -> Result<ExecOutcome> {
             calls.set(calls.get() + 1);
-            let endpoint = args.last().unwrap_or(&"");
+            let endpoint = args
+                .iter()
+                .find(|arg| arg.starts_with("repos/"))
+                .unwrap_or(&"");
             let body = if endpoint.contains("/pulls/") {
                 json!({"state":"open", "head":{"sha":oid,"ref":"feat","repo":{"full_name":"owner/repo"}}, "base":{"sha":oid,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"test"})
             } else if endpoint.contains("/rules/") || endpoint.contains("/statuses?") {

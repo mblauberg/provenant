@@ -236,13 +236,11 @@ and syncs PR state. Recheck the changed heads and their review evidence.
 Required checks and branch protection apply to every PR, based on the bottom
 PR's base; stack merges cannot bypass them. CI runs for every PR; use
 `github.event.pull_request.stack` to limit expensive jobs when appropriate.
-Land bottom-first with `gh stack merge --merge-method merge` or the asynchronous
-merge API. `gh stack merge` merges through the chosen PR, all-or-nothing; one
-PR, a prefix or the whole stack can land. Upper PRs automatically retarget
-`main`. GitHub also supports squash and rebase merge methods. The legacy REST
-`PUT /pulls/{n}/merge` used by `provenant pr land` cannot merge stacked PRs;
-until Provenant supports stacks, use `gh stack` to land them. Prune merged
-branches and worktrees as usual after landing.
+Land bottom-first with `provenant land`. Stack members use the asynchronous
+REST merge API, with the configured merge method and each verified head pinned.
+An upper PR waits for its lower members; after retargeting, its new head needs
+its own CI and review evidence. A pending or ambiguous merge is reconciled
+before retry. Prune merged branches and worktrees as usual after landing.
 
 See GitHub's [overview](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs),
 [quickstart](https://docs.github.com/en/pull-requests/get-started/stacked-prs-quickstart),
@@ -431,7 +429,9 @@ omitted fields inherit. The project and tier tables accept the same fields.
   refs and `max_rebuilds` bounds rebuilds on target movement.
   `publish_settle_seconds` defaults to 30 and controls the wait before recovery
   re-observes a publication that cannot safely be retried. Setting it to `0` disables
-  the in-flight window and `land --explain` warns. The bundled CI
+  the in-flight window and `land --explain` warns. `publish_unknown_warn_seconds`
+  controls when an unresolved marker emits a warning with the recovery command
+  (default 3600 seconds); it does not resolve the outcome. The bundled CI
   trigger covers `land/**`; if you change the prefix, update the CI trigger to
   match. `land --explain` warns on a non-default prefix. The contract's forge
   queue path is not yet implemented and `forge_queue` is rejected at runtime.
@@ -479,8 +479,8 @@ call errors but the PR is merged, the report is landed. With no required
 check, landing also waits 60 seconds after the newest check registers. If
 `land` reports `CI_PENDING`, rerun it with `--wait`.
 
-Landing reads pull request and check data over REST and sends a merge request
-pinned to the verified SHA. Pending checks are sampled initially after 30
+Landing uses REST for pull request resolution, checks and merge requests, which
+are pinned to the verified SHA. Pending checks are sampled initially after 30
 seconds, then with backoff up to four times that interval. Set the host default
 with `domains.pr.land.poll_seconds` in the state-root `config.toml`, or pass
 `--poll SECONDS` for one invocation. `land --explain --json` reports the
@@ -570,6 +570,9 @@ reported through the ordered split. For overlapping single-PR landings, use a
 serial merge train: merge one, update the next onto the new `main`, rerun
 exact-head checks and apply the review ladder head-move rules before merging.
 The ladder keeps rules A and B in shadow until enforced.
+Landing reports a head-move classification as shadow evidence; it does not
+replace review on the exact head. An approval-time base not recorded when the
+review was made remains unknown, and incomplete delta statistics classify as C.
 
 ### Rust build cache
 
