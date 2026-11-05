@@ -207,12 +207,26 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
     let moved = facts.resolve_commit(&context, name, &cancel())?;
     assert_ne!(moved, initial);
     assert_eq!(moved, fixture.head()?);
+    assert_eq!(
+        facts.resolve_revision(&context, GitRevision::new("facts-ref")?, &cancel())?,
+        moved
+    );
+    assert_eq!(
+        facts.resolve_revision(&context, GitRevision::new("facts-ref~1")?, &cancel())?,
+        initial
+    );
     let inventory_limit = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
     assert!(RepoFacts::with_limits(inventory_limit, 0).is_err());
     assert!(RepoFacts::with_limits(0, provenant_os::git::REPO_FACT_SCALAR_LIMIT).is_err());
     let limited = RepoFacts::with_limits(inventory_limit, 1)?;
     assert!(matches!(
         limited.resolve_commit(&context, GitRefName::branch("facts-ref")?, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert!(matches!(
+        limited.resolve_revision(&context, GitRevision::new("facts-ref")?, &cancel()),
         Err(WorktreeError::Utility(UtilityError::Truncated {
             stream: "stdout"
         }))
@@ -4126,7 +4140,12 @@ fn remote_base_uses_exact_advertisement_instead_of_tracking_ref() -> Result<(), 
         "@{push}",
     ] {
         assert_eq!(
-            pin_revision(&test_context.context(), alias, &cancel())?,
+            pin_revision(
+                &test_context.context(),
+                &RepoFacts::default(),
+                alias,
+                &cancel()
+            )?,
             expected,
             "{alias}"
         );
@@ -4139,7 +4158,12 @@ fn remote_base_uses_exact_advertisement_instead_of_tracking_ref() -> Result<(), 
         "@{push}^0",
     ] {
         assert_eq!(
-            pin_revision(&test_context.context(), expression, &cancel())?,
+            pin_revision(
+                &test_context.context(),
+                &RepoFacts::default(),
+                expression,
+                &cancel()
+            )?,
             expected,
             "{expression}"
         );
@@ -4168,6 +4192,7 @@ fn remote_base_uses_exact_advertisement_instead_of_tracking_ref() -> Result<(), 
             assert_eq!(
                 pin_revision(
                     &test_context.context(),
+                    &RepoFacts::default(),
                     &format!("{root}{suffix}"),
                     &cancel()
                 )?,
@@ -4228,9 +4253,14 @@ fn tracking_base_the_remote_cannot_vouch_for_fails_closed() -> Result<(), Box<dy
         unverifiable.extend(["Origin/main", "Origin/main~1", "remotes/Origin/main"]);
     }
     for base in unverifiable {
-        let error = pin_revision(&test_context.context(), base, &cancel())
-            .err()
-            .ok_or_else(|| format!("{base} must not fall back to the local tracking OID"))?;
+        let error = pin_revision(
+            &test_context.context(),
+            &RepoFacts::default(),
+            base,
+            &cancel(),
+        )
+        .err()
+        .ok_or_else(|| format!("{base} must not fall back to the local tracking OID"))?;
         assert!(
             matches!(&error, WorktreeError::BaseUnverified { base: named } if named == base),
             "{base}: {error}"

@@ -321,6 +321,7 @@ pub fn create(
 ) -> Result<WorktreeInfo, WorktreeError> {
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
+    let facts = RepoFacts::default();
     let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
     context.repo.revalidate()?;
     let entries = read_worktrees(context, cancel)?;
@@ -330,7 +331,7 @@ pub fn create(
         .find(|entry| entry.branch.as_ref() == Some(&branch));
     if let Some(entry) = checked_out {
         return Err(if let Some(base) = request.base.as_deref() {
-            let base_oid = pin_revision(context, base, cancel)?;
+            let base_oid = pin_revision(context, &facts, base, cancel)?;
             if !is_ancestor(context, base_oid, entry.head, cancel)? {
                 WorktreeError::BranchExistsWithBase {
                     branch: request.branch.clone(),
@@ -355,7 +356,7 @@ pub fn create(
     if let Some(existing_head) = existing
         && let Some(base) = request.base.as_deref()
     {
-        let base_oid = pin_revision(context, base, cancel)?;
+        let base_oid = pin_revision(context, &facts, base, cancel)?;
         if !is_ancestor(context, base_oid, existing_head, cancel)? {
             return Err(WorktreeError::BranchExistsWithBase {
                 branch: request.branch.clone(),
@@ -393,7 +394,7 @@ pub fn create(
     let base = if let Some(existing) = existing {
         existing
     } else if let Some(base) = request.base.as_deref() {
-        pin_revision(context, base, cancel)?
+        pin_revision(context, &facts, base, cancel)?
     } else {
         let outcome = run_git(context, context.repo, GitRead::RevParseHead, cancel)?;
         if exit_code(&outcome)? != 0 {
@@ -622,6 +623,7 @@ pub(super) fn primary_head(
 
 pub(super) fn pin_revision(
     context: &WorktreeContext<'_>,
+    facts: &RepoFacts,
     revision: &str,
     cancel: &CancelToken,
 ) -> Result<GitOid, WorktreeError> {
@@ -691,18 +693,17 @@ pub(super) fn pin_revision(
         crate::utility::RemoteBase::NotRemote => revision.to_owned(),
     };
     let parsed = GitRevision::new(&verified_revision).map_err(|_| WorktreeError::InvalidRequest)?;
-    let outcome = run_git(
-        context,
-        context.repo,
-        GitRead::ResolveRevision { revision: parsed },
-        cancel,
-    )?;
-    if exit_code(&outcome)? != 0 {
-        return Err(WorktreeError::BaseNotFound {
-            base: revision.to_owned(),
-        });
-    }
-    parse_oid(trim_ascii(&outcome.stdout.bytes))
+    facts
+        .resolve_revision(context, parsed, cancel)
+        .map_err(|error| {
+            if matches!(error, WorktreeError::NotFound) {
+                WorktreeError::BaseNotFound {
+                    base: revision.to_owned(),
+                }
+            } else {
+                error
+            }
+        })
 }
 
 pub(super) fn execute_mutation(
@@ -988,6 +989,7 @@ pub(super) fn pin_integration(
     text: &str,
     cancel: &CancelToken,
 ) -> Result<(GitRefName, GitOid), WorktreeError> {
+    let facts = RepoFacts::default();
     let candidates = [
         GitRefName::new(text),
         GitRefName::branch(text),
@@ -999,7 +1001,7 @@ pub(super) fn pin_integration(
         match resolve_ref(context, candidate.clone(), cancel) {
             Ok(oid) => {
                 let oid = if candidate.as_str().starts_with("refs/remotes/") {
-                    pin_revision(context, candidate.as_str(), cancel)?
+                    pin_revision(context, &facts, candidate.as_str(), cancel)?
                 } else {
                     oid
                 };

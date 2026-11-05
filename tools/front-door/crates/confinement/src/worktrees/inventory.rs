@@ -63,6 +63,30 @@ impl RepoFacts {
         parse_oid(trim_ascii(&outcome.stdout.bytes))
     }
 
+    /// Resolve a revision from fresh Git evidence using this session's scalar cap.
+    pub fn resolve_revision(
+        &self,
+        context: &WorktreeContext<'_>,
+        revision: GitRevision,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        validate_binding(context)?;
+        context.repo.revalidate()?;
+        let budget = context.utility_budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = run_utility(
+            context.executor,
+            GitRead::ResolveRevision { revision },
+            context.repo,
+            context.utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
     pub(super) fn capture_inventory(
         &self,
         context: &WorktreeContext<'_>,
