@@ -35,11 +35,8 @@ fn live_writer_cwd_refusal_suggests_running_from_the_main_checkout() {
         provenant_confinement::worktrees::ObservedProcess {
             pid: 42,
             command: Some("zsh".into()),
-<<<<<<< HEAD
             kind: provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
-=======
             cwd: None,
->>>>>>> origin/main
         },
     );
     assert!(
@@ -5206,7 +5203,6 @@ fn an_unknown_size_override_is_refused() {
 }
 
 #[test]
-<<<<<<< HEAD
 fn big_batch_without_scout_matches_golden() {
     let expanded = super::preset::expand_with(
         &Layers::empty(),
@@ -5222,7 +5218,13 @@ fn big_batch_without_scout_matches_golden() {
     actual.push('\n');
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("assets/presets/fixtures/big-batch.no-scout.json");
-=======
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
+    assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
+}
+
+#[test]
 fn compact_preset_show_lists_review_council_parameter_docs() {
     let layers = Layers::empty();
     let (values, origins) = layers.resolve("review-council").unwrap();
@@ -5699,13 +5701,11 @@ fn file_spec_expansion_golden() {
         .project_dir
         .unwrap()
         .join("assets/presets/fixtures/generator-evaluator-file-spec.expansion.json");
->>>>>>> origin/main
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         std::fs::write(&path, &actual).unwrap();
     }
     assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
 }
-<<<<<<< HEAD
 
 #[test]
 fn retry_allowances_survive_preset_and_node_expansion() {
@@ -5743,5 +5743,3 @@ fn nested_presets_retain_the_nearest_retry_default() {
     );
     assert_eq!(nodes[1]["preset_retry"]["retries"], 4);
 }
-=======
->>>>>>> origin/main
