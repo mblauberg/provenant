@@ -699,3 +699,36 @@ fn native_open_reader_cannot_read_github_credentials() -> Result<(), Box<dyn std
     assert!(denied.stdout.bytes.is_empty());
     Ok(())
 }
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn invalid_provider_endpoints_warn_and_preserve_open_network() -> Result<(), PermissionError> {
+    let (mut plan, mut profile) = write_grants_fixture();
+    plan.network = NetworkAccess::Open;
+    profile.spec.process_executables.push(PathGrant {
+        path: "/fixture/provider".into(),
+        scope: PathScope::Exact,
+    });
+    profile.spec.provider_api = vec![
+        NetworkEndpoint {
+            address: "localhost".into(),
+            port: 443,
+        },
+        NetworkEndpoint {
+            address: "invalid\") (allow file-read* (subpath \"/".into(),
+            port: 443,
+        },
+        NetworkEndpoint {
+            address: "*".into(),
+            port: 0,
+        },
+    ];
+    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
+    let source = render(&grants)?;
+    assert!(source.contains("(allow network-outbound (remote tcp \"localhost:443\"))"));
+    assert!(source.contains("(allow network-outbound (remote ip \"*:*\"))"));
+    assert!(!source.contains("invalid"));
+    assert!(!source.contains("remote tcp \"*:0\""));
+    Ok(())
+}

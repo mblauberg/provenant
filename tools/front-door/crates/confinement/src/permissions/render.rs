@@ -808,7 +808,15 @@ fn render_profile_with_limit(
         ));
     }
     for endpoint in &profile.spec.provider_api {
-        push_network_endpoint(&mut source, endpoint)?;
+        if super::validation::validate_endpoint(endpoint).is_ok() {
+            push_network_endpoint(&mut source, endpoint)?;
+        } else {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: invalid provider network endpoint was omitted"
+            );
+        }
     }
     if profile.spec.loopback_server {
         source.push_str(concat!(

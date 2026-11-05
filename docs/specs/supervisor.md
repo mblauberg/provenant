@@ -287,8 +287,10 @@ access to the staged copy. Links are copied as content rather than retained;
 links resolving into credential roots, cycles, changed entries and content
 exceeding the configured size bound are skipped with warnings. Optional grant
 discovery also omits credential-root targets with warnings. Required executable,
-worktree and configured grants keep the credential-root guard. Confinement
-limits access; it does not make a networked lane hermetic.
+worktree and configured grants keep the credential-root guard. Invalid provider
+network endpoints and native-control labels are omitted with warnings; valid
+endpoints and the selected network policy remain in force. Confinement limits
+access; it does not make a networked lane hermetic.
 
 ### Database IPC shares the host namespace
 

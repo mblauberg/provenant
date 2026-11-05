@@ -378,9 +378,14 @@ boundary = "credentials"
 reason = "Discovery reads are limited to exact adapter marker names rather than arbitrary host paths."
 
 [[guard]]
+site = "confinement/src/permissions/render.rs#render_profile_with_limit"
+boundary = "warning"
+reason = "Malformed provider endpoints are omitted before SBPL rendering; valid endpoints and open-network policy remain in force."
+
+[[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
 boundary = "unclassified"
-reason = "Remaining malformed profile paths and network endpoints require caller-specific classification or a tolerant fallback."
+reason = "Remaining malformed profile paths require caller-specific classification or a tolerant fallback."
 
 [[guard]]
 site = "providers/src/launch.rs#admit"

@@ -369,9 +369,6 @@ fn validate_profile_spec_impl(
             }
         })?;
     }
-    for endpoint in &spec.provider_api {
-        validate_endpoint(endpoint)?;
-    }
     Ok(())
 }
 
@@ -608,7 +605,7 @@ pub(super) fn path_overlaps(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test, feature = "snapshot"))]
 pub(super) fn validate_endpoint(endpoint: &NetworkEndpoint) -> Result<(), PermissionError> {
     if endpoint.port == 0
         || endpoint.port > u64::from(u16::MAX)
