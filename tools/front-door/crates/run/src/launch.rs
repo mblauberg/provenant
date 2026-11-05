@@ -1928,4 +1928,4 @@ mod retry_pin_tests {
     }
 }
 
-mod hand_off;
+pub(crate) mod hand_off;

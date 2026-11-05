@@ -325,7 +325,7 @@ fn clone_target(
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn seed_with(
+pub(crate) fn seed_with(
     home: &Path,
     cache: &Path,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,

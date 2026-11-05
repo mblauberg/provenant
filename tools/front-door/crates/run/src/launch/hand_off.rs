@@ -179,8 +179,10 @@ impl RunStore {
             // Cache seeding can walk and sync a large registry. Release the
             // repository lock during that work, then revalidate Git under a
             // fresh lock before constructing the confined command and launch.
-            drop(_git_setup_lock.take());
-            confinement.seed_cargo(&plan.environment, &directory()?);
+            let seed_attempt = directory()?;
+            seed_without_setup_lock(&mut _git_setup_lock, || {
+                confinement.seed_cargo(&plan.environment, &seed_attempt);
+            });
             _git_setup_lock = match retry_setup_lock(
                 record.retry_of.is_some(),
                 |budget| {
@@ -302,6 +304,13 @@ impl RunStore {
         .map_err(|failure| HandOff::Uncertain(failure.error.to_string()))?;
         Ok(())
     }
+}
+
+// The seed can be slow, while the lock protects shared Git state. The caller
+// must reacquire it and revalidate Git after this function returns.
+pub(crate) fn seed_without_setup_lock<T>(lock: &mut Option<T>, seed: impl FnOnce()) {
+    drop(lock.take());
+    seed();
 }
 
 // A setup lock timeout occurs before Git preparation and before any guardian

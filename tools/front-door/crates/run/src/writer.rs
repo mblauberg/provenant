@@ -1499,6 +1499,62 @@ mod cargo_setup_tests {
                 .map_err(|_| "second preparation panicked".to_owned())??;
             Ok::<(), String>(())
         })?;
+        // Hold a real seed in its clone callback while another writer runs
+        // Git setup. The handoff helper releases the actual repository lock.
+        let cache = root.join("held-seed-cache");
+        std::fs::create_dir(&cache)?;
+        std::thread::scope(
+            |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
+                let held = prepare_writer_git(
+                    &mut writer,
+                    &state,
+                    &root,
+                    None,
+                    None,
+                    &CancelToken::new(),
+                    None,
+                )?;
+                let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let root_ref = &root;
+                let cache_ref = &cache;
+                let seed = scope.spawn(move || {
+                    let mut lock = Some(held);
+                    crate::launch::hand_off::seed_without_setup_lock(&mut lock, || {
+                        crate::cargo_seed::seed_with(root_ref, cache_ref, |_, _| {
+                            entered_tx.send(()).unwrap();
+                            provenant_test_support::wait_for(
+                                "release seed",
+                                Duration::from_secs(30),
+                                || release_rx.try_recv().is_ok(),
+                                |ready| *ready,
+                            )
+                            .unwrap();
+                            Ok(())
+                        });
+                    });
+                });
+                provenant_test_support::wait_for(
+                    "seed entered",
+                    Duration::from_secs(30),
+                    || entered_rx.try_recv().is_ok(),
+                    |ready| *ready,
+                )?;
+                let result = prepare_writer_git(
+                    &mut second,
+                    &state,
+                    &root,
+                    None,
+                    None,
+                    &CancelToken::new(),
+                    None,
+                );
+                release_tx.send(())?;
+                result.map(drop)?;
+                seed.join().map_err(|_| "seed panicked")?;
+                Ok(())
+            },
+        )?;
         // A busy repository lock honours the configured bound and identifies
         // the setting that controls it, without changing the lock's inode.
         std::fs::write(
