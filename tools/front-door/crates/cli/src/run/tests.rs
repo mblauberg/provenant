@@ -147,6 +147,456 @@ fn parsed_run(args: &[&str]) -> Result<Dispatch, Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn project_capabilities_apply_to_writer_explain_and_can_be_removed()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane(
+        "run::tests::project_capabilities_apply_to_writer_explain_and_can_be_removed",
+    )? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let context = crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)?;
+            std::fs::write(
+                edge.roots.state.as_path().join("config.toml"),
+                format!(
+                    "schema_version = 1\n[domains.lanes.projects.\"{}\"]\ncapabilities = [\"postgres\", \"unrecognised\"]\n",
+                    context.identity.project
+                ),
+            )?;
+            let brief = fixture.root.join("brief.md");
+            std::fs::write(&brief, "Work")?;
+            let brief_arg = brief.to_str().ok_or("brief path")?;
+            for (mut args, expected) in [
+                (
+                    vec!["--branch", "fixture", "--explain"],
+                    Some("project default"),
+                ),
+                (vec!["--mode", "read-only", "--explain"], None),
+                (
+                    vec![
+                        "--branch",
+                        "fixture",
+                        "--capability",
+                        "postgres",
+                        "--explain",
+                    ],
+                    Some("flag"),
+                ),
+                (
+                    vec![
+                        "--branch",
+                        "fixture",
+                        "--no-capability",
+                        "postgres",
+                        "--explain",
+                    ],
+                    None,
+                ),
+            ] {
+                args.extend(["--model", "codex/gpt-6-luna", "--prompt-file", brief_arg]);
+                let command = parsed_run(&args)?;
+                let reply = super::run(command, edge);
+                assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+                if args.contains(&"--branch") {
+                    assert!(
+                        reply
+                            .human
+                            .contains("ignored unknown capability unrecognised")
+                    );
+                }
+                let capabilities = reply.result.data["capabilities"]
+                    .as_array()
+                    .ok_or("capabilities")?;
+                match expected {
+                    Some(source) => {
+                        assert_eq!(
+                            capabilities.as_slice(),
+                            &[json!({"name":"postgres", "source": source})]
+                        );
+                        assert!(
+                            reply
+                                .human
+                                .contains(&format!("capability: postgres ({source})"))
+                        );
+                    }
+                    None => assert!(capabilities.is_empty()),
+                }
+            }
+            let command = parsed_run(&[
+                "--mode",
+                "read-only",
+                "--capability",
+                "unknown",
+                "--model",
+                "codex/gpt-6-luna",
+                "--prompt-file",
+                brief_arg,
+                "--explain",
+            ])?;
+            let reply = super::run(command, edge);
+            assert_eq!(reply.result.status, Status::Ok);
+            assert!(reply.human.contains("ignored unknown capability unknown"));
+            assert!(
+                reply.result.data["capabilities"]
+                    .as_array()
+                    .ok_or("capabilities")?
+                    .is_empty()
+            );
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
+fn project_default_dispatch_renders_ipc_only_for_writer() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_confinement::permissions::{
+        AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
+        ProviderProfileSpec, WorktreeWriteAuthority,
+    };
+    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::os::unix::fs::DirBuilderExt;
+    const MARKER: &str = "PROVENANT_TEST_CAPABILITY_DISPATCH";
+    let executor = SystemExecutor::new(1)?;
+    let parent = AttemptId::from_bytes([8; 16]);
+    let Some(root) = std::env::var_os(MARKER).map(PathBuf::from) else {
+        let fixture = linked_fixture()?;
+        let gitdir = String::from_utf8(provenant_os::fixture::run_git(
+            &fixture.tree,
+            &["rev-parse", "--absolute-git-dir"],
+        )?)?;
+        let tree = fixture.project.join("writer");
+        provenant_os::fixture::run_git(
+            &fixture.project,
+            &[
+                "worktree",
+                "move",
+                fixture.tree.to_str().ok_or("old tree")?,
+                tree.to_str().ok_or("tree")?,
+            ],
+        )?;
+        let argv = [
+            std::env::current_exe()?.into_os_string(),
+            "--exact".into(),
+            "run::tests::project_default_dispatch_renders_ipc_only_for_writer".into(),
+            "--nocapture".into(),
+        ];
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                !key.to_string_lossy().starts_with("GIT_")
+                    && key != MARKER
+                    && key != provenant_core::RUN_STATE_DIRECTORY_ENV
+                    && key != run::LANE_DEPTH_ENV
+                    && key != run::PARENT_ATTEMPT_ENV
+                    && key != "PROVENANT_WORKTREE_GITDIR"
+            })
+            .collect();
+        env.extend([
+            (MARKER.into(), fixture.root.as_os_str().to_owned()),
+            ("PROVENANT_WORKTREE_GITDIR".into(), gitdir.trim().into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            (
+                provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
+                fixture
+                    .root
+                    .join("state/children")
+                    .join(parent.to_string())
+                    .into_os_string(),
+            ),
+            (run::LANE_DEPTH_ENV.into(), "1".into()),
+            (run::PARENT_ATTEMPT_ENV.into(), parent.to_string().into()),
+        ]);
+        let mut options = ExecOptions::new(&argv, &tree, Duration::from_secs(30));
+        options.env = Some(&env);
+        options.stdout = StreamPolicy::Capture { limit: 65536 };
+        options.stderr = StreamPolicy::Capture { limit: 65536 };
+        let out = executor.execute(options)?;
+        assert_eq!(
+            out.termination,
+            Termination::Exit(0),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout.bytes),
+            String::from_utf8_lossy(&out.stderr.bytes)
+        );
+        return Ok(());
+    };
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+    let project = root.join("project");
+    let tree = project.join("writer");
+    let brief = root.join("brief.md");
+    std::fs::write(&brief, "work")?;
+    with_edge(
+        &root,
+        &tree,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(edge.roots.state.as_path())?;
+            let binding = provenant_config::bind_project(
+                edge.roots,
+                provenant_config::ProjectLocation::new(project.join(".git"))?,
+            )?;
+            provenant_config::bind_host(edge.roots)?;
+            std::fs::write(
+                edge.roots.state.as_path().join("config.toml"),
+                format!(
+                    "schema_version = 1\n[domains.lanes.projects.\"{}\"]\ncapabilities = ['postgres']\n",
+                    binding.project_id()
+                ),
+            )?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            for writer in [true, false] {
+                let mut args = vec![
+                    "--model",
+                    "codex/gpt-6-luna",
+                    "--prompt-file",
+                    brief.to_str().ok_or("brief")?,
+                    "--operation-id",
+                    if writer {
+                        "writer-default"
+                    } else {
+                        "reader-default"
+                    },
+                ];
+                if writer {
+                    args.extend(["--worktree", tree.to_str().ok_or("tree")?]);
+                } else {
+                    args.extend(["--mode", "read-only"]);
+                }
+                let mut command = parsed_run(&args)?;
+                command.wait = None;
+                let reply = dispatch_with_workers(command, edge, &Free);
+                assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+                let id: RunId = reply.result.data["run_id"]
+                    .as_str()
+                    .ok_or("run id")?
+                    .parse()?;
+                let request = session.store.request(id, &call)?;
+                let access = &request.tasks[0].access;
+                assert_eq!(access.database_ipc, writer);
+                let grant = |path: &str| PathGrant {
+                    path: path.into(),
+                    scope: PathScope::Subtree,
+                };
+                let mode = if writer {
+                    AccessMode::WorktreeWrite(Box::new(serde_json::from_value::<
+                        WorktreeWriteAuthority,
+                    >(
+                        json!({"git_grants_digest":vec![7_u8;32],"publishing":false,"common_git_dir":"/fixture/repo/.git","cargo_cache":{"path":"/fixture/cache","scope":"subtree"}}),
+                    )?))
+                } else {
+                    AccessMode::ReadOnly
+                };
+                let plan = PlanPermissions {
+                    mode,
+                    read_only: None,
+                    scratch: grant("/fixture/scratch"),
+                    private_state: None,
+                    read_roots: vec![],
+                    protected_roots: vec![],
+                    secret_roots: vec![],
+                    selected_authentication: None,
+                    include_continuation: false,
+                    write_roots: vec![],
+                    network: NetworkAccess::Provider,
+                    nested_confinement: false,
+                };
+                let mut profile = ProviderProfile {
+                    spec: ProviderProfileSpec::default(),
+                    observations: Default::default(),
+                };
+                super::provider::apply_lane_capabilities(&mut profile.spec, access);
+                let sbpl = provenant_confinement::permissions::snapshot::render(
+                    &plan,
+                    &profile,
+                    Path::new("/fixture/home"),
+                )?;
+                assert_eq!(sbpl.contains("(allow ipc-sysv-shm)"), writer);
+            }
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
+fn project_default_branch_dispatch_renders_database_ipc() -> Result<(), Box<dyn std::error::Error>>
+{
+    if reexec_test_in_lane("run::tests::project_default_branch_dispatch_renders_database_ipc")? {
+        return Ok(());
+    }
+    use provenant_confinement::permissions::{
+        AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
+        ProviderProfileSpec, WorktreeWriteAuthority,
+    };
+    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+    let fixture = linked_fixture()?;
+    let brief = fixture.root.join("brief.md");
+    std::fs::write(&brief, "work")?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(edge.roots.state.as_path())?;
+            let binding = provenant_config::bind_project(
+                edge.roots,
+                provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
+            )?;
+            provenant_config::bind_host(edge.roots)?;
+            std::fs::write(
+                edge.roots.state.as_path().join("config.toml"),
+                format!(
+                    "schema_version = 1\n[gc]\nfree_floor = '1B'\n[domains.lanes.projects.\"{}\"]\ncapabilities = ['postgres']\n",
+                    binding.project_id()
+                ),
+            )?;
+            let mut command = parsed_run(&[
+                "--branch",
+                "capability-branch",
+                "--base",
+                "HEAD",
+                "--model",
+                "codex/gpt-6-luna",
+                "--prompt-file",
+                brief.to_str().ok_or("brief")?,
+            ])?;
+            command.wait = None;
+            let reply = super::submit::with_deferred_provider_launch(|| {
+                dispatch_with_workers(command, edge, &Free)
+            });
+            assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+            let id: RunId = reply.result.data["run_id"]
+                .as_str()
+                .ok_or("run id")?
+                .parse()?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let request = session.store.request(id, &call)?;
+            let access = &request.tasks[0].access;
+            assert!(access.database_ipc);
+            let grant = |path: &str| PathGrant {
+                path: path.into(),
+                scope: PathScope::Subtree,
+            };
+            let plan = PlanPermissions {
+                mode: AccessMode::WorktreeWrite(Box::new(serde_json::from_value::<
+                    WorktreeWriteAuthority,
+                >(
+                    json!({"git_grants_digest":vec![7_u8;32],"publishing":false,"common_git_dir":"/fixture/repo/.git","cargo_cache":{"path":"/fixture/cache","scope":"subtree"}}),
+                )?)),
+                read_only: None,
+                scratch: grant("/fixture/scratch"),
+                private_state: None,
+                read_roots: vec![],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            };
+            let mut profile = ProviderProfile {
+                spec: ProviderProfileSpec::default(),
+                observations: Default::default(),
+            };
+            super::provider::apply_lane_capabilities(&mut profile.spec, access);
+            let sbpl = provenant_confinement::permissions::snapshot::render(
+                &plan,
+                &profile,
+                Path::new("/fixture/home"),
+            )?;
+            assert!(sbpl.contains("(allow ipc-sysv-shm)"));
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
+fn lane_gitdir_resolves_the_registered_project_without_querying_primary()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane(
+        "run::tests::lane_gitdir_resolves_the_registered_project_without_querying_primary",
+    )? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let context = crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)?;
+            let gitdir = String::from_utf8(provenant_os::fixture::run_git(
+                &fixture.tree,
+                &["rev-parse", "--absolute-git-dir"],
+            )?)?;
+            let gitdir = PathBuf::from(gitdir.trim());
+            assert_eq!(
+                super::dispatch::project_id_for_lane_gitdir(edge.roots, &gitdir),
+                Some(context.identity.project)
+            );
+            assert_eq!(
+                super::dispatch::project_id_for_lane_gitdir(
+                    edge.roots,
+                    &fixture.project.join(".git")
+                ),
+                Some(context.identity.project)
+            );
+            assert_eq!(
+                super::dispatch::project_id_for_lane_gitdir(
+                    edge.roots,
+                    &fixture.root.join("unrelated")
+                ),
+                None
+            );
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
 fn run_in_linked_worktree_requires_explicit_target() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = linked_fixture()?;
     let nested = fixture.tree.join("nested");
@@ -3354,6 +3804,49 @@ fn trace_store(
 }
 
 #[test]
+fn status_shows_recorded_capability_origins() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+    let store = trace_store(&temp, &call)?;
+    let mut input = trace_run(
+        1,
+        AttemptId::from_bytes([9; 16]),
+        WallTime::from_micros(100)?,
+    )?;
+    input.request.tasks[0].access.database_ipc = true;
+    input.request.tasks[0].access.extra.insert(
+        "capability_sources".into(),
+        json!([{"name":"postgres","source":"project default"}]),
+    );
+    store.create(&input, &call)?;
+    let row = store.record(input.attempts[0].attempt_id, &call)?;
+    let mut roots = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+    roots.state_dir = Some(root.join("state"));
+    let context = run::ExecutionContext {
+        state_root: roots.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+        project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+        actor_id: ActorId::from_bytes([2; 16]),
+        read_prompts: true,
+    };
+    let session = Session { store, context };
+    let (mut data, _) = render_lanes(std::slice::from_ref(&row), &[], None, &root, None);
+    super::status::attach_capability_sources(
+        &session,
+        std::slice::from_ref(&row),
+        &mut data,
+        &call,
+    );
+    assert_eq!(
+        data["lanes"][0]["capabilities"],
+        json!([{"name":"postgres","source":"project default"}])
+    );
+    Ok(())
+}
+
+#[test]
 fn a_nested_lane_reads_the_host_ledger_when_it_opens_read_only()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -4749,6 +5242,7 @@ fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn st
                 write_root: if read { vec![] } else { vec![root.clone()] },
                 network: None,
                 capability: vec![],
+                no_capability: Vec::new(),
             };
             let fail = lane_access(&access, &temp.path().join("state"), home).unwrap_err();
             assert!(fail.message.contains(flag), "{}", fail.message);
@@ -4784,6 +5278,7 @@ fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
         write_root,
         network: None,
         capability: vec![],
+        no_capability: Vec::new(),
     };
     for root in [&team, &home, &config] {
         for (flag, read) in [("--read-root", true), ("--write-root", false)] {
@@ -4855,6 +5350,7 @@ fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::e
         write_root,
         network: None,
         capability: vec![],
+        no_capability: Vec::new(),
     };
     let granted = lane_access(
         &access(vec![release.clone()], vec![]),
@@ -4939,6 +5435,7 @@ fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::er
         write_root,
         network,
         capability: capability.iter().map(|name| name.to_string()).collect(),
+        no_capability: Vec::new(),
     };
     let network = |mode, switch, capability: &[&str]| {
         lane_access(
@@ -4973,14 +5470,12 @@ fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::er
         network(Mode::ReadOnly, Some(Switch::On), &[]),
         Ok(Some(run::NetworkAccess::Open))
     );
-    assert!(matches!(
-        lane_access_checked(
-            &access(Mode::ReadOnly, None, &["rust"], Vec::new()),
-            &state,
-            Path::new("/fixture/host-home"),
-        ),
-        Err(AccessError::UnknownCapability(name)) if name == "rust"
-    ));
+    let unknown = lane_access_checked(
+        &access(Mode::ReadOnly, None, &["rust"], Vec::new()),
+        &state,
+        Path::new("/fixture/host-home"),
+    )?;
+    assert!(!unknown.database_ipc);
     let granted = lane_access(
         &access(Mode::WorktreeWrite, None, &[], vec![project.clone()]),
         &state,
@@ -5024,6 +5519,7 @@ fn lane_access_refuses_write_root_overlapping_the_worktree()
         write_root,
         network: None,
         capability: Vec::new(),
+        no_capability: Vec::new(),
     };
     for overlapping in [worktree.clone(), temp.path().join("work")] {
         let expected = provenant_os::fs::canonicalize(&overlapping)?;
@@ -5063,6 +5559,7 @@ fn lane_access_reads_installed_release_skills_only() -> Result<(), Box<dyn std::
         write_root,
         network: None,
         capability: Vec::new(),
+        no_capability: Vec::new(),
     };
     // Preset roles read bundled skills from the installed release.
     let granted = lane_access(

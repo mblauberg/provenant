@@ -293,13 +293,14 @@ limits access; it does not make a networked lane hermetic.
 ### Database IPC shares the host namespace
 
 Database IPC is denied by default in both writer and read-only profiles.
-Only an explicit `provenant run --capability postgres` declaration grants
+A project writer default (`domains.lanes.projects.<project>.capabilities`), a
+graph node capability, or an explicit `provenant run --capability postgres` grants
 `ipc-sysv-shm` and `ipc-sysv-sem`. The CLI preserves this in the sealed
 `LaneAccess.database_ipc` field; both provider and configured-command launchers
 copy it to `ProviderProfileSpec.allow_database_ipc` before compilation. Network
 access, writer mode, provider identity and loopback-server support never imply
-database authority. Ordinary MCP, preset and undeclared reviewer lanes stay
-off. Host child validation refuses database authority beyond the parent, and
+database authority. With no capability declaration, MCP and preset lanes stay
+off; read-only nodes do not inherit writer defaults. Host child validation refuses database authority beyond the parent, and
 unvalidated sealed requests cannot add it. The separate backend availability
 probe keeps its minimal launch-only profile.
 

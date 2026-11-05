@@ -29,6 +29,25 @@
                     }
                   ]
                 },
+                "capabilities": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "source": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "source"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
                 "cause": {
                   "anyOf": [
                     {
@@ -925,6 +944,25 @@
                       "type": "null"
                     }
                   ]
+                },
+                "capabilities": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "source": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "source"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
                 },
                 "cause": {
                   "anyOf": [
@@ -1914,6 +1952,25 @@
                     }
                   ]
                 },
+                "capabilities": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "source": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "source"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
                 "cause": {
                   "anyOf": [
                     {
@@ -2812,6 +2869,25 @@
                       "type": "null"
                     }
                   ]
+                },
+                "capabilities": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "source": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "source"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
                 },
                 "cause": {
                   "anyOf": [
@@ -3761,6 +3837,25 @@
                       "type": "null"
                     }
                   ]
+                },
+                "capabilities": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "source": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "source"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
                 },
                 "cause": {
                   "anyOf": [

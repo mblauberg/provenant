@@ -1,5 +1,24 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DEFER_PROVIDER_LAUNCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Keep a test submission queued after admission, before provider preparation.
+#[cfg(test)]
+pub(super) fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.set(false));
+        }
+    }
+    TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.set(true));
+    let _reset = Reset;
+    action()
+}
+
 /// Strict manifest: `{schema_version:1,tasks:[...]}`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -199,12 +218,18 @@ pub fn lane_access(
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
 }
 
+/// Emit an advisory for an unsupported capability without granting it.
+pub fn warn_ignored_capability(origin: &str, name: &str) {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: ignored unknown {origin}capability {}",
+        plain_text(name, 128)
+    );
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum AccessError {
-    #[error(
-        "unknown capability {0}; known: postgres (Rust and Node toolchains are granted to every lane)"
-    )]
-    UnknownCapability(String),
     #[error("{flag} {} is not an existing directory", path.display())]
     MissingDirectory { flag: &'static str, path: PathBuf },
     #[error("{flag} {} overlaps the Provenant state root", path.display())]
@@ -240,9 +265,7 @@ pub(super) fn lane_access_checked(
     for name in &access.capability {
         match name.as_str() {
             "postgres" => postgres = true,
-            other => {
-                return Err(AccessError::UnknownCapability(other.into()));
-            }
+            other => warn_ignored_capability("", other),
         }
     }
     let network = network_access(access.network, postgres);
@@ -678,6 +701,10 @@ fn submit_with_launcher(
                 .map_err(run::RunError::from)?;
             }
         }
+    }
+    #[cfg(test)]
+    if TEST_DEFER_PROVIDER_LAUNCH.with(std::cell::Cell::get) {
+        return Ok((record, Vec::new()));
     }
     let started = launch(&record, parent_attempt.is_some())?;
     Ok((record, started))

@@ -47,6 +47,13 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     mod escape;
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn native_sandbox_blocks_path_escape_probes() -> Result<(), String> {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "native Seatbelt lock contention requires macOS",
+        )
+    }
     mod grants;
     mod ipc;
     mod process_info;
