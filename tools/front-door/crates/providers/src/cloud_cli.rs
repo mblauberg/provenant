@@ -154,24 +154,16 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
             }
             self.cli
                 .run("git", &["fetch", "--no-tags", "origin", reference], None)?;
-            let parents = self.cli.run(
-                "git",
-                &["rev-list", "--parents", "-n", "1", "FETCH_HEAD"],
-                None,
-            )?;
+            let parents = self
+                .cli
+                .run("git", &["rev-list", "--parents", "-n", "1", oid], None)?;
             let parts: Vec<_> = parents.split_whitespace().collect();
             if parts.as_slice() != [oid, job.commit.as_str()] {
                 continue;
             }
             let diff = self.cli.run(
                 "git",
-                &[
-                    "diff",
-                    "--no-ext-diff",
-                    "--no-renames",
-                    &job.commit,
-                    "FETCH_HEAD",
-                ],
+                &["diff", "--no-ext-diff", "--no-renames", &job.commit, oid],
                 None,
             )?;
             let Ok(result) = crate::cloud_result::result_from_diff(&diff) else {
@@ -415,6 +407,8 @@ mod adapter_tests {
             RemoteState::Finished { .. }
         ));
         assert_eq!(adapter.cli.calls.len(), 4);
+        assert!(adapter.cli.calls[2].contains(&oid));
+        assert!(adapter.cli.calls[3].contains(&oid));
         adapter.after_save(&job);
         assert!(adapter.cli.calls[4].contains("--delete"));
     }
