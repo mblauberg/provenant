@@ -510,6 +510,65 @@ impl Forge for GhForge {
         }
         Ok(latest.into_values().flatten().collect())
     }
+    fn latest_review(
+        &mut self,
+        number: u64,
+        author: &str,
+    ) -> Result<Option<super::head_move::ReviewedHead>, LandingError> {
+        let reviews = self.pages(&format!(
+            "repos/{{owner}}/{{repo}}/pulls/{number}/reviews?per_page=100"
+        ))?;
+        let mut latest =
+            std::collections::BTreeMap::<String, (&str, u64, &serde_json::Value)>::new();
+        for review in &reviews {
+            if !matches!(
+                review["state"].as_str(),
+                Some("APPROVED" | "DISMISSED" | "CHANGES_REQUESTED")
+            ) {
+                continue;
+            }
+            let (Some(at), Some(id), Some(head)) = (
+                review["submitted_at"].as_str(),
+                review["id"].as_u64(),
+                review["commit_id"].as_str(),
+            ) else {
+                continue;
+            };
+            let Some(reviewer) = review["user"]["login"]
+                .as_str()
+                .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(author))
+            else {
+                continue;
+            };
+            if object_id(head).is_err() {
+                continue;
+            }
+            let key = reviewer.to_ascii_lowercase();
+            if latest
+                .get(&key)
+                .is_none_or(|(previous, previous_id, _)| (at, id) > (*previous, *previous_id))
+            {
+                latest.insert(key, (at, id, review));
+            }
+        }
+        let accepted = latest
+            .values()
+            .copied()
+            .filter(|(_, _, review)| review["state"].as_str() == Some("APPROVED"))
+            .max_by_key(|(at, id, _)| (*at, *id));
+        let latest = accepted.or_else(|| {
+            latest
+                .values()
+                .copied()
+                .max_by_key(|(at, id, _)| (*at, *id))
+        });
+        Ok(latest.map(|(_, _, review)| super::head_move::ReviewedHead {
+            head: review["commit_id"].as_str().unwrap_or_default().to_owned(),
+            // The REST review does not contain its approval-time base.
+            base: None,
+            valid: review["state"].as_str() == Some("APPROVED"),
+        }))
+    }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
         let head = commit
@@ -1065,6 +1124,32 @@ impl Repo for GitRepo<'_> {
         self.ensure(commit)?;
         let spec = format!("{}^{{tree}}", object_id(commit)?);
         self.ok(&["rev-parse", "--verify", &spec])
+    }
+    fn parents(&mut self, commit: &str) -> Result<Vec<String>, LandingError> {
+        self.ensure(commit)?;
+        let commit = object_id(commit)?;
+        let output = self.ok(&["rev-list", "--parents", "-n", "1", commit])?;
+        let mut words = output.split_whitespace();
+        if words.next() != Some(commit) {
+            return Err(LandingError::Failed(
+                "git returned an unexpected commit".into(),
+            ));
+        }
+        words
+            .map(|parent| object_id(parent).map(str::to_owned))
+            .collect()
+    }
+    fn review_delta(
+        &mut self,
+        _old: &str,
+        _new: &str,
+    ) -> Result<super::ports::DeltaStats, LandingError> {
+        // Until all file-kind and protected-path evidence is available, the
+        // statistics are incomplete and cannot prove a small delta.
+        Ok(super::ports::DeltaStats {
+            complete: false,
+            files: Vec::new(),
+        })
     }
 }
 

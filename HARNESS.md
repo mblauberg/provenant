@@ -195,8 +195,10 @@ exact-head landing gates in the meantime:
 - C: all other moves get a full re-plan; expanding risk or scope also requires
   re-planning. Candidate CI covers the landing head in every class.
 
-During shadowing, record the classification and compare it with a full review;
-do not use A or B to bypass current exact-head requirements.
+During shadowing, the landing report and receipt record the classification and
+available proof; an approval-time base that was not recorded remains unknown.
+Compare the classification with a full review; do not use A or B to bypass
+current exact-head requirements.
 
 A writer distinct from the reviewers repairs accepted findings. Re-review the delta through the
 lenses that raised them, checking closure and relevant tests. After three repair

@@ -19,6 +19,7 @@ pub struct FakeForge {
     pub heads: BTreeMap<u64, String>,
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
+    pub latest_reviews: BTreeMap<u64, super::head_move::ReviewedHead>,
     pub check_runs: BTreeMap<String, Vec<GateEvidence>>,
     pub check_timeouts: Vec<std::time::Duration>,
     pub labels: BTreeMap<u64, Vec<String>>,
@@ -84,6 +85,13 @@ impl Forge for FakeForge {
             .get(&(number, head.into()))
             .cloned()
             .unwrap_or_default())
+    }
+    fn latest_review(
+        &mut self,
+        number: u64,
+        _author: &str,
+    ) -> Result<Option<super::head_move::ReviewedHead>, LandingError> {
+        Ok(self.latest_reviews.get(&number).cloned())
     }
     #[allow(clippy::disallowed_methods, reason = "simulate a slow forge in tests")]
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
@@ -209,6 +217,7 @@ pub struct FakeRepo {
     pub refs: BTreeMap<String, String>,
     pub trees: BTreeMap<String, String>,
     pub parents: BTreeMap<String, Vec<String>>,
+    pub review_deltas: BTreeMap<(String, String), DeltaStats>,
     pub pushes: Vec<(String, String, Option<String>)>,
     pub push_attempts: Vec<String>,
     pub pending_dir_to_observe: Option<std::path::PathBuf>,
@@ -344,6 +353,18 @@ impl Repo for FakeRepo {
             .get(commit)
             .cloned()
             .ok_or_else(|| LandingError::Failed("missing tree".into()))
+    }
+    fn parents(&mut self, commit: &str) -> Result<Vec<String>, LandingError> {
+        self.parents
+            .get(commit)
+            .cloned()
+            .ok_or_else(|| LandingError::Failed("missing parents".into()))
+    }
+    fn review_delta(&mut self, old: &str, new: &str) -> Result<DeltaStats, LandingError> {
+        self.review_deltas
+            .get(&(old.into(), new.into()))
+            .cloned()
+            .ok_or_else(|| LandingError::Failed("missing delta".into()))
     }
 }
 #[derive(Default)]

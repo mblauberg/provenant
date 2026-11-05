@@ -568,6 +568,9 @@ reported through the ordered split. For overlapping single-PR landings, use a
 serial merge train: merge one, update the next onto the new `main`, rerun
 exact-head checks and apply the review ladder head-move rules before merging.
 The ladder keeps rules A and B in shadow until enforced.
+Landing reports a head-move classification as shadow evidence; it does not
+replace review on the exact head. An approval-time base not recorded when the
+review was made remains unknown, and incomplete delta statistics classify as C.
 
 ### Rust build cache
 

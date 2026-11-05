@@ -403,6 +403,7 @@ pub(crate) fn recover_pending_with(
                     attempt.cost.clone(),
                     false,
                 );
+                record.head_moves = attempt.head_moves.clone();
                 record.pull_requests.clear();
                 record.candidate_steps.clear();
                 for step in &attempt.candidate.steps {
@@ -581,6 +582,7 @@ pub(crate) fn recover_pending_with(
             attempt.cost.clone(),
             false,
         );
+        record.head_moves = attempt.head_moves.clone();
         record
             .candidate_steps
             .retain(|step| outcomes.get(&step.pr.number) == Some(&Outcome::Landed));

@@ -114,6 +114,8 @@ pub struct PendingAttempt {
     pub gate_evidence: GateEvidence,
     pub publish: PublishDecision,
     pub cost: CostEstimate,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub head_moves: BTreeMap<u64, super::head_move::HeadMove>,
     #[serde(default)]
     pub settled: Option<SettledAttempt>,
 }
@@ -159,6 +161,8 @@ pub struct LandingReceipt {
     pub cost: CostEstimate,
     pub alarms: Vec<Alarm>,
     pub shadow: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub head_moves: BTreeMap<u64, super::head_move::HeadMove>,
 }
 
 impl LandingReceipt {
@@ -188,6 +192,7 @@ impl LandingReceipt {
             cost,
             alarms: Vec::new(),
             shadow,
+            head_moves: BTreeMap::new(),
         }
     }
 }
