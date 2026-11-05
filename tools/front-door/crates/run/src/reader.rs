@@ -342,6 +342,44 @@ impl RunStore {
         })
         .transpose()
     }
+    /// Read terminal pre-admission refusals in this project, optionally
+    /// restricted to one actor. This never opens or changes an attempt.
+    pub fn refused_operations(
+        &self,
+        owner: Option<ActorId>,
+        call: &Request<'_>,
+    ) -> Result<Vec<OperationRecord>> {
+        call.check()?;
+        let mut query = self.db.prepare(
+            "SELECT actor, operation, record FROM operations WHERE project=?1 AND (?2 IS NULL OR actor=?2) ORDER BY rowid DESC",
+        )?;
+        let owner = owner.map(|actor| actor.to_string());
+        let mut rows = query.query(params![self.context.project_id.to_string(), owner])?;
+        let mut refusals = Vec::new();
+        while let Some(row) = rows.next()? {
+            call.check()?;
+            let actor: String = row.get(0)?;
+            let operation: String = row.get(1)?;
+            let raw: Vec<u8> = row.get(2)?;
+            let record: OperationRecord = decode(&raw)?;
+            if record.project_id != self.context.project_id
+                || record.actor_id.to_string() != actor
+                || record.operation_id.as_str() != operation
+            {
+                return Err(RunError::Validation("operation index identity"));
+            }
+            if record.refusal.is_some() {
+                if record.state != OperationState::Terminal
+                    || record.kind != OperationKind::Dispatch
+                {
+                    return Err(RunError::Validation("invalid dispatch refusal"));
+                }
+                refusals.push(record);
+            }
+        }
+        Ok(refusals)
+    }
+
     /// Whether the store holds any run record.
     pub fn has_runs(&self, call: &Request<'_>) -> Result<bool> {
         call.check()?;

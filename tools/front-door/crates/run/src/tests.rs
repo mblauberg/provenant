@@ -3331,3 +3331,33 @@ fn refused_operation_create_replay_returns_the_saved_projection() -> TestResult 
     );
     Ok(())
 }
+
+#[test]
+fn refused_operation_listing_is_project_and_actor_scoped_and_read_only() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    store.create(&input(), &call)?;
+    let first = refused_operation(&context);
+    store.record_refusal(&first, &call)?;
+    let mut other_context = context.clone();
+    other_context.actor_id = ActorId::from_bytes([22; 16]);
+    let other_store = RunStore::open(&other_context, &call)?;
+    let mut second = refused_operation(&other_context);
+    second.run_id = RunId::from_bytes([23; 16]);
+    other_store.record_refusal(&second, &call)?;
+    let changes = store.db.total_changes();
+    assert_eq!(
+        store.refused_operations(None, &call)?,
+        vec![second, first.clone()]
+    );
+    assert_eq!(
+        store.refused_operations(Some(context.actor_id), &call)?,
+        vec![first]
+    );
+    assert_eq!(store.db.total_changes(), changes);
+    Ok(())
+}
