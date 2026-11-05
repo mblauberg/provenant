@@ -62,6 +62,9 @@ pub(crate) mod peer_tests {
     #[test]
     fn tick_reports_unreadable_once_and_advances_another_graph()
     -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::tick_reports_unreadable_once_and_advances_another_graph")? {
+            return Ok(());
+        }
         use provenant_fabric_runtime::graph;
         struct Seed {
             actor: String,
@@ -198,6 +201,9 @@ pub(crate) mod peer_tests {
     #[test]
     fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std::error::Error>>
     {
+        if host_test("fabric::peer_tests::graph_status_and_cancel_retire_unreadable_record")? {
+            return Ok(());
+        }
         use provenant_fabric_runtime::graph::{FileJournal, GraphStatus};
         let rig = crate::worktree_tests::support::TestRig::new()?;
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
