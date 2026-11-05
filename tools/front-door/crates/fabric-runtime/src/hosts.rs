@@ -37,7 +37,9 @@ pub fn newest_feature_protocol() -> u64 {
 
 /// Render a protocol mismatch with the requested protocol level.
 pub fn protocol_mismatch_message(peer: &str, remote: u64, expected: u64) -> String {
-    format!("peer {peer} speaks protocol {remote}, this host expects protocol {expected}; upgrade both")
+    format!(
+        "peer {peer} speaks protocol {remote}, this host expects protocol {expected}; upgrade both"
+    )
 }
 
 pub fn discover_ssh_executable(
