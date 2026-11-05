@@ -36,11 +36,7 @@ pub(super) fn validate_plan_grant_limit(
         ("write root grant count", plan.write_roots.len()),
     ] {
         if count > limit {
-            return Err(PermissionError::BoundExceeded {
-                family,
-                limit,
-                path: plan.scratch.path.clone(),
-            });
+            return Err(PermissionError::GrantLimitExceeded { family, limit });
         }
     }
     Ok(())
@@ -205,18 +201,41 @@ fn validate_profile_spec_impl(
     home: Option<&Path>,
     grant_limit: usize,
 ) -> Result<(), PermissionError> {
-    if spec.process_executables.len() > grant_limit
-        || spec.runtime_reads.len() > grant_limit
-        || spec.discovery_reads.len() > grant_limit
-        || spec.authentication.len() > grant_limit.max(16)
-        || spec.continuation_reads.len() > grant_limit
-        || spec.state_writes.len() > grant_limit
-        || spec.tool_exec_roots.len() > grant_limit
-        || spec.tool_writes.len() > grant_limit
-        || spec.provider_api.len() > grant_limit
-        || spec.native_controls.len() > grant_limit.max(64)
-    {
-        return Err(PermissionError::InvalidFixture);
+    for (family, count, limit) in [
+        (
+            "process executables",
+            spec.process_executables.len(),
+            grant_limit,
+        ),
+        ("runtime reads", spec.runtime_reads.len(), grant_limit),
+        ("discovery reads", spec.discovery_reads.len(), grant_limit),
+        (
+            "authentication profiles",
+            spec.authentication.len(),
+            grant_limit.max(16),
+        ),
+        (
+            "continuation reads",
+            spec.continuation_reads.len(),
+            grant_limit,
+        ),
+        ("state writes", spec.state_writes.len(), grant_limit),
+        (
+            "tool execution roots",
+            spec.tool_exec_roots.len(),
+            grant_limit,
+        ),
+        ("tool writes", spec.tool_writes.len(), grant_limit),
+        ("provider endpoints", spec.provider_api.len(), grant_limit),
+        (
+            "native controls",
+            spec.native_controls.len(),
+            grant_limit.max(64),
+        ),
+    ] {
+        if count > limit {
+            return Err(PermissionError::GrantLimitExceeded { family, limit });
+        }
     }
     if spec.process_executables.is_empty() {
         return Err(PermissionError::ProcessPolicyMissing);
@@ -282,8 +301,16 @@ fn validate_profile_spec_impl(
                 return Err(PermissionError::BroadRoot);
             }
         }
-        if auth.roots.len() > grant_limit || auth.in_place_writes.len() > grant_limit {
-            return Err(PermissionError::InvalidFixture);
+        for (family, count) in [
+            ("authentication roots", auth.roots.len()),
+            ("authentication writes", auth.in_place_writes.len()),
+        ] {
+            if count > grant_limit {
+                return Err(PermissionError::GrantLimitExceeded {
+                    family,
+                    limit: grant_limit,
+                });
+            }
         }
         for write in &auth.in_place_writes {
             write.validate()?;

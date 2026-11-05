@@ -592,6 +592,25 @@ pub struct LaunchConfinement {
     /// Host state root containing target seed generations.
     pub state_root: PathBuf,
 }
+fn launch_resource_limits(state: &Path) -> ProfileLimits {
+    match provenant_confinement::run_config::RunConfig::read(state) {
+        Ok(config) => ProfileLimits {
+            grant_limit: config.grant_limit,
+            profile_limit_bytes: config.profile_limit_bytes,
+        },
+        Err(error) => {
+            let defaults = ProfileLimits::default();
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: launch resource limits unavailable ({error}); using compiled defaults domains.run.grant_limit={} and domains.run.profile_limit_bytes={}",
+                defaults.grant_limit,
+                defaults.profile_limit_bytes
+            );
+            defaults
+        }
+    }
+}
+
 impl LaunchConfinement {
     /// Prepare Git while custody is held, then replace every handle that was
     /// bound to the common config before Git changed it.
@@ -637,12 +656,7 @@ impl LaunchConfinement {
     ) -> Result<Vec<OsString>> {
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let config = provenant_confinement::run_config::RunConfig::read(&self.state_root)
-            .map_err(error("read launch resource limits", None))?;
-        let limits = ProfileLimits {
-            grant_limit: config.grant_limit,
-            profile_limit_bytes: config.profile_limit_bytes,
-        };
+        let limits = launch_resource_limits(&self.state_root);
         let backend = system_backend_with_limits(
             &BackendContext {
                 executor: &executor,
@@ -2794,6 +2808,32 @@ mod custody_admission_tests {
             &Directory::open_anchor(&path)?,
             scope
         )?);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod launch_resource_limit_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_resource_settings_use_compiled_limits() -> std::io::Result<()> {
+        let state = tempfile::tempdir()?;
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version=1\n[domains.run]\ngrant_limit=0\n",
+        )?;
+        let limits = launch_resource_limits(state.path());
+        let defaults = ProfileLimits::default();
+        assert_eq!(limits.grant_limit, defaults.grant_limit);
+        assert_eq!(limits.profile_limit_bytes, defaults.profile_limit_bytes);
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version=1\n[domains.run]\ngrant_limit=256\nprofile_limit_bytes=1048576\n",
+        )?;
+        let configured = launch_resource_limits(state.path());
+        assert_eq!(configured.grant_limit, 256);
+        assert_eq!(configured.profile_limit_bytes, 1048576);
         Ok(())
     }
 }

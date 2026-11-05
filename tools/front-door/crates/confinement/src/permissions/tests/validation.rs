@@ -235,7 +235,15 @@ fn profile_family_limits_follow_configured_grant_limit() {
         native_controls: (0..65).map(|index| format!("fixture-{index}")).collect(),
         ..ProviderProfileSpec::default()
     };
-    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 64).is_err());
+    let error = validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 64).unwrap_err();
+    assert!(matches!(
+        &error,
+        PermissionError::GrantLimitExceeded {
+            family: "native controls",
+            limit: 64
+        }
+    ));
+    assert!(error.to_string().contains("domains.run.grant_limit"));
     assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 65).is_ok());
     spec.native_controls.clear();
     spec.authentication.push(AuthenticationProfile {

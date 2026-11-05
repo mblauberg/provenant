@@ -68,6 +68,10 @@ pub enum PermissionError {
         "compiled profile is {bytes} bytes, over the configured {limit}-byte limit; reduce granted roots or raise domains.run.profile_limit_bytes (the OS may impose its own argv limit)"
     )]
     ProfileTooLarge { bytes: usize, limit: usize },
+    #[error(
+        "{family} exceeds the effective domains.run.grant_limit of {limit}; raise domains.run.grant_limit to allow more"
+    )]
+    GrantLimitExceeded { family: &'static str, limit: usize },
     #[error("{family} exceeds its bound of {limit}: {path:?}")]
     BoundExceeded {
         family: &'static str,
