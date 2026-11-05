@@ -100,6 +100,22 @@ setting = "lanes.prepare_deps"
 reason = "Automatic writer dependency preparation defaults on; a refusal reports the sealed profile or compiled default and can be disabled with this setting."
 
 [[guard]]
+site = "run/src/launch.rs#lane_port_plan_or_warn"
+boundary = "warning"
+reason = "Unreadable or unrepresentable lane-port settings warn and leave the lane without an allocated port block."
+
+[[guard]]
+site = "supervisor/src/guardian.rs#Driver::run"
+boundary = "configurable_default"
+setting = "domains.fabric.lanes.lane_port_blocks"
+reason = "An exhausted port-block pool refuses the writer and names the setting that can raise the pool or disable allocation."
+
+[[guard]]
+site = "supervisor/src/guardian.rs#lane_port_allocation"
+boundary = "warning"
+reason = "A port-block allocation I/O failure warns and continues without a block; stale port-block environment variables are removed."
+
+[[guard]]
 site = "run/src/launch.rs#Providers::check_policy"
 boundary = "configurable_default"
 setting = "gc.free_floor"

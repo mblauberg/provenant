@@ -1493,3 +1493,42 @@ fn a_leased_port_block_replaces_any_block_the_launch_environment_named() {
     )));
     assert!(out.contains(&("PROVENANT_LANE_PORT_COUNT".into(), "16".into())));
 }
+
+#[test]
+fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let file = temp.path().join("not-a-directory");
+    std::fs::write(&file, b"fixture")?;
+    let unavailable = provenant_os::lane_ports::Plan {
+        state: file,
+        base: 30000,
+        size: 16,
+        blocks: 1,
+    };
+    let (lease, warning) =
+        lane_port_allocation(Some(&unavailable)).map_err(std::io::Error::other)?;
+    assert!(lease.is_none());
+    assert!(warning.is_some_and(|text| text.contains("domains.fabric.lanes.lane_port_blocks")));
+    let env = vec![
+        ("PATH".into(), "/bin".into()),
+        (provenant_os::lane_ports::BASE_ENV.into(), "1".into()),
+        (provenant_os::lane_ports::COUNT_ENV.into(), "2".into()),
+    ];
+    assert_eq!(
+        without_lane_ports(&env),
+        [(OsString::from("PATH"), OsString::from("/bin"))]
+    );
+    let available = provenant_os::lane_ports::Plan {
+        state: temp.path().into(),
+        ..unavailable
+    };
+    let (first, warning) = lane_port_allocation(Some(&available)).map_err(std::io::Error::other)?;
+    assert!(first.is_some());
+    assert!(warning.is_none());
+    let error = lane_port_allocation(Some(&available))
+        .err()
+        .ok_or("expected exhausted pool")?;
+    assert!(error.contains("domains.fabric.lanes.lane_port_blocks=1"));
+    Ok(())
+}

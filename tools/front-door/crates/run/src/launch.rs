@@ -1905,9 +1905,33 @@ fn lane_port_plan(
     }))
 }
 
+fn lane_port_plan_or_warn(state: &std::path::Path) -> Option<provenant_os::lane_ports::Plan> {
+    match lane_port_plan(state) {
+        Ok(plan) => plan,
+        Err(error) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: lane port settings unavailable ({error}); continuing without a port block (domains.fabric.lanes.lane_port_base, domains.fabric.lanes.lane_port_block, domains.fabric.lanes.lane_port_blocks)"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod lane_environment_tests {
     use super::*;
+
+    #[test]
+    fn unavailable_lane_port_settings_skip_allocation() -> std::io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let not_directory = temp.path().join("not-directory");
+        std::fs::write(&not_directory, b"fixture")?;
+        assert!(lane_port_plan_or_warn(&not_directory).is_none());
+        assert!(lane_port_plan_or_warn(temp.path()).is_some());
+        Ok(())
+    }
 
     #[test]
     fn lane_environment_overrides_adapter_values() {

@@ -259,15 +259,11 @@ impl RunStore {
             Some(rest) if rest.starts_with('/') => model.to_owned(),
             _ => format!("{provider}/{model}"),
         };
-        let lane_ports = local_or_withdraw!(
-            plan.confinement
-                .as_ref()
-                .filter(|c| c.writer.is_some())
-                .map(|c| lane_port_plan(&c.state_root))
-                .transpose()
-                .map_err(|error| local("lane ports", &error))
-        )
-        .flatten();
+        let lane_ports = plan
+            .confinement
+            .as_ref()
+            .filter(|c| c.writer.is_some())
+            .and_then(|c| lane_port_plan_or_warn(&c.state_root));
         let command = ProviderCommand {
             lane_ports,
             resolved_route: route,
