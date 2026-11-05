@@ -2918,6 +2918,150 @@ fn graph_fixture_available() -> Result<bool> {
     Ok(true)
 }
 
+/// The preferred fake vanishes after its version probe. Its pool peer stays
+/// available, so a successful writer must actually start that peer.
+fn writer_pool_redraw_fixture() -> Result<TestRig> {
+    let mut rig = TestRig::new()?;
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    let cursor = bin.join("cursor-agent");
+    fs::write(
+        &cursor,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then /bin/rm \"$0\"; printf 'cursor fixture 1.0\\n'; exit 0; fi\nexit 1\n",
+    )?;
+    fs::set_permissions(&cursor, fs::Permissions::from_mode(0o700))?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing]\nsettlement_retries=1\n[domains.routing.pools]\nwriter-redraw=[{{model='cursor/gpt-5.3-codex-low',weight=1}},{{model='opencode/opencode-go/deepseek-v4.1-flash',weight=0}}]"
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+    assert_eq!(code(&commit), 0, "{commit:?}");
+    Ok(rig)
+}
+
+fn assert_writer_pool_peer_launched(lanes: &Value) -> Result {
+    let rows = lanes["data"]["lanes"].as_array().ok_or("lanes")?;
+    let lane = rows
+        .iter()
+        .find(|row| row["applied_route"]["provider"] == "opencode")
+        .ok_or_else(|| format!("second pool member did not launch: {lanes}"))?;
+    assert_eq!(lane["state"], "succeeded", "{lanes}");
+    let skipped = lane["skipped_routes"].as_array().ok_or("skipped routes")?;
+    assert!(
+        skipped.iter().any(|row| row["route"]
+            .as_str()
+            .is_some_and(|route| route.starts_with("cursor/"))),
+        "{lanes}"
+    );
+    Ok(())
+}
+
+fn direct_writer_launches_second_eligible_pool_member() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = writer_pool_redraw_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "reply OK")?;
+    let started = rig.command(&[
+        "dispatch",
+        "--operation-id",
+        "writer-redraw-direct",
+        "--route",
+        "writer-redraw",
+        "--mode",
+        "worktree-write",
+        "--worktree-branch",
+        "fixture/redraw",
+        "--base",
+        "main",
+        "--deliver",
+        "none",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait",
+        "30s",
+        "--json",
+    ])?;
+    assert_eq!(code(&started), 0, "{started:?}");
+    let started: Value = serde_json::from_slice(&started.stdout.bytes)?;
+    let run = started["data"]["run_id"].as_str().ok_or("run id")?;
+    let lanes = rig.command(&["lanes", "--id", run, "--all", "--json"])?;
+    assert_eq!(code(&lanes), 0, "{lanes:?}");
+    assert_writer_pool_peer_launched(&serde_json::from_slice(&lanes.stdout.bytes)?)?;
+    cleanup.disarm();
+    Ok(())
+}
+
+fn graph_writer_launches_second_eligible_pool_member() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = writer_pool_redraw_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let created = rig.command(&[
+        "worktree",
+        "create",
+        "graph-redraw",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(code(&created), 0, "{created:?}");
+    fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(&json!({
+            "schema_version":1,"graph_id":"writer-redraw","nodes":[{
+                "id":"write","prompt":"reply OK","access":"worktree_write",
+                "worktree":".worktrees/graph-redraw","delivery":"none","route":{"alias":"writer-redraw"}
+            }]
+        }))?,
+    )?;
+    let started = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(code(&started), 0, "{started:?}");
+    let status = provenant_test_support::wait_for(
+        "writer pool redraw settlement",
+        std::time::Duration::from_secs(30),
+        || -> Result<Value> {
+            let out = rig.command(&["fabric", "graph", "status", "writer-redraw", "--json"])?;
+            assert_eq!(code(&out), 0, "{out:?}");
+            Ok(serde_json::from_slice(&out.stdout.bytes)?)
+        },
+        |result| {
+            result.as_ref().is_ok_and(|status| {
+                status["data"]["status"] == "complete" || status["data"]["status"] == "failed"
+            })
+        },
+    )??;
+    assert_eq!(status["data"]["status"], "complete", "{status}");
+    assert_eq!(
+        status["data"]["checkpoint"]["nodes"][0]["attempts"][0]["launched"], true,
+        "{status}"
+    );
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    assert_eq!(code(&lanes), 0, "{lanes:?}");
+    assert_writer_pool_peer_launched(&serde_json::from_slice(&lanes.stdout.bytes)?)?;
+    cleanup.disarm();
+    Ok(())
+}
+
 fn graph_read_only_alias_does_not_redraw_after_launch_quota() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -5102,6 +5246,8 @@ fn main() -> ExitCode {
                 "host_native_preparation_uses_the_provider_contract",
                 "unconfigured_host_native_repair_launches_alias_fallback",
                 "graph_read_only_alias_does_not_redraw_after_launch_quota",
+                "direct_writer_launches_second_eligible_pool_member",
+                "graph_writer_launches_second_eligible_pool_member",
                 "graph_retries_real_registry_lock_and_runs_writer",
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_node_reads_full_upstream_result_from_its_inputs_directory",
@@ -5179,6 +5325,8 @@ fn main() -> ExitCode {
                         unconfigured_host_native_repair_launches_alias_fallback()
                     }
                     "graph_read_only_alias_does_not_redraw_after_launch_quota" => graph_read_only_alias_does_not_redraw_after_launch_quota(),
+                    "direct_writer_launches_second_eligible_pool_member" => direct_writer_launches_second_eligible_pool_member(),
+                    "graph_writer_launches_second_eligible_pool_member" => graph_writer_launches_second_eligible_pool_member(),
                     "graph_retries_real_registry_lock_and_runs_writer" => graph_retries_real_registry_lock_and_runs_writer(),
                     "graph_settlement_advances_writer_and_account_routed_review" => {
                         graph_settlement_advances_writer_and_account_routed_review()
