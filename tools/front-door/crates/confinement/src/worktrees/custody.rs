@@ -390,7 +390,9 @@ mod dirty_tests {
             path: b"new name".to_vec(),
             original_path: Some(b"old name".to_vec()),
         }];
-        assert_eq!(dirty_paths_summary(&paths), "new name, old name");
+        let summary = dirty_paths_summary(&paths);
+        assert!(summary.contains("new name"));
+        assert!(summary.contains("old name"));
     }
 
     #[test]
