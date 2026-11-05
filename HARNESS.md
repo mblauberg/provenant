@@ -173,7 +173,7 @@ family, lens, scope, unavailable legs, reasons, evidence, expiry and substitutio
 Use distinct
 actors in fresh contexts; a repeat reviewer never adds to the count. If a
 required family is unavailable, substitute an independent same-family reviewer
-through a different lens without reducing the count. Counted reviewers at
+for the same lens without reducing the count. Counted reviewers at
 `substantial` and above meet or exceed the highest author tier. Unknown
 provenance leaves coverage incomplete. Evidence decides claims, not votes.
 
