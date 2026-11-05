@@ -3255,6 +3255,19 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         )))
     ));
     std::fs::remove_file(path.join("uncommitted"))?;
+    let git_dir = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
+        Ok(tree.repo().private_git_dir().to_path_buf())
+    })?;
+    std::fs::write(git_dir.join("MERGE_HEAD"), format!("{head}\n"))?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::GitOperationInProgress
+        )))
+    ));
+    assert!(git_dir.join("MERGE_HEAD").exists());
+    std::fs::remove_file(git_dir.join("MERGE_HEAD"))?;
     let admitted = super::own_worktree(
         &super::OwnedWorktree {
             branch: branch.into(),
