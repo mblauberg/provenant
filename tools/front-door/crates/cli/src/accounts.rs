@@ -204,7 +204,9 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
                 "Claude registration requires its fixed ~/.claude-<label> directory".into(),
             );
         }
-        if adapter == provenant_records::Harness::Agy.spec().name {
+        if provenant_records::AdapterSpec::get(adapter)
+            .is_some_and(|spec| spec.isolated_login_keychain)
+        {
             check_agy_directory(&directory, home)?;
         }
         let executable = crate::run::provider_executable(adapter)?;

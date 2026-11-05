@@ -201,7 +201,10 @@ fn agy_accounts(
     accounts
         .entries
         .values()
-        .filter(|entry| entry.adapter == "agy")
+        .filter(|entry| {
+            provenant_records::AdapterSpec::get(&entry.adapter)
+                .is_some_and(|spec| spec.isolated_login_keychain)
+        })
         .map(|entry| {
             let keychain = entry.directory.join("Library/Keychains/login.keychain-db");
             let keychain_available =
