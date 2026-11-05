@@ -834,6 +834,46 @@ mod result_tests {
     }
 
     #[test]
+    fn node_review_base_uses_its_worktree_not_the_invoking_checkout() -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test("fabric::result_tests::node_review_base_uses_its_worktree_not_the_invoking_checkout")? {
+            return Ok(());
+        }
+        use super::*;
+        use provenant_fabric_runtime::graph::AttemptOwner;
+        struct FreeWorkers;
+        impl WorkerObserver for FreeWorkers {
+            fn observe_roots(&self, _: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
+                Default::default()
+            }
+        }
+        let rig = crate::worktree_tests::repository()?;
+        let original = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let lane = rig.root.join("lane");
+        crate::worktree_tests::git(&rig, &["worktree", "add", "--detach", lane.to_str().ok_or("lane path")?, "HEAD"])?;
+        std::fs::write(rig.project.join("changed"), "new")?;
+        crate::worktree_tests::git(&rig, &["add", "changed"])?;
+        crate::worktree_tests::git(&rig, &["commit", "-qm", "advance invoking checkout"])?;
+        let moved = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        assert_ne!(original, moved);
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let mut owner = BoundGraphOwner {
+            factory: &factory, integration_base: None, integration_branch: None, network: None,
+            exclude: Vec::new(), budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            cancel: &cancel, prices: None, tick: false,
+        };
+        assert_eq!(owner.resolve_review_base("HEAD", Some(lane.to_str().ok_or("lane path")?))?, Some(original));
+        assert_eq!(owner.resolve_review_base("HEAD", None)?, Some(moved));
+        Ok(())
+    }
+
+    #[test]
     fn graph_status_names_blocking_upstream() {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[1];
