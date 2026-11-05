@@ -2186,13 +2186,95 @@ fn build_stages(
         scope,
     };
     let start = nodes.len();
-    let ends = builder.sequence(
-        config.get("stages").ok_or("missing stages")?,
-        "",
-        deps,
-        nodes,
-        0,
-    )?;
+    let mut stage_entries = config.get("stages").cloned().ok_or("missing stages")?;
+    let explicit_verifiers = builder
+        .origins
+        .get("parameters.verifiers")
+        .is_some_and(|origin| !builder.layers.is_initial_origin(name, "verifiers", origin));
+    let verifier_override = explicit_verifiers
+        .then(|| builder.parameters.get("verifiers").and_then(Value::as_u64))
+        .flatten();
+    let deferred_shape = builder.layers.review.is_some()
+        && ["size", "review_shape"].iter().all(|key| {
+            builder
+                .parameters
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        })
+        && matches!(
+            builder
+                .parameters
+                .pointer("/subject/type")
+                .and_then(Value::as_str),
+            Some("head" | "node")
+        );
+    if deferred_shape
+        && let Some(verifier) = config
+            .pointer("/shape_stages/verifier")
+            .and_then(Value::as_str)
+        && let Some(stage) = stage_entries
+            .as_array_mut()
+            .and_then(|stages| stages.iter_mut().find(|stage| stage["id"] == verifier))
+    {
+        stage["count"] = json!(1);
+    }
+    let mut ends = builder.sequence(&stage_entries, "", deps, nodes, 0)?;
+    if let Some(stages) = config.get("shape_stages").and_then(Value::as_object) {
+        let id = |key: &str| stages.get(key).and_then(Value::as_str).unwrap_or("");
+        let (frame, panel, verifier, synthesis) =
+            (id("frame"), id("panel"), id("verifier"), id("synthesis"));
+        if let Some(position) = nodes[start..]
+            .iter()
+            .position(|node| node["id"] == panel && node.get("review").is_some())
+            .map(|position| start + position)
+        {
+            let frame_node = nodes[start..]
+                .iter()
+                .find(|node| node["id"] == frame)
+                .cloned()
+                .ok_or("deferred review frame missing")?;
+            let verifier_node = nodes[start..]
+                .iter()
+                .find(|node| node["id"] == verifier)
+                .cloned();
+            let synthesis_node = nodes[start..]
+                .iter()
+                .find(|node| node["id"] == synthesis)
+                .cloned()
+                .ok_or("deferred review synthesis missing")?;
+            let node = &mut nodes[position];
+            node["panel_templates"] = json!({"frame": frame_node, "verifier": verifier_node, "synthesis": synthesis_node});
+            if let Some(count) = verifier_override {
+                node["panel_verifiers"] = json!(count);
+            }
+            for key in ["source", "depends_on", "inputs"] {
+                if let Some(value) = frame_node.get(key) {
+                    node[key] = value.clone();
+                } else {
+                    node.as_object_mut().unwrap().remove(key);
+                }
+            }
+            // The original bound covers the lens group and its candidates.
+            // The outer boundary and all possible shape stages also count.
+            let hint = builder
+                .shape_hint(true)?
+                .ok_or("deferred review needs shape configuration")?;
+            node["panel_shapes"] = json!(hint.panel_shapes);
+            let stages = hint
+                .max_panel_stages
+                .max(verifier_override.unwrap_or(0) as usize + 2);
+            if let Some(max) = node["review"]["max_nodes"].as_u64() {
+                node["review"]["max_nodes"] =
+                    json!(max.saturating_add(stages as u64).saturating_add(1));
+            }
+            let children = nodes.split_off(start);
+            nodes.extend(children.into_iter().filter(|node| {
+                node["id"] != frame && node["id"] != verifier && node["id"] != synthesis
+            }));
+            ends = vec![panel.to_owned()];
+        }
+    }
     if let Some(retry) = config.get("retry") {
         let retry = interpolate(retry, &builder.parameters, prompt, 1)?;
         inherit_preset_retry(&mut nodes[start..], &retry);
@@ -2252,6 +2334,22 @@ fn apply_shape_stages(
         .cloned()
         .ok_or("shape_stages needs a subject")?;
     if subject.get("type").and_then(Value::as_str) != Some("commit") {
+        let unresolved = ["size", "review_shape"].iter().all(|key| {
+            parameters
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        });
+        if layers.review.is_some()
+            && unresolved
+            && matches!(
+                subject.get("type").and_then(Value::as_str),
+                Some("head" | "node")
+            )
+        {
+            config["exports"] =
+                json!([{ "node": panel, "outputs": ["result", "findings", "verdict", "commit"] }]);
+        }
         return Ok(());
     }
     let (mut stack, mut local, mut files) = (Vec::new(), origins.clone(), Vec::new());

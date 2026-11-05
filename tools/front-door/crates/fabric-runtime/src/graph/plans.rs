@@ -715,24 +715,143 @@ pub(super) fn validate_review_addition(
         .review
         .as_ref()
         .map(|review| review.subject.to_string());
+    let whole_panel = source.extra.contains_key("panel_templates");
+    let lenses = if whole_panel {
+        addition
+            .nodes
+            .iter()
+            .find(|node| node.id == format!("{}--lenses", root.id))
+    } else {
+        Some(root)
+    };
+    let shape_matches = if whole_panel {
+        addition
+            .review
+            .as_ref()
+            .and_then(|resolution| source.extra.get("panel_shapes")?.get(&resolution.shape))
+            .is_some_and(|shape| {
+                let frame = shape.get("frame").and_then(serde_json::Value::as_bool);
+                let verifiers = source
+                    .extra
+                    .get("panel_verifiers")
+                    .or_else(|| shape.get("verifiers"))
+                    .and_then(serde_json::Value::as_u64);
+                let synthesis = shape.get("synthesis").and_then(serde_json::Value::as_str);
+                let expected_frame = format!("{}--frame", root.id);
+                let expected_synthesis = format!("{}--synthesis", root.id);
+                let actual_verifiers = addition
+                    .nodes
+                    .iter()
+                    .filter(|node| node.id.starts_with(&format!("{}--verify-", root.id)))
+                    .count();
+                let ordered = lenses.is_some_and(|group| {
+                    let mut previous = group.id.clone();
+                    if frame == Some(true) && !group.depends_on.contains(&expected_frame) {
+                        return false;
+                    }
+                    for index in 0..actual_verifiers {
+                        let id = format!("{}--verify-{}", root.id, index + 1);
+                        let Some(verifier) = addition.nodes.iter().find(|node| node.id == id)
+                        else {
+                            return false;
+                        };
+                        if !verifier.depends_on.contains(&previous)
+                            || !verifier.inputs.iter().any(|input| {
+                                input.node == previous
+                                    && input.outputs.contains(&OutputKind::Findings)
+                            })
+                        {
+                            return false;
+                        }
+                        previous = id;
+                    }
+                    if synthesis == Some("model") {
+                        let Some(final_node) = addition
+                            .nodes
+                            .iter()
+                            .find(|node| node.id == expected_synthesis)
+                        else {
+                            return false;
+                        };
+                        if !final_node.depends_on.contains(&group.id)
+                            || !final_node.depends_on.contains(&previous)
+                            || !final_node.inputs.iter().any(|input| {
+                                input.node == group.id
+                                    && input.outputs.contains(&OutputKind::Findings)
+                            })
+                            || (previous != group.id
+                                && !final_node.inputs.iter().any(|input| {
+                                    input.node == previous
+                                        && input.outputs.contains(&OutputKind::Findings)
+                                }))
+                        {
+                            return false;
+                        }
+                    }
+                    true
+                });
+                ordered
+                    && frame.is_some_and(|frame| {
+                        frame == addition.nodes.iter().any(|node| node.id == expected_frame)
+                    })
+                    && verifiers
+                        .is_some_and(|count| usize::try_from(count).ok() == Some(actual_verifiers))
+                    && synthesis.is_some_and(|mode| match mode {
+                        "reduce" => {
+                            lenses
+                                .and_then(|node| node.composite.as_ref())
+                                .is_some_and(|group| group.reduce_verdict)
+                                && !addition
+                                    .nodes
+                                    .iter()
+                                    .any(|node| node.id == expected_synthesis)
+                        }
+                        "model" => {
+                            lenses
+                                .and_then(|node| node.composite.as_ref())
+                                .is_some_and(|group| !group.reduce_verdict)
+                                && addition
+                                    .nodes
+                                    .iter()
+                                    .any(|node| node.id == expected_synthesis)
+                        }
+                        _ => false,
+                    })
+            })
+    } else {
+        true
+    };
     if addition.review.is_none()
+        || !shape_matches
+        || lenses.is_none()
         || addition.nodes.iter().filter(|node| node.composite.is_none()).any(|node| !matches!(&node.source, Some(SourceBinding::Commit { commit }) if Some(commit) == subject.as_ref()))
         || addition.continuation
         || !addition.patterns.is_empty()
         || addition.nodes.len() < 2
         || addition.nodes.len() > spec.max_nodes
-        || root.composite.as_ref().is_none_or(|composite| {
+        || lenses.and_then(|node| node.composite.as_ref()).is_none_or(|composite| {
+            let lens_root = lenses.expect("checked above");
             let mut exported = std::collections::BTreeSet::new();
-            composite.reduce_verdict != spec.reduce_verdict
+            (!whole_panel && composite.reduce_verdict != spec.reduce_verdict)
                 || composite.min_successful != spec.min_successful.map(|n| if n == 0 { composite.exports.len().saturating_sub(1).max(1) } else { n })
                 || composite.exports.is_empty()
                 || composite.exports.first().is_none_or(|first| spec.export_first.iter().any(|output| !first.outputs.contains(output)))
+                || (whole_panel && addition.nodes.iter().filter(|member| member.id.starts_with(&format!("{}--", lens_root.id))).count() != composite.exports.len())
                 || composite.exports.iter().any(|export| {
                     export.outputs.is_empty() || !exported.insert(&export.node)
-                        || !addition.nodes.iter().any(|member| member.id == export.node && member.id != root.id)
-                        || addition.nodes.iter().any(|parent| parent.id != root.id && parent.id != export.node && parent.composite.is_some() && export.node.starts_with(&format!("{}--", parent.id)))
+                        || !addition.nodes.iter().any(|member| member.id == export.node && member.id != lens_root.id && member.id.starts_with(&format!("{}--", lens_root.id)))
+                        || addition.nodes.iter().any(|parent| parent.id != root.id && parent.id != lens_root.id && parent.id != export.node && parent.composite.is_some() && export.node.starts_with(&format!("{}--", parent.id)))
                 })
         })
+        || (whole_panel && root.composite.as_ref().is_none_or(|composite| {
+            let lens = lenses.expect("checked above");
+            let reduced = lens.composite.as_ref().is_some_and(|group| group.reduce_verdict);
+            let output = if reduced { lens.id.clone() } else { format!("{}--synthesis", root.id) };
+            composite.reduce_verdict || composite.min_successful.is_some()
+                || composite.exports.len() != 1 || composite.exports[0].node != output
+                || [OutputKind::Result, OutputKind::Findings, OutputKind::Verdict, OutputKind::Commit].iter().any(|kind| !composite.exports[0].outputs.contains(kind))
+                || !addition.nodes.iter().any(|node| node.id == output)
+        }))
         || addition
             .nodes
             .iter()

@@ -4341,6 +4341,10 @@ impl BoundGraphOwner<'_> {
             .and_then(serde_json::Value::as_object)
             .ok_or_else(|| failed("deferred review carries no lens templates".into()))?;
         let root_id = format!("{}--review", node.id);
+        let panel_templates = node.extra.get("panel_templates").and_then(serde_json::Value::as_object)
+            .ok_or_else(|| failed("deferred review carries no panel templates; finish old reviews before upgrading".into()))?;
+        let lens_id = format!("{root_id}--lenses");
+        let frame_id = format!("{root_id}--frame");
         let subject = measure.subject.to_string();
         let mut members: Vec<GraphNode> = Vec::new();
         for slot in &panel.slots {
@@ -4364,10 +4368,20 @@ impl BoundGraphOwner<'_> {
             map.insert(key.into(), route);
             map.insert(
                 "id".into(),
-                serde_json::json!(format!("{root_id}--{local}")),
+                serde_json::json!(format!("{lens_id}--{local}")),
             );
-            map.insert("depends_on".into(), serde_json::json!(node.depends_on));
-            if !node.inputs.is_empty() {
+            let lens_deps = if panel.frame {
+                vec![frame_id.clone()]
+            } else {
+                node.depends_on.clone()
+            };
+            map.insert("depends_on".into(), serde_json::json!(lens_deps));
+            if panel.frame {
+                map.insert(
+                    "inputs".into(),
+                    serde_json::json!([{"node":frame_id,"outputs":["result"]}]),
+                );
+            } else if !node.inputs.is_empty() {
                 map.insert("inputs".into(), serde_json::json!(node.inputs));
             }
             if !node.read_roots.is_empty() {
@@ -4393,7 +4407,22 @@ impl BoundGraphOwner<'_> {
         if members.is_empty() {
             return Err(failed("the review panel selected no lenses".into()));
         }
-        if members.len() + 1 > spec.max_nodes {
+        let verifiers = node
+            .extra
+            .get("panel_verifiers")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(panel.verifiers, |count| {
+                usize::try_from(count).unwrap_or(usize::MAX)
+            });
+        if verifiers > 32 {
+            return Err(failed("review verifier count exceeds 32".into()));
+        }
+        let total = members.len()
+            + 2
+            + usize::from(panel.frame)
+            + verifiers
+            + usize::from(panel.synthesis == provenant_routing::ReviewSynthesis::Model);
+        if total > spec.max_nodes {
             return Err(failed(format!(
                 "the review panel selected {} lenses; the review allows {}",
                 members.len(),
@@ -4409,6 +4438,9 @@ impl BoundGraphOwner<'_> {
                     provenant_fabric_runtime::graph::OutputKind::Findings,
                 ];
                 if index == 0 {
+                    if panel.synthesis == provenant_routing::ReviewSynthesis::Reduce {
+                        outputs.push(provenant_fabric_runtime::graph::OutputKind::Commit);
+                    }
                     for output in &spec.export_first {
                         if !outputs.contains(output) {
                             outputs.push(*output);
@@ -4418,21 +4450,79 @@ impl BoundGraphOwner<'_> {
                 serde_json::json!({"node": member.id, "outputs": outputs})
             })
             .collect();
+        let reduction = panel.synthesis == provenant_routing::ReviewSynthesis::Reduce;
+        let lens_deps = if panel.frame {
+            vec![frame_id.clone()]
+        } else {
+            node.depends_on.clone()
+        };
+        let lens_group: GraphNode = serde_json::from_value(serde_json::json!({
+            "id": lens_id, "kind":"composite", "access":"read_only", "depends_on":lens_deps,
+            "composite": {"min_successful": spec.min_successful.map(|n| if n == 0 { members.len().saturating_sub(1).max(1) } else { n }),
+                "reduce_verdict": reduction, "nodes":[], "exports":exports},
+        })).map_err(|error| failed(format!("review lenses do not lower: {error}")))?;
+        let pinned = serde_json::json!({"type":"commit","commit":subject});
+        let template = |key: &str,
+                        id: &str,
+                        deps: Vec<String>,
+                        inputs: serde_json::Value|
+         -> Result<GraphNode, ReviewResolveError> {
+            let mut value = panel_templates
+                .get(key)
+                .cloned()
+                .filter(|value| !value.is_null())
+                .ok_or_else(|| failed(format!("deferred review lacks {key} template")))?;
+            let map = value
+                .as_object_mut()
+                .ok_or_else(|| failed(format!("invalid {key} template")))?;
+            map.insert("id".into(), serde_json::json!(id));
+            map.insert("source".into(), pinned.clone());
+            map.insert("depends_on".into(), serde_json::json!(deps));
+            map.insert("inputs".into(), inputs);
+            serde_json::from_value(value)
+                .map_err(|error| failed(format!("review {key} does not lower: {error}")))
+        };
+        let mut children = Vec::new();
+        if panel.frame {
+            children.push(template(
+                "frame",
+                &frame_id,
+                node.depends_on.clone(),
+                serde_json::json!(node.inputs),
+            )?);
+        }
+        children.push(lens_group);
+        children.extend(members);
+        let mut previous = lens_id.clone();
+        for index in 0..verifiers {
+            let id = format!("{root_id}--verify-{}", index + 1);
+            let inputs = serde_json::json!([{"node":previous,"outputs":["result","findings"]}]);
+            children.push(template("verifier", &id, vec![previous], inputs)?);
+            previous = id;
+        }
+        let output = if reduction {
+            lens_id.clone()
+        } else {
+            let id = format!("{root_id}--synthesis");
+            let mut inputs =
+                vec![serde_json::json!({"node":lens_id,"outputs":["result","findings"]})];
+            if previous != lens_id {
+                inputs.push(serde_json::json!({"node":previous,"outputs":["result","findings"]}));
+            }
+            let deps = if previous == lens_id {
+                vec![lens_id.clone()]
+            } else {
+                vec![lens_id.clone(), previous]
+            };
+            children.push(template("synthesis", &id, deps, serde_json::json!(inputs))?);
+            id
+        };
         let root: GraphNode = serde_json::from_value(serde_json::json!({
-            "id": root_id,
-            "kind": "composite",
-            "access": "read_only",
-            "depends_on": node.depends_on,
-            "composite": {
-                "min_successful": spec.min_successful.map(|n| if n == 0 { members.len().saturating_sub(1).max(1) } else { n }),
-                "reduce_verdict": spec.reduce_verdict,
-                "nodes": [],
-                "exports": exports,
-            },
-        }))
-        .map_err(|error| failed(format!("review composite does not lower: {error}")))?;
+            "id":root_id, "kind":"composite", "access":"read_only", "depends_on":node.depends_on,
+            "composite":{"nodes":[],"exports":[{"node":output,"outputs":["result","findings","verdict","commit"]}]}
+        })).map_err(|error| failed(format!("review composite does not lower: {error}")))?;
         let mut nodes = vec![root];
-        nodes.extend(members);
+        nodes.extend(children);
         Ok(Expansion {
             review: Some(ReviewResolution {
                 subject: measure.subject,

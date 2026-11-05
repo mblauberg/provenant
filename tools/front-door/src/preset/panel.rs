@@ -40,6 +40,10 @@ pub struct ShapeHint {
     pub frame: bool,
     pub verifiers: usize,
     pub synthesis: ReviewSynthesis,
+    /// Largest number of non-lens stages a deferred shape may add.
+    pub max_panel_stages: usize,
+    /// Shape stages captured with the deferred review for replay validation.
+    pub panel_shapes: std::collections::BTreeMap<String, Value>,
     /// Reviewer pools in shape order, one entry per reviewer.
     pub slots: Vec<String>,
     /// Lens names a shape reviewer group names explicitly, with its pool.
@@ -173,6 +177,19 @@ fn review_selector_with_git(
             frame: selected.shape.frame,
             verifiers: selected.shape.verifiers,
             synthesis: selected.shape.synthesis,
+            max_panel_stages: review
+                .shapes
+                .values()
+                .map(|shape| {
+                    usize::from(shape.frame)
+                        + shape.verifiers
+                        + usize::from(shape.synthesis == ReviewSynthesis::Model)
+                })
+                .max()
+                .unwrap_or(0),
+            panel_shapes: review.shapes.iter().map(|(name, shape)| (name.clone(), json!({
+                "frame": shape.frame, "verifiers": shape.verifiers, "synthesis": shape.synthesis,
+            }))).collect(),
             source: format!(
                 "{}{}; size={}; kind={}; risk={}",
                 selected.source,

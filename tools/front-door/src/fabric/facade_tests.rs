@@ -2403,8 +2403,10 @@ pub(crate) mod peer_tests {
                 "id":"review", "kind":"plan", "access":"read_only", "prompt":"review",
                 "depends_on":["subject"], "read_roots":["/repo/lane"],
                 "inputs":[{"node":"subject","outputs":["result"]}],
-                "review":{"shape":null,"risk_tier":risk,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":lenses,"min_successful":1,"max_nodes":13},
+                "review":{"shape":null,"risk_tier":risk,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":lenses,"min_successful":1,"max_nodes":48},
                 "lens_templates": templates,
+                "panel_shapes": {"quick":{"frame":false,"verifiers":0,"synthesis":"reduce"}, "standard":{"frame":true,"verifiers":1,"synthesis":"model"}, "deep":{"frame":true,"verifiers":1,"synthesis":"model"}},
+                "panel_templates": {"frame":{"id":"subject","prompt":"frame","access":"read_only","route":{"alias":"senior"}}, "verifier":{"id":"verify","prompt":"verify","access":"read_only","route":{"alias":"senior"}}, "synthesis":{"id":"synthesis","kind":"synthesise","prompt":"synthesise","access":"read_only","route":{"alias":"senior"}}},
             }))?)
         };
         let small = bound.resolve_review(&deferred(None, serde_json::json!([]))?, &head)?;
@@ -2413,9 +2415,9 @@ pub(crate) mod peer_tests {
         assert_eq!((record.subject.to_string(), record.base), (head.clone(), base));
         assert_eq!(small.source, "review");
         assert_eq!(small.nodes[0].id, "review--review");
-        assert_eq!(small.nodes.len(), 2);
-        let lens = &small.nodes[1];
-        assert_eq!(lens.id, "review--review--lens-correctness-spec");
+        assert_eq!(small.nodes.len(), 3);
+        let lens = &small.nodes[2];
+        assert_eq!(lens.id, "review--review--lenses--lens-correctness-spec");
         // A read-only alias repeats so a usage-limited first member falls back.
         assert_eq!(lens.routes.as_ref().map(Vec::len), Some(2));
         assert_eq!(lens.depends_on, ["subject"]);
@@ -2431,19 +2433,28 @@ pub(crate) mod peer_tests {
         standard.review.as_mut().ok_or("review spec missing")?.shape = Some("standard".into());
         standard.review.as_mut().ok_or("review spec missing")?.min_successful = Some(0);
         let standard = bound.resolve_review(&standard, &head)?;
-        assert_eq!(standard.nodes[0].composite.as_ref().ok_or("composite missing")?.min_successful, Some(4));
-        let members = &standard.nodes[1..];
+        let group_node = standard.nodes.iter().find(|node| node.id.ends_with("--lenses")).ok_or("lens group missing")?;
+        assert_eq!(group_node.composite.as_ref().ok_or("composite missing")?.min_successful, Some(4));
+        let members: Vec<_> = standard.nodes.iter().filter(|node| node.id.contains("--lenses--lens-")).collect();
         assert_eq!(members.len(), 5);
         let group = members[0].family_group.clone().ok_or("family group missing")?;
         assert!(members.iter().all(|member| member.family_group.as_ref() == Some(&group)));
+        let frame = standard.nodes.iter().find(|node| node.id.ends_with("--frame")).ok_or("frame missing")?;
+        let verify = standard.nodes.iter().find(|node| node.id.ends_with("--verify-1")).ok_or("verifier missing")?;
+        let synthesis = standard.nodes.iter().find(|node| node.id.ends_with("--synthesis")).ok_or("synthesis missing")?;
+        assert!(members.iter().all(|member| member.depends_on.contains(&frame.id)));
+        assert!(verify.depends_on.contains(&group_node.id));
+        assert!(synthesis.depends_on.contains(&verify.id));
+        assert!(standard.nodes.iter().filter(|node| node.composite.is_none()).all(|node| matches!(&node.source, Some(graph::SourceBinding::Commit { commit }) if *commit == head)));
+        assert!(small.nodes[1].composite.as_ref().is_some_and(|group| group.reduce_verdict));
         // An exact-model lens tier is that model on one route, with no repeat.
         let exact = bound.resolve_review(&deferred(None, serde_json::json!([{"name":"tests","when":null,"tier":"codex/gpt-6@high"}]))?, &head)?;
-        let route = exact.nodes[1].route.as_ref().ok_or("exact route missing")?;
+        let route = exact.nodes[2].route.as_ref().ok_or("exact route missing")?;
         assert_eq!((route.adapter.as_deref(), route.model.as_deref(), route.effort.as_deref()), (Some("codex"), Some("gpt-6"), Some("high")));
         // That lens launches on that model: the owner submits an exact model
         // route, even with sibling families to prefer against.
         let exact_key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-            "graph_id":"pinned-base", "node_id":exact.nodes[1].id, "route_index":0
+            "graph_id":"pinned-base", "node_id":exact.nodes[2].id, "route_index":0
         }))?;
         bound.observe_or_start(&exact_key, graph::NodeInput { settlement_retries: None, review_base: None,
             prior_attempts: &[], family_peers: &["openai".to_owned()], context: Default::default(), read_roots: &[],
@@ -2497,19 +2508,23 @@ pub(crate) mod peer_tests {
             "nodes":[{
                 "id":"review", "kind":"plan", "access":"read_only", "prompt":"review",
                 "source":{"type":"commit","commit":head},
-                "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":[],"min_successful":1,"max_nodes":13},
+                "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":[],"min_successful":1,"max_nodes":48},
                 "lens_templates": templates,
+                "panel_shapes": {"quick":{"frame":false,"verifiers":0,"synthesis":"reduce"}, "standard":{"frame":true,"verifiers":1,"synthesis":"model"}, "deep":{"frame":true,"verifiers":1,"synthesis":"model"}},
+                "panel_templates": {"frame":{"id":"subject","prompt":"frame","access":"read_only","route":{"alias":"senior"}}, "verifier":{"id":"verify","prompt":"verify","access":"read_only","route":{"alias":"senior"}}, "synthesis":{"id":"synthesis","kind":"synthesise","prompt":"synthesise","access":"read_only","route":{"alias":"senior"}}},
             }]
         }))?)?;
-        let result = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel)?;
+        let result = factory.graph(GraphInput::Run { extra: Default::default(), document: path.clone() }, budget, &cancel)?;
         let resolved = result.checkpoint.expansions.iter().find_map(|expansion| expansion.review.as_ref()).ok_or_else(|| format!("review not resolved: {:#?}", result.checkpoint.nodes))?;
         assert_eq!((resolved.subject.to_string(), resolved.base.to_string()), (head.clone(), base_text.clone()));
-        let lens = result.checkpoint.nodes.iter().find(|node| node.id == "review--review--lens-correctness-spec").ok_or("lens missing")?;
+        let lens = result.checkpoint.nodes.iter().find(|node| node.id == "review--review--lenses--lens-correctness-spec").ok_or("lens missing")?;
         let operation = graph_operation("graph-attempt-operation", &lens.attempts.first().ok_or("lens not scheduled")?.key)?;
         let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("lens operation missing")?;
         let request = store.request(operation.run_id, &owner.call(&cancel))?;
         assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
         assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+        let replay = factory.graph(GraphInput::Resume { extra: Default::default(), document: path, extend: vec![] }, budget, &cancel)?;
+        assert_eq!(replay.checkpoint.expansions.iter().filter(|expansion| expansion.review.is_some()).count(), 1);
         Ok(())
     }
 

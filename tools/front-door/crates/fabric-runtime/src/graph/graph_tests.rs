@@ -8635,3 +8635,33 @@ fn launch_projection_omits_untrusted_error_sources() {
     assert!(!reason.contains("/private/host"));
     assert!(!reason.chars().any(char::is_control));
 }
+
+#[test]
+fn deferred_panel_replay_keeps_the_recorded_reduction() {
+    let subject = "3".repeat(40);
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "review-replay",
+        "nodes": [{"id":"review", "kind":"plan", "access":"read_only", "prompt":"review",
+            "source":{"type":"commit","commit":subject},
+            "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"lenses":[],"min_successful":1,"max_nodes":3},
+            "panel_templates":{}, "panel_shapes":{"quick":{"frame":false,"verifiers":0,"synthesis":"reduce"}}}]
+    })).unwrap();
+    let addition: Expansion = serde_json::from_value(serde_json::json!({
+        "source":"review", "continuation":false, "patterns":[],
+        "review":{"subject":subject,"base":"2".repeat(40),"measured_size":"small","shape":"quick","source":"fixture"},
+        "nodes":[
+            {"id":"review--review","kind":"composite","access":"read_only","composite":{"nodes":[],"exports":[{"node":"review--review--lenses","outputs":["result","findings","verdict","commit"]}]}},
+            {"id":"review--review--lenses","kind":"composite","access":"read_only","composite":{"nodes":[],"min_successful":1,"reduce_verdict":true,"exports":[{"node":"review--review--lenses--lens","outputs":["result","findings","commit"]}]}},
+            {"id":"review--review--lenses--lens","access":"read_only","prompt":"review","source":{"type":"commit","commit":subject},"route":{"alias":"senior"}}
+        ]
+    })).unwrap();
+    assert!(plans::validate_review_addition(&document, &addition).is_ok());
+    let mut changed = addition.clone();
+    changed.nodes[1].composite.as_mut().unwrap().reduce_verdict = false;
+    assert!(plans::validate_review_addition(&document, &changed).is_err());
+    let mut changed = addition;
+    changed.nodes[2].source = Some(SourceBinding::Commit {
+        commit: "4".repeat(40),
+    });
+    assert!(plans::validate_review_addition(&document, &changed).is_err());
+}

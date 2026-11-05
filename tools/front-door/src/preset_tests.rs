@@ -5449,12 +5449,16 @@ fn a_head_subject_review_defers_its_size_to_the_pinned_commit() {
     // No expansion-time git read: nothing to degrade, nothing to warn about.
     assert!(expanded.warnings.is_empty(), "{:?}", expanded.warnings);
     let review = &document["nodes"][2]["composite"]["nodes"];
-    let lenses = &review[1];
+    assert_eq!(review.as_array().unwrap().len(), 1);
+    let lenses = &review[0];
     assert_eq!(lenses["id"], "lenses");
     assert_eq!(lenses["kind"], "plan");
     assert_eq!(lenses["review"]["worktree"], "/repo/w");
-    assert_eq!(lenses["review"]["max_nodes"], 12);
-    assert_eq!(lenses["depends_on"], json!(["subject"]));
+    assert!(lenses["review"]["max_nodes"].as_u64().unwrap() > 12);
+    assert_eq!(lenses["source"]["type"], "head");
+    assert!(lenses["panel_templates"]["frame"].is_object());
+    assert!(lenses["panel_templates"]["verifier"].is_object());
+    assert!(lenses["panel_templates"]["synthesis"].is_object());
     assert_eq!(lenses["read_roots"], json!(["/repo/w"]));
     assert!(lenses.get("composite").is_none());
     let templates = lenses["lens_templates"].as_object().unwrap();
@@ -5471,9 +5475,13 @@ fn a_head_subject_review_defers_its_size_to_the_pinned_commit() {
     // The writer keeps one route; read-only members repeat their alias.
     assert!(document["nodes"][0].get("routes").is_none());
     assert_eq!(document["nodes"][0]["route"]["alias"], "senior");
-    assert_eq!(review[0]["routes"].as_array().unwrap().len(), 2);
-    let verify = &review[2];
-    assert_eq!(verify["id"], "verify");
+    assert_eq!(
+        lenses["panel_templates"]["frame"]["routes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document.clone()).unwrap();
     assert_eq!(document.review_base.as_deref(), Some("main"));

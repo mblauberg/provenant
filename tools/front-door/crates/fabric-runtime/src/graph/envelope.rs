@@ -26,6 +26,7 @@ const REVIEW_RECORD_RESERVE: usize = 256 * 1024;
 
 fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
     let templates = node.extra.get("lens_templates").map_or(0, canonical_len);
+    let panel_templates = node.extra.get("panel_templates").map_or(0, canonical_len);
     let inherited = canonical_len(&(&node.depends_on, &node.inputs, &node.read_roots));
     // A custom lens can have a disposition projection or CI evidence larger
     // than an ordinary review leaf. Reserve those declared additions too.
@@ -90,6 +91,17 @@ fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
         .saturating_mul(REVIEW_NODE_RESERVE)
         .saturating_add(REVIEW_RECORD_RESERVE)
         .saturating_add(templates.saturating_mul(2))
+        // Verifier templates can be instantiated more than once.
+        .saturating_add(
+            panel_templates
+                .saturating_mul(review.max_nodes)
+                .saturating_mul(2),
+        )
+        .saturating_add(if panel_templates > 0 {
+            DISPOSITION_FINDINGS_BYTES + COMPOSITE_EXCERPT_BYTES
+        } else {
+            0
+        })
         .saturating_add(template_extra)
         .saturating_add(route_extra)
         // Explicit lens tiers can carry route lists copied into both the
