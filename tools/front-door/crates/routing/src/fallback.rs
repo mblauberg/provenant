@@ -34,6 +34,8 @@ pub enum FallbackHandoff {
     Local,
     /// A process may have been launched, or its handoff is uncertain.
     UncertainOrLaunched,
+    /// The adapter confirms that a process launched and reported an outcome.
+    Launched,
 }
 
 /// Inputs to route switching. Absence of evidence must be represented as false
@@ -43,6 +45,7 @@ pub struct FallbackPolicy {
     pub outcome: FallbackOutcome,
     pub handoff: FallbackHandoff,
     pub custody_released: bool,
+    pub read_only: bool,
     pub budget_remaining: bool,
     pub pinned: bool,
 }
@@ -54,8 +57,13 @@ impl FallbackPolicy {
             FallbackOutcome::AuthRequired
                 | FallbackOutcome::UsageLimited
                 | FallbackOutcome::AdapterUnavailable
-        ) && self.handoff == FallbackHandoff::Local
-            && self.custody_released
+        ) && ((self.handoff == FallbackHandoff::Local && self.custody_released)
+            || (self.handoff == FallbackHandoff::Launched
+                && self.read_only
+                && matches!(
+                    self.outcome,
+                    FallbackOutcome::AuthRequired | FallbackOutcome::UsageLimited
+                )))
             && self.budget_remaining
             && !self.pinned
     }
@@ -88,6 +96,7 @@ mod tests {
             ),
             handoff: FallbackHandoff::Local,
             custody_released: true,
+            read_only: false,
             budget_remaining: true,
             pinned: false,
         };
@@ -105,6 +114,53 @@ mod tests {
         ] {
             assert!(FallbackPolicy { outcome, ..base }.allows_switch());
         }
+        for outcome in [FallbackOutcome::AuthRequired, FallbackOutcome::UsageLimited] {
+            let launched_reader = FallbackPolicy {
+                outcome,
+                handoff: FallbackHandoff::Launched,
+                read_only: true,
+                custody_released: false,
+                ..base
+            };
+            assert!(launched_reader.allows_switch());
+            assert!(
+                !FallbackPolicy {
+                    read_only: false,
+                    ..launched_reader
+                }
+                .allows_switch()
+            );
+            assert!(
+                !FallbackPolicy {
+                    budget_remaining: false,
+                    ..launched_reader
+                }
+                .allows_switch()
+            );
+            assert!(
+                !FallbackPolicy {
+                    pinned: true,
+                    ..launched_reader
+                }
+                .allows_switch()
+            );
+            assert!(
+                !FallbackPolicy {
+                    handoff: FallbackHandoff::UncertainOrLaunched,
+                    ..launched_reader
+                }
+                .allows_switch()
+            );
+        }
+        assert!(
+            !FallbackPolicy {
+                outcome: FallbackOutcome::AdapterUnavailable,
+                handoff: FallbackHandoff::Launched,
+                read_only: true,
+                ..base
+            }
+            .allows_switch()
+        );
         for policy in [
             FallbackPolicy {
                 outcome: FallbackOutcome::Other,

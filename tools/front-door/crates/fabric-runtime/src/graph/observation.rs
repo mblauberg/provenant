@@ -51,11 +51,20 @@ pub(super) fn historical_fallback_admissible(
 pub(super) fn live_fallback_allowed(
     outcome: AttemptOutcome,
     launched: bool,
+    access: AccessMode,
     evidence: Option<provenant_records::run::PreparationFailure>,
 ) -> bool {
     use provenant_records::run::PreparationFailure;
     if launched {
-        return false;
+        return provenant_routing::FallbackPolicy {
+            outcome: routing_outcome(outcome),
+            handoff: provenant_routing::FallbackHandoff::Launched,
+            custody_released: false,
+            read_only: access == AccessMode::ReadOnly,
+            budget_remaining: true,
+            pinned: false,
+        }
+        .allows_switch();
     }
     let expected = match evidence {
         Some(PreparationFailure::AuthRequired) => provenant_routing::FallbackOutcome::AuthRequired,
@@ -70,10 +79,34 @@ pub(super) fn live_fallback_allowed(
             outcome: expected,
             handoff: provenant_routing::FallbackHandoff::Local,
             custody_released: true,
+            read_only: access == AccessMode::ReadOnly,
             budget_remaining: true,
             pinned: false,
         }
         .allows_switch()
+}
+
+pub(super) fn fallback_denial(
+    launched: bool,
+    access: AccessMode,
+    unreadable: bool,
+) -> (&'static str, &'static str) {
+    if launched && access == AccessMode::WorktreeWrite {
+        (
+            "fallback_launched_writer",
+            "A launched writer may have effects; route fallback is denied.",
+        )
+    } else if unreadable {
+        (
+            "fallback_evidence_unreadable",
+            "Cannot read preparation fallback evidence.",
+        )
+    } else {
+        (
+            "fallback_evidence_unavailable",
+            "Cannot verify local preparation and released custody for route fallback.",
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,26 +138,31 @@ mod fallback_evidence_tests {
         assert!(live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
+            AccessMode::WorktreeWrite,
             Some(PreparationFailure::AuthRequired)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             true,
+            AccessMode::WorktreeWrite,
             Some(PreparationFailure::AuthRequired)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::UsageLimited,
             false,
+            AccessMode::WorktreeWrite,
             Some(PreparationFailure::AuthRequired)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::TaskFailed,
             false,
+            AccessMode::WorktreeWrite,
             Some(PreparationFailure::AuthRequired)
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
+            AccessMode::WorktreeWrite,
             None
         ));
     }

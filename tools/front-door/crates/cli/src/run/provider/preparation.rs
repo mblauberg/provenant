@@ -1000,6 +1000,7 @@ pub(super) fn prepare_candidates(
                 outcome: previous_outcome,
                 handoff: provenant_routing::FallbackHandoff::Local,
                 custody_released: true,
+                read_only: false,
                 budget_remaining: named_pool && redraws < config.domains.routing.settlement_retries,
                 pinned: false,
             }
@@ -1047,6 +1048,7 @@ pub(super) fn prepare_candidates(
                 outcome: previous_outcome,
                 handoff: provenant_routing::FallbackHandoff::Local,
                 custody_released: true,
+                read_only: false,
                 budget_remaining: true,
                 pinned,
             })

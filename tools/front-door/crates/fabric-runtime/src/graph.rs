@@ -1727,18 +1727,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }) =>
                     {
                         let Some(outcome) = last.outcome else { break };
-                        let evidence = last.attempt_ref.as_deref().and_then(|reference| {
-                            owner
-                                .preparation_fallback_evidence(&last.key, reference)
-                                .ok()
-                                .flatten()
-                        });
-                        if !live_fallback_allowed(outcome, last.launched, evidence) {
+                        let (evidence, unreadable) = match last.attempt_ref.as_deref() {
+                            Some(reference) if !last.launched => {
+                                match owner.preparation_fallback_evidence(&last.key, reference) {
+                                    Ok(evidence) => (evidence, false),
+                                    Err(_) => (None, true),
+                                }
+                            }
+                            _ => (None, false),
+                        };
+                        if !live_fallback_allowed(outcome, last.launched, node.access, evidence) {
+                            let (code, message) =
+                                fallback_denial(last.launched, node.access, unreadable);
                             let progress = &mut checkpoint.nodes[node_index];
                             progress.state = NodeState::Failed;
-                            progress.advance_error_code =
-                                Some("fallback_evidence_unavailable".into());
-                            progress.advance_error = Some("Cannot verify local preparation and released custody for route fallback.".into());
+                            progress.advance_error_code = Some(code.into());
+                            progress.advance_error = Some(message.into());
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             break;
                         }
@@ -1746,6 +1750,28 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Some(_) => break,
                 };
+                if route_index > 0
+                    && progress.attempts.last().is_some_and(|attempt| {
+                        attempt.launched && attempt.state == AttemptState::Terminal
+                    })
+                    && node
+                        .routes
+                        .get(route_index - 1)
+                        .and_then(|route| route.account.as_ref())
+                        .is_some_and(|account| {
+                            node.routes
+                                .get(route_index)
+                                .is_some_and(|next| next.account.as_ref() != Some(account))
+                        })
+                {
+                    let progress = &mut checkpoint.nodes[node_index];
+                    progress.state = NodeState::Failed;
+                    progress.advance_error_code = Some("fallback_account_pinned".into());
+                    progress.advance_error =
+                        Some("Route fallback cannot change the pinned account.".into());
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    break;
+                }
                 let allowance = progress
                     .extra
                     .get("retry")
@@ -1761,6 +1787,27 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     spent = spent.saturating_add(
                         owner.retry_successors(reference).map_err(GraphError::Run)?,
                     );
+                }
+                // Each launched attempt that needs another route consumes one
+                // infrastructure retry, in addition to successors within a run.
+                let launched_switches = progress
+                    .attempts
+                    .iter()
+                    .filter(|attempt| attempt.launched && attempt.state == AttemptState::Terminal)
+                    .count() as u64;
+                spent = spent.saturating_add(launched_switches);
+                if route_index > 0
+                    && progress.attempts.last().is_some_and(|attempt| {
+                        attempt.launched && attempt.state == AttemptState::Terminal
+                    })
+                    && allowance.is_some_and(|limit| spent > limit)
+                {
+                    let progress = &mut checkpoint.nodes[node_index];
+                    progress.state = NodeState::Failed;
+                    progress.advance_error_code = Some("fallback_budget_exhausted".into());
+                    progress.advance_error = Some("Route fallback retry budget exhausted.".into());
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    break;
                 }
                 let settlement_retries = allowance.map(|limit| limit.saturating_sub(spent) as u8);
                 let route = node
@@ -2257,15 +2304,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Err(error) => return Err(GraphError::Run(error)),
                 };
-                let fallback_evidence = match &observation {
+                let (fallback_evidence, evidence_unreadable) = match &observation {
                     AttemptObservation::Terminal {
                         attempt_ref: Some(reference),
+                        launched: false,
                         ..
-                    } => owner
-                        .preparation_fallback_evidence(&key, reference)
-                        .ok()
-                        .flatten(),
-                    _ => None,
+                    } => match owner.preparation_fallback_evidence(&key, reference) {
+                        Ok(evidence) => (evidence, false),
+                        Err(_) => (None, true),
+                    },
+                    _ => (None, false),
                 };
                 let mut usage_error = None;
                 let mut cost_error = None;
@@ -2555,8 +2603,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 AttemptOutcome::AuthRequired
                                 | AttemptOutcome::UsageLimited
                                 | AttemptOutcome::AdapterUnavailable => {
-                                    if !live_fallback_allowed(outcome, launched, fallback_evidence)
-                                        || route_index + 1 == node.routes.len()
+                                    if !live_fallback_allowed(
+                                        outcome,
+                                        launched,
+                                        node.access,
+                                        fallback_evidence,
+                                    ) || route_index + 1 == node.routes.len()
                                     {
                                         if outcome == AttemptOutcome::UsageLimited {
                                             progress.advance_error_code =
@@ -2575,15 +2627,32 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                                 MAX_ADVANCE_ERROR_BYTES,
                                             ));
                                         }
+                                        if route_index + 1 == node.routes.len()
+                                            && launched
+                                            && node.access == AccessMode::ReadOnly
+                                            && (route.account.is_some() || route.model.is_some())
+                                        {
+                                            progress.advance_error_code =
+                                                Some("fallback_route_pinned".into());
+                                            progress.advance_error = Some(
+                                                "The selected route is pinned and has no fallback."
+                                                    .into(),
+                                            );
+                                        }
                                         if !live_fallback_allowed(
                                             outcome,
                                             launched,
+                                            node.access,
                                             fallback_evidence,
                                         ) && route_index + 1 < node.routes.len()
                                         {
-                                            progress.advance_error_code =
-                                                Some("fallback_evidence_unavailable".into());
-                                            progress.advance_error = Some("Cannot verify local preparation and released custody for route fallback.".into());
+                                            let (code, message) = fallback_denial(
+                                                launched,
+                                                node.access,
+                                                evidence_unreadable,
+                                            );
+                                            progress.advance_error_code = Some(code.into());
+                                            progress.advance_error = Some(message.into());
                                         }
                                         progress.state = NodeState::Failed;
                                         false
