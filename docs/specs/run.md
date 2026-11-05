@@ -1320,7 +1320,10 @@ external effects, while failures remain explicitly retryable. A worktree
 already pruned by its own lifecycle may replay its successful receipt.
 PR bodies use commit subjects and bodies with run and attempt IDs, capped at
 60,000 bytes with an explicit truncation note and supplied to `gh` through stdin;
-existing PR reuse requires an open PR at the exact delivered head.
+PR reconciliation reuses a merged PR at the exact delivered head, or an open
+PR at that head and the repository default base. Only a successful empty branch
+lookup permits creation. Failed or ambiguous lookups, a closed PR, or a base
+mismatch stop delivery; a moved head is refused at verification.
 - Why: delivery is host authority attached to a verified result, and a later
   pickup must not silently deliver unrelated edits.
 - Test: `crates/run/src/delivery_tests.rs::local_integration_fast_forwards_merges_and_replays`;

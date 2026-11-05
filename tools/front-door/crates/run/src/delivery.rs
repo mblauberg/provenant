@@ -1681,36 +1681,70 @@ impl HostDeliveryContext {
         }
         Ok(())
     }
-    fn existing_pr(
+    #[cfg(test)]
+    pub(super) fn set_test_gh(&mut self, gh: PathBuf) {
+        self.tools.as_mut().expect("prepared host tools").gh = Some(gh);
+    }
+
+    pub(super) fn existing_pr(
         &self,
         cwd: &Path,
         repo: &str,
         branch: &str,
         head: GitOid,
     ) -> Result<Option<String>> {
-        let Ok(raw) = self.command(
+        // A failed lookup is not evidence of absence. Only an empty list
+        // permits creation; all ambiguous results leave the effect stopped.
+        let raw = self.command(
             cwd,
             "gh",
             &[
                 "pr",
-                "view",
-                branch,
+                "list",
                 "--repo",
                 repo,
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--limit",
+                "1000",
                 "--json",
-                "url,state,headRefOid",
+                "url,state,headRefOid,baseRefName",
             ],
             Stage::PullRequest,
-        ) else {
-            return Ok(None);
-        };
-        let value: serde_json::Value =
+        )?;
+        let pulls: Vec<serde_json::Value> =
             serde_json::from_str(&raw).map_err(|_| RunError::Delivery(Stage::PullRequest))?;
-        if value["state"] != "OPEN" {
-            return Ok(None);
-        }
+        let value = match pulls.as_slice() {
+            [] => return Ok(None),
+            [value] => value,
+            _ => return Err(RunError::Delivery(Stage::PullRequest)),
+        };
         if value["headRefOid"].as_str() != Some(head.to_string().as_str()) {
             return Err(RunError::Delivery(Stage::Verify));
+        }
+        match value["state"].as_str() {
+            Some("MERGED") => {}
+            Some("OPEN") => {
+                // `gh pr create` without --base targets the repository default.
+                let raw = self.command(
+                    cwd,
+                    "gh",
+                    &["repo", "view", repo, "--json", "defaultBranchRef"],
+                    Stage::PullRequest,
+                )?;
+                let repository: serde_json::Value = serde_json::from_str(&raw)
+                    .map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+                let base = repository["defaultBranchRef"]["name"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .ok_or(RunError::Delivery(Stage::PullRequest))?;
+                if value["baseRefName"].as_str() != Some(base) {
+                    return Err(RunError::Delivery(Stage::PullRequest));
+                }
+            }
+            _ => return Err(RunError::Delivery(Stage::PullRequest)),
         }
         let url = value["url"]
             .as_str()
@@ -1718,6 +1752,7 @@ impl HostDeliveryContext {
             .ok_or(RunError::Delivery(Stage::PullRequest))?;
         Ok(Some(url.to_owned()))
     }
+
     fn push(
         &self,
         writer: &WriterRequest,
