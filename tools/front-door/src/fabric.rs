@@ -4703,6 +4703,36 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.prior_models(attempts)
     }
 
+    fn applied_route(
+        &mut self,
+        reference: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::GraphRoute>, Self::Error> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        let target = AttemptTarget {
+            extra: Default::default(),
+            host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+            attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+        };
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        Ok(owner
+            .snapshot(target, self.budget, self.cancel)?
+            .applied_route
+            .map(|route| provenant_fabric_runtime::graph::GraphRoute {
+                extra: Default::default(),
+                adapter: route.provider,
+                model: route.model,
+                effort: route.effort,
+                account: route.account_label,
+                name: None,
+                alias: None,
+            }))
+    }
+
     fn equal_review_range(&mut self, reference: &str) -> Result<bool, Self::Error> {
         let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
         if host != self.factory.context.identity.host.to_string() {

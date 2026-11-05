@@ -837,11 +837,52 @@ pub struct GraphAttempt {
     /// Byte cap fixed at admission so operation replay renders the same input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_cap: Option<usize>,
+    /// Bounded identifiers describing what was selected and delivered before launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_manifest: Option<AttemptInputManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<AttemptUsage>,
     /// When the attempt settled, as a graph-wide order from 1; zero while it runs.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub settled: u64,
+}
+
+/// Evidence contains identifiers and digests only, never input text or host paths.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptInputManifest {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub schema_version: u64,
+    pub source_commit: Option<String>,
+    pub review_base: Option<String>,
+    pub integration_base: Option<String>,
+    pub applied_route: Option<GraphRoute>,
+    pub inputs: Vec<AttemptInputEvidence>,
+    pub omitted: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptInputEvidence {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub producer_node: String,
+    pub producer_attempt: Option<AttemptKey>,
+    pub kind: OutputKind,
+    pub required: bool,
+    pub producer_result_digest: Option<String>,
+    pub commit: Option<String>,
+    pub delivery: InputDelivery,
+    pub file_delivery: InputDelivery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputDelivery {
+    Delivered,
+    Capped,
+    Omitted,
+    Unavailable,
+    Pending,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -491,6 +491,7 @@ fn node_bound(
             outcome: Some(AttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),
             input_cap: Some(usize::MAX),
+            input_manifest: None,
             settled: u64::MAX,
             usage: Some(AttemptUsage {
                 extra: Default::default(),
@@ -502,7 +503,16 @@ fn node_bound(
                 cost_unknown_reason: Some(String::new()),
             }),
         };
-        bytes += canonical_len(&attempt) + 2 * HOST_ID_BYTES + NOTE_BYTES + 1;
+        // A manifest records at most MANIFEST_INPUT_LIMIT selected values. Each
+        // entry carries two bounded identifiers, a digest and an optional OID.
+        let selections = node
+            .inputs
+            .iter()
+            .map(|input| input.outputs.len())
+            .sum::<usize>()
+            .min(MANIFEST_INPUT_LIMIT);
+        bytes +=
+            canonical_len(&attempt) + 2 * HOST_ID_BYTES + NOTE_BYTES + 1 + 2048 + selections * 768;
     }
     bytes
 }

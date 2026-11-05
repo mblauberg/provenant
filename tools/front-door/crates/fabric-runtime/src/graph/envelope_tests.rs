@@ -303,6 +303,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                         outcome: Some(AttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
                         input_cap: Some(usize::MAX),
+                        input_manifest: None,
                         settled: u64::MAX,
                         usage: Some(AttemptUsage {
                             extra: Default::default(),

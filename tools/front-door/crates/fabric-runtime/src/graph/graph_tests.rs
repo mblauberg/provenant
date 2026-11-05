@@ -151,6 +151,17 @@ impl AttemptOwner for FakeOwner {
             .clone()
             .ok_or(ReviewResolveError::Unsupported)
     }
+    fn applied_route(&mut self, attempt: &str) -> Result<Option<GraphRoute>, Self::Error> {
+        Ok(self.models.get(attempt).map(|model| GraphRoute {
+            extra: Default::default(),
+            adapter: Some("fixture".into()),
+            model: Some(model.clone()),
+            name: None,
+            alias: None,
+            effort: None,
+            account: None,
+        }))
+    }
     fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
         Ok(attempts
             .iter()
@@ -5079,6 +5090,180 @@ fn parent_and_child(
         ..Default::default()
     };
     (graph(vec![child, node("parent", route("fixture"))]), owner)
+}
+
+#[test]
+fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
+    let source = "1".repeat(40);
+    let base = "2".repeat(40);
+    let mut child = node("child", route("first"));
+    child.route = None;
+    child.routes = Some(vec![route("first"), route("second")]);
+    child.depends_on.push("parent".into());
+    child.source = Some(SourceBinding::Node {
+        node: "parent".into(),
+    });
+    child
+        .extra
+        .insert("review_base".into(), serde_json::json!(base));
+    child.inputs.push(GraphInput {
+        extra: Default::default(),
+        node: "parent".into(),
+        outputs: vec![OutputKind::Result, OutputKind::Commit],
+        required_outputs: vec![OutputKind::Commit],
+    });
+    let mut producer = node("parent", route("fixture"));
+    producer.source = Some(SourceBinding::Commit {
+        commit: source.clone(),
+    });
+    let mut document = graph(vec![child, producer]);
+    document.schema_version = 2;
+    let mut parent = terminal_from("private input content", "host/parent");
+    if let AttemptObservation::Terminal { commit, .. } = &mut parent {
+        *commit = Some(source.clone());
+    }
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            parent,
+            preparation_refusal("host/first", AttemptOutcome::AuthRequired),
+            terminal_from("done", "host/second"),
+        ]),
+        resolved_review_base: Some(base.clone()),
+        models: [("host/second".into(), "fixture/model".into())].into(),
+        materialise: Some(|requests| MaterialisedInputs {
+            directory: Some("/private/inputs".into()),
+            index: None,
+            entries: requests
+                .iter()
+                .map(|request| MaterialisedInput::File {
+                    label: request.label.clone(),
+                    path: "/private/inputs/result".into(),
+                    bytes: 3,
+                    omitted: 5,
+                })
+                .collect(),
+        }),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let child = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "child")
+        .unwrap();
+    assert_eq!(child.attempts.len(), 2);
+    for attempt in &child.attempts {
+        let manifest = attempt.input_manifest.as_ref().unwrap();
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.source_commit.as_deref(), Some(source.as_str()));
+        assert_eq!(manifest.review_base.as_deref(), Some(base.as_str()));
+        assert_eq!(manifest.inputs.len(), 2);
+        let input = &manifest.inputs[0];
+        assert_eq!(input.producer_attempt.as_ref().unwrap().node_id, "parent");
+        assert_eq!(
+            input.producer_attempt.as_ref().unwrap().graph_id,
+            document.graph_id
+        );
+        assert!(
+            input
+                .producer_result_digest
+                .as_deref()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_eq!(input.file_delivery, InputDelivery::Capped);
+        assert_eq!(manifest.inputs[1].commit.as_deref(), Some(source.as_str()));
+        assert!(manifest.inputs[1].required);
+        let encoded = serde_json::to_string(manifest).unwrap();
+        assert!(!encoded.contains("private input content"));
+        assert!(!encoded.contains("/private/inputs"));
+    }
+    assert_eq!(
+        child.attempts[1]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .applied_route
+            .as_ref()
+            .and_then(|route| route.model.as_deref()),
+        Some("fixture/model")
+    );
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, run.checkpoint);
+    let mut value =
+        serde_json::to_value(child.attempts[1].input_manifest.as_ref().unwrap()).unwrap();
+    value["future_field"] = serde_json::json!({"kept":true});
+    let decoded: AttemptInputManifest = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+    let mut broken = run.checkpoint.clone();
+    broken
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "child")
+        .unwrap()
+        .attempts[0]
+        .input_manifest = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+}
+
+#[test]
+fn attempt_manifest_bounds_the_number_of_selected_values() {
+    let count = outputs::MANIFEST_INPUT_LIMIT + 1;
+    let mut consumer = node("consumer", route("fixture"));
+    let mut nodes = Vec::new();
+    for index in 0..count {
+        let id = format!("producer-{index}");
+        consumer.depends_on.push(id.clone());
+        consumer.inputs.push(GraphInput {
+            extra: Default::default(),
+            node: id.clone(),
+            outputs: vec![OutputKind::Result],
+            required_outputs: Vec::new(),
+        });
+        nodes.push(node(&id, route("fixture")));
+    }
+    nodes.push(consumer);
+    let document = graph(nodes);
+    let mut owner = FakeOwner {
+        observations: (0..=count)
+            .map(|_| terminal_with_result(AttemptOutcome::Succeeded, "private body"))
+            .collect(),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &plans::generous(),
+        &Default::default(),
+    )
+    .unwrap();
+    let manifest = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "consumer")
+        .unwrap()
+        .attempts[0]
+        .input_manifest
+        .as_ref()
+        .unwrap();
+    assert_eq!(manifest.inputs.len(), outputs::MANIFEST_INPUT_LIMIT);
+    assert_eq!(manifest.omitted, 1);
+    assert!(
+        !serde_json::to_string(manifest)
+            .unwrap()
+            .contains("private body")
+    );
 }
 
 #[test]

@@ -1362,6 +1362,117 @@ pub(super) fn render_files(
     text
 }
 
+/// Maximum selected values retained per attempt; the omitted count records the rest.
+pub(super) const MANIFEST_INPUT_LIMIT: usize = 32;
+
+pub(super) fn attempt_input_manifest(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+    requests: &[InputRequest],
+    materialised: Option<&MaterialisedInputs>,
+) -> AttemptInputManifest {
+    let progress = &checkpoint.nodes[positions[&node.id]];
+    let mut manifest = AttemptInputManifest {
+        extra: Default::default(),
+        schema_version: 1,
+        source_commit: progress.source_commit.clone(),
+        review_base: progress.review_base.clone(),
+        integration_base: checkpoint.integration_pin.clone(),
+        applied_route: None,
+        inputs: Vec::new(),
+        omitted: 0,
+    };
+    for input in &node.inputs {
+        let producer = positions
+            .get(&input.node)
+            .map(|index| (&plan.nodes[*index], &checkpoint.nodes[*index]));
+        let output = producer.and_then(|(_, progress)| progress.outputs.as_ref());
+        for kind in &input.outputs {
+            if manifest.inputs.len() == MANIFEST_INPUT_LIMIT {
+                manifest.omitted = manifest.omitted.saturating_add(1);
+                continue;
+            }
+            let available = output.is_some_and(|output| match kind {
+                OutputKind::Result => output.result.is_some(),
+                OutputKind::Verdict => producer
+                    .is_some_and(|(node, progress)| verdict_available(node, progress, output)),
+                OutputKind::Findings => output.findings_available == Some(true),
+                OutputKind::Branch => output.branch.is_some(),
+                OutputKind::Commit => output
+                    .commit
+                    .as_deref()
+                    .is_some_and(|value| provenant_core::GitOid::parse(value).is_ok()),
+                OutputKind::Remaining => output.remaining.is_some(),
+            });
+            let delivery = if !available {
+                InputDelivery::Unavailable
+            } else if *kind == OutputKind::Result
+                && output
+                    .and_then(|output| output.result.as_ref())
+                    .is_some_and(|result| result.truncated)
+            {
+                InputDelivery::Capped
+            } else {
+                InputDelivery::Delivered
+            };
+            let file_delivery = materialised
+                .and_then(|files| {
+                    files.entries.iter().find(|entry| match entry {
+                        MaterialisedInput::File { label, .. }
+                        | MaterialisedInput::Capped { label }
+                        | MaterialisedInput::Unavailable { label, .. } => label == &input.node,
+                    })
+                })
+                .map_or_else(
+                    || {
+                        if requests.iter().any(|request| request.label == input.node) {
+                            InputDelivery::Unavailable
+                        } else {
+                            InputDelivery::Omitted
+                        }
+                    },
+                    |entry| match entry {
+                        MaterialisedInput::File { omitted: 0, .. } => InputDelivery::Delivered,
+                        MaterialisedInput::File { .. } | MaterialisedInput::Capped { .. } => {
+                            InputDelivery::Capped
+                        }
+                        MaterialisedInput::Unavailable { .. } => InputDelivery::Unavailable,
+                    },
+                );
+            let digest = output
+                .and_then(|output| output.result.as_ref())
+                .map(|result| &result.digest)
+                .filter(|digest| {
+                    digest.strip_prefix("sha256:").is_some_and(|hex| {
+                        hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                })
+                .cloned();
+            let commit = (*kind == OutputKind::Commit)
+                .then(|| output.and_then(|output| output.commit.as_ref()))
+                .flatten()
+                .filter(|commit| provenant_core::GitOid::parse(commit).is_ok())
+                .cloned();
+            manifest.inputs.push(AttemptInputEvidence {
+                extra: Default::default(),
+                producer_node: input.node.clone(),
+                producer_attempt: producer
+                    .and_then(|(_, progress)| progress.attempts.last())
+                    .map(|attempt| attempt.key.clone()),
+                kind: *kind,
+                required: input.required_outputs.contains(kind),
+                producer_result_digest: digest,
+                commit,
+                delivery,
+                file_delivery,
+            });
+        }
+    }
+    manifest
+}
+
 #[cfg(test)]
 mod alias_tests {
     use super::*;

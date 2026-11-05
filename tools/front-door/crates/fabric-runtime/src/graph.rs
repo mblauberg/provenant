@@ -298,6 +298,11 @@ pub trait AttemptOwner {
         Ok(Vec::new())
     }
 
+    /// The route recorded by the host for an accepted attempt, when known.
+    fn applied_route(&mut self, _attempt: &str) -> Result<Option<GraphRoute>, Self::Error> {
+        Ok(None)
+    }
+
     /// Models that served the referenced attempts, in attempt order.
     fn attempt_models(&mut self, _attempts: &[String]) -> Result<Vec<String>, Self::Error> {
         Ok(Vec::new())
@@ -2057,6 +2062,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
+                    let mut initial_manifest =
+                        attempt_input_manifest(node, &plan, &checkpoint, &positions, &[], None);
+                    for input in &mut initial_manifest.inputs {
+                        if matches!(input.kind, OutputKind::Result | OutputKind::Findings) {
+                            input.file_delivery = InputDelivery::Pending;
+                        }
+                    }
                     checkpoint.nodes[node_index].attempts.push(GraphAttempt {
                         extra: Default::default(),
                         key: key.clone(),
@@ -2068,6 +2080,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         launch_actor: owner.actor(),
                         settled: 0,
                         input_cap: (!node.inputs.is_empty()).then_some(cap),
+                        input_manifest: Some(initial_manifest),
                         usage: None,
                     });
                     checkpoint.nodes[node_index].state = NodeState::Running;
@@ -2125,6 +2138,36 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &requests,
                         materialised.index.as_deref(),
                     ));
+                }
+                if stored_ref.is_none() {
+                    let attempt =
+                        checkpoint.nodes[node_index]
+                            .attempts
+                            .last()
+                            .ok_or_else(|| GraphError::BadCheckpoint {
+                                node: node.id.clone(),
+                                invariant: "an observed attempt must have a checkpoint row",
+                            })?;
+                    if !owner.launch_accepted(attempt).map_err(GraphError::Run)? {
+                        let manifest = attempt_input_manifest(
+                            node,
+                            &plan,
+                            &checkpoint,
+                            &positions,
+                            &requests,
+                            materialised.as_ref(),
+                        );
+                        checkpoint.nodes[node_index]
+                            .attempts
+                            .last_mut()
+                            .ok_or_else(|| GraphError::BadCheckpoint {
+                                node: node.id.clone(),
+                                invariant: "an observed attempt must have a checkpoint row",
+                            })?
+                            .input_manifest = Some(manifest);
+                        // Evidence is durable before the owner can submit the attempt.
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    }
                 }
                 // The writer is the nearest writing node along the source chain,
                 // so a framing node between a lens and the writer is skipped.
@@ -2347,6 +2390,46 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Err(error) => return Err(GraphError::Run(error)),
                 };
+                let applied_route = match &observation {
+                    AttemptObservation::Pending { attempt_ref }
+                    | AttemptObservation::Unknown { attempt_ref }
+                    | AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref
+                        .as_ref()
+                        .and_then(|reference| owner.applied_route(reference).ok().flatten()),
+                };
+                if let Some(mut route) = applied_route {
+                    let clean = |value: &mut Option<String>| {
+                        if value.as_ref().is_some_and(|value| {
+                            value.is_empty()
+                                || value.len() > HOST_ID_BYTES
+                                || value.starts_with('/')
+                                || !value.bytes().all(|b| {
+                                    b.is_ascii_alphanumeric()
+                                        || matches!(b, b'/' | b'-' | b'_' | b'.' | b':')
+                                })
+                        }) {
+                            *value = None;
+                        }
+                    };
+                    for value in [
+                        &mut route.adapter,
+                        &mut route.name,
+                        &mut route.model,
+                        &mut route.alias,
+                        &mut route.effort,
+                        &mut route.account,
+                    ] {
+                        clean(value);
+                    }
+                    route.extra.clear();
+                    if let Some(manifest) = checkpoint.nodes[node_index]
+                        .attempts
+                        .last_mut()
+                        .and_then(|attempt| attempt.input_manifest.as_mut())
+                    {
+                        manifest.applied_route = Some(route);
+                    }
+                }
                 let fallback_evidence = match &observation {
                     AttemptObservation::Terminal {
                         attempt_ref: Some(reference),

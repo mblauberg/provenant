@@ -1165,6 +1165,40 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             continue;
         }
         for (index, attempt) in progress.attempts.iter().enumerate() {
+            if document.schema_version >= 2 && attempt.input_manifest.is_none() {
+                return Err(bad("attempt must retain its input manifest"));
+            }
+            if let Some(manifest) = &attempt.input_manifest {
+                let count: usize = node.inputs.iter().map(|input| input.outputs.len()).sum();
+                if manifest.schema_version != 1
+                    || manifest.inputs.len() > MANIFEST_INPUT_LIMIT
+                    || manifest.inputs.len().saturating_add(manifest.omitted) != count
+                    || manifest.source_commit != progress.source_commit
+                    || manifest.review_base != progress.review_base
+                    || manifest
+                        .inputs
+                        .iter()
+                        .zip(
+                            node.inputs.iter().flat_map(|input| {
+                                input.outputs.iter().map(move |kind| (input, kind))
+                            }),
+                        )
+                        .any(|(evidence, (input, kind))| {
+                            evidence.producer_node != input.node
+                                || evidence.kind != *kind
+                                || evidence.required != input.required_outputs.contains(kind)
+                        })
+                    || (attempt.state != AttemptState::Starting
+                        && manifest
+                            .inputs
+                            .iter()
+                            .any(|input| input.file_delivery == InputDelivery::Pending))
+                {
+                    return Err(bad(
+                        "attempt input manifest must match its selected inputs and pins",
+                    ));
+                }
+            }
             if attempt.key.graph_id != plan.graph_id
                 || attempt.key.node_id != node.id
                 || usize::from(attempt.key.route_index) != index
