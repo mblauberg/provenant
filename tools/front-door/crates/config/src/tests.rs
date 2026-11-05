@@ -190,7 +190,11 @@ fn retention_defaults_overrides_and_invalid_values_are_named_cases() {
         let value = serde_json::to_value(&config).unwrap();
         assert_eq!(value["retention"][key], override_value, "{case} override");
         if key == "session_revisions" {
-            assert_eq!(value["retention"]["provider_state_days"], defaults["retention"]["provider_state_days"], "{case}");
+            assert_eq!(
+                value["retention"]["provider_state_days"],
+                defaults["retention"]["provider_state_days"],
+                "{case}"
+            );
         }
         test_support::assert_leaf_origins(&config);
         for (value, rule) in invalid_range_values
@@ -1722,7 +1726,6 @@ fn wrong_value_type_in_a_serde_decoded_section_still_reports_type() {
         assert_warning(&config, "type");
     }
 }
-
 
 #[test]
 fn read_knobs_ignores_domain_sections_it_does_not_know() {

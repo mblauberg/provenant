@@ -448,10 +448,18 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
             {
                 let actual = lane_swap[index].ok_or("lane swap must be measured")? as f64;
                 let rounding = 0.01 * 1024.0 * 1024.0;
-                let low = host_samples.iter().map(|sample| sample[index]).fold(f64::INFINITY, f64::min);
-                let high = host_samples.iter().map(|sample| sample[index]).fold(f64::NEG_INFINITY, f64::max);
-                assert!(actual >= low - rounding && actual <= high + rounding,
-                    "{field}: lane={actual}, host range={low}..{high}");
+                let low = host_samples
+                    .iter()
+                    .map(|sample| sample[index])
+                    .fold(f64::INFINITY, f64::min);
+                let high = host_samples
+                    .iter()
+                    .map(|sample| sample[index])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                assert!(
+                    actual >= low - rounding && actual <= high + rounding,
+                    "{field}: lane={actual}, host range={low}..{high}"
+                );
             }
             peer_stop.cancel();
             let _ = peer.join().expect("peer executor");

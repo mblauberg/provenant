@@ -2212,7 +2212,10 @@ fn install_compacts_routine_output_and_keeps_json_actions_once() -> Result {
     );
     let report: serde_json::Value = serde_json::from_slice(&applied.stdout.bytes)?;
     let text = String::from_utf8(human.stdout.bytes.clone())?;
-    assert!(human.stdout.bytes.len() < preview.stdout.bytes.len(), "{text}");
+    assert!(
+        human.stdout.bytes.len() < preview.stdout.bytes.len(),
+        "{text}"
+    );
     for line in text.lines() {
         assert!(!line.trim_start().starts_with("action:"), "{line}");
     }

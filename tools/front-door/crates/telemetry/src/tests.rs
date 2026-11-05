@@ -490,8 +490,21 @@ fn bundled_toml_uses_exact_rates_and_unknowns_without_aliases() {
     ));
     let config: ConfiguredPrices = toml_edit::de::from_str(text).unwrap();
     let table = validate_prices(&config).unwrap();
-    let model = config.models.iter().find(|model| model.provider == "codex" && model.billing == BillingKind::Subscription && model.rates.values().iter().all(Option::is_some)).unwrap();
-    let rate = table.get(&model.provider, &model.model).unwrap().0.uncached_input.unwrap();
+    let model = config
+        .models
+        .iter()
+        .find(|model| {
+            model.provider == "codex"
+                && model.billing == BillingKind::Subscription
+                && model.rates.values().iter().all(Option::is_some)
+        })
+        .unwrap();
+    let rate = table
+        .get(&model.provider, &model.model)
+        .unwrap()
+        .0
+        .uncached_input
+        .unwrap();
     let mut input = fact(1, Some(1_000_000));
     input.resolved_route = Some(RouteFact {
         provider: Some(model.provider.clone()),
@@ -506,7 +519,10 @@ fn bundled_toml_uses_exact_rates_and_unknowns_without_aliases() {
     input.usage.reasoning = None;
     let report = stats([input.clone()], &table, Window::default()).unwrap();
     assert!(report.totals.cost.complete.is_none());
-    assert_eq!(report.totals.cost.known_lower_bound.unwrap().microdollars, rate);
+    assert_eq!(
+        report.totals.cost.known_lower_bound.unwrap().microdollars,
+        rate
+    );
     assert_eq!(report.totals.cost.subscription_attempts, 1);
     let minimal = r#"schema_version = 1
 id = "unpriced"
@@ -527,7 +543,13 @@ billing = "subscription"
     assert_eq!(report.routes[0].totals.cost.subscription_attempts, 1);
     let mut unknown = fact(2, Some(1));
     unknown.resolved_route.as_mut().unwrap().model = Some("m-alias".into());
-    assert_eq!(stats([unknown], &table, Window::default()).unwrap().coverage.missing_price, 1);
+    assert_eq!(
+        stats([unknown], &table, Window::default())
+            .unwrap()
+            .coverage
+            .missing_price,
+        1
+    );
     let bad = minimal.replace("[models.rates]", "[models.rates]\nother = 1");
     assert!(toml_edit::de::from_str::<ConfiguredPrices>(&bad).is_err());
 }

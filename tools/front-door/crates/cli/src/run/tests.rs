@@ -1198,7 +1198,12 @@ fn host_delivery_limit_cli_error_matches_golden() -> Result<(), Box<dyn std::err
         &mut rendered,
     )?;
     let actual = String::from_utf8(rendered)?;
-    for part in ["IO", "Integrate", "git", &provenant_os::exec::DEFAULT_CAPTURE_LIMIT.to_string()] {
+    for part in [
+        "IO",
+        "Integrate",
+        "git",
+        &provenant_os::exec::DEFAULT_CAPTURE_LIMIT.to_string(),
+    ] {
         assert!(actual.contains(part), "{actual}");
     }
     Ok(())
@@ -1937,7 +1942,12 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         } else {
             args.extend([
                 OsString::from("--deliver"),
-                if delivery == "integrate" { format!("integrate:{target}") } else { "push".into() }.into(),
+                if delivery == "integrate" {
+                    format!("integrate:{target}")
+                } else {
+                    "push".into()
+                }
+                .into(),
             ]);
             args.extend([
                 OsString::from("--prompt-file"),
@@ -3752,7 +3762,9 @@ fn delivery_state_text_retains_known_details_without_extensions() {
             WriterDeliveryState::Delivered { pull_request, .. } => {
                 assert_eq!(pull_request.as_deref(), wire["pull_request"].as_str());
                 assert!(text.contains("Delivered"));
-                if pull_request.is_some() { assert!(text.contains("pr1") || text.contains("https://example.invalid/pr/1")); }
+                if pull_request.is_some() {
+                    assert!(text.contains("pr1") || text.contains("https://example.invalid/pr/1"));
+                }
             }
         }
         assert!(!text.chars().any(char::is_control), "{text:?}");

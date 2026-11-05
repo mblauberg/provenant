@@ -1034,7 +1034,7 @@ fn pattern_expansion_respects_plan_max_nodes_boundary() {
     let limits = crate::config::GraphLimits { nodes: 4, ..Default::default() };
     let run = advance_with_budget(&pattern_planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default(), &limits, &Default::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("structural_limit"));
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("limits.nodes"));
     assert!(run.checkpoint.expansions.is_empty());
 }

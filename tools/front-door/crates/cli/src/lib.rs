@@ -2323,7 +2323,6 @@ mod tests {
         for flags in [
             vec!["--worktree", "existing"],
             vec!["--host", "peer"],
-
             vec!["--deliver", "integrate:../main"],
         ] {
             let mut words = base.to_vec();

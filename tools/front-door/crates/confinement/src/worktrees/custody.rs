@@ -410,8 +410,16 @@ mod dirty_tests {
         let many_refs: Vec<&[u8]> = many.iter().map(Vec::as_slice).collect();
         let summary = dirty_paths_summary_bytes(&many_refs);
         assert!(summary.len() <= 1024);
-        let listed = (0..15).filter(|n| summary.contains(&format!("f{n:02}"))).count();
-        let omitted: usize = summary.split_whitespace().rev().nth(1).unwrap().parse().unwrap();
+        let listed = (0..15)
+            .filter(|n| summary.contains(&format!("f{n:02}")))
+            .count();
+        let omitted: usize = summary
+            .split_whitespace()
+            .rev()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
         assert_eq!(listed + omitted, many.len(), "{summary}");
         let long = vec![b'x'; 4000];
         let long_summary = dirty_paths_summary_bytes(&[&long]);

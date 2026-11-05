@@ -30,9 +30,9 @@ use provenant_core::Clock;
 use provenant_core::{AttemptId, CancelToken, GitOid, RelativePath, WaitBudget, hex};
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, canonicalize};
-use provenant_os::pid::{
-    CensusIgnoreEntry, CwdObservation, CwdObserver, ProcessUids, SystemCwdObserver,
-};
+#[cfg(test)]
+use provenant_os::pid::ProcessUids;
+use provenant_os::pid::{CensusIgnoreEntry, CwdObservation, CwdObserver, SystemCwdObserver};
 use provenant_records::{PathWire, PathWireError};
 use provenant_supervisor::census::{
     Ancestry, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,

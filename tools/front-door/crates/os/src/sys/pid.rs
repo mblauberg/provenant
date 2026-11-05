@@ -2040,7 +2040,10 @@ mod tests {
             if darwin_on_sealed_system_volume(&file) != Some(false) {
                 continue;
             }
-            assert!(unreadable_policy_uids(pid, &[]).is_err(), "off-sealed platform process {pid}: {path:?}");
+            assert!(
+                unreadable_policy_uids(pid, &[]).is_err(),
+                "off-sealed platform process {pid}: {path:?}"
+            );
             eprintln!(
                 "ASSERTED: off-sealed platform process {pid} {path:?} refused by native daemon policy"
             );

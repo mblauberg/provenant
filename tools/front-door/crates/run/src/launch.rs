@@ -697,7 +697,11 @@ mod release_root_tests {
         let credential = home.join(".ssh").join("nested");
         std::fs::create_dir_all(&credential)?;
         let home = std::fs::canonicalize(home)?;
-        let roots = [std::fs::canonicalize(temp.path())?, home.clone(), std::fs::canonicalize(credential)?];
+        let roots = [
+            std::fs::canonicalize(temp.path())?,
+            home.clone(),
+            std::fs::canonicalize(credential)?,
+        ];
         for root in roots {
             let mut parent = crate::tests::input().request.tasks.remove(0);
             parent.access.read_roots = vec![root.clone()];
@@ -706,13 +710,9 @@ mod release_root_tests {
                 let mut child = parent.clone();
                 child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
                 child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
-                let error = child_access_within(
-                    &parent,
-                    &child,
-                    &temp.path().join("state"),
-                    Some(&home),
-                )
-                .unwrap_err();
+                let error =
+                    child_access_within(&parent, &child, &temp.path().join("state"), Some(&home))
+                        .unwrap_err();
                 assert!(matches!(
                     error,
                     RunError::Confinement(

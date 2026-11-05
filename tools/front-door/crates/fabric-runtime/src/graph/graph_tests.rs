@@ -3709,7 +3709,6 @@ fn verdict_gate_matches_review_tokens_and_legacy_aliases() {
     );
 }
 
-
 #[test]
 fn gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities() {
     for (threshold, verdicts, passed) in [

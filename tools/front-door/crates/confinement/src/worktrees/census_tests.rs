@@ -327,7 +327,10 @@ fn native_full_census_places_clean_merged_worktree_and_same_user_sleep()
     );
     assert!(child.0.try_wait()?.is_none());
     let pid = i64::from(child.0.id());
-    assert!(SystemCwdObserver.unreadable_policy_uids(pid, &[]).is_err(), "same-user /bin/sleep cannot earn daemon exception");
+    assert!(
+        SystemCwdObserver.unreadable_policy_uids(pid, &[]).is_err(),
+        "same-user /bin/sleep cannot earn daemon exception"
+    );
     let (occupied, occupied_details) =
         workers.observe_roots_for_land_with_details(std::slice::from_ref(&root));
     eprintln!(
@@ -815,8 +818,18 @@ impl CwdObserver for InjectedCensus {
             gap: None,
         }
     }
-    fn unreadable_policy_uids(&self, pid: i64, _: &[CensusIgnoreEntry]) -> Result<provenant_os::pid::UnreadablePolicyExcusal, provenant_os::pid::UnreadablePolicyFailure> {
-        self.platform_uids.get(&pid).copied().filter(|uids| uids.all_system())
+    fn unreadable_policy_uids(
+        &self,
+        pid: i64,
+        _: &[CensusIgnoreEntry],
+    ) -> Result<
+        provenant_os::pid::UnreadablePolicyExcusal,
+        provenant_os::pid::UnreadablePolicyFailure,
+    > {
+        self.platform_uids
+            .get(&pid)
+            .copied()
+            .filter(|uids| uids.all_system())
             .map(|uids| provenant_os::pid::UnreadablePolicyExcusal { uids })
             .ok_or_else(|| "image policy evidence unavailable".into())
     }
@@ -1761,9 +1774,18 @@ fn listed_process_is_excluded_only_after_eperm_and_never_for_the_owner()
                 })
             }
         }
-        fn unreadable_policy_uids(&self, _: i64, _: &[CensusIgnoreEntry]) -> Result<provenant_os::pid::UnreadablePolicyExcusal, provenant_os::pid::UnreadablePolicyFailure> {
+        fn unreadable_policy_uids(
+            &self,
+            _: i64,
+            _: &[CensusIgnoreEntry],
+        ) -> Result<
+            provenant_os::pid::UnreadablePolicyExcusal,
+            provenant_os::pid::UnreadablePolicyFailure,
+        > {
             assert!(self.denied, "non-EPERM must never consult listing policy");
-            Ok(provenant_os::pid::UnreadablePolicyExcusal { uids: test_uids(self.uid) })
+            Ok(provenant_os::pid::UnreadablePolicyExcusal {
+                uids: test_uids(self.uid),
+            })
         }
     }
     let fixture = Fixture::new()?;
@@ -1979,7 +2001,14 @@ fn cwd_query_errors_never_consult_the_daemon_policy() -> Result<(), Box<dyn Erro
                 source: std::io::Error::from_raw_os_error(5),
             })
         }
-        fn unreadable_policy_uids(&self, _: i64, _: &[CensusIgnoreEntry]) -> Result<provenant_os::pid::UnreadablePolicyExcusal, provenant_os::pid::UnreadablePolicyFailure> {
+        fn unreadable_policy_uids(
+            &self,
+            _: i64,
+            _: &[CensusIgnoreEntry],
+        ) -> Result<
+            provenant_os::pid::UnreadablePolicyExcusal,
+            provenant_os::pid::UnreadablePolicyFailure,
+        > {
             panic!("non-EPERM cwd failure reached daemon policy")
         }
     }

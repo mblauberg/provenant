@@ -2174,8 +2174,16 @@ mod uncommitted_tests {
         let reason = uncommitted_reason(&many).unwrap();
         assert!(reason.starts_with("writer left uncommitted edits"));
         assert!(reason.len() <= 1024);
-        let listed = (0..15).filter(|n| reason.contains(&format!("f{n:02}"))).count();
-        let omitted: usize = reason.split_whitespace().rev().nth(1).unwrap().parse().unwrap();
+        let listed = (0..15)
+            .filter(|n| reason.contains(&format!("f{n:02}")))
+            .count();
+        let omitted: usize = reason
+            .split_whitespace()
+            .rev()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
         assert_eq!(listed + omitted, many.len(), "{reason}");
         let long = uncommitted_reason(&[vec![b'x'; 4000]]).unwrap();
         assert!(long.len() <= 1024);

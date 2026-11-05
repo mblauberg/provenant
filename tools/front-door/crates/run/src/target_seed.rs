@@ -220,16 +220,25 @@ fn lane_release_pin(worktree: &Path, home: &Path) -> Result<String, &'static str
     let pin = dir.join("rust-toolchain.toml");
     match std::fs::symlink_metadata(&pin) {
         Ok(metadata) if !metadata.is_file() => return Err(codes::TOOLCHAIN_PIN_NON_REGULAR),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS);
+        }
         Err(_) => return Err(codes::TOOLCHAIN_PIN_UNREADABLE),
         _ => {}
     }
     let doc = parse(&pin, codes::TOOLCHAIN_PIN_UNREADABLE)?;
-    let toolchain = doc.get("toolchain").and_then(|value| value.as_table()).ok_or(codes::TOOLCHAIN_PIN_INVALID)?;
+    let toolchain = doc
+        .get("toolchain")
+        .and_then(|value| value.as_table())
+        .ok_or(codes::TOOLCHAIN_PIN_INVALID)?;
     if toolchain.contains_key("path") {
         return Err(codes::TOOLCHAIN_PIN_CUSTOM);
     }
-    let channel = toolchain.get("channel").and_then(|value| value.as_str()).ok_or(codes::TOOLCHAIN_PIN_CHANNEL_MISSING)?.to_owned();
+    let channel = toolchain
+        .get("channel")
+        .and_then(|value| value.as_str())
+        .ok_or(codes::TOOLCHAIN_PIN_CHANNEL_MISSING)?
+        .to_owned();
     let parts: Vec<_> = channel.split('.').collect();
     if parts.len() != 3
         || parts
@@ -317,7 +326,11 @@ mod lane_probe_tests {
         std::fs::create_dir_all(&front).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
-        std::fs::write(front.join("rust-toolchain.toml"), "[toolchain]\nchannel = '1.99.1'\n").unwrap();
+        std::fs::write(
+            front.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = '1.99.1'\n",
+        )
+        .unwrap();
         let rustc = bin.join("rustc");
         std::fs::write(
             &rustc,

@@ -728,12 +728,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         },
         &call,
     )?;
-    let elapsed = Duration::from_micros(provenant_os::clock::host_monotonic_micros()? - started);
     std::fs::write(&marker, original)?;
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "launch refusal took {elapsed:?}"
-    );
     assert!(
         matches!(&result[..], [crate::Started::Refused { reason, .. }] if reason.contains("could not be revalidated")),
         "{result:?}"

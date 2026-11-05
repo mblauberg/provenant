@@ -1487,7 +1487,10 @@ fn opencode_usage_limit_settlement_is_bounded() -> Result {
         include_bytes!("fixtures/providers/opencode/free-limit.jsonl").as_slice(),
         br#"{"type":"provider.quota","message":"Go usage limit exceeded"}"#.as_slice(),
     ] {
-        assert!(matches!(decoder.decode(stdout)?, FrameEvent::Terminal | FrameEvent::ProtocolRejected));
+        assert!(matches!(
+            decoder.decode(stdout)?,
+            FrameEvent::Terminal | FrameEvent::ProtocolRejected
+        ));
         let (_rig, terminal) = persisted_attempt_with(
             "opencode",
             "opencode/opencode/glm-5.3-flash-free",
@@ -4724,7 +4727,18 @@ fn owned_dispatch_retains_failed_attempt_and_replays() -> Result {
     assert!(std::path::Path::new(path).exists());
     // Explicit worktrees use the ordinary admission path, which must also
     // preserve replay after a publication target becomes protected.
-    assert_eq!(code(&rig.execute(&git, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/unrelated"], None)?), 0);
+    assert_eq!(
+        code(&rig.execute(
+            &git,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/unrelated"
+            ],
+            None
+        )?),
+        0
+    );
     let explicit_args = [
         "dispatch",
         "--operation-id",
