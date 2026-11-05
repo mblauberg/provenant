@@ -158,7 +158,7 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
 }
 
 #[test]
-fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
+fn review_bound_worktree_resolves_subject_and_warns_on_differing_head()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let invoking = temp.path().join("invoking");
@@ -311,7 +311,7 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
 /// runtime accepts only under schema 2. `--explain` never admitted the graph,
 /// so the mismatch surfaced only on submit, as `preset_graph: invalid input`.
 #[test]
-fn review_council_with_a_base_is_admitted_on_submit() -> Result<(), Box<dyn std::error::Error>> {
+fn review_with_a_base_is_admitted_on_submit() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let project = temp.path().join("project");
     std::fs::create_dir(&project)?;
@@ -1667,7 +1667,7 @@ fn preset_list_and_show_human_output_match_goldens() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
+fn review_explain_shows_lenses_tiers_families_and_the_verifier()
 -> Result<(), Box<dyn std::error::Error>> {
     let text = explain_text(
         "review",

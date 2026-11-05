@@ -1296,7 +1296,7 @@ fn preset_wait_prepares_scratch_once_across_polls() {
 }
 
 #[test]
-fn review_council_continues_when_lens_findings_exceed_the_cap() {
+fn review_continues_when_lens_findings_exceed_the_cap() {
     use provenant_fabric_runtime::graph::{GraphStatus, NodeState, advance_with_budget};
     let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
@@ -1394,7 +1394,7 @@ fn review_council_continues_when_lens_findings_exceed_the_cap() {
 }
 
 #[test]
-fn review_council_accepts_compact_overflow_dispositions() {
+fn review_accepts_compact_overflow_dispositions() {
     use provenant_fabric_runtime::graph::{GraphStatus, advance_with_budget};
     let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
@@ -1421,7 +1421,7 @@ fn review_council_accepts_compact_overflow_dispositions() {
 }
 
 #[test]
-fn review_council_refuses_a_missing_overflow_disposition() {
+fn review_refuses_a_missing_overflow_disposition() {
     use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
     let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
@@ -1453,7 +1453,7 @@ fn review_council_refuses_a_missing_overflow_disposition() {
 }
 
 #[test]
-fn review_council_refuses_a_missing_overflow_verification() {
+fn review_refuses_a_missing_overflow_verification() {
     use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
     let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
@@ -1494,7 +1494,7 @@ fn review_council_refuses_a_missing_overflow_verification() {
 }
 
 #[test]
-fn review_council_refuses_conflicting_overflow_dispositions() {
+fn review_refuses_conflicting_overflow_dispositions() {
     use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
     let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
@@ -2607,7 +2607,7 @@ fn lens_ids(document: &serde_json::Value) -> Vec<String> {
 }
 
 #[test]
-fn review_council_fans_out_one_lens_role_over_the_lens_list() {
+fn review_fans_out_one_lens_role_over_the_lens_list() {
     let document = council(&["parameters.worktree='/repo/lane'"], false).unwrap();
     assert_eq!(
         lens_ids(&document),
@@ -3241,7 +3241,7 @@ fn opting_out_of_external_scouts_is_an_explicit_recorded_parameter() {
 }
 
 #[test]
-fn review_council_verifies_between_the_lenses_and_the_synthesis() {
+fn review_verifies_between_the_lenses_and_the_synthesis() {
     let expanded = expand(
         &Layers::empty(),
         "review",
@@ -4471,7 +4471,7 @@ mod planner_front_end {
     }
 
     #[test]
-    fn review_council_plans_only_lenses_the_panel_allows() {
+    fn review_plans_only_lenses_the_panel_allows() {
         let on = layers(PlanMode::On, None);
         let base = vec![("worktree".to_owned(), json!("/repo/lane"))];
         for tags in [json!([]), json!(["security"])] {
@@ -4508,7 +4508,7 @@ mod planner_front_end {
     }
 
     #[test]
-    fn review_council_with_a_non_commit_subject_keeps_its_static_lenses() {
+    fn review_with_a_non_commit_subject_keeps_its_static_lenses() {
         let mut configured = layers(PlanMode::On, None);
         let original = include_str!("../assets/presets/review.toml");
         let with_subject = original.replacen(
@@ -4536,7 +4536,7 @@ mod planner_front_end {
     }
 
     #[test]
-    fn review_council_auto_plans_only_a_large_subject() {
+    fn review_auto_plans_only_a_large_subject() {
         let sized = |size: Option<&'static str>| -> Layers {
             let mut layers = layers(PlanMode::Auto, None);
             layers.review = Some(Box::new(move |query| {
@@ -5654,7 +5654,7 @@ fn big_batch_without_scout_matches_golden() {
 }
 
 #[test]
-fn compact_preset_show_lists_review_council_parameter_docs() {
+fn compact_preset_show_lists_review_parameter_docs() {
     let layers = Layers::empty();
     let (values, origins) = layers.resolve("review").unwrap();
     let data = json!({"name": "review", "values": values, "origins": origins});

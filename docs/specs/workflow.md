@@ -24,7 +24,7 @@ if none remains, the findings block is invalid.
 - Why: reviewers can reconcile findings by identity without repeating their descriptions.
 - Test: `crates/fabric-runtime/src/graph/outputs.rs::alias_tests::unknown_identity_warns_when_another_disposition_is_valid`;
   `crates/fabric-runtime/src/graph/graph_tests.rs::a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once`;
-  `tests/dispatch_provider.rs::review_council_resolves_identity_only_dispositions`
+  `tests/dispatch_provider.rs::review_resolves_identity_only_dispositions`
 - Owner: `src/preset.rs`, `crates/fabric-runtime/src/graph/outputs.rs`
 
 ## Review coverage

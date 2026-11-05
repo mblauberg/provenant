@@ -1208,7 +1208,7 @@ fn capacity_settlement_resumes_the_same_session() -> Result {
     cleanup.disarm();
     Ok(())
 }
-fn review_council_resolves_identity_only_dispositions() -> Result {
+fn review_resolves_identity_only_dispositions() -> Result {
     if !graph_fixture_available().map_err(|e| format!("sandbox: {e}"))? {
         return Ok(());
     }
@@ -3024,7 +3024,7 @@ fn graph_read_only_alias_does_not_redraw_after_launch_quota() -> Result {
     Ok(())
 }
 
-fn review_council_overcap_runs_through_fake_providers() -> Result {
+fn review_overcap_runs_through_fake_providers() -> Result {
     if !graph_fixture_available().map_err(|e| format!("fixture availability: {e}"))? {
         return Ok(());
     }
@@ -5132,7 +5132,7 @@ fn main() -> ExitCode {
                 "handoff_recovery_requires_a_settled_successor",
                 "capacity_settlement_resumes_the_same_session",
                 "fixture_guardian_exits_when_sigkilled_test_owner_dies",
-                "review_council_resolves_identity_only_dispositions",
+                "review_resolves_identity_only_dispositions",
                 "review_fans_out_and_collects_fake_provider",
                 "opencode_usage_limit_settlement_is_bounded",
                 "opencode_usage_limit_stops_hanging_provider",
@@ -5148,7 +5148,7 @@ fn main() -> ExitCode {
                 "graph_retries_real_registry_lock_and_runs_writer",
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_node_reads_full_upstream_result_from_its_inputs_directory",
-                "review_council_overcap_runs_through_fake_providers",
+                "review_overcap_runs_through_fake_providers",
                 "graph_settlement_records_a_failed_advance_for_status",
                 "opencode_free_pool_cools_second_model",
                 "opencode_free_reset_cools_pool_until_reset_and_restores",
@@ -5192,9 +5192,9 @@ fn main() -> ExitCode {
                     "handoff_recovery_requires_a_settled_successor" => handoff_recovery_requires_a_settled_successor(),
                     "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
                     "fixture_guardian_exits_when_sigkilled_test_owner_dies" => fixture_guardian_exits_when_sigkilled_test_owner_dies(),
-                    "review_council_resolves_identity_only_dispositions" => review_council_resolves_identity_only_dispositions(),
+                    "review_resolves_identity_only_dispositions" => review_resolves_identity_only_dispositions(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
-                    "review_council_overcap_runs_through_fake_providers" => review_council_overcap_runs_through_fake_providers(),
+                    "review_overcap_runs_through_fake_providers" => review_overcap_runs_through_fake_providers(),
                     "opencode_usage_limit_settlement_is_bounded" => {
                         opencode_usage_limit_settlement_is_bounded()
                     }
