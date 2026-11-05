@@ -525,6 +525,10 @@ pub(crate) mod peer_tests {
 
     impl SettlementFixture {
         fn resumed() -> Result<Self, Box<dyn std::error::Error>> {
+            Self::resumed_as("settlement-resume")
+        }
+
+        fn resumed_as(operation: &str) -> Result<Self, Box<dyn std::error::Error>> {
             use provenant_confinement::worktrees::{
                 self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
             };
@@ -657,7 +661,7 @@ pub(crate) mod peer_tests {
             let resume = provenant_run::Resume {
                 prior,
                 expected_generation: 0,
-                operation_id: "settlement-resume".parse()?,
+                operation_id: operation.parse()?,
                 run_id: RunId::from_bytes([30; 16]),
                 attempt_id: AttemptId::from_bytes([31; 16]),
                 prompt: "continue".into(),
@@ -2947,6 +2951,23 @@ pub(crate) mod peer_tests {
             .ok_or("settlement")?;
         assert!(receipt["tracking_ref_warning"].is_string(), "{receipt}");
         assert_eq!(receipt["state"], "pruned", "{receipt}");
+        Ok(())
+    }
+
+    #[test]
+    fn unmatched_graph_writer_keeps_its_worktree() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::unmatched_graph_writer_keeps_its_worktree")? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed_as("graph-unmatched")?;
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request { clock: &clock, cancel: &cancel };
+        let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?
+            .ok_or("missing settlement")?;
+        assert_eq!(receipt["state"], "retained");
+        assert!(fixture.worktree.exists());
         Ok(())
     }
 
