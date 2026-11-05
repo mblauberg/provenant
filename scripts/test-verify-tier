@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Behaviour checks for repository tier selection."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import tempfile
+import unittest
+from unittest import mock
+import io
+import json
+
+loader = importlib.machinery.SourceFileLoader("verify_tier", str(Path(__file__).with_name("verify-tier")))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+verify = importlib.util.module_from_spec(spec)
+loader.exec_module(verify)
+
+
+class Selection(unittest.TestCase):
+    def test_deepest_crate_wins_and_integration_explains_paths(self):
+        packages = [
+            {"name": "root", "manifest_path": "workspace/Cargo.toml"},
+            {"name": "child", "manifest_path": "workspace/crates/child/Cargo.toml"},
+        ]
+        rules = [{"paths": ["workspace/crates/child/*"], "package": "root", "binary": "child_integration"}]
+        path = "workspace/crates/child/src/lib.rs"
+        crates, targets = verify.select([path], packages, rules)
+        self.assertEqual(crates, ["child"])
+        self.assertEqual(targets, [("root", "child_integration", [path])])
+
+    def test_override_preserves_other_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".provenant").mkdir()
+            (root / ".provenant/verify.json").write_text('{"tiers": {"1": ["custom test"]}}')
+            cfg = verify.config(root)
+            self.assertEqual(cfg["tiers"]["1"], ["custom test"])
+            self.assertEqual(cfg["tiers"]["2"], verify.DEFAULTS["tiers"]["2"])
+
+
+    def test_default_runs_only_touched_crate(self):
+        metadata = {"packages": [
+            {"name": "root", "id": "root", "manifest_path": str(verify.ROOT / "tools/front-door/Cargo.toml")},
+            {"name": "child", "id": "child", "manifest_path": str(verify.ROOT / "tools/front-door/crates/child/Cargo.toml")},
+        ], "workspace_members": ["root", "child"]}
+        def output(cmd, **kwargs):
+            return json.dumps(metadata) if cmd[0] == "cargo" else "abc\n"
+        with mock.patch.object(verify, "config", return_value=verify.DEFAULTS), \
+             mock.patch.object(verify, "changed_paths", return_value=["tools/front-door/crates/child/src/lib.rs"]), \
+             mock.patch.object(verify.subprocess, "check_output", side_effect=output), \
+             mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+             mock.patch.object(verify.sys, "argv", ["verify-tier"]), \
+             mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO):
+            self.assertEqual(verify.main(), 0)
+        for call in run.call_args_list:
+            command = call.args[0]
+            self.assertIn("child", command)
+            self.assertNotIn("root", command)
+        self.assertIn("--lib", run.call_args_list[-1].args[0])
+        self.assertIn("--bins", run.call_args_list[-1].args[0])
+
+    def test_t1_prints_matching_path_and_runs_named_binary(self):
+        path = "workspace/src/parser.rs"
+        cfg = dict(verify.DEFAULTS, integrations=[{"paths": ["workspace/src/*"], "package": "root", "binary": "parser"}])
+        metadata = json.dumps({"packages": [], "workspace_members": []})
+        with mock.patch.object(verify, "config", return_value=cfg), \
+             mock.patch.object(verify, "changed_paths", return_value=[path]), \
+             mock.patch.object(verify.subprocess, "check_output", side_effect=["abc\n", metadata]), \
+             mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "1"]), \
+             mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(verify.main(), 0)
+        self.assertIn(path, out.getvalue())
+        self.assertIn("parser", run.call_args.args[0])
+        self.assertIn("--test", run.call_args.args[0])
+
+    def test_high_load_warns_and_runs_configured_tier(self):
+        cfg = dict(verify.DEFAULTS, local_max_tier=3, suggested_host="peer", tiers={"2": ["true"]})
+        metadata = json.dumps({"packages": [], "workspace_members": []})
+        with mock.patch.object(verify, "config", return_value=cfg), \
+             mock.patch.object(verify, "changed_paths", return_value=[]), \
+             mock.patch.object(verify.os, "getloadavg", return_value=(10000, 0, 0)), \
+             mock.patch.object(verify.subprocess, "check_output", side_effect=["abc\n", metadata]), \
+             mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "2"]), \
+             mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO), \
+             mock.patch.object(verify.sys, "stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(verify.main(), 0)
+        self.assertIn("peer", err.getvalue())
+        run.assert_called_once()
+
+    def test_fake_remote_reports_commit_and_failure(self):
+        cfg = dict(verify.DEFAULTS, runners={"peer": ["fake-runner", "{commit}", "{tier}"]})
+        with mock.patch.object(verify, "config", return_value=cfg), \
+             mock.patch.object(verify.subprocess, "check_output", side_effect=["abc\n", "origin/example\n"]), \
+             mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=7)) as run, \
+             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "2", "--host", "peer"]), \
+             mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(verify.main(), 7)
+        self.assertEqual(run.call_args.args[0], ["fake-runner", "abc", "2"])
+        self.assertIn("commit=abc exit_status=7", out.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

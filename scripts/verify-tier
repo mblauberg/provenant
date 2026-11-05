@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Select repository verification work from changed paths and tier data."""
+import argparse
+import fnmatch
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULTS = {
+    "base": "origin/main",
+    "workspace": "tools/front-door",
+    "local_max_tier": 1,
+    "load_per_cpu": 1.0,
+    "suggested_host": "CI",
+    "tiers": {
+        "0": ["cargo fmt {packages} -- --check", "cargo check --locked {packages}", "cargo nextest run --profile lane --locked {packages} --lib --bins"],
+        "1": ["cargo nextest run --profile lane --locked {integration_args}"],
+        "2": [],
+        "3": [],
+    },
+    "integrations": [],
+    "runners": {},
+}
+
+
+def config(root):
+    data = dict(DEFAULTS)
+    data["tiers"] = dict(DEFAULTS["tiers"])
+    path = root / ".provenant" / "verify.json"
+    if path.exists():
+        with path.open() as stream:
+            override = json.load(stream)
+        data.update({k: v for k, v in override.items() if k != "tiers"})
+        data["tiers"].update(override.get("tiers", {}))
+    return data
+
+
+def changed_paths(root, base):
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=root, text=True).splitlines()
+    paths = set(git("diff", "--name-only", f"{base}...HEAD"))
+    paths.update(git("diff", "--name-only", "HEAD"))
+    paths.update(git("ls-files", "--others", "--exclude-standard"))
+    return sorted(paths)
+
+
+def select(paths, packages, mappings):
+    touched = set()
+    for path in paths:
+        candidates = [(p["manifest_path"], p["name"]) for p in packages
+                      if path == p["manifest_path"] or path.startswith(str(Path(p["manifest_path"]).parent) + "/")]
+        if candidates:
+            touched.add(max(candidates, key=lambda p: len(p[0]))[1])
+    selected = []
+    for rule in mappings:
+        matches = [path for path in paths if any(fnmatch.fnmatchcase(path, pattern) for pattern in rule["paths"])]
+        if matches:
+            selected.append((rule["package"], rule["binary"], matches))
+    return sorted(touched), selected
+
+
+def main():
+    import shlex
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tier", choices=["0", "1", "2", "3"], default="0")
+    parser.add_argument("--host", default="local")
+    args = parser.parse_args()
+    cfg = config(ROOT)
+    workspace = ROOT / cfg["workspace"]
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    if args.host != "local":
+        runner = cfg["runners"].get(args.host)
+        if not runner:
+            parser.error(f"no runner configured for {args.host}")
+        refs = subprocess.check_output(["git", "branch", "-r", "--contains", commit], cwd=ROOT, text=True).strip()
+        if not refs:
+            parser.error("commit is not present in a remote-tracking ref; push it before remote verification")
+        command = [part.format(commit=commit, tier=args.tier) for part in runner]
+        print(f"tier T{args.tier} on {args.host}, commit {commit}: {shlex.join(command)}", flush=True)
+        result = subprocess.run(command, cwd=ROOT).returncode
+        print(f"result: host={args.host} tier=T{args.tier} commit={commit} exit_status={result}", flush=True)
+        return result
+    if int(args.tier) > cfg["local_max_tier"] or (int(args.tier) >= 2 and os.getloadavg()[0] > cfg["load_per_cpu"] * (os.cpu_count() or 1)):
+        print(f"warning: T{args.tier} may load this host; consider {cfg['suggested_host']}", file=sys.stderr)
+    metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, text=True))
+    packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(ROOT))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
+    paths = changed_paths(ROOT, cfg["base"])
+    touched, integrations = select(paths, packages, cfg["integrations"])
+    print(f"tier T{args.tier} on local, commit {commit}; touched crates: {', '.join(touched) or 'none'}", flush=True)
+    for package, binary, matches in integrations:
+        print(f"integration {package}/{binary}: {', '.join(matches)}", flush=True)
+    if args.tier == "0" and not touched or args.tier == "1" and not integrations:
+        print(f"No matching tests selected. result: host=local tier=T{args.tier} commit={commit} exit_status=0")
+        return 0
+    packages_arg = " ".join(f"-p {shlex.quote(name)}" for name in touched)
+    integration_args = " ".join(f"-p {shlex.quote(p)} --test {shlex.quote(b)}" for p, b, _ in integrations)
+    templates = cfg["tiers"][args.tier]
+    if not templates:
+        print(f"T{args.tier} has no configured commands", file=sys.stderr)
+        return 2
+    for template in templates:
+        targets = integrations if "{integration_args}" in template else [None]
+        for target in targets:
+            target_args = (f"-p {shlex.quote(target[0])} --test {shlex.quote(target[1])}" if target else integration_args)
+            command = shlex.split(template.format(packages=packages_arg, integration_args=target_args))
+            print(f"+ {shlex.join(command)}", flush=True)
+            status = subprocess.run(command, cwd=workspace).returncode
+            if status:
+                print(f"result: host=local tier=T{args.tier} commit={commit} exit_status={status}", flush=True)
+                return status
+    print(f"result: host=local tier=T{args.tier} commit={commit} exit_status=0", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
