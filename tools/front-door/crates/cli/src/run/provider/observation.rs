@@ -230,8 +230,9 @@ pub(super) fn observe_account(
     } = *probe;
     let directory = canonical(&entry.directory)?;
     if directory != entry.directory
-        || (entry.adapter == provenant_records::Harness::Claude.spec().name
-            && directory != home.join(format!(".claude-{}", entry.label)))
+        || AdapterSpec::get(&entry.adapter)
+            .and_then(|spec| spec.account_directory_prefix)
+            .is_some_and(|prefix| directory != home.join(format!("{prefix}{}", entry.label)))
     {
         return Err(format!(
             "{} account {} has no fixed canonical identity directory",

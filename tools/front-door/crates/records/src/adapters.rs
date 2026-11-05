@@ -76,6 +76,8 @@ pub struct AdapterSpec {
     /// directory, which account settings sync keeps in step. False where it is
     /// something else: agy's is the account's keychain home.
     pub account_config_dir: bool,
+    /// Fixed home-relative prefix for registered account directories, if required.
+    pub account_directory_prefix: Option<&'static str>,
     pub local_login: bool,
     pub login_reprobe: LoginReprobe,
     pub login_observation: LoginObservation,
@@ -278,6 +280,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: true,
         account_config_dir: true,
+        account_directory_prefix: Some(".claude-"),
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::AccountAvailability,
@@ -337,6 +340,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: true,
         account_config_dir: true,
+        account_directory_prefix: None,
         local_login: false,
         login_reprobe: LoginReprobe::Codex,
         login_observation: LoginObservation::Reprobe,
@@ -400,6 +404,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: false,
         account_config_dir: false,
+        account_directory_prefix: None,
         local_login: true,
         login_reprobe: LoginReprobe::Cursor,
         login_observation: LoginObservation::Reprobe,
@@ -462,6 +467,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: true,
         account_config_dir: false,
+        account_directory_prefix: None,
         local_login: true,
         login_reprobe: LoginReprobe::AccountIdentity,
         login_observation: LoginObservation::Reprobe,
@@ -528,6 +534,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: false,
         account_config_dir: false,
+        account_directory_prefix: None,
         local_login: true,
         login_reprobe: LoginReprobe::ExecutableOnly,
         login_observation: LoginObservation::ExecutableOnly,
@@ -588,6 +595,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         skill_install_roots: &[],
         registered_account: false,
         account_config_dir: false,
+        account_directory_prefix: None,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
@@ -645,6 +653,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         skill_install_roots: &[],
         registered_account: false,
         account_config_dir: false,
+        account_directory_prefix: None,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
@@ -699,8 +708,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_copy_policy_preserves_adapter_behavior() {
+    fn account_and_session_policies_preserve_adapter_behavior() {
         for spec in ADAPTER_SPECS {
+            assert_eq!(
+                spec.account_directory_prefix,
+                (spec.id == Harness::Claude).then_some(".claude-"),
+                "{}",
+                spec.name
+            );
             assert_eq!(
                 spec.copy_sessions_only,
                 spec.id == Harness::Codex,
