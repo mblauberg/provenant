@@ -27,7 +27,9 @@ job. It binds the full tested commit, exit status, tests and log location;
 changed tracked files or incomplete evidence cannot pass. Requested model and
 effort are distinct from the observed model. Unknown or different models are
 reported. Provider-specific task protocols and log access remain behind the
-adapter, not in the shared lifecycle contract.
+adapter, not in the shared lifecycle contract. Observation and cancellation
+receive the durable job context so an adapter can select its repository and
+bind the result channel to the requested commit after a restart.
 
 The existing lane Git, credential, object-integrity and authority boundaries
 continue to apply. Host credentials do not travel in prompts, results or
