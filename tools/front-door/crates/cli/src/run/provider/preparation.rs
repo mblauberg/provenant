@@ -416,10 +416,14 @@ pub(super) fn prepare_with_wait(
             description,
             prompt,
         } = native;
+        let provider = model
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .ok_or("host-native model has no provider")?;
         let mut delegated = task.clone();
         delegated.route = run::RequestedRoute::Model {
             extra: Default::default(),
-            provider: provenant_records::Harness::Claude.spec().name.into(),
+            provider: provider.into(),
             model: model.clone(),
             effort: effort.clone(),
         };
