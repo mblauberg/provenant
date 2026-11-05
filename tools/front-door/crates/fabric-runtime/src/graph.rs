@@ -299,10 +299,10 @@ pub trait AttemptOwner {
     }
 
     /// Verify a registered writer and bind its current source before admission.
-    fn bind_implicit_writer(
+    fn bind_writer_worktree(
         &mut self,
         _worktree: &str,
-    ) -> Result<Option<ImplicitWriterBinding>, Self::Error> {
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
         Ok(None)
     }
 
@@ -581,6 +581,43 @@ impl PlannedNode {
                 .filter(|name| !self.depends_on.contains(name)),
         )
     }
+}
+
+/// The verified writer location on a reader's source chain, when known.
+fn source_worktree<'a>(
+    node: &'a PlannedNode,
+    plan: &'a PlannedGraph,
+    checkpoint: &'a GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<&'a str> {
+    let mut current = node;
+    if matches!(node.source, Some(SourceBinding::Commit { .. }))
+        && let Some(origin) = checkpoint
+            .expansions
+            .iter()
+            .find(|expansion| {
+                expansion.review.is_some()
+                    && expansion.nodes.iter().any(|member| member.id == node.id)
+            })
+            .and_then(|expansion| positions.get(&expansion.source))
+    {
+        current = &plan.nodes[*origin];
+    }
+    for _ in 0..plan.nodes.len() {
+        let source = match &current.source {
+            Some(SourceBinding::Node { node } | SourceBinding::Head { node }) => node,
+            _ => return None,
+        };
+        let index = *positions.get(source)?;
+        current = &plan.nodes[index];
+        if plans::writer(current) {
+            return checkpoint.nodes[index]
+                .writer_binding
+                .as_ref()
+                .map(|binding| binding.worktree.as_str());
+        }
+    }
+    None
 }
 
 /// Advance all currently ready nodes once. Independent nodes can progress
@@ -1076,8 +1113,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
                             _ => None,
                         },
-                        implicit_writer: None,
+                        writer_binding: None,
+                        writer_binding_pending: plans::writer(node),
                         review_base: None,
+                        review_base_pending: node.access == AccessMode::ReadOnly
+                            && node.extra.contains_key("review_base"),
                         fragment: None,
                         handoff: None,
                         expansion_pause: None,
@@ -1105,14 +1145,26 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             };
             {
                 for (node, progress) in plan.nodes.iter().zip(&mut checkpoint.nodes) {
-                    if plans::writer(node) && node.source.is_none() && node.continues.is_none() {
+                    // A loop round's worktree is advanced by earlier rounds;
+                    // its starting head becomes known only at that round.
+                    if plans::writer(node) && node.round.is_none() {
                         let worktree = node
                             .worktree
                             .as_deref()
                             .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
-                        let binding = owner
-                            .bind_implicit_writer(worktree)
-                            .map_err(GraphError::Run)?;
+                        let binding = match owner.bind_writer_worktree(worktree) {
+                            Ok(binding) => binding,
+                            Err(error) => {
+                                progress.state = NodeState::Failed;
+                                progress.advance_error_code =
+                                    Some("writer_binding_unavailable".into());
+                                progress.advance_error = Some(bounded(
+                                    &format!("node {}: cannot bind writer: {error}", node.id),
+                                    MAX_ADVANCE_ERROR_BYTES,
+                                ));
+                                continue;
+                            }
+                        };
                         let Some(binding) = binding else {
                             if document.schema_version >= 2 {
                                 return Err(GraphError::Refused(format!(
@@ -1120,24 +1172,51 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     node.id
                                 )));
                             }
+                            progress.writer_binding_pending = false;
                             continue;
                         };
                         if !std::path::Path::new(&binding.worktree).is_absolute()
                             || binding.worktree.len() > 4096
-                            || binding
-                                .source_commit
-                                .parse::<provenant_core::GitOid>()
-                                .is_err()
+                            || binding.head.parse::<provenant_core::GitOid>().is_err()
                         {
                             return Err(GraphError::Refused(format!(
                                 "node {}: writer binding is invalid",
                                 node.id
                             )));
                         }
-                        progress.source_commit = Some(binding.source_commit.clone());
-                        progress.implicit_writer = Some(binding);
+                        if node.source.is_none() && node.continues.is_none() {
+                            progress.source_commit = Some(binding.head.clone());
+                        }
+                        progress.writer_binding = Some(binding);
+                        progress.writer_binding_pending = false;
                     }
                 }
+            }
+            // Pin named review bases while the admitted source locations are
+            // still the ones selected for this execution.
+            for index in 0..plan.nodes.len() {
+                if !checkpoint.nodes[index].review_base_pending {
+                    continue;
+                }
+                let node = &plan.nodes[index];
+                let location = source_worktree(node, &plan, &checkpoint, &positions);
+                if matches!(
+                    node.source,
+                    Some(SourceBinding::Node { .. } | SourceBinding::Head { .. })
+                ) && location.is_none()
+                {
+                    continue;
+                }
+                let reference = node
+                    .extra
+                    .get("review_base")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| GraphError::Invalid("node review base missing".into()))?;
+                let base = owner.resolve_review_base(reference, location).map_err(GraphError::Run)?
+                    .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
+                    .ok_or_else(|| GraphError::Refused(format!("node {}: review base could not be bound; correct the reference and rerun", node.id)))?;
+                checkpoint.nodes[index].review_base = Some(base);
+                checkpoint.nodes[index].review_base_pending = false;
             }
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
             checkpoint
@@ -1592,6 +1671,50 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 );
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
             }
+            let requested_review_base = (node.access == AccessMode::ReadOnly)
+                .then(|| {
+                    node.extra
+                        .get("review_base")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .flatten()
+                .filter(|base| !base.is_empty());
+            if let Some(reference) = requested_review_base {
+                let progress = &checkpoint.nodes[node_index];
+                if progress.review_base.is_none() && !progress.attempts.is_empty() {
+                    return Err(GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "node review base must be bound before its first attempt",
+                    });
+                }
+                if let Some(base) = &progress.review_base {
+                    if base.parse::<provenant_core::GitOid>().is_err() {
+                        return Err(GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "node review base must be a full object ID",
+                        });
+                    }
+                } else {
+                    let base = owner
+                        .resolve_review_base(
+                            reference,
+                            source_worktree(node, &plan, &checkpoint, &positions)
+                                .or(node.worktree.as_deref()),
+                        )
+                        .map_err(GraphError::Run)?;
+                    let Some(base) =
+                        base.filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
+                    else {
+                        return Err(GraphError::Refused(format!(
+                            "node {}: review base could not be bound; correct the reference and rerun",
+                            node.id
+                        )));
+                    };
+                    checkpoint.nodes[node_index].review_base = Some(base);
+                    checkpoint.nodes[node_index].review_base_pending = false;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
+            }
             if node.review.is_some() {
                 if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
                     continue;
@@ -1640,17 +1763,23 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         node: node.id.clone(),
                         invariant: "deferred review node must have a source commit",
                     })?;
-                let original = expanded
+                let mut original = expanded
                     .nodes
                     .iter()
                     .find(|candidate| candidate.id == node.id)
+                    .cloned()
                     .ok_or_else(|| GraphError::BadCheckpoint {
                         node: node.id.clone(),
                         invariant: "deferred review node must exist in the expanded plan",
                     })?;
+                if let Some(base) = &checkpoint.nodes[node_index].review_base {
+                    original
+                        .extra
+                        .insert("review_base".into(), serde_json::json!(base));
+                }
                 let mut resolution_error_code = "review_resolution_failed";
                 let result = owner
-                    .resolve_review(original, subject)
+                    .resolve_review(&original, subject)
                     .map_err(|error| {
                         if matches!(error, ReviewResolveError::Unsupported) {
                             resolution_error_code = "review_resolution_unsupported";
@@ -1669,20 +1798,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 child.source = Some(SourceBinding::Commit {
                                     commit: subject.to_owned(),
                                 });
+                                if let Some(base) = &checkpoint.nodes[node_index].review_base {
+                                    child.extra.insert("review_base".into(), serde_json::json!(base));
+                                }
                             }
                         }
-                        if checkpoint
-                            .expansions
-                            .iter()
-                            .filter_map(|item| item.review.as_ref())
-                            .any(|review| {
-                                addition
-                                    .review
-                                    .as_ref()
-                                    .is_some_and(|next| review.base != next.base)
-                            })
-                        {
-                            return Err("review expansions disagree on the base".into());
+                        let expected_base = checkpoint.nodes[node_index].review_base.as_deref()
+                            .or(checkpoint.bound_review_base.as_deref())
+                            .or(checkpoint.bound_integration_base.as_deref());
+                        if expected_base.is_some_and(|base| addition.review.as_ref().is_none_or(|review| review.base.to_string() != base)) {
+                            return Err("review expansion base does not match its bound base".into());
                         }
                         plans::validate_review_addition(&expanded, &addition)?;
                         if addition.source != node.id
@@ -1887,16 +2012,27 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
                 // Expanded writers acquire their binding as soon as they exist.
                 if plans::writer(node)
-                    && node.source.is_none()
-                    && node.continues.is_none()
-                    && checkpoint.nodes[node_index].implicit_writer.is_none()
+                    && checkpoint.nodes[node_index].writer_binding.is_none()
                     && checkpoint.nodes[node_index].attempts.is_empty()
                 {
                     let path = node
                         .worktree
                         .as_deref()
                         .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
-                    let binding = owner.bind_implicit_writer(path).map_err(GraphError::Run)?;
+                    let binding = match owner.bind_writer_worktree(path) {
+                        Ok(binding) => binding,
+                        Err(error) => {
+                            let progress = &mut checkpoint.nodes[node_index];
+                            progress.state = NodeState::Failed;
+                            progress.advance_error_code = Some("writer_binding_unavailable".into());
+                            progress.advance_error = Some(bounded(
+                                &format!("node {}: cannot bind writer: {error}", node.id),
+                                MAX_ADVANCE_ERROR_BYTES,
+                            ));
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            break;
+                        }
+                    };
                     if binding.is_none() && document.schema_version >= 2 {
                         return Err(GraphError::Refused(format!(
                             "node {}: host cannot bind the writer source",
@@ -1906,60 +2042,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     if let Some(binding) = binding {
                         if !std::path::Path::new(&binding.worktree).is_absolute()
                             || binding.worktree.len() > 4096
-                            || binding
-                                .source_commit
-                                .parse::<provenant_core::GitOid>()
-                                .is_err()
+                            || binding.head.parse::<provenant_core::GitOid>().is_err()
                         {
                             return Err(GraphError::Refused(format!(
                                 "node {}: writer binding is invalid",
                                 node.id
                             )));
                         }
-                        checkpoint.nodes[node_index].source_commit =
-                            Some(binding.source_commit.clone());
-                        checkpoint.nodes[node_index].implicit_writer = Some(binding);
-                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    }
-                }
-                let requested_review_base = (node.access == AccessMode::ReadOnly)
-                    .then(|| {
-                        node.extra
-                            .get("review_base")
-                            .and_then(serde_json::Value::as_str)
-                    })
-                    .flatten()
-                    .filter(|base| !base.is_empty());
-                if let Some(reference) = requested_review_base {
-                    let progress = &checkpoint.nodes[node_index];
-                    if progress.review_base.is_none() && !progress.attempts.is_empty() {
-                        return Err(GraphError::BadCheckpoint {
-                            node: node.id.clone(),
-                            invariant: "node review base must be bound before its first attempt",
-                        });
-                    }
-                    if let Some(base) = &progress.review_base {
-                        if base.parse::<provenant_core::GitOid>().is_err() {
-                            return Err(GraphError::BadCheckpoint {
-                                node: node.id.clone(),
-                                invariant: "node review base must be a full object ID",
-                            });
+                        if node.source.is_none() && node.continues.is_none() {
+                            checkpoint.nodes[node_index].source_commit = Some(binding.head.clone());
                         }
-                    } else {
-                        let base = owner
-                            .resolve_review_base(reference, node.worktree.as_deref())
-                            .map_err(GraphError::Run)?;
-                        let Some(base) =
-                            base.filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
-                        else {
-                            return Err(GraphError::Refused(format!(
-                                "node {}: review base could not be bound; correct the reference and rerun",
-                                node.id
-                            )));
-                        };
-                        checkpoint.nodes[node_index].review_base = Some(base);
-                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        checkpoint.nodes[node_index].writer_binding = Some(binding);
                     }
+                    checkpoint.nodes[node_index].writer_binding_pending = false;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
                 let needs_record = checkpoint.nodes[node_index]
                     .attempts
@@ -2497,7 +2593,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     &route,
                     node.access,
                     checkpoint.nodes[node_index]
-                        .implicit_writer
+                        .writer_binding
                         .as_ref()
                         .map(|binding| binding.worktree.as_str())
                         .or(node.worktree.as_deref()),
@@ -2549,7 +2645,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 || value.starts_with('/')
                                 || !value.bytes().all(|b| {
                                     b.is_ascii_alphanumeric()
-                                        || matches!(b, b'/' | b'-' | b'_' | b'.' | b':')
+                                        || matches!(
+                                            b,
+                                            b'/' | b'-' | b'_' | b'.' | b':' | b'@' | b'+'
+                                        )
                                 })
                         }) {
                             *value = None;

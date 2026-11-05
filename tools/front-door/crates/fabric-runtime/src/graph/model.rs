@@ -773,12 +773,18 @@ pub struct NodeProgress {
     /// Resolved once before launch and retained across retries and replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
-    /// Canonical worktree and initial source for a writer with no explicit source.
+    /// Canonical verified writer worktree and its head at binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub implicit_writer: Option<ImplicitWriterBinding>,
+    pub writer_binding: Option<WriterWorktreeBinding>,
+    /// An expanded writer whose worktree has not yet become available to bind.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub writer_binding_pending: bool,
     /// Node-specific review base resolved before the first attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_base: Option<String>,
+    /// Review base awaiting a source location that has not yet been bound.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub review_base_pending: bool,
     /// Bounded planner JSON retained until admission succeeds, including across resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
@@ -833,11 +839,11 @@ pub struct NodeProgress {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImplicitWriterBinding {
+pub struct WriterWorktreeBinding {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub worktree: String,
-    pub source_commit: String,
+    pub head: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -882,6 +888,12 @@ pub struct AttemptInputManifest {
     pub extra: provenant_records::ExtraFields,
     pub schema_version: u64,
     pub source_commit: Option<String>,
+    /// Producer of an upstream source, absent when it cannot be identified.
+    #[serde(default)]
+    pub source_producer: Option<AttemptKey>,
+    /// Writer worktree head observed when its location was bound.
+    #[serde(default)]
+    pub writer_head: Option<String>,
     pub review_base: Option<String>,
     /// Graph-wide bases are distinct from a node's review base and source.
     #[serde(default)]

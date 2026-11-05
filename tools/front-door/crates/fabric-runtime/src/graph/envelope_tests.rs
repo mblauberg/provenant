@@ -211,8 +211,10 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 children: node.composite_members.clone(),
                 source_binding: node.source.clone(),
                 source_commit: node.source.as_ref().map(|_| "1".repeat(64)),
-                implicit_writer: None,
+                writer_binding: None,
+        writer_binding_pending: plans::writer(node),
                 review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
+        review_base_pending: false,
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
                 handoff: plans::writer(node).then(|| "\"".repeat(plans::STORED_HANDOFF_BYTES / 2 - 1)),
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
@@ -944,6 +946,24 @@ fn check_big_batch_panels(document: GraphDocument) {
     }
 }
 
+#[test]
+fn independent_review_expansions_can_retain_different_bases() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../assets/presets/fixtures/big-batch-five-lane-checkpoint.json"
+    )).unwrap();
+    let document: GraphDocument = serde_json::from_value(fixture).unwrap();
+    let limits = plans::generous();
+    let expanded = loops::expand(&document, &[], &limits).unwrap();
+    let sources: Vec<_> = expanded.nodes.iter().filter(|node| node.review.is_some()).take(2).cloned().collect();
+    assert_eq!(sources.len(), 2);
+    let additions: Vec<_> = sources.iter().enumerate().map(|(index, source)| {
+        let mut addition = fixture_review_expansion(source, &"1".repeat(40));
+        addition.review.as_mut().unwrap().base = (if index == 0 { "2" } else { "3" }).repeat(40).parse().unwrap();
+        addition
+    }).collect();
+    assert!(plans::expand(&document, &[], &additions, &limits).is_ok());
+}
+
 fn fixture_review_expansion(source: &GraphNode, subject: &str) -> Expansion {
     let id = source.id.clone();
     let spec = source.review.as_ref().unwrap();
@@ -1104,6 +1124,9 @@ fn five_lane_big_batch_expands_through_runtime() {
         type Error = std::convert::Infallible;
         fn actor(&self) -> String {
             "fixture".into()
+        }
+        fn bind_writer_worktree(&mut self, worktree: &str) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+            Ok(Some(WriterWorktreeBinding { extra: Default::default(), worktree: if std::path::Path::new(worktree).is_absolute() { worktree.to_owned() } else { format!("/fixture/{worktree}") }, head: "1111111111111111111111111111111111111111".into() }))
         }
         fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
             Ok(Some("1".repeat(40)))

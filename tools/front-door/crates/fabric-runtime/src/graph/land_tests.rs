@@ -886,6 +886,17 @@ fn a_head_source_reviews_the_newest_continuation_and_lands_it() {
         node(&checkpoint, "review").source_commit.as_deref(),
         Some(REPAIR_HEAD)
     );
+    assert_eq!(
+        node(&checkpoint, "review").attempts[0]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .source_producer
+            .as_ref()
+            .unwrap()
+            .node_id,
+        "repair"
+    );
     // The pinned head replays unchanged.
     assert_eq!(
         advance(&document, &mut owner, &mut journal)

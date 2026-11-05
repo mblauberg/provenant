@@ -242,7 +242,7 @@ pub(super) fn delivered_head(
     checkpoint: &GraphCheckpoint,
     writer: &str,
 ) -> Option<(String, String)> {
-    delivered_within(plan, checkpoint, writer, |_| true)
+    delivered_within(plan, checkpoint, writer, |_| true).map(|(branch, head, _)| (branch, head))
 }
 
 /// As [`delivered_head`], counting only the chain nodes `include` accepts.
@@ -251,7 +251,7 @@ fn delivered_within(
     checkpoint: &GraphCheckpoint,
     writer: &str,
     include: impl Fn(usize) -> bool,
-) -> Option<(String, String)> {
+) -> Option<(String, String, Option<AttemptKey>)> {
     plan.nodes
         .iter()
         .zip(&checkpoint.nodes)
@@ -267,10 +267,15 @@ fn delivered_within(
                 .attempts
                 .last()
                 .map_or(0, |attempt| attempt.settled);
-            Some((settled, outputs.branch.clone()?, outputs.commit.clone()?))
+            Some((
+                settled,
+                outputs.branch.clone()?,
+                outputs.commit.clone()?,
+                progress.attempts.last().map(|attempt| attempt.key.clone()),
+            ))
         })
-        .max_by_key(|(settled, _, _)| *settled)
-        .map(|(_, branch, commit)| (branch, commit))
+        .max_by_key(|(settled, _, _, _)| *settled)
+        .map(|(_, branch, commit, attempt)| (branch, commit, attempt))
 }
 
 /// The head a reviewer judged, or `None` for a node that is not a reviewer.
@@ -325,7 +330,20 @@ pub(super) fn chain_head(
 ) -> Option<String> {
     let upstream = ancestors(&plan.nodes, positions, node);
     delivered_within(plan, checkpoint, writer, |index| upstream.contains(&index))
-        .map(|(_, head)| head)
+        .map(|(_, head, _)| head)
+}
+
+/// The attempt that supplied the head selected by the same chain ordering.
+pub(super) fn chain_source_attempt(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    node: &str,
+    writer: &str,
+) -> Option<AttemptKey> {
+    let upstream = ancestors(&plan.nodes, positions, node);
+    delivered_within(plan, checkpoint, writer, |index| upstream.contains(&index))
+        .and_then(|(_, _, attempt)| attempt)
 }
 
 /// Attempt references of `writer` and of the writers that continue it among

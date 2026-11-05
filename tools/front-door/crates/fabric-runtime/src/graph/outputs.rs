@@ -1378,6 +1378,20 @@ pub(super) fn attempt_input_manifest(
         extra: Default::default(),
         schema_version: 1,
         source_commit: progress.source_commit.clone(),
+        source_producer: match &node.source {
+            Some(SourceBinding::Node { node }) => positions
+                .get(node)
+                .and_then(|index| checkpoint.nodes[*index].attempts.last())
+                .map(|attempt| attempt.key.clone()),
+            Some(SourceBinding::Head { node: writer }) => {
+                land::chain_source_attempt(plan, checkpoint, positions, &node.id, writer)
+            }
+            _ => None,
+        },
+        writer_head: progress
+            .writer_binding
+            .as_ref()
+            .map(|binding| binding.head.clone()),
         review_base: progress.review_base.clone(),
         graph_review_base: checkpoint.bound_review_base.clone(),
         integration_base: checkpoint.bound_integration_base.clone(),
@@ -1445,9 +1459,8 @@ pub(super) fn attempt_input_manifest(
                     },
                     |entry| match entry {
                         MaterialisedInput::File { omitted: 0, .. } => InputDelivery::Delivered,
-                        MaterialisedInput::File { .. } | MaterialisedInput::Capped { .. } => {
-                            InputDelivery::Capped
-                        }
+                        MaterialisedInput::File { .. } => InputDelivery::Capped,
+                        MaterialisedInput::Capped { .. } => InputDelivery::Omitted,
                         MaterialisedInput::Unavailable { .. } => InputDelivery::Unavailable,
                     },
                 );

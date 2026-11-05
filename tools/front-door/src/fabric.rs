@@ -4309,9 +4309,15 @@ impl BoundGraphOwner<'_> {
         let subject = provenant_core::GitOid::parse(subject).map_err(|error| {
             ReviewResolveError::Failed(format!("invalid pinned review subject: {error}"))
         })?;
-        let base = self
-            .integration_base
-            .and_then(|bases| bases.review.or(bases.integration))
+        let base = node
+            .extra
+            .get("review_base")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|base| provenant_core::GitOid::parse(base).ok())
+            .or_else(|| {
+                self.integration_base
+                    .and_then(|bases| bases.review.or(bases.integration))
+            })
             .unwrap_or(subject);
         let directory = spec.worktree.as_deref().map_or_else(
             || self.factory.cwd.clone(),
@@ -4703,10 +4709,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.prior_models(attempts)
     }
 
-    fn bind_implicit_writer(
+    fn bind_writer_worktree(
         &mut self,
         path: &str,
-    ) -> Result<Option<provenant_fabric_runtime::graph::ImplicitWriterBinding>, Self::Error> {
+    ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
         let request = provenant_run::resolve_writer(
             self.factory.context.roots.state.as_path(),
             &self.factory.cwd,
@@ -4718,7 +4724,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             self.factory.context.roots.state.as_path(),
             self.factory.context.identity.project,
         )
-        .map_err(run_error)?;
+        .map_err(|error| match error {
+            provenant_run::RunError::Validation("writer needs a branch") => FacadeError::DispatchRefused {
+                fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DetachedWriter),
+                disk: None,
+                reason: "writer needs a branch".into(),
+            },
+            other => run_error(other),
+        })?;
         let worktree = writer
             .worktree
             .path()
@@ -4726,10 +4739,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .ok_or(FacadeError::InvalidInput { detail: None })?
             .to_owned();
         Ok(Some(
-            provenant_fabric_runtime::graph::ImplicitWriterBinding {
+            provenant_fabric_runtime::graph::WriterWorktreeBinding {
                 extra: Default::default(),
                 worktree,
-                source_commit: writer.source_commit().to_string(),
+                head: writer.source_commit().to_string(),
             },
         ))
     }

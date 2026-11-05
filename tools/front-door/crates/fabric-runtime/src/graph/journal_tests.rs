@@ -514,15 +514,15 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
         fn actor(&self) -> String {
             "fixture".into()
         }
-        fn bind_implicit_writer(
+        fn bind_writer_worktree(
             &mut self,
             _: &str,
-        ) -> Result<Option<ImplicitWriterBinding>, Infallible> {
+        ) -> Result<Option<WriterWorktreeBinding>, Infallible> {
             self.bindings += 1;
-            Ok(Some(ImplicitWriterBinding {
+            Ok(Some(WriterWorktreeBinding {
                 extra: Default::default(),
                 worktree: "/fixture/lane".into(),
-                source_commit: self.head.clone(),
+                head: self.head.clone(),
             }))
         }
         fn observe_or_start(
@@ -604,7 +604,7 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
         replay.nodes[0].attempts[0].key
     );
     assert_eq!(
-        first.nodes[0].implicit_writer,
-        replay.nodes[0].implicit_writer
+        first.nodes[0].writer_binding,
+        replay.nodes[0].writer_binding
     );
 }

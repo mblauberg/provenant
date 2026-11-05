@@ -987,12 +987,47 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         node: plan.graph_id.clone(),
         invariant: "asks must match checkpoint identities and decision sessions",
     })?;
-    let positions = plan
+    let positions: std::collections::BTreeMap<String, usize> = plan
         .nodes
         .iter()
         .enumerate()
         .map(|(i, node)| (node.id.clone(), i))
         .collect();
+    for expansion in &checkpoint.expansions {
+        if let Some(review) = &expansion.review {
+            let progress = positions
+                .get(&expansion.source)
+                .map(|index| &checkpoint.nodes[*index])
+                .ok_or_else(|| GraphError::BadCheckpoint {
+                    node: expansion.source.clone(),
+                    invariant: "review expansion must retain its source",
+                })?;
+            let expected = progress
+                .review_base
+                .as_deref()
+                .or(checkpoint.bound_review_base.as_deref())
+                .or(checkpoint.bound_integration_base.as_deref());
+            if expected.is_some_and(|base| review.base.to_string() != base)
+                || progress.review_base.as_deref().is_some_and(|base| {
+                    expansion
+                        .nodes
+                        .iter()
+                        .filter(|node| node.composite.is_none())
+                        .any(|node| {
+                            node.extra
+                                .get("review_base")
+                                .and_then(serde_json::Value::as_str)
+                                != Some(base)
+                        })
+                })
+            {
+                return Err(GraphError::BadCheckpoint {
+                    node: expansion.source.clone(),
+                    invariant: "review expansion must retain its bound base",
+                });
+            }
+        }
+    }
     for (index, (progress, node)) in checkpoint.nodes.iter().zip(&plan.nodes).enumerate() {
         let bad = |invariant| GraphError::BadCheckpoint {
             node: node.id.clone(),
@@ -1027,7 +1062,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             (
                 progress.source_commit.is_some()
                     && node.source.is_none()
-                    && progress.implicit_writer.is_none(),
+                    && progress.writer_binding.is_none(),
                 "resolved source requires a source binding",
             ),
             (
@@ -1153,29 +1188,51 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         } else if progress.land.is_some() {
             return Err(bad("land record requires a land node"));
         }
-        if let Some(binding) = &progress.implicit_writer {
+        let requests_review_base =
+            node.access == AccessMode::ReadOnly && node.extra.contains_key("review_base");
+        if progress.review_base_pending
+            && (!requests_review_base
+                || progress.review_base.is_some()
+                || !progress.attempts.is_empty())
+        {
+            return Err(bad(
+                "pending review base must belong to an unlaunched reader",
+            ));
+        }
+        if document.schema_version >= 2
+            && requests_review_base
+            && progress.review_base.is_none()
+            && !progress.review_base_pending
+        {
+            return Err(bad("reader must retain its review base binding"));
+        }
+        if progress.writer_binding_pending
+            && (!plans::writer(node)
+                || progress.writer_binding.is_some()
+                || !progress.attempts.is_empty())
+        {
+            return Err(bad(
+                "pending writer binding must belong to an unlaunched writer",
+            ));
+        }
+        if let Some(binding) = &progress.writer_binding {
             if !plans::writer(node)
-                || node.source.is_some()
-                || node.continues.is_some()
                 || !std::path::Path::new(&binding.worktree).is_absolute()
                 || binding.worktree.len() > 4096
-                || binding
-                    .source_commit
-                    .parse::<provenant_core::GitOid>()
-                    .is_err()
-                || progress.source_commit.as_ref() != Some(&binding.source_commit)
+                || binding.head.parse::<provenant_core::GitOid>().is_err()
+                || (node.source.is_none()
+                    && node.continues.is_none()
+                    && progress.source_commit.as_ref() != Some(&binding.head))
             {
                 return Err(bad(
-                    "implicit writer binding must retain its worktree and source",
+                    "writer binding must retain its worktree and initial head",
                 ));
             }
         } else if document.schema_version >= 2
             && plans::writer(node)
-            && node.source.is_none()
-            && node.continues.is_none()
-            && !progress.attempts.is_empty()
+            && !progress.writer_binding_pending
         {
-            return Err(bad("launched implicit writer must retain its binding"));
+            return Err(bad("writer must retain its binding"));
         }
         if !progress.attempts.is_empty()
             && node.source.is_some()

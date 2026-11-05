@@ -163,6 +163,15 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
                         attempt.input_cap_source.map_or("unavailable", |_| "effective_graph_limits"),
                         manifest.omitted,
                     ));
+                    if let Some(producer) = &manifest.source_producer {
+                        human.push_str(&format!(
+                            "      source_producer graph={} node={} attempt={}\n",
+                            producer.graph_id, producer.node_id, producer.route_index
+                        ));
+                    }
+                    if let Some(head) = &manifest.writer_head {
+                        human.push_str(&format!("      writer_initial_head={head}\n"));
+                    }
                     match &manifest.dependencies {
                         Some(dependencies) => human.push_str(&format!(
                             "      dependencies={} omitted={}\n",

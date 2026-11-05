@@ -68,6 +68,7 @@ struct FakeOwner {
     source_commits: Vec<Option<String>>,
     resolved_review_base: Option<String>,
     review_base_resolutions: usize,
+    review_base_worktrees: Vec<Option<String>>,
     observed_review_bases: Vec<Option<String>>,
     equal_range: bool,
     read_roots: Vec<Vec<String>>,
@@ -78,6 +79,7 @@ struct FakeOwner {
     models: std::collections::BTreeMap<String, String>,
     review_expansion: Option<Expansion>,
     review_calls: usize,
+    review_requested_bases: Vec<Option<String>>,
     require_distinct: Vec<bool>,
     deadlines: Vec<Option<u64>>,
     families: std::collections::BTreeMap<String, String>,
@@ -136,9 +138,10 @@ impl AttemptOwner for FakeOwner {
     fn resolve_review_base(
         &mut self,
         reference: &str,
-        _: Option<&str>,
+        worktree: Option<&str>,
     ) -> Result<Option<String>, Self::Error> {
         self.review_base_resolutions += 1;
+        self.review_base_worktrees.push(worktree.map(str::to_owned));
         Ok(self.resolved_review_base.clone().or_else(|| {
             reference
                 .parse::<provenant_core::GitOid>()
@@ -149,27 +152,33 @@ impl AttemptOwner for FakeOwner {
 
     fn resolve_review(
         &mut self,
-        _node: &GraphNode,
+        node: &GraphNode,
         _subject: &str,
     ) -> Result<Expansion, ReviewResolveError> {
         self.review_calls += 1;
+        self.review_requested_bases.push(
+            node.extra
+                .get("review_base")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        );
         self.review_expansion
             .clone()
             .ok_or(ReviewResolveError::Unsupported)
     }
-    fn bind_implicit_writer(
+    fn bind_writer_worktree(
         &mut self,
         worktree: &str,
-    ) -> Result<Option<ImplicitWriterBinding>, Self::Error> {
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
         self.implicit_bindings += 1;
-        Ok(Some(ImplicitWriterBinding {
+        Ok(Some(WriterWorktreeBinding {
             extra: Default::default(),
             worktree: if std::path::Path::new(worktree).is_absolute() {
                 worktree.to_owned()
             } else {
                 format!("/fixture/{worktree}")
             },
-            source_commit: self.implicit_head.clone().unwrap_or_else(|| "a".repeat(40)),
+            head: self.implicit_head.clone().unwrap_or_else(|| "a".repeat(40)),
         }))
     }
     fn bound_graph_bases(
@@ -3057,6 +3066,106 @@ fn source_and_read_roots_survive_retry_and_replay() {
 }
 
 #[test]
+fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
+    let original = "1".repeat(40);
+    let predecessor = "2".repeat(40);
+    let base = "3".repeat(40);
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    writer.source = Some(SourceBinding::Commit { commit: original });
+    let mut reader = node("reader", route("fixture"));
+    reader.depends_on.push("writer".into());
+    reader.source = Some(SourceBinding::Node {
+        node: "writer".into(),
+    });
+    reader
+        .extra
+        .insert("review_base".into(), serde_json::json!("moving-ref"));
+    let mut document = graph(vec![reader, writer]);
+    document.schema_version = 2;
+    let mut written = terminal(AttemptOutcome::Succeeded);
+    if let AttemptObservation::Terminal { commit, .. } = &mut written {
+        *commit = Some(predecessor.clone());
+    }
+    let mut owner = FakeOwner {
+        resolved_review_base: Some(base.clone()),
+        observations: VecDeque::from([
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/writer".into()),
+            },
+            written,
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/reader".into()),
+            },
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let admitted = advance(&document, &mut owner, &mut journal).unwrap();
+    let reader = admitted
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "reader")
+        .unwrap();
+    assert!(reader.attempts.is_empty());
+    assert_eq!(reader.review_base.as_deref(), Some(base.as_str()));
+    let mut broken = admitted.checkpoint.clone();
+    broken
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "reader")
+        .unwrap()
+        .review_base = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+    owner.resolved_review_base = Some("4".repeat(40));
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    let reader = pending
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "reader")
+        .unwrap();
+    assert_eq!(reader.source_commit.as_deref(), Some(predecessor.as_str()));
+    assert_eq!(reader.review_base.as_deref(), Some(base.as_str()));
+    assert_eq!(
+        reader.attempts[0]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .source_producer
+            .as_ref()
+            .unwrap()
+            .node_id,
+        "writer"
+    );
+    assert_eq!(
+        owner.review_base_worktrees,
+        vec![Some("/fixture/lane".into())]
+    );
+    owner.resolved_review_base = Some("4".repeat(40));
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    let reader = replay
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "reader")
+        .unwrap();
+    assert_eq!(reader.source_commit.as_deref(), Some(predecessor.as_str()));
+    assert_eq!(reader.review_base.as_deref(), Some(base.as_str()));
+    assert_eq!(owner.review_base_resolutions, 1);
+}
+
+#[test]
 fn known_commit_source_is_visible_before_dependencies_settle() {
     let mut reader = node("reader", route("fixture"));
     reader.depends_on.push("gate".into());
@@ -3083,6 +3192,69 @@ fn known_commit_source_is_visible_before_dependencies_settle() {
         reader.source_commit.as_deref(),
         Some("1111111111111111111111111111111111111111")
     );
+}
+
+#[test]
+fn explicit_writer_source_stays_distinct_from_its_bound_worktree_head() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    writer.source = Some(SourceBinding::Commit {
+        commit: "1".repeat(40),
+    });
+    writer.depends_on.push("gate".into());
+    let mut document = graph(vec![writer, node("gate", route("fixture"))]);
+    document.schema_version = 2;
+    let mut owner = FakeOwner {
+        implicit_head: Some("2".repeat(40)),
+        observations: VecDeque::from([AttemptObservation::Pending {
+            attempt_ref: Some("host/gate".into()),
+        }]),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let writer = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "writer")
+        .unwrap();
+    assert!(writer.attempts.is_empty());
+    assert_eq!(
+        writer.source_commit.as_deref(),
+        Some("1111111111111111111111111111111111111111")
+    );
+    assert_eq!(writer.writer_binding.as_ref().unwrap().head, "2".repeat(40));
+    let mut broken = run.checkpoint.clone();
+    broken
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "writer")
+        .unwrap()
+        .writer_binding = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+}
+
+#[test]
+fn schema_two_refuses_a_host_that_cannot_bind_a_writer() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    let mut document = graph(vec![writer]);
+    document.schema_version = 2;
+    let mut journal = MemoryJournal::default();
+    assert!(matches!(
+        advance(&document, &mut ErrorLauncher::default(), &mut journal),
+        Err(GraphError::Refused(_))
+    ));
+    assert!(journal.0.is_none());
 }
 
 #[test]
@@ -3134,6 +3306,21 @@ fn implicit_writer_binds_before_its_dependency_settles() {
         .unwrap();
     assert!(progress.attempts.is_empty());
     assert_eq!(progress.source_commit.as_deref(), Some(first_head.as_str()));
+    let mut broken = pending.checkpoint.clone();
+    broken
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "writer")
+        .unwrap()
+        .writer_binding = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
     owner.implicit_head = Some("2".repeat(40));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(owner.implicit_bindings, 1);
@@ -3173,7 +3360,7 @@ fn implicit_writer_source_is_bound_at_admission_and_survives_replay() {
     let progress = &pending.checkpoint.nodes[0];
     assert_eq!(progress.source_commit.as_deref(), Some(first_head.as_str()));
     assert_eq!(
-        progress.implicit_writer.as_ref().unwrap().worktree,
+        progress.writer_binding.as_ref().unwrap().worktree,
         "/fixture/lane"
     );
     assert_eq!(owner.implicit_bindings, 1);
@@ -3190,7 +3377,7 @@ fn implicit_writer_source_is_bound_at_admission_and_survives_replay() {
         Some(first_head.as_str())
     );
     let mut broken = done.checkpoint.clone();
-    broken.nodes[0].implicit_writer = None;
+    broken.nodes[0].writer_binding = None;
     assert!(matches!(
         advance(
             &document,
@@ -5581,6 +5768,31 @@ fn capped_upstream_results_are_named_in_the_prompt() {
         "{prompt}"
     );
     assert!(prompt.contains("- later: CAPPED: not written"), "{prompt}");
+}
+
+#[test]
+fn manifest_reports_a_file_omitted_at_the_delivery_cap() {
+    let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        directory: None,
+        index: None,
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::Capped {
+                label: request.label.clone(),
+            })
+            .collect(),
+    }));
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let child = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "child")
+        .unwrap();
+    let input = &child.attempts[0].input_manifest.as_ref().unwrap().inputs[0];
+    assert_eq!(input.file_delivery, InputDelivery::Omitted);
+    assert_eq!(input.delivery, InputDelivery::Delivered);
+    assert!(owner.prompts[1].contains("CAPPED"));
 }
 
 #[test]
@@ -8211,9 +8423,10 @@ fn review_base_save_failure_prevents_attempt_creation() {
         Err(GraphError::Journal(_))
     ));
     assert!(owner.calls.is_empty());
-    let prior = journal.0.as_ref().unwrap();
-    assert!(prior.nodes[0].review_base.is_none());
-    assert!(prior.nodes[0].attempts.is_empty());
+    assert!(
+        journal.0.is_none(),
+        "failed admission must not save a partial graph"
+    );
 }
 
 #[test]
@@ -9178,6 +9391,10 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
     for invalid in [false, true] {
         let mut review = node("review", route("first"));
         review.kind = Some(NodeKind::Plan);
+        review.extra.insert(
+            "review_base".into(),
+            serde_json::json!("moving-review-base"),
+        );
         review.route = None;
         review.source = Some(SourceBinding::Commit {
             commit: oid.clone(),
@@ -9263,6 +9480,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
         let mut owner = FakeOwner {
             observations,
             review_expansion: Some(addition),
+            resolved_review_base: Some("2".repeat(40)),
             materialise: Some(|requests| MaterialisedInputs {
                 directory: Some("/inputs".into()),
                 index: Some("/inputs/index.json".into()),
@@ -9290,6 +9508,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
             &Default::default(),
         )
         .unwrap();
+        assert_eq!(owner.review_requested_bases, vec![Some("2".repeat(40))]);
         assert_eq!(
             run.checkpoint
                 .nodes

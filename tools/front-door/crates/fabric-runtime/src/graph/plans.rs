@@ -385,14 +385,7 @@ pub(super) fn expand(
 ) -> Result<GraphDocument, String> {
     let mut expanded = loops::expand(document, extensions, limits)?;
     let mut sources = std::collections::BTreeSet::new();
-    let mut review_base = None;
     for addition in expansions {
-        if let Some(review) = &addition.review {
-            if review_base.is_some_and(|base| base != review.base) {
-                return Err("review expansions disagree on the base".into());
-            }
-            review_base = Some(review.base);
-        }
         if addition.nodes.is_empty()
             || !sources.insert(&addition.source)
             || !expanded.nodes.iter().any(|n| n.id == addition.source)

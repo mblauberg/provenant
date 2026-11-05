@@ -571,8 +571,11 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                     Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
                     _ => None,
                 },
-                implicit_writer: None,
+                writer_binding: None,
+                writer_binding_pending: plans::writer(n),
                 review_base: None,
+                review_base_pending: n.access == AccessMode::ReadOnly
+                    && n.extra.contains_key("review_base"),
                 fragment: None,
                 handoff: None,
                 expansion_pause: None,

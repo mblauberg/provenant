@@ -117,6 +117,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
     fn actor(&self) -> String {
         "deliver-test".into()
     }
+    fn bind_writer_worktree(
+        &mut self,
+        worktree: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
+        Ok(Some(
+            provenant_fabric_runtime::graph::WriterWorktreeBinding {
+                extra: Default::default(),
+                worktree: if std::path::Path::new(worktree).is_absolute() {
+                    worktree.to_owned()
+                } else {
+                    format!("/fixture/{worktree}")
+                },
+                head: self.integration.clone().unwrap_or_else(|| BASE.into()),
+            },
+        ))
+    }
     fn preparation_fallback_evidence(
         &mut self,
         key: &AttemptKey,
@@ -1036,8 +1052,6 @@ fn big_batch_lanes_deliver_then_the_council_gates_the_principal_and_repairer() {
     assert!(combined.is_some());
     // Each repair round continues the worktree and descends from the head the
     // previous delivery left on the integration branch, never a stale pin.
-    assert_eq!(source("repair--r1--fix"), None);
-    assert_eq!(source("repair--r2--fix"), None);
     let head = |id: &str| {
         progress(&run.checkpoint, id)
             .outputs
@@ -1051,6 +1065,8 @@ fn big_batch_lanes_deliver_then_the_council_gates_the_principal_and_repairer() {
         head("repair--r1--fix"),
         head("repair--r2--fix"),
     );
+    assert_eq!(source("repair--r1--fix"), principal);
+    assert_eq!(source("repair--r2--fix"), round_one);
     assert!(principal.is_some() && round_one.is_some() && round_two.is_some());
     assert_ne!(principal, round_one);
     assert_ne!(round_one, round_two);

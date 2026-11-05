@@ -288,8 +288,10 @@ fn node_bound(
         children: node.composite_members.clone(),
         source_binding: node.source.clone(),
         source_commit: node.source.as_ref().map(|_| String::new()),
-        implicit_writer: None,
+        writer_binding: None,
+        writer_binding_pending: plans::writer(node),
         review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
+        review_base_pending: false,
         fragment: (node.plan.is_some() && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
         expansion_pause: expands.then(String::new),
@@ -457,7 +459,7 @@ fn node_bound(
                 .saturating_add(OUTPUT_FIELD_BYTES + 512);
         }
     }
-    if plans::writer(node) && node.source.is_none() && node.continues.is_none() {
+    if plans::writer(node) {
         bytes = bytes.saturating_add(6 * 4096 + 256);
     }
     if !boundary {
