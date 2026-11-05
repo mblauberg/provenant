@@ -806,6 +806,35 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
         fs::write(directory.join("auth.json"), &auth)?;
         let key = provenant_providers::identity::codex_account(&auth).ok_or("account key")?;
         support::register_account(&rig, "codex", label, &key, &directory)?;
+        let readiness = rig.state.join("readiness").join(&key);
+        fs::create_dir_all(&readiness)?;
+        fs::set_permissions(
+            rig.state.join("readiness"),
+            fs::Permissions::from_mode(0o700),
+        )?;
+        fs::set_permissions(&readiness, fs::Permissions::from_mode(0o700))?;
+        let stale = provenant_quota::ReadinessFile {
+            schema_version: 1,
+            login: None,
+            records: vec![provenant_quota::RouteReadiness {
+                schema_version: 1,
+                scope: provenant_quota::ReadinessScope {
+                    host: provenant_quota::LOCAL_HOST.into(),
+                    adapter: "codex".into(),
+                    account_key: key,
+                    route: "codex/gpt-6-luna".into(),
+                },
+                state: provenant_quota::ReadinessState::Ready,
+                reason: None,
+                observed_unix_seconds: 1,
+                expires_unix_seconds: 2,
+                reset_unix_seconds: None,
+                evidence_ref: Some("fixture".into()),
+            }],
+        };
+        let readiness_file = readiness.join("codex.json");
+        fs::write(&readiness_file, serde_json::to_vec(&stale)?)?;
+        fs::set_permissions(readiness_file, fs::Permissions::from_mode(0o600))?;
     }
     let git = provenant_os::git::git_executable().ok_or("git")?;
     for args in [
@@ -894,6 +923,12 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
         .find(|row| row["attempt_number"] == 2)
         .ok_or("successor")?;
     assert_eq!(first["state"], "quota_limited", "{lanes}");
+    assert!(
+        first["applied_route"]["availability_warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("Stale")),
+        "{lanes}"
+    );
     assert_eq!(second["state"], "uncommitted", "{lanes}");
     assert_eq!(second["continuation"], "policy_fallback");
     assert_ne!(

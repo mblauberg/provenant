@@ -1066,7 +1066,10 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         match scenario {
             "authority" => assert!(reason.contains("single regular file"), "{reason}"),
             "refresh" => assert!(reason.contains("stored credential JSON"), "{reason}"),
-            "quota" => assert!(reason.contains("Exhausted"), "{reason}"),
+            "quota" => assert!(
+                reason.to_ascii_lowercase().contains("exhausted"),
+                "{reason}"
+            ),
             _ => unreachable!(),
         }
         cleanup.disarm();

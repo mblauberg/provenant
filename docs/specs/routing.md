@@ -381,6 +381,13 @@ auth failures never switch accounts. Provider capacity errors settle as
 `model_unavailable` with the provider's reason visible in lanes and record a
 separate, advisory capacity cooldown on the host.
 
+For an identified account, uncertain availability is a selection preference:
+current evidence ranks ahead of stale or unknown evidence. When uncertainty is
+selected, the lane records a warning and lets the provider answer. A missing
+executable, identity mismatch, disclosure or model-policy denial, active
+provider refusal and exhausted allowance remain exclusions. If every account
+is excluded, the decision carries each account's state and remedy.
+
 One quota function, `Admission::account_block`, assesses persisted account
 mismatch and live provider refusals (including the free-pool refusal) with their
 expiry and clearing rules. Resolution applies it to each otherwise eligible
@@ -395,6 +402,7 @@ Compatibility: the four reason codes are new `RouteExclusionReason` variants;
 older readers that reject unknown variants cannot read records carrying them.
 - Why: one probe outage or model limit must not take a provider offline.
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
+  `crates/routing/src/tests.rs::stale_availability_is_selectable_but_current_account_wins`;
   `::independent_pool_reset_and_refusal_scope`;
   `tests/dispatch_provider.rs::codex_capacity_settles_without_quota_refusal`;
   `crates/routing/src/tests.rs::spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale`;

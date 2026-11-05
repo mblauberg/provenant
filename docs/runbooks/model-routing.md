@@ -504,6 +504,11 @@ multiple profiles for the same account under different names. Remove or update
 stale profile and `reset_of` references when unregistering accounts: an unknown
 or ambiguous reference prevents route resolution and dispatch for all providers.
 
+Current availability evidence is preferred. If only stale or unknown evidence
+remains for an identified account, the lane warns and lets the provider check it.
+An exhausted account remains excluded until its reset; an all-excluded route
+reports the accounts and their remedies.
+
 For example, in the selected state's `config.toml`:
 
 ```toml
