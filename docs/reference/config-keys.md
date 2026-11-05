@@ -506,6 +506,19 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Lower marks silence sooner; the process census and observation cadence stays unchanged."` |
 | `type` | `"int"` |
 
+## `lanes.slot_wait_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `7200` |
+| `effect` | `"Most time in total that a lane's build-slot waits keep off its wall-clock deadline. Beyond it the wall deadline runs while the lane waits, so a stuck lane cannot wait forever. 0 keeps no waiting off the deadline."` |
+| `max` | `86400` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Higher tolerates longer queues for build slots; lower ends a stuck lane sooner."` |
+| `type` | `"int"` |
+
 ## `routing.allow_unknown_partial_headroom`
 
 | Field | Value |
@@ -654,7 +667,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
       "writer_token_budget": {
         "allowed": "0 or more tokens",
         "default": "500000",
-        "effect": "Tokens a writer attempt may use, from the usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. A provider that reports no usage is warned about, not refused. Time queued for a build slot does not count towards the wall-clock deadline. The source (run, project, host or default) is shown with the budget.",
+        "effect": "Tokens a writer attempt may use, from the usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. Cached input counts. Only a provider that reports usage while it runs (Claude) can be stopped; for any other the budget is not enforced, and `--explain` says so. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget.",
         "type": "int"
       }
     }

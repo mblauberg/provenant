@@ -1179,7 +1179,9 @@ impl RunStore {
         // Valid natural completion wins over a late stop request.
         if decoded.outcome != Outcome::Succeeded {
             match exit.stop_reason {
-                Some(StopReason::WallDeadline) => decoded.outcome = Outcome::TimedOut,
+                Some(StopReason::WallDeadline | StopReason::TokenBudget) => {
+                    decoded.outcome = Outcome::TimedOut
+                }
                 Some(StopReason::ExplicitCancellation) if cancelled => {
                     decoded.outcome = Outcome::Cancelled
                 }
@@ -1227,6 +1229,29 @@ impl RunStore {
             let limit = format!(
                 "runtime deadline exceeded: provider stopped after {}s",
                 task.provider_timeout_seconds
+            );
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(detail) if detail != "provider output is partial" => {
+                    format!("{limit}; {detail}")
+                }
+                _ => limit,
+            });
+        }
+        // A writer that passed its token budget was stopped by the host: say
+        // so, with the budget and where it came from. Its work stays in the
+        // lane's worktree for a continuation.
+        if decoded.outcome == Outcome::TimedOut && exit.stop_reason == Some(StopReason::TokenBudget)
+        {
+            let budget = crate::launch::token_budget(
+                task,
+                self.context.state_root.as_path(),
+                &record.project_id.to_string(),
+            );
+            let limit = format!(
+                "token budget reached: provider stopped after passing {} tokens (source: {}); \
+                 unfinished work stays in the lane worktree for a continuation",
+                budget.tokens,
+                budget.source.as_str()
             );
             decoded.reason = Some(match decoded.reason.take() {
                 Some(detail) if detail != "provider output is partial" => {

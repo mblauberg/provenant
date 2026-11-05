@@ -337,7 +337,16 @@ impl RunStore {
                     .ok_or_else(|| local("lane priority", &"missing"))
             ),
         };
-        let capture = capture_plan(task, runtime_seconds);
+        let capture = capture_plan(
+            task,
+            runtime_seconds,
+            crate::launch::token_budget(
+                task,
+                self.context.state_root.as_path(),
+                &record.project_id.to_string(),
+            )
+            .tokens,
+        );
         // Held before launch: an unconfirmed handoff may still have a guardian.
         if let Some((held, custody)) = held {
             self.hold_child(held, custody);

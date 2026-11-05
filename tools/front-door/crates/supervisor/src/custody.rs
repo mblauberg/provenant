@@ -768,6 +768,18 @@ pub struct CapturePlan {
     pub wall_ms: u64,
     pub descendant_grace_ms: u64,
     pub root_flush_ms: u64,
+    /// Tokens the attempt may use, from the usage its provider reports while
+    /// it runs. 0 is no budget.
+    #[serde(default)]
+    pub token_budget: u64,
+    /// The most time spent queued for a build slot that is kept off the wall
+    /// deadline, in total.
+    #[serde(default = "default_slot_wait_ms")]
+    pub slot_wait_ms: u64,
+}
+/// Registry default for lanes.slot_wait_seconds, in milliseconds.
+pub fn default_slot_wait_ms() -> u64 {
+    7_200_000
 }
 // Registry default for lanes.silence_seconds, expressed in milliseconds.
 fn default_silence_ms() -> u64 {
@@ -786,6 +798,8 @@ impl Default for CapturePlan {
             descendant_grace_ms: crate::machine::DEFAULT_DESCENDANT_GRACE_MS,
             root_flush_ms: crate::machine::DEFAULT_ROOT_FLUSH_MS,
             silence_ms: default_silence_ms(),
+            token_budget: 0,
+            slot_wait_ms: default_slot_wait_ms(),
         }
     }
 }
@@ -813,6 +827,7 @@ impl CapturePlan {
             || self.silence_ms > 3_600_000
             || self.wall_ms == 0
             || self.wall_ms > 86400000
+            || self.slot_wait_ms > 86400000
             || self.descendant_grace_ms > 60000
             || self.root_flush_ms > 60000
         {

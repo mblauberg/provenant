@@ -72,7 +72,27 @@ pub fn runtime_seconds(task: &TaskRequest, cap: Option<u64>) -> u64 {
     })
 }
 
-pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64) -> CapturePlan {
+/// The token budget of one lane: a writer's, resolved from host configuration
+/// with the project, and 0 (none) for any other lane. Each fresh read keeps a
+/// setting changed between lanes in effect for the next one.
+pub fn token_budget(
+    task: &TaskRequest,
+    state_root: &std::path::Path,
+    project: &str,
+) -> provenant_confinement::run_config::TokenBudget {
+    use provenant_confinement::run_config::{RunConfig, TokenBudget, TokenBudgetSource};
+    if task.writer.is_none() {
+        return TokenBudget {
+            tokens: 0,
+            source: TokenBudgetSource::Default,
+        };
+    }
+    RunConfig::read(state_root)
+        .unwrap_or_default()
+        .writer_token_budget_for(project, None)
+}
+
+pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64, token_budget: u64) -> CapturePlan {
     CapturePlan {
         stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. } if provider == "command")
         {
@@ -88,6 +108,14 @@ pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64) -> CapturePlan {
             .knob_u64("lanes.silence_seconds")
             .unwrap_or(1800)
             .saturating_mul(1000),
+        token_budget,
+        slot_wait_ms: task
+            .profile
+            .knob_u64("lanes.slot_wait_seconds")
+            .map_or_else(
+                provenant_supervisor::custody::default_slot_wait_ms,
+                |seconds| seconds.saturating_mul(1000),
+            ),
         ..CapturePlan::default()
     }
 }

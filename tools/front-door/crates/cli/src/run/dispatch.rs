@@ -816,6 +816,36 @@ pub(super) fn dispatch_inner(
                     "admission timeout: {}s ({})\n",
                     effective_admission.seconds, effective_admission.origin
                 ));
+                if matches!(command.access.mode(), Mode::WorktreeWrite) {
+                    let budget = run_config.writer_token_budget_for(
+                        &project.as_ref().map(ToString::to_string).unwrap_or_default(),
+                        None,
+                    );
+                    let enforced: Vec<&str> = provenant_providers::REGISTRY
+                        .iter()
+                        .filter(|entry| {
+                            entry
+                                .stdout_decoder
+                                .is_some_and(|decoder| decoder.reports_usage())
+                        })
+                        .map(|entry| entry.adapter.id())
+                        .collect();
+                    data["token_budget"] = json!({
+                        "tokens": budget.tokens,
+                        "source": budget.source.as_str(),
+                        "enforced_for": enforced,
+                    });
+                    if budget.tokens == 0 {
+                        text.push_str("token budget: off\n");
+                    } else {
+                        text.push_str(&format!(
+                            "token budget: {} tokens ({}); enforced for {}, which report usage while running; not enforced for other providers\n",
+                            budget.tokens,
+                            budget.source.as_str(),
+                            enforced.join(", ")
+                        ));
+                    }
+                }
                 record_warnings(&mut data, warnings);
                 text.push_str(&warnings_text(&data));
                 (data, text, false)

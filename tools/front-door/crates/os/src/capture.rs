@@ -16,6 +16,13 @@ pub enum FrameEvent {
     Progress,
     Terminal,
     ProtocolRejected,
+    /// Tokens one provider call reported while the attempt runs. `key`
+    /// identifies the call, so a call that is reported again replaces its
+    /// earlier figure instead of adding to it.
+    Usage {
+        key: u64,
+        tokens: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -26,6 +33,13 @@ pub struct DecodeFailure;
 /// or signalling capability. Frames and partial frames are capped at FRAME_LIMIT.
 pub trait FrameDecoder: Send + Sync {
     fn decode(&self, frame: &[u8]) -> Result<FrameEvent, DecodeFailure>;
+
+    /// Whether this decoder reports token usage while the attempt runs, which
+    /// is what lets a token budget end it. A provider that reports usage only
+    /// at the end cannot be held to a budget.
+    fn reports_usage(&self) -> bool {
+        false
+    }
 
     /// Whether a partial frame is sufficient evidence for a terminal event.
     fn partial_terminal(&self, _frame: &[u8]) -> bool {

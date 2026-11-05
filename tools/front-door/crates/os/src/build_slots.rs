@@ -40,8 +40,9 @@ pub const WAIT_MARKER_FRESH: Duration = Duration::from_secs(150);
 
 /// Whether any command of the lane at `attempt` is waiting for a build slot
 /// now. The lane writes the marker, so it is read bounded and trusted only for
-/// being a fresh slot wait; a lane that fakes one only extends its own wall
-/// clock, which the token budget bounds.
+/// being a fresh slot wait. A lane that keeps one fresh only extends its own
+/// wall clock, and the guardian bounds the total extension
+/// (`lanes.slot_wait_seconds`), so a stuck lane cannot run forever.
 pub fn slot_wait_active(attempt: &Directory, now_secs: u64) -> bool {
     let Ok(temporary) = attempt.open_directory("tmp".as_ref()) else {
         return false;

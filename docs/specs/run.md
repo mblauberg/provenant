@@ -781,6 +781,30 @@ The `Status:` line protocol is removed.
   `crates/providers/src/tests.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
 - Owner: `crates/run/src/completion.rs`, `crates/run/src/holder.rs`
 
+## A writer stops on a token budget
+
+A writer lane is bounded by a token budget, not by the wall clock alone: the
+host `[domains.run] writer_token_budget` (default 500000, 0 for none), replaced
+per project under `[domains.run.projects."PROJECT_ID"]`. The guardian sums the
+tokens the provider reports while the attempt runs, cached input included, one
+figure per provider call. When the sum passes the budget it stops the provider
+with the typed stop `token_budget`, and the attempt settles `timed_out` with a
+reason naming the budget and its source (`project`, `host` or `default`); a
+host setting equal to the default still reports `host`. Unfinished work stays
+in the lane's worktree for a continuation; the host does not commit for it.
+`provenant run --explain` shows the budget, its source and the providers it is
+enforced for. Only a provider whose stream reports usage while it runs can be
+held to it (Claude); for any other the budget is not enforced, and `--explain`
+says so. Time a lane spends queued for a build slot stays off the wall
+deadline, up to `lanes.slot_wait_seconds` (default 7200) in total.
+- Why: a long writer should stop on what it spends, and a stuck lane must not
+  wait or run forever.
+- Test: `crates/supervisor/src/machine.rs::tests::a_token_budget_stop_is_a_typed_stop`;
+  `crates/providers/src/claude.rs::tests::live_usage_counts_each_call_once_with_cached_input`;
+  `crates/run/src/token_budget.rs::tests::a_fake_provider_passing_the_budget_ends_the_attempt_and_silence_only_warns`;
+  `crates/confinement/src/run_config.rs::tests::a_host_setting_equal_to_the_default_still_reports_host`
+- Owner: `crates/supervisor/src/guardian.rs`, `crates/run/src/token_budget.rs`
+
 ## Host inputs fail before launch
 
 A host failure to read the stored prompt, or to stage or read back a context

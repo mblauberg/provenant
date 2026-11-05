@@ -18,10 +18,61 @@ use std::path::Path;
 use std::time::Duration;
 pub struct Claude;
 
+/// Live token usage for a token budget. Each assistant message carries the
+/// usage of its API call, repeated on every content block of that message, so
+/// a call is keyed by its message id and counted once. Output counts are
+/// streaming placeholders until the result, so a live total may undercount
+/// output; it counts input, cached reads and cache writes in full.
+pub struct LiveUsage;
+impl provenant_os::capture::FrameDecoder for LiveUsage {
+    fn decode(
+        &self,
+        frame: &[u8],
+    ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
+        use provenant_os::capture::FrameEvent;
+        Ok(
+            live_usage(frame).map_or(FrameEvent::Progress, |(key, tokens)| FrameEvent::Usage {
+                key,
+                tokens,
+            }),
+        )
+    }
+    fn reports_usage(&self) -> bool {
+        true
+    }
+}
+/// The key and token total of an assistant frame, or `None` for any other
+/// frame or one that does not parse. A bad frame never ends an attempt.
+fn live_usage(frame: &[u8]) -> Option<(u64, u64)> {
+    use std::hash::{Hash, Hasher};
+    if !frame.windows(7).any(|window| window == b"\"usage\"") {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(frame).ok()?;
+    if value.get("type")?.as_str()? != "assistant" {
+        return None;
+    }
+    let message = value.get("message")?;
+    let usage = message.get("usage")?;
+    let count = |name: &str| usage.get(name).and_then(serde_json::Value::as_u64);
+    let tokens = [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ]
+    .into_iter()
+    .filter_map(count)
+    .fold(0_u64, u64::saturating_add);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    message.get("id")?.as_str()?.hash(&mut hasher);
+    Some((hasher.finish(), tokens))
+}
+
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &Claude,
     quota_source: Some(&Claude),
-    stdout_decoder: None,
+    stdout_decoder: Some(&LiveUsage),
     stderr_decoder: None,
     display_name: "Claude",
     quota: provenant_quota::QuotaPolicy {
@@ -1129,6 +1180,32 @@ mod overload_tests {
                 .iter()
                 .any(|event| matches!(event, E::ModelOverloaded { .. }))
         );
+    }
+
+    #[test]
+    fn live_usage_counts_each_call_once_with_cached_input() {
+        use provenant_os::capture::{FrameDecoder, FrameEvent};
+        let frame = |id: &str| {
+            format!(
+                r#"{{"type":"assistant","session_id":"s","message":{{"id":"{id}","model":"m","role":"assistant","content":[],"usage":{{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":1000,"cache_creation_input_tokens":100}}}}}}"#
+            )
+        };
+        let one = LiveUsage.decode(frame("a").as_bytes()).unwrap();
+        // Every content block of a message repeats its usage under one key.
+        assert_eq!(one, LiveUsage.decode(frame("a").as_bytes()).unwrap());
+        let FrameEvent::Usage { tokens, .. } = one else {
+            panic!("an assistant frame with usage reports it");
+        };
+        assert_eq!(tokens, 1115);
+        assert_ne!(one, LiveUsage.decode(frame("b").as_bytes()).unwrap());
+        for other in [
+            &br#"{"type":"system","subtype":"init","session_id":"s"}"#[..],
+            br#"{"type":"assistant","message":{"usage":{"input_tokens":1}}}"#,
+            b"not json with \"usage\"",
+        ] {
+            assert_eq!(LiveUsage.decode(other).unwrap(), FrameEvent::Progress);
+        }
+        assert!(LiveUsage.reports_usage());
     }
 
     #[test]

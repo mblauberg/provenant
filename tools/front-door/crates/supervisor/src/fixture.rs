@@ -783,6 +783,19 @@ pub fn dispatch() -> io::Result<bool> {
             stream.write_all(b"R")?;
             wait_for_eof(&mut stream)?;
         }
+        // A fake provider that reports usage while it runs: the same call twice
+        // (it counts once), then a second call that passes a budget of 1000.
+        "usage-blocked" => {
+            let path = fixture_path(&args, 3)?;
+            let mut stream = std::os::unix::net::UnixStream::connect(&path)?;
+            stream.write_all(b"R")?;
+            io::stdout().write_all(b"usage:1:600\nusage:1:600\n")?;
+            io::stdout().flush()?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            io::stdout().write_all(b"usage:2:600\n")?;
+            io::stdout().flush()?;
+            wait_for_eof(&mut stream)?;
+        }
         "hold-stdout" => {
             let path = fixture_path(&args, 3)?;
             let mut stream = std::os::unix::net::UnixStream::connect(&path)?;

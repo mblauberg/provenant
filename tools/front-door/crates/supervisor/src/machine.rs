@@ -27,6 +27,8 @@ pub enum StopReason {
     ProtocolRejected,
     SupervisorSignal,
     PostTerminalCleanup,
+    /// A writer passed its token budget, from usage the provider reported.
+    TokenBudget,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -229,6 +231,8 @@ pub enum Event {
     Cancel,
     ProtocolRejected,
     SupervisorSignal,
+    /// Live usage passed the token budget.
+    TokenBudget,
     RetryStop(StopReason),
     Silence,
     CaptureFailure,
@@ -349,6 +353,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
             Event::Progress
             | Event::Terminal
             | Event::ProtocolRejected
+            | Event::TokenBudget
             | Event::RetryStop(_)
             | Event::Silence
             | Event::CaptureFailure
@@ -373,6 +378,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
             Event::SupervisorSignal => {
                 request_stop(&mut state, StopReason::SupervisorSignal, &mut effects)
             }
+            Event::TokenBudget => request_stop(&mut state, StopReason::TokenBudget, &mut effects),
             Event::Silence
             | Event::CaptureFailure
             | Event::ObservationFailure
@@ -401,6 +407,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
                     Event::RetryStop(reason) => retry_stop(&mut state, reason, &mut effects),
                     Event::Progress
                     | Event::Terminal
+                    | Event::TokenBudget
                     | Event::Silence
                     | Event::CaptureFailure
                     | Event::ObservationFailure
@@ -504,6 +511,18 @@ mod tests {
             );
             assert_eq!(effects, vec![Effect::DeliverStop(reason)]);
         }
+    }
+
+    #[test]
+    fn a_token_budget_stop_is_a_typed_stop() {
+        let (state, effects) = step(running(), Event::TokenBudget, Tick::at(1));
+        assert_eq!(state.phase(), Phase::Stopping);
+        assert_eq!(effects, vec![Effect::DeliverStop(StopReason::TokenBudget)]);
+        // Before launch there is nothing to stop.
+        let prepared = State::prepared(Budgets::with_cleanup(100, 10, 5));
+        let (prepared, effects) = step(prepared, Event::TokenBudget, Tick::at(1));
+        assert_eq!(prepared.phase(), Phase::Prepared);
+        assert!(effects.is_empty());
     }
 
     #[test]

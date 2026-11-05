@@ -22,7 +22,6 @@ push_conflict_markers = true
 brief_read_root_warnings = true
 profile_limit_bytes = 524288
 grant_limit = 128
-writer_token_budget = 500000
 
 [projects]
 "#;
@@ -65,18 +64,17 @@ pub struct RunConfig {
     /// Maximum path grants in each profile family and in the plan.
     #[serde(default = "default_grant_limit")]
     pub grant_limit: usize,
-    /// Tokens a writer attempt may use before it is ended with its work
-    /// committed and pushed. 0 turns the budget off.
-    #[serde(default = "default_writer_token_budget")]
-    pub writer_token_budget: u64,
+    /// Tokens a writer attempt may use before it is ended. 0 turns the budget
+    /// off. `None` means the host did not set it, so the default applies and
+    /// reports its source as `default`, even if the host later sets the same
+    /// number.
+    #[serde(default)]
+    pub writer_token_budget: Option<u64>,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
 /// Default writer token budget.
 pub const DEFAULT_WRITER_TOKEN_BUDGET: u64 = 500_000;
-fn default_writer_token_budget() -> u64 {
-    DEFAULT_WRITER_TOKEN_BUDGET
-}
 fn default_profile_limit_bytes() -> usize {
     512 * 1024
 }
@@ -124,7 +122,7 @@ impl Default for RunConfig {
             admission_seconds: None,
             profile_limit_bytes: default_profile_limit_bytes(),
             grant_limit: default_grant_limit(),
-            writer_token_budget: default_writer_token_budget(),
+            writer_token_budget: None,
             projects: BTreeMap::new(),
         }
     }
@@ -170,8 +168,8 @@ impl RunConfig {
             .and_then(|settings| settings.writer_token_budget)
         {
             (tokens, TokenBudgetSource::Project)
-        } else if self.writer_token_budget != DEFAULT_WRITER_TOKEN_BUDGET {
-            (self.writer_token_budget, TokenBudgetSource::Host)
+        } else if let Some(tokens) = self.writer_token_budget {
+            (tokens, TokenBudgetSource::Host)
         } else {
             (DEFAULT_WRITER_TOKEN_BUDGET, TokenBudgetSource::Default)
         };
@@ -223,6 +221,17 @@ pub enum TokenBudgetSource {
     Project,
     Host,
     Default,
+}
+impl TokenBudgetSource {
+    /// The name shown in `--explain` and receipts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Project => "project",
+            Self::Host => "host",
+            Self::Default => "default",
+        }
+    }
 }
 fn valid_writer_write(path: &Path) -> bool {
     path.is_absolute()
@@ -399,6 +408,22 @@ mod tests {
                 .any(|error| error.field == "grant_limit")
         );
         Ok(())
+    }
+    #[test]
+    fn a_host_setting_equal_to_the_default_still_reports_host() {
+        let unset = RunConfig::default().writer_token_budget_for("p", None);
+        assert_eq!(
+            (unset.tokens, unset.source),
+            (DEFAULT_WRITER_TOKEN_BUDGET, TokenBudgetSource::Default)
+        );
+        let host: RunConfig = toml_edit::de::from_str("writer_token_budget = 500000\n").unwrap();
+        let budget = host.writer_token_budget_for("p", None);
+        assert_eq!(
+            (budget.tokens, budget.source),
+            (500_000, TokenBudgetSource::Host)
+        );
+        let off: RunConfig = toml_edit::de::from_str("writer_token_budget = 0\n").unwrap();
+        assert_eq!(off.writer_token_budget_for("p", None).tokens, 0);
     }
     #[test]
     fn accepts_absolute_directories() {
