@@ -211,6 +211,12 @@ fn inspect_context(
         };
         let path = fs::canonicalize(&info.path).unwrap_or(info.path);
         let (live_writer, writer_unknown) = handoff_writer_state(&observation.occupancy);
+        let writer_evidence = match &observation.occupancy {
+            Occupancy::Unknown {
+                scope, evidence, ..
+            } => Some(format!("{}: {evidence}", scope.display())),
+            _ => None,
+        };
         trees.push(Tree {
             primary: primary == Some(path.as_path()),
             path,
@@ -223,6 +229,7 @@ fn inspect_context(
             ),
             live_writer,
             writer_unknown,
+            writer_evidence,
             upstream,
             pushed,
         });
@@ -240,6 +247,15 @@ fn handoff_writer_state(occupancy: &Occupancy) -> (bool, bool) {
 /// WIP mutates Git, so an unresolved writer state cannot grant custody.
 fn unsafe_wip(tree: &Tree) -> bool {
     tree.primary || tree.branch.is_none() || tree.live_writer || tree.writer_unknown || tree.unknown
+}
+
+fn wip_unsafe_description(tree: &Tree) -> String {
+    let detail = match (tree.writer_unknown, tree.writer_evidence.as_deref()) {
+        (true, Some(evidence)) => format!("; writer custody unknown: {evidence}"),
+        (true, None) => "; writer custody unknown".to_owned(),
+        (false, _) => String::new(),
+    };
+    format!("  {}{detail}", tree.describe())
 }
 
 /// Hold writer custody through WIP Git operations, not just the earlier preview.
@@ -669,14 +685,7 @@ fn execute(
             let mut unsafe_trees: Vec<String> = problems
                 .iter()
                 .filter(|tree| unsafe_wip(tree))
-                .map(|tree| {
-                    let detail = if tree.writer_unknown {
-                        "; writer custody unknown"
-                    } else {
-                        ""
-                    };
-                    format!("  {}{detail}", tree.describe())
-                })
+                .map(wip_unsafe_description)
                 .collect();
             for tree in problems.iter().filter(|t| t.dirty) {
                 let files = untracked(tree)?;
@@ -1313,6 +1322,7 @@ mod tests {
             unknown: false,
             live_writer: false,
             writer_unknown: false,
+            writer_evidence: None,
             upstream: None,
             pushed: false,
         };
@@ -1331,6 +1341,9 @@ mod tests {
         (tree.live_writer, tree.writer_unknown) = handoff_writer_state(&Occupancy::Available);
         assert!(!unsafe_wip(&tree));
         tree.writer_unknown = true;
+        tree.writer_evidence = Some("/repo: process census incomplete".into());
+        let refusal = wip_unsafe_description(&tree);
+        assert!(refusal.contains("/repo: process census incomplete"));
         tree.dirty = false;
         tree.upstream = Some("b".repeat(40));
         tree.pushed = true;
@@ -1394,6 +1407,7 @@ mod tests {
             unknown: false,
             live_writer: false,
             writer_unknown: false,
+            writer_evidence: None,
             upstream: None,
             pushed: false,
         };
