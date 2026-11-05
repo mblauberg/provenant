@@ -143,6 +143,32 @@ struct Factory {
     workers: &'static dyn WorkerObserver,
 }
 impl Factory {
+    /// Reopen a retained graph directory without borrowing the caller's checkout.
+    fn for_graph_directory(&self, directory: &Path) -> Result<Self, FacadeError> {
+        let context = Context::open(self.context.roots.clone(), &self.home, directory)
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        if context.identity.project != self.context.identity.project || context.in_lane {
+            return Err(FacadeError::StateCorrupt);
+        }
+        let mut host_launch = self.host_launch.clone();
+        if let Some(host) = &mut host_launch {
+            host.cwd = directory.to_path_buf();
+        }
+        Ok(Self {
+            context,
+            project_attribution: self.project_attribution,
+            clock: SystemClock::new(),
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(4).map_err(|_| FacadeError::StateCorrupt)?,
+            home: self.home.clone(),
+            cwd: directory.to_path_buf(),
+            assets: self.assets.clone(),
+            host_launch,
+            mcp_project: self.mcp_project.clone(),
+            workers: self.workers,
+        })
+    }
+
     #[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
     fn coordination(&self) -> Result<CoordinationService<'_>, CoordinationError> {
         let ctx = &self.context;
@@ -6129,29 +6155,7 @@ impl Factory {
             let rebound = if let Some(execution) = bound_execution.as_ref()
                 && execution.directory != self.cwd
             {
-                let context =
-                    Context::open(self.context.roots.clone(), &self.home, &execution.directory)
-                        .map_err(|_| FacadeError::StateCorrupt)?;
-                if context.identity.project != self.context.identity.project || context.in_lane {
-                    return Err(FacadeError::StateCorrupt);
-                }
-                let mut host_launch = self.host_launch.clone();
-                if let Some(host) = &mut host_launch {
-                    host.cwd = execution.directory.clone();
-                }
-                Some(Factory {
-                    context,
-                    project_attribution: self.project_attribution,
-                    clock: SystemClock::new(),
-                    backoff: ThreadPause,
-                    executor: SystemExecutor::new(4).map_err(|_| FacadeError::StateCorrupt)?,
-                    home: self.home.clone(),
-                    cwd: execution.directory.clone(),
-                    assets: self.assets.clone(),
-                    host_launch,
-                    mcp_project: self.mcp_project.clone(),
-                    workers: self.workers,
-                })
+                Some(self.for_graph_directory(&execution.directory)?)
             } else {
                 None
             };

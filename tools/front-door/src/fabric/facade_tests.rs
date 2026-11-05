@@ -28,6 +28,33 @@ pub(crate) mod peer_tests {
     use provenant_run::{AttemptState, Outcome, RunStore};
 
     #[test]
+    fn graph_factory_reopens_the_retained_directory() -> Result<(), Box<dyn std::error::Error>> {
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let retained = rig.project.join("retained-directory");
+        std::fs::create_dir(&retained)?;
+        let rebound = factory.for_graph_directory(&retained)?;
+        assert_eq!(rebound.cwd, retained);
+        assert_eq!(rebound.context.identity.project, factory.context.identity.project);
+        let foreign = crate::worktree_tests::support::TestRig::new()?;
+        assert!(factory.for_graph_directory(&foreign.project).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn tick_reports_unreadable_once_and_advances_another_graph()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph;
