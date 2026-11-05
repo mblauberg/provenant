@@ -7681,6 +7681,27 @@ fn launch_retry_backoff_starts_after_a_slow_failed_submission() {
 }
 
 #[test]
+fn writer_lock_contention_retries_the_same_attempt_after_release() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, crate::coordination::facade::FacadeError::WriterLockBusy)].into(),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(pending.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(retry_of(&pending.checkpoint).wake_at, Some(at(5)));
+    owner.now = Some(at(5));
+    let completed = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(completed.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(completed.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0], owner.calls[1]);
+}
+
+#[test]
 fn an_unobserved_writer_disk_check_is_a_retryable_launch_error() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
