@@ -1660,6 +1660,88 @@ fn availability() -> AvailabilityRecord {
         expires_unix_seconds: 120,
     }
 }
+
+#[test]
+fn resolves_an_available_provider_supplied_only_by_the_registry()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::{
+        AccountDetection, Adapter, Continuation, ExitObservation, LaunchSpec, PrepareInput,
+        ProviderError, ProviderEvent, ProviderOutcome, RouteProvenance, StreamState,
+        VerifiedLineage,
+    };
+    struct Fixture;
+    impl Adapter for Fixture {
+        fn id(&self) -> &'static str {
+            "fixture-provider"
+        }
+        fn account(&self, _: &StreamState) -> Result<AccountDetection, ProviderError> {
+            Ok(AccountDetection::Unknown)
+        }
+        fn prepare(&self, _: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+        fn stream(&self, _: Option<&Continuation>) -> Result<StreamState, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+        fn observe(
+            &self,
+            _: &mut StreamState,
+            _: &[u8],
+        ) -> Result<Vec<ProviderEvent>, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+        fn finish(
+            &self,
+            _: StreamState,
+            _: ExitObservation,
+        ) -> Result<ProviderOutcome, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+        fn continuation(
+            &self,
+            _: &ProviderOutcome,
+            _: &provenant_records::ResolvedRoute,
+            _: &str,
+        ) -> Result<Continuation, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+        fn validate_provenance(
+            &self,
+            _: &RouteProvenance<'_>,
+        ) -> Result<VerifiedLineage, ProviderError> {
+            Err(ProviderError::UnsupportedPolicy)
+        }
+    }
+    static ADAPTER: Fixture = Fixture;
+    let registry = [provenant_providers::Registration {
+        adapter: &ADAPTER,
+        quota_source: None,
+        ..provenant_providers::codex::REGISTRATION
+    }];
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [AvailabilityRecord {
+        adapter: "fixture-provider".into(),
+        executable: "/fixture/provider".into(),
+        ..availability()
+    }];
+    let access = [AccessContext {
+        adapter: "fixture-provider",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let context = RoutingContext {
+        registry: &registry,
+        availability: &records,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let resolved = resolve(&request("fixture-provider/test")?, &context)?;
+    assert_eq!(resolved.adapter, "fixture-provider");
+    assert_eq!(resolved.account_key.as_deref(), Some("opaque-account"));
+    assert!(matches!(resolved.readiness, RouteReadiness::Ready { .. }));
+    Ok(())
+}
 #[test]
 fn availability_gates_disclosure_and_rejects_duplicates() -> Result<(), Box<dyn std::error::Error>>
 {
