@@ -1186,6 +1186,16 @@ fn graph_wake_due(
         })
     } else {
         checkpoint.wake_at.is_none_or(|deadline| now >= deadline)
+            || checkpoint.nodes.iter().any(|node| {
+                use provenant_fabric_runtime::graph::NodeState;
+                node.state == NodeState::Running
+                    && !node.attempts.is_empty()
+                    && node
+                        .launch_retry
+                        .as_ref()
+                        .and_then(|retry| retry.wake_at)
+                        .is_none()
+            })
     }
 }
 fn landing_error(error: &(dyn std::error::Error + 'static)) -> FacadeError {
