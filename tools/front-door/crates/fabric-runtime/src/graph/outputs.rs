@@ -1015,7 +1015,27 @@ pub(super) fn render_input(
             let value = match kind {
                 OutputKind::Result => serde_json::to_string(&outputs.result.as_ref().map(|result| serde_json::json!({"digest": result.digest, "excerpt": result.excerpt, "truncated": result.truncated}))),
                 OutputKind::Verdict => serde_json::to_string(&outputs.verdict),
-                OutputKind::Findings => serde_json::to_string(&selected.iter().filter(|(source, _)| source == &input.node).map(|(_, finding)| finding).collect::<Vec<_>>()),
+                OutputKind::Findings => {
+                    let generated = positions.get(&input.node).is_some_and(|index| {
+                        checkpoint.nodes[*index].gate.is_some()
+                            || plan.nodes[*index].composite.is_some()
+                    });
+                    let quota_stopped = positions.get(&input.node).is_some_and(|index| {
+                        checkpoint.nodes[*index]
+                            .attempts
+                            .last()
+                            .is_some_and(|attempt| attempt.outcome == Some(AttemptOutcome::UsageLimited))
+                    });
+                    let available = generated
+                        || (outputs.result.is_some()
+                            && !quota_stopped
+                            && !outputs.warnings.iter().any(|warning| warning.starts_with(FINDINGS_INVALID)));
+                    let findings = available.then(|| {
+                        selected.iter().filter(|(source, _)| source == &input.node)
+                            .map(|(_, finding)| finding).collect::<Vec<_>>()
+                    });
+                    serde_json::to_string(&findings)
+                },
                 OutputKind::Branch => serde_json::to_string(&outputs.branch),
                 OutputKind::Commit => serde_json::to_string(&outputs.commit),
                 OutputKind::Remaining => serde_json::to_string(&outputs.remaining),

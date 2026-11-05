@@ -6171,6 +6171,37 @@ fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
 }
 
 #[test]
+fn optional_findings_distinguish_missing_invalid_and_valid_empty() {
+    for (result, expected) in [
+        ("no findings", "parent findings: null"),
+        ("```findings\nnot json\n```", "parent findings: null"),
+        (
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+            "parent findings: []",
+        ),
+    ] {
+        let mut child = node("child", route("fixture"));
+        child.depends_on.push("parent".into());
+        child.inputs.push(GraphInput {
+            extra: Default::default(),
+            node: "parent".into(),
+            outputs: vec![OutputKind::Findings],
+        });
+        let document = graph(vec![child, node("parent", route("fixture"))]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal_with_result(AttemptOutcome::Succeeded, result),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        advance(&document, &mut owner, &mut journal).unwrap();
+        assert!(owner.prompts[1].contains(expected), "{}", owner.prompts[1]);
+    }
+}
+
+#[test]
 fn findings_blocks_normalise_array_and_id_keyed_object_shapes() {
     let array = make_outputs(
         Some(&capture(

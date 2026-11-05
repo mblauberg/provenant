@@ -1312,7 +1312,9 @@ unfinished work across a clipped `result` excerpt. Decision (#2279): the
 earlier closing-window selector is removed rather than kept as a fallback,
 because handoff v2 is bounded, structured and parsed from the complete stream;
 a provider that emits no handoff gets the head excerpt and digest only. Each dependency and output selector
-may occur only once. The selected data is rendered into its brief, which is
+may occur only once. Findings from a direct attempt render as `null` when its
+findings are unavailable or invalid, and as `[]` for a valid empty block.
+The selected data is rendered into its brief, which is
 bounded by the effective per-node prompt byte limit. If the node prompt leaves
 no room for the block, or the selected outputs do not fit, the node fails
 before its next attempt is admitted with a per-node advance error. A failure
