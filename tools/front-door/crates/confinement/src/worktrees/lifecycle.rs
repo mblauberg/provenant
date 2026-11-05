@@ -247,6 +247,13 @@ fn list_impl(
                 ),
             }
         };
+        // Until all consumers use Occupancy, legacy inventory consumers must
+        // retain an unreadable owner rather than treating the tree as free.
+        let writer = if owner_evidence.is_some() && disk != WorkerState::Busy {
+            WriterState::Unknown
+        } else {
+            writer
+        };
         let occupancy = if disk == WorkerState::Busy {
             Occupancy::Held
         } else if registration_unknown || owner_evidence.is_some() {

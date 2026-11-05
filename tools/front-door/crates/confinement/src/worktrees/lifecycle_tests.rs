@@ -1344,10 +1344,30 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
     let owner_path = tree.repo().private_git_dir().join("provenant-owner.json");
     let saved = fs::read(&owner_path)?;
     fs::write(&owner_path, b"invalid owner record")?;
+    context.workers = &FreeWorkers;
     let observation = list_with_observation(&context, &cancel())?
         .into_iter()
         .find(|entry| entry.info.path == info.path)
         .ok_or("missing worktree")?;
+    assert_eq!(observation.info.writer, WriterState::Unknown);
+    let policy = WorktreeGcPolicy {
+        upstream: Some(info.head),
+        terminal: &|_| true,
+        no_live_lanes: &|_| true,
+        regenerable: &[],
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: false,
+        foreign_merged_clean: false,
+    };
+    collect(
+        &context,
+        std::slice::from_ref(&observation.info),
+        &policy,
+        &cancel(),
+    )?;
+    assert!(info.path.exists());
+    assert_eq!(fs::read(&owner_path)?, b"invalid owner record");
     assert!(matches!(
         observation.occupancy,
         Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
