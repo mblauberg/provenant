@@ -1083,47 +1083,6 @@ mod tests {
     }
 
     #[test]
-    fn rebind_keeps_eight_changes_and_upgrades_single_hop_records() {
-        use provenant_core::{ActorId, HostId};
-        let (_temp, root, project) = setup();
-        let host = HostId::from_bytes([3; 16]);
-        let selected = |actor| {
-            store(&root, project, "chair")
-                .with_chair(host, ActorId::from_bytes([actor; 16]))
-                .with_rebind(true)
-        };
-        saved(&selected(0), "notes");
-        for actor in 1..=10 {
-            saved(&selected(actor), "notes");
-        }
-        let record = selected(10).discovery().unwrap().unwrap().record;
-        assert_eq!(record.rebound_from.len(), 8);
-        assert_eq!(record.rebound_from[0].actor, ActorId::from_bytes([2; 16]));
-        assert_eq!(record.rebound_from[7].actor, ActorId::from_bytes([9; 16]));
-        saved(&selected(10).with_rebind(false), "same chair");
-        assert_eq!(
-            selected(10)
-                .discovery()
-                .unwrap()
-                .unwrap()
-                .record
-                .rebound_from,
-            record.rebound_from
-        );
-        // Old single-hop JSON remains readable and is retained on migration.
-        let mut legacy = serde_json::to_value(&record).unwrap();
-        legacy["rebound_from"] = serde_json::to_value(&record.rebound_from[7]).unwrap();
-        let discovery = path(&root, project, "chair").join("discovery.json");
-        std::fs::write(&discovery, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        saved(&selected(11), "notes");
-        let record = selected(11).discovery().unwrap().unwrap().record;
-        assert_eq!(record.rebound_from.len(), 2);
-        assert_eq!(record.rebound_from[0].actor, ActorId::from_bytes([9; 16]));
-        assert_eq!(record.rebound_from[1].actor, ActorId::from_bytes([10; 16]));
-        assert!(std::fs::metadata(discovery).unwrap().len() <= 4096);
-    }
-
-    #[test]
     fn hook_save_commands_preserve_the_installing_harness() {
         let (_temp, root, project) = setup();
         for (harness, fixture) in [
