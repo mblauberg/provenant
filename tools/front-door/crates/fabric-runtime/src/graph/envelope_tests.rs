@@ -286,6 +286,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     .iter()
                     .enumerate()
                     .map(|(index, route)| GraphAttempt {
+                        review_substitution: false,
                         extra: Default::default(),
                         launched: true,
                         key: AttemptKey {
@@ -699,6 +700,7 @@ fn usage_warnings_keep_the_most_recently_settled_attempts() {
         let attempt = checkpoint.nodes[node].attempts[0].clone();
         checkpoint.nodes[node].attempts = (0..copies as u64)
             .map(|i| GraphAttempt {
+                review_substitution: false,
                 settled: first + i,
                 ..attempt.clone()
             })
@@ -1001,6 +1003,7 @@ fn fixture_review_expansion(source: &GraphNode, subject: &str) -> Expansion {
             measured_size: "large".into(),
             shape: "fixture".into(),
             source: "fixture".into(),
+            substitutions: Vec::new(),
         }),
         extra: Default::default(),
         source: id,

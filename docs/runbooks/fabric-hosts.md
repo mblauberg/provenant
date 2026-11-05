@@ -565,6 +565,9 @@ substantial = "ask"
 
 Limits also include `routes_per_node`, `node_prompt_bytes`,
 `graph_prompt_bytes`, `expansion_depth`, `fan_out_width`, `continuations` and `concurrency`.
+`review_substitutions` bounds retries after settled lens and verifier task failures
+and verified preparation refusals;
+its default is 1, and 0 disables those retries.
 The defaults are 16 routes, 256 KiB per node prompt, 4 MiB per graph,
 expansion depth 64 and fan-out 32. Set concurrency to 0 to use host lane caps.
 Fan-out counts direct dependants of a node; expansion depth is the longest

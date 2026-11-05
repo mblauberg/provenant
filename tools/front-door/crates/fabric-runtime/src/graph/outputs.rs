@@ -390,16 +390,19 @@ fn parse_findings(
     let mut size = canonical_len(&findings);
     let mut trimmed = 0;
     if !upstream.is_empty() && size > DISPOSITION_TEXT_TARGET {
-        // Retain identities, locations, dispositions and the marker used to
-        // follow provenance. The full result remains in the attempt artifact.
+        // Retain the qualified finding and the marker used to follow it.
+        // The full result remains in the attempt artifact.
         for finding in &mut findings {
             if size <= DISPOSITION_TEXT_TARGET {
                 break;
             }
             let before = canonical_len(finding);
-            finding
-                .extra
-                .retain(|key, _| key == "propagates" || key == "verification");
+            finding.extra.retain(|key, _| {
+                matches!(
+                    key.as_str(),
+                    "propagates" | "verification" | "lens" | "evidence" | "proposed_fix"
+                )
+            });
             finding.summary.clear();
             let after = canonical_len(finding);
             if after < before {
@@ -1357,7 +1360,8 @@ mod alias_tests {
         let mut upstream: Finding = serde_json::from_value(serde_json::json!({
             "id":"F1", "severity":"high", "file":"src/lib.rs", "line":17,
             "summary":"description", "status":"open", "detail":"x".repeat(8000),
-            "propagates":"review:F1"
+            "propagates":"review:F1", "lens":"tests", "evidence":"observed",
+            "proposed_fix":"repair"
         }))
         .unwrap();
         upstream.summary = "s".repeat(1000);
@@ -1381,6 +1385,9 @@ mod alias_tests {
             assert_eq!(finding.line, Some(17));
             assert_eq!(finding.disposition.as_deref(), Some("accepted"));
             assert_eq!(finding.reason.as_deref(), Some("yes"));
+            assert_eq!(finding.extra["lens"], "tests");
+            assert_eq!(finding.extra["evidence"], "observed");
+            assert_eq!(finding.extra["proposed_fix"], "repair");
             assert_eq!(
                 finding
                     .extra

@@ -3,13 +3,9 @@ use super::{
     model::*,
     ports::{Forge, MergeTree, PullRequestState, Repo},
 };
-use std::time::{Duration, Instant};
+use provenant_core::{Clock, MonoTime};
 
 /// Select eligible pull requests in requested order, up to the configured batch limit.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "batch collection is a wall-clock boundary"
-)]
 pub fn select_batch(
     forge: &mut dyn Forge,
     numbers: &[u64],
@@ -17,11 +13,23 @@ pub fn select_batch(
     limit: usize,
     batch_wait_seconds: u64,
 ) -> Result<Vec<EligiblePr>, LandingError> {
+    select_batch_with_dependencies(forge, numbers, numbers, target, limit, batch_wait_seconds)
+}
+
+pub fn select_batch_with_dependencies(
+    forge: &mut dyn Forge,
+    numbers: &[u64],
+    requested: &[u64],
+    target: &str,
+    limit: usize,
+    batch_wait_seconds: u64,
+) -> Result<Vec<EligiblePr>, LandingError> {
     if limit == 0 || numbers.is_empty() {
         return Ok(Vec::new());
     }
-    let start = Instant::now();
-    let budget = Duration::from_secs(batch_wait_seconds);
+    let clock = provenant_os::clock::SystemClock::new();
+    let start = clock.mono_now().as_micros();
+    let budget = batch_wait_seconds.saturating_mul(1_000_000);
     loop {
         let mut selected = Vec::new();
         for &number in numbers {
@@ -29,6 +37,37 @@ pub fn select_batch(
                 continue;
             }
             let info = forge.pull_request(number)?;
+            if let Some(stack) = &info.stack {
+                if stack.base_branch != target {
+                    continue;
+                }
+                let members = forge.stack_members(stack.number)?;
+                let position = members
+                    .iter()
+                    .position(|member| member.number == number)
+                    .ok_or_else(|| {
+                        LandingError::Failed(format!(
+                            "stack {} does not contain pull request #{number}",
+                            stack.number
+                        ))
+                    })?;
+                let lower = members[..position]
+                    .iter()
+                    .filter(|member| member.state != PullRequestState::Merged)
+                    .collect::<Vec<_>>();
+                if let Some(missing) = lower
+                    .iter()
+                    .find(|member| !requested.contains(&member.number))
+                {
+                    return Err(LandingError::Refused(format!(
+                        "pull request #{number} has unmerged lower pull request #{}",
+                        missing.number
+                    )));
+                }
+                if !lower.is_empty() {
+                    continue;
+                }
+            }
             if info.number != number
                 || info.state != PullRequestState::Open
                 || info.base_branch != target
@@ -59,10 +98,19 @@ pub fn select_batch(
                 }
             }
         }
-        if selected.len() == limit || selected.len() == numbers.len() || start.elapsed() >= budget {
+        if selected.len() == limit
+            || selected.len() == numbers.len()
+            || clock.mono_now().as_micros().saturating_sub(start) >= budget
+        {
             return Ok(selected);
         }
-        std::thread::sleep(Duration::from_secs(1).min(budget.saturating_sub(start.elapsed())));
+        let now = clock.mono_now().as_micros();
+        let deadline = start
+            .saturating_add(budget)
+            .min(now.saturating_add(1_000_000));
+        clock
+            .wait_until(MonoTime::from_micros(deadline))
+            .map_err(|error| LandingError::Failed(format!("batch wait: {error}")))?;
     }
 }
 /// Build and push an exact candidate chain from the fetched target and approved heads.
@@ -145,7 +193,62 @@ mod tests {
             author: author.into(),
             state: PullRequestState::Open,
             merged_commit: None,
+            stack: None,
         }
+    }
+    #[test]
+    fn upper_stack_selection_names_its_unmerged_lower_member() {
+        use crate::pr::landing::ports::{StackMember, StackMembership};
+        let mut forge = FakeForge::default();
+        let mut upper = info(2, "author", "lower");
+        upper.stack = Some(StackMembership {
+            number: 42,
+            size: 2,
+            position: 2,
+            base_branch: "main".into(),
+        });
+        forge.pull_requests.insert(2, upper);
+        forge.stacks.insert(
+            42,
+            vec![
+                StackMember {
+                    number: 1,
+                    state: PullRequestState::Open,
+                },
+                StackMember {
+                    number: 2,
+                    state: PullRequestState::Open,
+                },
+            ],
+        );
+        let error = select_batch(&mut forge, &[2], "main", 1, 0).unwrap_err();
+        assert!(error.to_string().contains("#1"));
+        assert!(forge.merge_attempts.is_empty());
+    }
+    #[test]
+    fn stack_selection_names_missing_lower_even_when_another_lower_was_requested() {
+        use crate::pr::landing::ports::{StackMember, StackMembership};
+        let mut forge = FakeForge::default();
+        let mut upper = info(3, "author", "middle");
+        upper.stack = Some(StackMembership {
+            number: 42,
+            size: 3,
+            position: 3,
+            base_branch: "main".into(),
+        });
+        forge.pull_requests.insert(3, upper);
+        forge.stacks.insert(
+            42,
+            (1..=3)
+                .map(|number| StackMember {
+                    number,
+                    state: PullRequestState::Open,
+                })
+                .collect(),
+        );
+        let error =
+            select_batch_with_dependencies(&mut forge, &[3], &[1, 3], "main", 1, 0).unwrap_err();
+        assert!(error.to_string().contains("#2"));
     }
     #[test]
     fn selection_requires_independent_approval_at_head_and_target() -> Result<(), LandingError> {

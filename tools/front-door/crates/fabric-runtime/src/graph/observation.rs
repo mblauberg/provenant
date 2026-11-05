@@ -47,6 +47,32 @@ pub(super) fn fallback_candidate(outcome: AttemptOutcome, launched: bool) -> boo
         )
 }
 
+/// A settled review task can be independently re-attempted without changing
+/// the panel topology. An unresolved launch is never eligible.
+pub(super) fn review_substitution(node: &PlannedNode, attempt: &GraphAttempt) -> bool {
+    review_member(node)
+        && attempt.state == AttemptState::Terminal
+        && attempt.launched
+        && attempt.outcome == Some(AttemptOutcome::TaskFailed)
+}
+
+pub(super) fn review_member(node: &PlannedNode) -> bool {
+    node.access == AccessMode::ReadOnly
+        && node.role.as_deref().is_some_and(|role| {
+            role == "lens" || role.starts_with("lens.") || role == "review.verify"
+        })
+}
+
+/// Preparation fallback still needs live evidence before a new route starts.
+pub(super) fn review_preparation_substitution(node: &PlannedNode, attempt: &GraphAttempt) -> bool {
+    review_member(node)
+        && attempt.state == AttemptState::Terminal
+        && !attempt.launched
+        && attempt
+            .outcome
+            .is_some_and(|outcome| fallback_candidate(outcome, false))
+}
+
 pub(super) fn live_fallback_allowed(
     outcome: AttemptOutcome,
     launched: bool,

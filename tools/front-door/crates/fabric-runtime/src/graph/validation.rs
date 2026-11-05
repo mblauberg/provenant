@@ -1060,12 +1060,23 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 || attempt.key.node_id != node.id
                 || usize::from(attempt.key.route_index) != index
                 || attempt.route != node.routes[index]
+                || (attempt.review_substitution
+                    && (index == 0
+                        || !(review_substitution(node, &progress.attempts[index - 1])
+                            || review_preparation_substitution(
+                                node,
+                                &progress.attempts[index - 1],
+                            ))))
+                || (index > 0
+                    && review_substitution(node, &progress.attempts[index - 1])
+                    && !attempt.review_substitution)
                 || (attempt.state == AttemptState::Terminal) != attempt.outcome.is_some()
                 || (index + 1 < progress.attempts.len()
                     && (attempt.state != AttemptState::Terminal
-                        || !attempt
-                            .outcome
-                            .is_some_and(|outcome| fallback_candidate(outcome, attempt.launched))))
+                        || !(review_substitution(node, attempt)
+                            || attempt.outcome.is_some_and(|outcome| {
+                                fallback_candidate(outcome, attempt.launched)
+                            }))))
             {
                 return Err(bad(
                     "attempt key, route, terminal outcome and fallback order must match plan",
@@ -1087,9 +1098,10 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             NodeState::Running => match last {
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,
                 Some(attempt) => {
-                    attempt
-                        .outcome
-                        .is_some_and(|outcome| fallback_candidate(outcome, attempt.launched))
+                    (review_substitution(node, attempt)
+                        || attempt
+                            .outcome
+                            .is_some_and(|outcome| fallback_candidate(outcome, attempt.launched)))
                         && progress.attempts.len() < node.routes.len()
                 }
                 None => false,
@@ -1137,6 +1149,31 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             return Err(bad(
                 "node state must agree with terminal attempt outcome or validated planner fallback",
             ));
+        }
+    }
+    for expansion in &checkpoint.expansions {
+        let Some(review) = &expansion.review else {
+            continue;
+        };
+        let mut expected = Vec::new();
+        for (index, member) in plan.nodes.iter().enumerate() {
+            if review_panel_contains(expansion, member, plan, &positions) {
+                for attempt in &checkpoint.nodes[index].attempts {
+                    if attempt.review_substitution {
+                        expected.push(ReviewSubstitution {
+                            member: member.id.clone(),
+                            route_index: attempt.key.route_index,
+                        });
+                    }
+                }
+            }
+        }
+        expected.sort();
+        if review.substitutions != expected {
+            return Err(GraphError::BadCheckpoint {
+                node: expansion.source.clone(),
+                invariant: "review substitutions must match member attempts",
+            });
         }
     }
     Ok(())
