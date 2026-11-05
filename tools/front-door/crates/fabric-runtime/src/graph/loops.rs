@@ -566,7 +566,11 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
             prior.remove(&n.id).unwrap_or_else(|| NodeProgress {
                 extra: Default::default(),
                 children: n.composite_members.clone(),
-                source_commit: None,
+                source_binding: n.source.clone(),
+                source_commit: match &n.source {
+                    Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+                    _ => None,
+                },
                 implicit_writer: None,
                 review_base: None,
                 fragment: None,

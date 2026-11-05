@@ -110,7 +110,7 @@ fn loop_composite_review_pins_each_repaired_commit() {
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.successful());
-    assert_eq!(owner.source_commits, vec![None, Some(commit1), None, Some(commit2)]);
+    assert_eq!(owner.source_commits, vec![Some("a".repeat(40)), Some(commit1), Some("a".repeat(40)), Some(commit2)]);
     assert_eq!(owner.calls[1].0.node_id, "repair--r1--council--lens");
     assert_eq!(owner.calls[3].0.node_id, "repair--r2--council--lens");
     assert_eq!(advance(&document, &mut FakeOwner::default(), &mut journal).unwrap().checkpoint, run.checkpoint);

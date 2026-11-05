@@ -1028,7 +1028,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 return Err(GraphError::Invalid(reason));
             }
             let asks = may_ask(&plan);
+            let (bound_review_base, bound_integration_base) = owner.bound_graph_bases();
             let mut checkpoint = GraphCheckpoint {
+                bound_review_base: bound_review_base.map(|base| base.to_string()),
+                bound_integration_base: bound_integration_base.map(|base| base.to_string()),
                 extra: Default::default(),
                 expansions: Vec::new(),
                 remaining: None,
@@ -1068,7 +1071,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .map(|node| NodeProgress {
                         extra: Default::default(),
                         children: node.composite_members.clone(),
-                        source_commit: None,
+                        source_binding: node.source.clone(),
+                        source_commit: match &node.source {
+                            Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+                            _ => None,
+                        },
                         implicit_writer: None,
                         review_base: None,
                         fragment: None,
@@ -1096,7 +1103,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     })
                     .collect(),
             };
-            if document.schema_version >= 2 {
+            {
                 for (node, progress) in plan.nodes.iter().zip(&mut checkpoint.nodes) {
                     if plans::writer(node) && node.source.is_none() && node.continues.is_none() {
                         let worktree = node
@@ -1105,13 +1112,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
                         let binding = owner
                             .bind_implicit_writer(worktree)
-                            .map_err(GraphError::Run)?
-                            .ok_or_else(|| {
-                                GraphError::Refused(format!(
+                            .map_err(GraphError::Run)?;
+                        let Some(binding) = binding else {
+                            if document.schema_version >= 2 {
+                                return Err(GraphError::Refused(format!(
                                     "node {}: host cannot bind the writer source",
                                     node.id
-                                ))
-                            })?;
+                                )));
+                            }
+                            continue;
+                        };
                         if !std::path::Path::new(&binding.worktree).is_absolute()
                             || binding.worktree.len() > 4096
                             || binding
@@ -1876,47 +1886,41 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 };
 
                 // Expanded writers acquire their binding as soon as they exist.
-                if document.schema_version >= 2
-                    && plans::writer(node)
+                if plans::writer(node)
                     && node.source.is_none()
                     && node.continues.is_none()
                     && checkpoint.nodes[node_index].implicit_writer.is_none()
+                    && checkpoint.nodes[node_index].attempts.is_empty()
                 {
-                    if !checkpoint.nodes[node_index].attempts.is_empty() {
-                        return Err(GraphError::BadCheckpoint {
-                            node: node.id.clone(),
-                            invariant: "implicit writer must retain its binding",
-                        });
-                    }
                     let path = node
                         .worktree
                         .as_deref()
                         .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
-                    let binding = owner
-                        .bind_implicit_writer(path)
-                        .map_err(GraphError::Run)?
-                        .ok_or_else(|| {
-                            GraphError::Refused(format!(
-                                "node {}: host cannot bind the writer source",
-                                node.id
-                            ))
-                        })?;
-                    if !std::path::Path::new(&binding.worktree).is_absolute()
-                        || binding.worktree.len() > 4096
-                        || binding
-                            .source_commit
-                            .parse::<provenant_core::GitOid>()
-                            .is_err()
-                    {
+                    let binding = owner.bind_implicit_writer(path).map_err(GraphError::Run)?;
+                    if binding.is_none() && document.schema_version >= 2 {
                         return Err(GraphError::Refused(format!(
-                            "node {}: writer binding is invalid",
+                            "node {}: host cannot bind the writer source",
                             node.id
                         )));
                     }
-                    checkpoint.nodes[node_index].source_commit =
-                        Some(binding.source_commit.clone());
-                    checkpoint.nodes[node_index].implicit_writer = Some(binding);
-                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    if let Some(binding) = binding {
+                        if !std::path::Path::new(&binding.worktree).is_absolute()
+                            || binding.worktree.len() > 4096
+                            || binding
+                                .source_commit
+                                .parse::<provenant_core::GitOid>()
+                                .is_err()
+                        {
+                            return Err(GraphError::Refused(format!(
+                                "node {}: writer binding is invalid",
+                                node.id
+                            )));
+                        }
+                        checkpoint.nodes[node_index].source_commit =
+                            Some(binding.source_commit.clone());
+                        checkpoint.nodes[node_index].implicit_writer = Some(binding);
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    }
                 }
                 let requested_review_base = (node.access == AccessMode::ReadOnly)
                     .then(|| {
@@ -1957,7 +1961,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                     }
                 }
-                let graph_bases = owner.bound_graph_bases();
                 let needs_record = checkpoint.nodes[node_index]
                     .attempts
                     .last()
@@ -2186,15 +2189,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         break;
                     }
                     prepared_inputs = Some((requests, materialised));
-                    let mut initial_manifest = attempt_input_manifest(
-                        node,
-                        &plan,
-                        &checkpoint,
-                        &positions,
-                        graph_bases,
-                        &[],
-                        None,
-                    );
+                    let mut initial_manifest =
+                        attempt_input_manifest(node, &plan, &checkpoint, &positions, &[], None);
                     for input in &mut initial_manifest.inputs {
                         if matches!(input.kind, OutputKind::Result | OutputKind::Findings) {
                             input.file_delivery = InputDelivery::Pending;
@@ -2211,6 +2207,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         launch_actor: owner.actor(),
                         settled: 0,
                         input_cap: (!node.inputs.is_empty()).then_some(cap),
+                        input_cap_source: (!node.inputs.is_empty())
+                            .then_some(InputCapSource::EffectiveGraphLimits),
                         input_manifest: Some(initial_manifest),
                         usage: None,
                     });
@@ -2297,7 +2295,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &plan,
                         &checkpoint,
                         &positions,
-                        graph_bases,
                         &requests,
                         materialised.as_ref(),
                     );

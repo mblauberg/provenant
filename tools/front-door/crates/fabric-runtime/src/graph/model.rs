@@ -697,6 +697,11 @@ pub struct GraphCheckpoint {
     pub delivered: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<String>,
+    /// Graph-wide review and integration bases fixed at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_review_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_integration_base: Option<String>,
     /// Integration head pinned when the first integration source was resolved.
     /// Synthesis and writers that start from that commit stop if it moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -762,6 +767,9 @@ pub struct NodeProgress {
     /// Direct children of a composite, whose individual evidence stays available.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<String>,
+    /// Declared source selection, including upstream sources still pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_binding: Option<SourceBinding>,
     /// Resolved once before launch and retained across retries and replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
@@ -848,6 +856,9 @@ pub struct GraphAttempt {
     /// Byte cap fixed at admission so operation replay renders the same input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_cap: Option<usize>,
+    /// The effective graph limits supplied to admission own this cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_cap_source: Option<InputCapSource>,
     /// Bounded identifiers describing what was selected and delivered before launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_manifest: Option<AttemptInputManifest>,
@@ -856,6 +867,12 @@ pub struct GraphAttempt {
     /// When the attempt settled, as a graph-wide order from 1; zero while it runs.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub settled: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputCapSource {
+    EffectiveGraphLimits,
 }
 
 /// Evidence contains identifiers and digests only, never input text or host paths.
@@ -874,6 +891,11 @@ pub struct AttemptInputManifest {
     #[serde(default)]
     pub integration_source: Option<String>,
     pub applied_route: Option<GraphRoute>,
+    /// Ordering edges, separate from the outputs selected as context.
+    #[serde(default)]
+    pub dependencies: Option<Vec<String>>,
+    #[serde(default)]
+    pub dependencies_omitted: usize,
     pub inputs: Vec<AttemptInputEvidence>,
     pub omitted: usize,
 }

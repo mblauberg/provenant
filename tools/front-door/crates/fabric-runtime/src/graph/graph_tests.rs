@@ -3057,6 +3057,54 @@ fn source_and_read_roots_survive_retry_and_replay() {
 }
 
 #[test]
+fn known_commit_source_is_visible_before_dependencies_settle() {
+    let mut reader = node("reader", route("fixture"));
+    reader.depends_on.push("gate".into());
+    reader.source = Some(SourceBinding::Commit {
+        commit: "1".repeat(40),
+    });
+    let mut document = graph(vec![reader, node("gate", route("fixture"))]);
+    document.schema_version = 2;
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([AttemptObservation::Pending {
+            attempt_ref: Some("host/gate".into()),
+        }]),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let reader = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "reader")
+        .unwrap();
+    assert!(reader.attempts.is_empty());
+    assert_eq!(
+        reader.source_commit.as_deref(),
+        Some("1111111111111111111111111111111111111111")
+    );
+}
+
+#[test]
+fn implicit_writer_binding_applies_to_schema_one_when_host_supports_it() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    let document = graph(vec![writer]);
+    let mut owner = FakeOwner {
+        implicit_head: Some("1".repeat(40)),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[0].source_commit.as_deref(),
+        Some("1111111111111111111111111111111111111111")
+    );
+    assert_eq!(owner.implicit_bindings, 1);
+}
+
+#[test]
 fn implicit_writer_binds_before_its_dependency_settles() {
     let mut writer = node("writer", route("fixture"));
     writer.access = AccessMode::WorktreeWrite;

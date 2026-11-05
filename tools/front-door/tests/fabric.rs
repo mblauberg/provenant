@@ -737,7 +737,8 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
     let document: graph::GraphDocument = serde_json::from_value(json!({
         "schema_version":2,"graph_id":"inspection","nodes":[
             {"id":"producer","prompt":"produce","access":"read_only","source":{"type":"commit","commit":"1".repeat(40)},"route":{"adapter":"fixture","model":"fixture/model"}},
-            {"id":"consumer","prompt":"consume","access":"read_only","depends_on":["producer"],"source":{"type":"node","node":"producer"},
+            {"id":"ordering-only","prompt":"order","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}},
+            {"id":"consumer","prompt":"consume","access":"read_only","depends_on":["producer","ordering-only"],"source":{"type":"node","node":"producer"},
              "inputs":[{"node":"producer","outputs":["commit"],"required_outputs":["commit"]}],"route":{"adapter":"fixture","model":"fixture/model"}}
         ]
     }))?;
@@ -776,6 +777,18 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
         .find(|node| node["id"] == "consumer")
         .ok_or("consumer")?;
     let attempt = &consumer["attempts"][0];
+    let dependencies = attempt["input_manifest"]["dependencies"]
+        .as_array()
+        .ok_or("dependencies")?;
+    assert!(dependencies.contains(&json!("producer")));
+    assert!(dependencies.contains(&json!("ordering-only")));
+    assert_eq!(
+        attempt["input_manifest"]["inputs"]
+            .as_array()
+            .ok_or("selected inputs")?
+            .len(),
+        1
+    );
     assert_eq!(
         attempt["input_manifest"]["inputs"][0]["producer_node"],
         "producer"
@@ -788,6 +801,8 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
         attempt["input_manifest"]["applied_route"]["model"],
         "fixture/model"
     );
+    assert_eq!(attempt["input_cap"], 262144);
+    assert_eq!(attempt["input_cap_source"], "effective_graph_limits");
     assert_eq!(attempt["outcome"], "succeeded");
     let human = rig.command(&["fabric", "graph", "status", "inspection", "--full"])?;
     assert_eq!(code(&human), 0);
@@ -798,6 +813,8 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
         "producer",
         "fixture/model",
         "selected_input",
+        "dependencies=",
+        "ordering-only",
         "delivery=Delivered",
         "Succeeded",
     ] {

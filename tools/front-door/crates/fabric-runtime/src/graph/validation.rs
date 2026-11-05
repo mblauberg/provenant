@@ -948,6 +948,17 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             invariant: "instance identity must be a run ID",
         });
     }
+    if checkpoint
+        .bound_review_base
+        .iter()
+        .chain(checkpoint.bound_integration_base.iter())
+        .any(|base| base.parse::<provenant_core::GitOid>().is_err())
+    {
+        return Err(GraphError::BadCheckpoint {
+            node: plan.graph_id.clone(),
+            invariant: "graph bases must be full object IDs",
+        });
+    }
     if checkpoint.schema_version != 1
         || checkpoint.graph_id != plan.graph_id
         || checkpoint.delivery_required
@@ -1008,6 +1019,10 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                             .iter()
                             .any(|id| !node.after_expansion.contains(id))),
                 "composite completion edges must include every member",
+            ),
+            (
+                document.schema_version >= 2 && progress.source_binding != node.source,
+                "source selection must match the expanded plan",
             ),
             (
                 progress.source_commit.is_some()

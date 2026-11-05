@@ -148,6 +148,8 @@ pub(super) fn checkpoint_bound(
     plan: &PlannedGraph,
 ) -> usize {
     let skeleton = GraphCheckpoint {
+        bound_review_base: Some("f".repeat(64)),
+        bound_integration_base: Some("f".repeat(64)),
         extra: Default::default(),
         expansions: expansions.to_vec(),
         remaining: Some(RemainingBudgets {
@@ -284,6 +286,7 @@ fn node_bound(
         .into_iter()
         .collect(),
         children: node.composite_members.clone(),
+        source_binding: node.source.clone(),
         source_commit: node.source.as_ref().map(|_| String::new()),
         implicit_writer: None,
         review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
@@ -495,6 +498,7 @@ fn node_bound(
             outcome: Some(AttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),
             input_cap: Some(usize::MAX),
+            input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
             input_manifest: None,
             settled: u64::MAX,
             usage: Some(AttemptUsage {
@@ -516,7 +520,7 @@ fn node_bound(
             .sum::<usize>()
             .min(MANIFEST_INPUT_LIMIT);
         bytes +=
-            canonical_len(&attempt) + 2 * HOST_ID_BYTES + NOTE_BYTES + 1 + 2048 + selections * 768;
+            canonical_len(&attempt) + 2 * HOST_ID_BYTES + NOTE_BYTES + 1 + 4608 + selections * 768;
     }
     bytes
 }

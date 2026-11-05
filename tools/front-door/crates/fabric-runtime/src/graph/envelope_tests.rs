@@ -209,6 +209,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
             NodeProgress {
                 extra: Default::default(),
                 children: node.composite_members.clone(),
+                source_binding: node.source.clone(),
                 source_commit: node.source.as_ref().map(|_| "1".repeat(64)),
                 implicit_writer: None,
                 review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
@@ -304,6 +305,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                         outcome: Some(AttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
                         input_cap: Some(usize::MAX),
+                        input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
                         input_manifest: None,
                         settled: u64::MAX,
                         usage: Some(AttemptUsage {
@@ -321,6 +323,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         })
         .collect();
     GraphCheckpoint {
+        bound_review_base: Some("f".repeat(64)),
+        bound_integration_base: Some("f".repeat(64)),
         extra: Default::default(),
         expansions: Vec::new(),
         remaining: Some(RemainingBudgets {

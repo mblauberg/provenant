@@ -15,6 +15,22 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         .flat_map(|node| node.children.iter())
         .collect();
     let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
+    if full
+        && (run.checkpoint.bound_review_base.is_some()
+            || run.checkpoint.bound_integration_base.is_some())
+    {
+        human.push_str(&format!(
+            "Graph bases: review={} integration={}\n",
+            run.checkpoint
+                .bound_review_base
+                .as_deref()
+                .unwrap_or("unavailable"),
+            run.checkpoint
+                .bound_integration_base
+                .as_deref()
+                .unwrap_or("unavailable")
+        ));
+    }
     if run.status == provenant_fabric_runtime::graph::GraphStatus::Paused
         && let Some(reason) = &run.checkpoint.pause_reason
     {
@@ -112,6 +128,8 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         }
         if let Some(head) = &node.source_commit {
             human.push_str(&format!(" source={head}"));
+        } else if node.source_binding.is_some() {
+            human.push_str(" source=pending");
         }
         if let Some(base) = &node.review_base {
             human.push_str(&format!(" review_base={base}"));
@@ -130,7 +148,7 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
                 if let Some(manifest) = &attempt.input_manifest {
                     let route = manifest.applied_route.as_ref();
                     human.push_str(&format!(
-                        "    attempt route_index={} state={:?} outcome={:?} applied_adapter={} applied_model={} applied_effort={} applied_account={} source={} review_base={} graph_review_base={} integration_base={} integration_source={} input_limit={} omitted={}\n",
+                        "    attempt route_index={} state={:?} outcome={:?} applied_adapter={} applied_model={} applied_effort={} applied_account={} source={} review_base={} graph_review_base={} integration_base={} integration_source={} input_limit={} input_limit_source={} omitted={}\n",
                         attempt.key.route_index, attempt.state, attempt.outcome,
                         route.and_then(|route| route.adapter.as_deref()).unwrap_or("unavailable"),
                         route.and_then(|route| route.model.as_deref()).unwrap_or("unavailable"),
@@ -142,8 +160,17 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
                         manifest.integration_base.as_deref().unwrap_or("unavailable"),
                         manifest.integration_source.as_deref().unwrap_or("unavailable"),
                         attempt.input_cap.map_or_else(|| "unavailable".into(), |cap| cap.to_string()),
+                        attempt.input_cap_source.map_or("unavailable", |_| "effective_graph_limits"),
                         manifest.omitted,
                     ));
+                    match &manifest.dependencies {
+                        Some(dependencies) => human.push_str(&format!(
+                            "      dependencies={} omitted={}\n",
+                            dependencies.join(","),
+                            manifest.dependencies_omitted
+                        )),
+                        None => human.push_str("      dependencies=unavailable\n"),
+                    }
                     for input in &manifest.inputs {
                         let producer = input.producer_attempt.as_ref();
                         human.push_str(&format!(

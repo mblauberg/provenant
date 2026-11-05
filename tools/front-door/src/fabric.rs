@@ -6160,6 +6160,8 @@ impl Factory {
             GraphRun {
                 status: GraphStatus::Paused,
                 checkpoint: GraphCheckpoint {
+                    bound_review_base: None,
+                    bound_integration_base: None,
                     extra: Default::default(),
                     expansions: Vec::new(),
                     remaining: None,

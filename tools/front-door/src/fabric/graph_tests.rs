@@ -936,14 +936,22 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let first = "1".repeat(40);
         let second = "2".repeat(40);
+        run.checkpoint.bound_review_base = Some(first.clone());
+        run.checkpoint.bound_integration_base = Some(second.clone());
         run.checkpoint.nodes[1].source_commit = Some(first.clone());
         run.checkpoint.nodes[1].review_base = Some(second.clone());
         run.checkpoint.nodes[2].source_commit = Some(second.clone());
+        run.checkpoint.nodes[3].source_binding = Some(serde_json::from_value(serde_json::json!({"type":"node", "node":"member"})).unwrap());
         let full = super::graph_human::graph_human_full(&run);
+        assert!(full.contains(&format!("Graph bases: review={first} integration={second}")));
         assert!(full.lines().any(|row| row.starts_with("  composite:") && row.contains(&format!("source={first}"))));
         assert!(full.lines().any(|row| row.starts_with("  member:") && row.contains(&format!("source={second}"))));
         assert!(full.lines().any(|row| row.starts_with("  composite:") && row.contains(&format!("review_base={second}"))));
+        assert!(full.lines().any(|row| row.starts_with("  loop-member:") && row.contains("source=pending")));
         let json = serde_json::to_value(&run).unwrap();
+        assert_eq!(json["checkpoint"]["bound_review_base"], first);
+        assert_eq!(json["checkpoint"]["bound_integration_base"], second);
+        assert_eq!(json["checkpoint"]["nodes"][3]["source_binding"]["node"], "member");
         assert_eq!(json["checkpoint"]["nodes"][1]["review_base"], second);
     }
 
@@ -952,6 +960,7 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[0];
         node.attempts[1].input_cap = Some(262144);
+        node.attempts[1].input_cap_source = Some(provenant_fabric_runtime::graph::InputCapSource::EffectiveGraphLimits);
         node.attempts[1].input_manifest = Some(serde_json::from_value(serde_json::json!({
             "schema_version":1, "source_commit":"1111111111111111111111111111111111111111",
             "review_base":"2222222222222222222222222222222222222222", "graph_review_base":"3333333333333333333333333333333333333333", "integration_base":"4444444444444444444444444444444444444444",
