@@ -12,21 +12,30 @@ def describe(repo: Path) -> str:
         "Keep credentials out of setup scripts, prompts and result artifacts.",
     ]
     manifests = []
+    toolchains = []
     if (repo / "Cargo.toml").is_file():
         manifests.append("Cargo.toml")
     try:
         tracked = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "--", "Cargo.toml", "**/Cargo.toml"],
+            ["git", "-C", str(repo), "ls-files", "--", "Cargo.toml", "**/Cargo.toml",
+             "rust-toolchain", "rust-toolchain.toml", "**/rust-toolchain", "**/rust-toolchain.toml"],
             check=True, capture_output=True, text=True,
         )
-        manifests.extend(path for path in tracked.stdout.splitlines() if path not in manifests)
+        for path in tracked.stdout.splitlines():
+            if Path(path).name == "Cargo.toml" and path not in manifests:
+                manifests.append(path)
+            elif Path(path).name in ("rust-toolchain", "rust-toolchain.toml"):
+                toolchains.append(path)
     except (OSError, subprocess.CalledProcessError):
         pass
     if manifests:
         lines.append("Rust: install the repository's Rust toolchain and Cargo.")
         lines.append("Cargo manifests: " + ", ".join(manifests))
-        if (repo / "rust-toolchain.toml").is_file() or (repo / "rust-toolchain").is_file():
-            lines.append("Use the toolchain pinned by the repository's rust-toolchain file.")
+        for name in ("rust-toolchain", "rust-toolchain.toml"):
+            if (repo / name).is_file() and name not in toolchains:
+                toolchains.append(name)
+        if toolchains:
+            lines.append("Use the pinned Rust toolchains: " + ", ".join(toolchains))
         lines.extend([
             "For nextest tiers: install cargo-nextest (cargo install cargo-nextest --locked).",
             "Optional cache warm-up: run cargo build --locked in the workspace; check the provider's setup time limit.",
