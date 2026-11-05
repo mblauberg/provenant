@@ -124,6 +124,30 @@ impl Layers {
         layers
     }
 
+    /// The initial layer declares a preset's defaults; later layers and dispatch
+    /// overrides can supply their own values.
+    fn is_initial_origin(&self, name: &str, origin: &str) -> bool {
+        let mut current = name;
+        let mut seen = BTreeSet::new();
+        while seen.insert(current) {
+            let Some(layers) = self.entries.get(current) else {
+                return false;
+            };
+            if layers.first().is_some_and(|(first, _)| first == origin) {
+                return true;
+            }
+            let Some(parent) = layers
+                .iter()
+                .rev()
+                .find_map(|(_, value)| value.get("extends").and_then(Value::as_str))
+            else {
+                return false;
+            };
+            current = parent;
+        }
+        false
+    }
+
     pub fn insert(&mut self, origin: &str, name: &str, text: &str) -> Result<(), String> {
         if !valid_name(name) {
             return Err(format!("invalid preset name: {name}"));

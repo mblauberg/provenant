@@ -791,8 +791,8 @@ sets its lane timeout, capped by `limits.graph_timeout_seconds`.
 
 `--plan` defaults to `[domains.fabric.plan] mode` (`auto`). `auto` stays off when
 `lanes` (or the catalogue's other `explicit` parameter, such as `width` or
-`lenses`) has any origin other than the bundled default, including a project or
-user preset. A `by_size` catalogue plans only a large subject. Otherwise, for
+`lenses`) comes from a later preset layer or a dispatch override. An initial preset
+layer supplies defaults regardless of its name. A `by_size` catalogue plans only a large subject. Otherwise, for
 `big-batch` unset lanes force it on, and an unset `width` does the same for the
 research presets; the thresholds
 (`auto.acceptance_items`, `auto.batch_issues`, `auto.write_crates`) then only

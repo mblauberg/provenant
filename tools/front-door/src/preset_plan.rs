@@ -192,7 +192,12 @@ pub fn write_crates(brief: &str, ctx: &PlanContext, parameters: &Value) -> usize
     found.len()
 }
 
-fn explicit(origins: &BTreeMap<String, String>, parameter: &str) -> bool {
+fn explicit(
+    layers: &Layers,
+    name: &str,
+    origins: &BTreeMap<String, String>,
+    parameter: &str,
+) -> bool {
     let path = format!("parameters.{parameter}");
     origins
         .get(&path)
@@ -202,12 +207,18 @@ fn explicit(origins: &BTreeMap<String, String>, parameter: &str) -> bool {
                 .find(|(origin, _)| origin.starts_with(&format!("{path}.")))
                 .map(|(_, origin)| origin)
         })
-        .is_some_and(|origin| origin != "bundled")
+        .is_some_and(|origin| !layers.is_initial_origin(name, origin))
 }
 
 /// The `auto` rule. Explicit shape wins; then any large or underspecified
 /// signal turns planning on; otherwise the work is small and specified.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "planner selection needs the preset's layered inputs"
+)]
 fn auto_rule(
+    layers: &Layers,
+    name: &str,
     ctx: &PlanContext,
     catalogue: &Value,
     origins: &BTreeMap<String, String>,
@@ -222,7 +233,10 @@ fn auto_rule(
         .flatten()
         .filter_map(Value::as_str)
         .collect();
-    if let Some(parameter) = shaped.iter().find(|name| explicit(origins, name)) {
+    if let Some(parameter) = shaped
+        .iter()
+        .find(|parameter| explicit(layers, name, origins, parameter))
+    {
         return (false, format!("{parameter} given explicitly"));
     }
     // A review panel is scaled by the subject's size: only a large one plans,
@@ -317,7 +331,16 @@ pub fn decide(
             } else {
                 None
             };
-            auto_rule(ctx, catalogue, origins, brief, &parameters, size.as_deref())
+            auto_rule(
+                layers,
+                name,
+                ctx,
+                catalogue,
+                origins,
+                brief,
+                &parameters,
+                size.as_deref(),
+            )
         }
     };
     let mut decision = Decision {
@@ -386,7 +409,7 @@ pub fn decide(
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .filter(|parameter| explicit(origins, parameter))
+            .filter(|parameter| explicit(layers, name, origins, parameter))
             .collect();
         if !given.is_empty() {
             decision.warnings.push(format!(
@@ -417,7 +440,7 @@ pub fn apply(
         .to_owned();
     // Unless the chair listed worktrees, the project's own linked ones are the
     // set a planner may assign.
-    if !explicit(origins, "worktrees")
+    if !explicit(layers, name, origins, "worktrees")
         && !ctx.worktrees.is_empty()
         && let Some(slot) = config.pointer_mut("/parameters/worktrees")
     {
@@ -875,4 +898,28 @@ pub fn attach(nodes: &mut [Value], plan: Value) -> Result<(), String> {
     }
     node["plan"] = plan;
     Ok(())
+}
+
+#[cfg(test)]
+mod declaration_tests {
+    use super::*;
+
+    #[test]
+    fn initial_custom_parameter_is_not_an_explicit_override() {
+        let mut layers = Layers::empty();
+        layers
+            .insert(
+                "custom.toml",
+                "custom",
+                "stages=[]\n[parameters]\nwidth=2\n",
+            )
+            .unwrap();
+        let (_, origins) = layers.resolve("custom").unwrap();
+        assert!(!explicit(&layers, "custom", &origins, "width"));
+        layers
+            .insert("override.toml", "custom", "[parameters]\nwidth=3\n")
+            .unwrap();
+        let (_, origins) = layers.resolve("custom").unwrap();
+        assert!(explicit(&layers, "custom", &origins, "width"));
+    }
 }

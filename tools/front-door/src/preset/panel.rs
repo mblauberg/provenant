@@ -343,7 +343,7 @@ impl StageBuilder<'_> {
         let caller_supplied = self
             .origins
             .get("parameters.lenses")
-            .is_some_and(|origin| origin != "bundled");
+            .is_some_and(|origin| !self.layers.is_initial_origin(self.name, origin));
         if let Some(plan) = plan {
             // A caller's own list keeps its lenses and order; only what the
             // change itself triggers (test paths and markers) is added to it.
@@ -635,11 +635,11 @@ impl StageBuilder<'_> {
             })
             .unwrap_or_default();
         let mut lenses = Vec::new();
-        // The bundled list is the default; only a caller's own list is a request.
+        // Initial-layer lists are defaults; later overrides are requests.
         let caller_supplied = self
             .origins
             .get("parameters.lenses")
-            .is_none_or(|origin| origin != "bundled");
+            .is_none_or(|origin| !self.layers.is_initial_origin(self.name, origin));
         for lens in self
             .parameters
             .get("lenses")

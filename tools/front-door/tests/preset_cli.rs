@@ -2949,3 +2949,49 @@ fn unbound_request_values_warn_in_explain() -> Result<(), Box<dyn std::error::Er
     }
     Ok(())
 }
+
+#[test]
+fn copied_review_preset_binds_request_values_under_any_name()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let presets = temp.path().join("config/provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("copy.toml"),
+        include_str!("../assets/presets/generator-evaluator.toml"),
+    )?;
+    let prompt = temp.path().join("prompt");
+    std::fs::write(&prompt, "Implement the bounded change")?;
+    let run = |preset: &str| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let output = fixture_cli()
+            .current_dir(&root)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "run", "--preset", preset, "--prompt-file"])
+            .arg(&prompt)
+            .args(["--risk-tier", "crucial", "--task-kind", "docs", "--explain"])
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let bundled = run("generator-evaluator")?;
+    let copied = run("copy")?;
+    assert_eq!(
+        bundled["data"]["graph"]["nodes"],
+        copied["data"]["graph"]["nodes"]
+    );
+    let lens = copied["data"]["graph"]["nodes"]
+        .as_array()
+        .ok_or("nodes missing")?
+        .iter()
+        .find(|node| node["id"] == "lens")
+        .ok_or("lens missing")?;
+    assert_eq!(lens["review"]["risk_tier"], "crucial");
+    assert_eq!(lens["review"]["kind"], "docs");
+    Ok(())
+}
