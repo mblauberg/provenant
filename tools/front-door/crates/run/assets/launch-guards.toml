@@ -105,3 +105,33 @@ reason = "Authentication, token identity, continuation and private-state checks 
 site = "run/src/launch.rs#Service::start_inner"
 boundary = "authority"
 reason = "Request digest and host-owned retry checks bind launch to the validated request and caller."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "unclassified"
+reason = "Validates profile paths, process policy, fixture observations, endpoints and authentication grants; classify individual refusal branches."
+
+[[guard]]
+site = "providers/src/launch.rs#admit"
+boundary = "unclassified"
+reason = "Validates route, continuation, executable and account inputs before adapter preparation."
+
+[[guard]]
+site = "providers/src/launch.rs#package_root"
+boundary = "unclassified"
+reason = "Rejects an executable whose package root cannot be represented safely."
+
+[[guard]]
+site = "providers/src/lane.rs#LaneRuntime::environment"
+boundary = "unclassified"
+reason = "Private Git wrapper and runtime setup can reject paths or unavailable configuration."
+
+[[guard]]
+site = "providers/src/lane.rs#LaunchSpec::configure_build_slots"
+boundary = "unclassified"
+reason = "Invalid build-slot paths or environment values refuse setup."
+
+[[guard]]
+site = "providers/src/identity.rs#RegisteredAccount::validate_route"
+boundary = "authority"
+reason = "The selected account must match the route it authorises."
