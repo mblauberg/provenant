@@ -1230,6 +1230,15 @@ fn init_fixture_repository(
 }
 
 #[test]
+fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
+    for adapter in ["codex", "cursor", "opencode"] {
+        assert!(super::preparation::login_check_can_clear(adapter, false));
+        assert!(!super::preparation::login_check_can_clear(adapter, true));
+    }
+    assert!(super::preparation::login_check_can_clear("agy", true));
+}
+
+#[test]
 fn opencode_stale_auth_prepares_with_an_unverified_warning()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId};

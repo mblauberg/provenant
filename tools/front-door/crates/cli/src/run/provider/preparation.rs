@@ -462,6 +462,12 @@ pub(super) fn prepare_with_wait(
     )
 }
 
+/// A mismatch is about which account is signed in, so only a check that names
+/// the account may clear it; a plain "logged in" answer must not.
+pub(super) fn login_check_can_clear(adapter: &str, mismatch: bool) -> bool {
+    !mismatch || adapter == "agy"
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_candidates(
     registry: &Registry<'_>,
@@ -703,19 +709,23 @@ pub(super) fn prepare_candidates(
                     };
                     let recorded =
                         crate::quota::read_readiness(roots.state.as_path(), &scope, timestamp);
-                    let auth_failure = matches!(
-                        recorded.reason,
-                        Some(
-                            provenant_quota::ReadinessReason::SignedOut
-                                | provenant_quota::ReadinessReason::LoginExpired
-                                | provenant_quota::ReadinessReason::AccountMismatch
-                        )
-                    ) || diagnostic_records.iter().any(|r| {
-                        r.account.adapter == entry.adapter
-                            && r.account.account_key == entry.key
-                            && r.last_error == Some(provenant_quota::ProbeFailure::AccountMismatch)
-                    });
-                    if auth_failure {
+                    let mismatch = recorded.reason
+                        == Some(provenant_quota::ReadinessReason::AccountMismatch)
+                        || diagnostic_records.iter().any(|r| {
+                            r.account.adapter == entry.adapter
+                                && r.account.account_key == entry.key
+                                && r.last_error
+                                    == Some(provenant_quota::ProbeFailure::AccountMismatch)
+                        });
+                    let auth_failure = mismatch
+                        || matches!(
+                            recorded.reason,
+                            Some(
+                                provenant_quota::ReadinessReason::SignedOut
+                                    | provenant_quota::ReadinessReason::LoginExpired
+                            )
+                        );
+                    if auth_failure && login_check_can_clear(&entry.adapter, mismatch) {
                         let executable = Path::new(&record.executable);
                         if entry.adapter == "opencode" {
                             // The version probe established executable availability,
