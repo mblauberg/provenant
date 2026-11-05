@@ -38,7 +38,6 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
             )
             .map_err(EdgeError::Peer)?,
         );
-
     }
     if super::tick_agent::eligible(state, &targets.home) {
         let program = targets.bin_dir.join("provenant");
