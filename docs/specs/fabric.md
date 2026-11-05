@@ -346,9 +346,10 @@ while raw documents retain their authored version. Version 2 carries deferred
 review configuration (`review` and `family_group` on nodes, and `review_base`
 on the document); a version 1 document must not carry these fields. The host
 pins the document `review_base` in the execution and can record review resolution in an
-expansion. A read-only node's own `review_base` is resolved in its bound
-worktree, or the graph execution directory when it has none, and saved on the
-node before its first attempt. Replay uses that OID and refuses an existing
+expansion. A read-only node's own `review_base` is resolved in the graph's
+bound execution directory and saved on the node before its first attempt.
+Read-only nodes cannot name a separate `worktree`; that field is reserved for
+writers. Replay uses that OID and refuses an existing
 attempt if its required binding is missing. Status includes the saved pin.
 Rebinding an existing journal retains its original execution
 directory and its persisted execution fields. A nonempty document review-base
