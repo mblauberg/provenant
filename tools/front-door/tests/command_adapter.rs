@@ -110,9 +110,6 @@ fn configure_commands(rig: &TestRig, commands: Value) -> Result {
 
 #[test]
 fn review_preset_launches_read_only_from_detached_head() -> Result {
-    if !available()? {
-        return Ok(());
-    }
     let mut rig = rig(
         json!({"review-pass":{"argv":["/bin/sh","-c", "printf '```findings\\n{\"schema_version\":1,\"findings\":[]}\\n```\\nVERDICT: PASS\\n'"]}}),
     )?;
@@ -144,6 +141,38 @@ fn review_preset_launches_read_only_from_detached_head() -> Result {
     )?;
     let brief = rig.root.join("review-brief");
     fs::write(&brief, "Review the pinned subject")?;
+    let explain = rig.command(&[
+        "run",
+        "--preset",
+        "review",
+        "--prompt-file",
+        brief.to_str().ok_or("brief")?,
+        "--set",
+        &format!("parameters.subject.commit='{head}'"),
+        "--set",
+        &format!("parameters.base='{head}'"),
+        "--set",
+        "parameters.review_shape='standard'",
+        "--set",
+        "parameters.lenses=[{name='correctness-spec',tier='',when=''}]",
+        "--set",
+        "parameters.min_reviews=1",
+        "--set",
+        "parameters.verifiers=0",
+        "--plan",
+        "off",
+        "--explain",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&explain),
+        0,
+        "{}",
+        String::from_utf8_lossy(&explain.stdout.bytes)
+    );
+    if !available()? {
+        return Ok(());
+    }
     let output = rig.command(&[
         "run",
         "--preset",
