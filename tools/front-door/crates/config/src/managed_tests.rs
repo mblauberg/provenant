@@ -524,7 +524,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             let inspection =
                 inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
             assert!(inspection.error.is_none(), "{:?}", inspection.error);
-                    let outcome = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
+            let outcome = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
             assert!(
                 outcome
                     .findings
