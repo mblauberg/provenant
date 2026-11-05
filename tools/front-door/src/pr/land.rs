@@ -554,13 +554,13 @@ fn checkout_path(dir: &Path, common: &Path) -> String {
 }
 
 fn follow_up(
+    git: &Git,
     project: &Path,
     pull: &Pull,
     merged: GitOid,
     globals: &mut provenant_cli::Globals,
     workers: &dyn WorkerObserver,
 ) -> Result<Vec<Step>> {
-    let git = Git::new()?;
     let (base, branch) = (pull.base.as_str(), pull.branch.as_str());
     if !plain_ref(base) || !plain_ref(branch) {
         return Err("pull request branch names are not plain Git names".into());
@@ -609,12 +609,12 @@ fn follow_up(
         format!("{upstream} updated"),
     ));
 
-    let checkouts = checkouts(&git, project)?;
+    let checkouts = checkouts(git, project)?;
     steps.push(fast_forward(
-        &git, project, base, &remote, &upstream, &checkouts,
+        git, project, base, &remote, &upstream, &checkouts,
     )?);
 
-    match cleanup_target(&git, project, pull, pinned, &upstream)? {
+    match cleanup_target(git, project, pull, pinned, &upstream)? {
         Cleanup::Skip(status, why) => {
             for name in ["worktree", "branch"] {
                 steps.push(Step::new(name, status, why.as_str()));
@@ -650,7 +650,7 @@ fn follow_up(
                 ));
             } else {
                 steps.push(delete_branch(
-                    &git,
+                    git,
                     cleanup_project,
                     branch,
                     base,
@@ -744,6 +744,7 @@ pub(super) fn batch_track(
 
 /// Run the existing local cleanup owner for a proven batch landing.
 pub(super) fn batch_follow_up(
+    git: &Git,
     project: &Path,
     number: u64,
     head: GitOid,
@@ -755,7 +756,7 @@ pub(super) fn batch_follow_up(
         tracking.view.state == "MERGED"
             && (tracking.view.cross_repository || tracking.tracker.is_some())
     }) {
-        let steps = follow_up(project, &tracking.view, head, globals, workers)?;
+        let steps = follow_up(git, project, &tracking.view, head, globals, workers)?;
         return Ok(serde_json::to_value(steps)?);
     }
     let rest = super::rest_pull(
@@ -778,7 +779,7 @@ pub(super) fn batch_follow_up(
             super::contributions::warn(Some(number), &error);
         }
     }
-    let steps = follow_up(project, &pull, head, globals, workers)?;
+    let steps = follow_up(git, project, &pull, head, globals, workers)?;
     Ok(serde_json::to_value(steps)?)
 }
 
@@ -1461,7 +1462,8 @@ pub(crate) fn execute(
             }
         }
         if merged {
-            steps = follow_up(&project, &view, current, &mut output_globals, workers)?;
+            let git = Git::new()?;
+            steps = follow_up(&git, &project, &view, current, &mut output_globals, workers)?;
         }
         Ok(())
     })();

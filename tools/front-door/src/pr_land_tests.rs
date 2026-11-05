@@ -1229,6 +1229,8 @@ pub(crate) fn pr_land_default_batch_gates_then_cleans_up() -> Result {
     );
     assert!(!landing.worktree.exists());
     assert!(!branch_exists(rig, "feat")?);
+    let remaining = git(rig, &["worktree", "list", "--porcelain"])?;
+    assert!(!remaining.contains("branch refs/heads/feat"), "{remaining}");
     Ok(())
 }
 

@@ -39,7 +39,9 @@ resolution and landing branch and commit tree reads each use a command-scoped fa
 and read-only verified checkouts, including when Git uses a separate directory
 or native object alternates. Landing inventory reads the common repository's
 local bare setting before listing worktrees, so Git's primary bare registration
-is preserved without accepting worktree-level configuration overrides.
+is preserved without accepting worktree-level configuration overrides. Batch
+landing passes its facts session into local follow-up and discards verified
+checkout handles around command-controlled mutations.
 
 ### Worktree census sessions
 

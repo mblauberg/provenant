@@ -96,7 +96,7 @@ impl Git {
         let mut repositories = self
             .repositories
             .lock()
-            .map_err(|_| "repository facts lock failed")?;
+            .unwrap_or_else(|poison| poison.into_inner());
         let repo = match repositories.entry(dir.to_path_buf()) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
@@ -105,6 +105,15 @@ impl Git {
             ),
         };
         action(repo)
+    }
+
+    /// A command-controlled mutation can change repository configuration or
+    /// remove a checkout, so later reads must bind and probe it again.
+    pub(super) fn invalidate_repositories(&self) {
+        self.repositories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
     }
 
     /// Resolve the tree of a commit using the same bounded facts session.

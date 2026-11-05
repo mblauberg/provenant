@@ -903,7 +903,9 @@ impl Repo for GitRepo<'_> {
         if let Some(local) = &mut self.local {
             let head = provenant_core::GitOid::parse(&pr.head)
                 .map_err(|error| LandingError::Failed(error.to_string()))?;
+            self.git.invalidate_repositories();
             let result = crate::pr::land::batch_follow_up(
+                &self.git,
                 &self.project,
                 pr.number,
                 head,
@@ -911,6 +913,7 @@ impl Repo for GitRepo<'_> {
                 local.workers,
                 local.tracking.get(&pr.number),
             );
+            self.git.invalidate_repositories();
             if let Some(project) = &local.globals.project {
                 self.project = project.clone();
             }

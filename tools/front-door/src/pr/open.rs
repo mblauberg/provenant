@@ -310,6 +310,13 @@ mod tests {
             Some(expected.trim().to_owned())
         );
         assert_eq!(base_commit(&git, &project, "origin", "missing")?, None);
+        provenant_os::fixture::run_git(&project, &["config", "user.name", "Updated"])?;
+        assert!(base_commit(&git, &project, "origin", "main").is_err());
+        git.invalidate_repositories();
+        assert_eq!(
+            base_commit(&git, &project, "origin", "main")?,
+            Some(expected.trim().to_owned())
+        );
         provenant_os::fixture::run_git(
             &project,
             &["update-ref", "refs/remotes/origin/moving", "HEAD"],
