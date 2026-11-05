@@ -45,6 +45,12 @@ pub struct LaneBuildSettings {
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
+    /// Most lanes of any class live at once across the host.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub max_lanes: Option<u64>,
+    /// Most lanes of any class live at once for one project.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub max_project_lanes: Option<u64>,
     /// Most writer lanes live at once across the host.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_writer_lanes: Option<u64>,
@@ -163,6 +169,16 @@ impl LaneBuildSettings {
         if !in_range(self.cargo_build_jobs, 1024) {
             invalid.push("cargo_build_jobs");
         }
+        if !in_range(self.max_lanes, WRITER_LANES_CEILING) {
+            invalid.push("max_lanes");
+        }
+        if !in_range(self.max_project_lanes, PROJECT_WRITER_LANES_CEILING)
+            || self
+                .max_project_lanes
+                .is_some_and(|project| project > self.total_lanes())
+        {
+            invalid.push("max_project_lanes");
+        }
         if !in_range(self.max_writer_lanes, WRITER_LANES_CEILING) {
             invalid.push("max_writer_lanes");
         }
@@ -258,6 +274,20 @@ impl LaneBuildSettings {
         let by_memory = total_bytes / (6 * 1024_u64.pow(3));
         by_cpu.min(by_memory).clamp(1, 64)
     }
+    /// Total caps retain the existing fixed ceilings as shipped defaults.
+    pub fn total_lanes(&self) -> u64 {
+        self.max_lanes
+            .unwrap_or(WRITER_LANES_CEILING)
+            .clamp(1, WRITER_LANES_CEILING)
+    }
+
+    pub fn project_total_lanes(&self) -> u64 {
+        self.max_project_lanes
+            .unwrap_or(PROJECT_WRITER_LANES_CEILING)
+            .clamp(1, PROJECT_WRITER_LANES_CEILING)
+            .min(self.total_lanes())
+    }
+
     pub fn writer_lanes(&self) -> u64 {
         self.max_writer_lanes
             .unwrap_or(DEFAULT_MAX_WRITER_LANES)
@@ -848,6 +878,26 @@ mod build_tests {
         };
         assert_eq!(wild.build_limit(0), 1);
     }
+    #[test]
+    fn total_lane_caps_preserve_defaults_and_validate_host_policy() {
+        let defaults = LaneBuildSettings::default();
+        assert_eq!(defaults.total_lanes(), crate::WRITER_LANES_CEILING);
+        assert_eq!(
+            defaults.project_total_lanes(),
+            crate::PROJECT_WRITER_LANES_CEILING
+        );
+        let configured: LaneBuildSettings =
+            toml_edit::de::from_str("max_lanes = 12\nmax_project_lanes = 5").unwrap();
+        assert!(configured.invalid_keys().is_empty());
+        assert_eq!(configured.total_lanes(), 12);
+        assert_eq!(configured.project_total_lanes(), 5);
+        let invalid: LaneBuildSettings =
+            toml_edit::de::from_str("max_lanes = 3\nmax_project_lanes = 4").unwrap();
+        assert!(invalid.invalid_keys().contains(&"max_project_lanes"));
+        let host_only: LaneBuildSettings = toml_edit::de::from_str("max_lanes = 3").unwrap();
+        assert_eq!(host_only.project_total_lanes(), 3);
+    }
+
     #[test]
     fn cargo_profile_defaults_and_overrides() {
         let settings = LaneBuildSettings::default();

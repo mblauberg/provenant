@@ -85,7 +85,7 @@ pub enum AdmissionError {
     Processes { used: u64, limit: u64 },
     #[error(
         "lane cap reached: {active} of {limit} {description} are active; {setting} (source: {source_label}); wait for a lane to finish",
-        description = .kind.description(), setting = .kind.setting().unwrap_or("fixed host safety ceiling"), source_label = .origin.description()
+        description = .kind.description(), setting = .kind.setting(), source_label = .origin.description()
     )]
     LaneCap {
         active: u64,

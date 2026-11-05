@@ -5148,7 +5148,7 @@ which may be reworded.
 | `MEMORY_PRESSURE` | Host memory pressure is too high to admit a lane. |
 | `MEMORY_FLOOR` | Available host memory is below the advisory admission floor. |
 | `STALE_READINESS` | The selected account's readiness observation is stale. |
-| `LANE_CAP` | The host or project writer lane cap is reached. |
+| `LANE_CAP` | The host or project lane cap is reached. |
 | `BUILD_SETTINGS` | The host lane build settings are invalid. |
 | `GUARDIAN_IDENTITY` | The guardian process identity could not be observed. |
 | `HOST_CLOCK` | Startup spacing cannot be judged: the monotonic clock or boot identity is unreadable. |

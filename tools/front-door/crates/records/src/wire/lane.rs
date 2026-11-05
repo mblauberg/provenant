@@ -95,7 +95,8 @@ impl LaneRow {
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default(),
-                reason.clone(),
+                (reason.is_some() || *outcome != crate::run::Outcome::Succeeded)
+                    .then(|| outcome.diagnostic_reason().to_owned()),
             ),
             other => (
                 serde_json::to_value(other)
@@ -166,7 +167,19 @@ impl LaneRow {
     /// Project a retained attempt with explicitly supplied observations.
     pub fn project(lane: &crate::run::AttemptRecord, facts: LaneProjectionFacts) -> Self {
         use crate::run::AttemptState;
-        let (state, terminal_reason) = Self::state_and_reason(&lane.state);
+        let (state, mut terminal_reason) = Self::state_and_reason(&lane.state);
+        if matches!(
+            lane.state,
+            AttemptState::Terminal {
+                outcome: crate::run::Outcome::Lost | crate::run::Outcome::Unsettled,
+                ..
+            }
+        ) {
+            terminal_reason = Some(format!(
+                "the lane outcome is uncertain; inspect status for operation {} before retrying",
+                lane.operation_id
+            ));
+        }
         let (exit_code, finished_at) = match &lane.state {
             AttemptState::Terminal {
                 exit_code,
@@ -250,7 +263,23 @@ impl LaneRow {
             host: facts.host,
             resolved_route: Some(project_route(lane.resolved_route.as_ref())),
             applied_route: project_route(lane.applied_route.as_ref()),
-            skipped_routes: json!(lane.skipped_routes),
+            skipped_routes: Value::Array(
+                lane.skipped_routes
+                    .iter()
+                    .map(|route| {
+                        let diagnostic = route.diagnostic();
+                        json!({
+                            "route": crate::diagnostic::safe_text(&route.route),
+                            "kind": route.kind,
+                            "cause": route.cause,
+                            "code": diagnostic.code,
+                            "category": diagnostic.category,
+                            "detail": diagnostic.detail,
+                            "next": diagnostic.next,
+                        })
+                    })
+                    .collect(),
+            ),
             account: json!(
                 lane.applied_route
                     .as_ref()

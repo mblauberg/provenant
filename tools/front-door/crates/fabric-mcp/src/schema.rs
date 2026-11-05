@@ -1073,6 +1073,61 @@ mod wire_parity {
     }
 
     #[test]
+    fn run_refusal_projects_safe_skipped_route_for_both_mcp_views() {
+        use provenant_records::{
+            RouteExclusionReason,
+            run::{SkipKind, SkippedRoute},
+        };
+        let mut record = attempt(None);
+        record.skipped_routes.push(SkippedRoute {
+            extra: Default::default(),
+            route: "fixture/model".into(),
+            kind: SkipKind::Unavailable,
+            cause: Some(RouteExclusionReason::StaleAvailability),
+            detail: format!("TOKEN_SENTINEL /private/source \u{1b} {}", "é".repeat(2048)),
+        });
+        record.state = provenant_records::run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: provenant_records::run::Outcome::Unsettled,
+            exit_code: None,
+            finished_at: provenant_core::WallTime::from_micros(2).unwrap(),
+            reason: Some("TOKEN_SENTINEL /private/source \u{1b}".into()),
+        };
+        for detailed in [false, true] {
+            let mut value = serde_json::to_value(RunResult::Status {
+                extra: Default::default(),
+                attempt: record.clone(),
+            })
+            .unwrap();
+            crate::tools::project_run(&mut value, detailed).unwrap();
+            let reason = value["attempt"]["reason"].as_str().unwrap();
+            assert!(reason.contains("wire-parity"));
+            assert!(!reason.contains("TOKEN_SENTINEL"));
+            assert!(!reason.contains("/private/source"));
+            assert!(
+                !value["attempt"]["settlement"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("TOKEN_SENTINEL")
+            );
+            let skipped = &value["attempt"]["skipped_routes"][0];
+            assert_eq!(skipped["code"], "REFUSED");
+            assert!(skipped["detail"].as_str().unwrap().contains("stale"));
+            assert!(
+                skipped["next"]
+                    .as_str()
+                    .unwrap()
+                    .contains("provenant quota tick")
+            );
+            let wire = skipped.to_string();
+            assert!(wire.len() < 4096);
+            assert!(!wire.contains("TOKEN_SENTINEL"));
+            assert!(!wire.contains("/private/source"));
+            assert!(!wire.contains('\u{1b}'));
+        }
+    }
+
+    #[test]
     fn output_results_validate() {
         let target = AttemptTarget {
             extra: Default::default(),

@@ -2774,6 +2774,11 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     assert!(
         redraw_launch.skipped_routes[0]
             .detail
+            .contains("selected route is unavailable")
+    );
+    assert!(
+        !redraw_launch.skipped_routes[0]
+            .detail
             .contains("fixture executable disappeared")
     );
     assert_ne!(
@@ -2825,9 +2830,14 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         panic!("zero retry budget must not redraw")
     };
     assert!(
-        refusal
+        !refusal
             .to_string()
             .contains("fixture executable disappeared")
+    );
+    assert!(
+        refusal
+            .to_string()
+            .contains("selected route is unavailable")
     );
     assert_eq!(calls.get(), 3);
     let PrepareError::Candidates { skipped_routes, .. } = &refusal else {

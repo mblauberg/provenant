@@ -655,7 +655,7 @@ error_kinds! {
     MemoryPressure => "MEMORY_PRESSURE", "Host memory pressure is too high to admit a lane.";
     MemoryFloor => "MEMORY_FLOOR", "Available host memory is below the advisory admission floor.";
     StaleReadiness => "STALE_READINESS", "The selected account's readiness observation is stale.";
-    LaneCap => "LANE_CAP", "The host or project writer lane cap is reached.";
+    LaneCap => "LANE_CAP", "The host or project lane cap is reached.";
     BuildSettings => "BUILD_SETTINGS", "The host lane build settings are invalid.";
     GuardianIdentity => "GUARDIAN_IDENTITY", "The guardian process identity could not be observed.";
     HostClock => "HOST_CLOCK", "Startup spacing cannot be judged: the monotonic clock or boot identity is unreadable.";
@@ -670,6 +670,11 @@ impl ErrorKind {
         if self == Self::SharedSettingsNeverSynced {
             return provenant_config::shared_settings::never_synced_diagnostic();
         }
+        if self == Self::StaleReadiness {
+            return provenant_records::RouteExclusionReason::StaleAvailability
+                .diagnostic(self.code())
+                .category(self.category());
+        }
         let diagnostic =
             provenant_records::diagnostic::Diagnostic::new(self.code()).category(self.category());
         match self {
@@ -679,9 +684,6 @@ impl ErrorKind {
             Self::DuplicatePacingProfile => {
                 diagnostic.next("remove duplicate pacing profiles for the same account")
             }
-            Self::StaleReadiness => diagnostic
-                .detail("the selected account's provider availability observation is stale")
-                .next("re-probe the selected account; if it remains unavailable, run `provenant quota tick` or check its login"),
             _ => diagnostic,
         }
     }

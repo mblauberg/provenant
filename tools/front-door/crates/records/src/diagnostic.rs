@@ -78,11 +78,12 @@ pub enum LaneLimit {
 }
 
 impl LaneLimit {
-    pub fn setting(self) -> Option<&'static str> {
+    pub fn setting(self) -> &'static str {
         match self {
-            Self::HostWriters => Some("domains.fabric.lanes.max_writer_lanes"),
-            Self::ProjectWriters => Some("domains.fabric.lanes.max_project_writer_lanes"),
-            Self::HostTotal | Self::ProjectTotal => None,
+            Self::HostWriters => "domains.fabric.lanes.max_writer_lanes",
+            Self::ProjectWriters => "domains.fabric.lanes.max_project_writer_lanes",
+            Self::HostTotal => "domains.fabric.lanes.max_lanes",
+            Self::ProjectTotal => "domains.fabric.lanes.max_project_lanes",
         }
     }
 
@@ -126,18 +127,63 @@ impl ResourceFact {
                 .next("reduce host memory pressure before retrying"),
             Self::LaneCap { active, limit, lane_limit, origin } => {
                 let description = lane_limit.description();
-                match lane_limit.setting() {
-                    Some(setting) => diagnostic
-                        .detail(format!("{active} of {limit} {description} are active; {setting} (source: {})", origin.description()))
-                        .next(format!("wait for a writer lane to finish or adjust {setting}")),
-                    None => diagnostic
-                        .detail(format!("{active} of {limit} {description} are active; fixed host safety ceiling"))
-                        .next("wait for an active lane to finish before retrying"),
-                }
+                let setting = lane_limit.setting();
+                diagnostic
+                    .detail(format!("{active} of {limit} {description} are active; {setting} (source: {})", origin.description()))
+                    .next(format!("wait for an active lane to finish or adjust {setting}"))
             }
             Self::Processes { used, limit, reserved } => diagnostic
                 .detail(format!("host user process count is {used} of the operating system RLIMIT_NPROC soft limit {limit}; shipped reserved headroom is {reserved}"))
                 .next("reduce host process use or raise the per-user process limit before retrying"),
+        }
+    }
+}
+
+/// Provider failure facts that can be shown without copying captured text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFailureFact {
+    Quota { free_pool: bool },
+    RateLimit,
+    ModelUnavailable,
+    Capacity,
+    Denied,
+    AuthRequired,
+    EarlyStop,
+    CodexIdentity,
+    OpenCodeIdentity,
+}
+
+impl ProviderFailureFact {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Quota { free_pool: true } => {
+                "provider quota exhausted; free tier exhausted; use a paid route or wait for its allowance reset"
+            }
+            Self::Quota { free_pool: false } => {
+                "provider quota exhausted; wait for the allowance to reset or select an eligible route"
+            }
+            Self::RateLimit => {
+                "provider rate limited; wait for the allowance to reset before retrying"
+            }
+            Self::ModelUnavailable => {
+                "provider model unavailable; check the selected model and choose an eligible route"
+            }
+            Self::Capacity => {
+                "provider capacity: the selected model is overloaded; wait or choose an eligible route"
+            }
+            Self::Denied => {
+                "provider denied an action; check account access and inspect the result"
+            }
+            Self::AuthRequired => {
+                "provider requires login; sign in to the selected account and run `provenant quota tick`"
+            }
+            Self::EarlyStop => "provider stopped early; inspect the result and resume if needed",
+            Self::CodexIdentity => {
+                "Codex rollout identity could not be verified; inspect the local session evidence"
+            }
+            Self::OpenCodeIdentity => {
+                "OpenCode session identity could not be verified; inspect the local session evidence"
+            }
         }
     }
 }
@@ -386,6 +432,83 @@ pub fn shell_path(path: &Path, destination: Destination<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn route_exclusions_have_bounded_causes_and_actions() {
+        use crate::RouteExclusionReason as Cause;
+        for cause in [
+            Cause::Disabled,
+            Cause::MissingExecutable,
+            Cause::UnknownAvailability,
+            Cause::StaleAvailability,
+            Cause::UnknownAccount,
+            Cause::DisclosureDenied,
+            Cause::ConfinementUnavailable,
+            Cause::UnsupportedEffort,
+            Cause::Exhausted,
+            Cause::PacingReserve,
+            Cause::UnknownPartialHeadroom,
+            Cause::AuthRequired,
+            Cause::LoginExpired,
+            Cause::UnverifiedModel,
+            Cause::AccountMismatch,
+            Cause::FreeTierRefused,
+            Cause::ProviderRefused,
+            Cause::InvalidAccountEvidence,
+        ] {
+            let diagnostic = cause.diagnostic("REFUSED");
+            assert_eq!(diagnostic.code, "REFUSED");
+            for text in [diagnostic.detail.unwrap(), diagnostic.next.unwrap()] {
+                assert!(!text.is_empty());
+                assert!(text.len() <= MAX_DIAGNOSTIC_BYTES);
+                assert!(!text.chars().any(char::is_control));
+            }
+        }
+    }
+
+    #[test]
+    fn skipped_route_projects_typed_readiness_without_source_text() {
+        use crate::{
+            RouteExclusionReason,
+            run::{SkipKind, SkippedRoute},
+        };
+        let mut route = SkippedRoute {
+            extra: Default::default(),
+            route: "fixture/model".into(),
+            kind: SkipKind::Unavailable,
+            cause: None,
+            detail: "TOKEN_SENTINEL /private/source \u{1b}".into(),
+        };
+        let initial = serde_json::to_string(&route.diagnostic()).unwrap();
+        assert!(!initial.contains("TOKEN_SENTINEL"));
+        assert!(!initial.contains("/private/source"));
+        route.set_cause(RouteExclusionReason::StaleAvailability);
+        assert!(route.detail.contains("stale"));
+        assert!(route.detail.contains("provenant quota tick"));
+        assert!(!route.detail.contains("TOKEN_SENTINEL"));
+        assert!(route.detail.len() <= 2 * MAX_DIAGNOSTIC_BYTES + 2);
+    }
+
+    #[test]
+    fn provider_failure_facts_have_bounded_safe_actions() {
+        for fact in [
+            ProviderFailureFact::Quota { free_pool: false },
+            ProviderFailureFact::Quota { free_pool: true },
+            ProviderFailureFact::RateLimit,
+            ProviderFailureFact::ModelUnavailable,
+            ProviderFailureFact::Capacity,
+            ProviderFailureFact::Denied,
+            ProviderFailureFact::AuthRequired,
+            ProviderFailureFact::EarlyStop,
+            ProviderFailureFact::CodexIdentity,
+            ProviderFailureFact::OpenCodeIdentity,
+        ] {
+            let reason = fact.reason();
+            assert!(reason.len() <= MAX_DIAGNOSTIC_BYTES);
+            assert!(!reason.chars().any(char::is_control));
+            assert!(reason.contains(';'));
+        }
+    }
+
     #[test]
     fn projection_has_code_and_optional_bounded_safe_fields() {
         let empty = serde_json::to_value(Diagnostic::new("INVALID")).unwrap();

@@ -365,8 +365,10 @@ workflow. Lane-writable missing child records alone cannot authorise deletion.
 
 Admission and operation insertion are one transaction, and the immutable
 request is published before acknowledgement. No launch, probe, wait or
-supervisor call happens inside a transaction. Admission bounds active lanes
-at the fixed ceilings of 64 per host and 32 per project (writers also by the configured caps below) and queued lanes at 256 per host, with
+supervisor call happens inside a transaction. Admission bounds active lanes by
+`max_lanes` (host, default 64) and `max_project_lanes` (project, default 32),
+with hard ceilings of 64 and 32; writers also have the configured caps below.
+Queued lanes are bounded at 256 per host, with
 the disk floor, startup spacing and a deadline. The unconfigured memory floor
 is advisory and emits `MEMORY_FLOOR` with a next action.
 
@@ -382,11 +384,11 @@ through the lane's `cargo` shim), so idle writers are admitted beyond the slot
 count. Writer lanes are capped separately by `max_writer_lanes` (host, default
 40) and `max_project_writer_lanes` (per project, default 30); a writer at the
 cap queues to the admission deadline and is then refused with a reason naming
-the cap, its scope and the key to raise. All lanes also count against fixed
-ceilings of 64 per host and 32 per project. At expiry, disk floor, known
-pressure and the writer cap have distinct refusal reasons. Disk-floor refusal
-takes precedence when disk and pressure are both insufficient. A failed memory
-sample or a floor-only memory shortage retains the generic admission refusal.
+the cap, its scope and the key to raise. All lanes also count against the
+configured total caps. At expiry, disk floor, known pressure and the applicable
+lane cap have distinct refusal reasons with their setting and source. Disk-floor
+refusal takes precedence when disk and pressure are both insufficient. A failed
+memory sample or a floor-only memory shortage does not by itself refuse admission.
 The ledger associates new leases
 with the boot and guardian identity; a different boot, a definitely absent
 guardian or an admission row proven absent from the same readable owner store

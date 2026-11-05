@@ -4520,10 +4520,9 @@ fn account_evidence_reasons_carry_their_repair_text() {
     ] {
         assert!(exclusion_detail(&reason).contains(text), "{reason:?}");
     }
-    assert_eq!(
-        exclusion_detail(&RouteExclusionReason::Exhausted),
-        "Exhausted"
-    );
+    let exhausted = exclusion_detail(&RouteExclusionReason::Exhausted);
+    assert!(exhausted.contains("exhausted"));
+    assert!(exhausted.contains("wait"));
 }
 
 #[test]

@@ -4773,6 +4773,56 @@ fn admission_warns_for_unconfigured_memory_floor_without_refusing() -> TestResul
 }
 
 #[test]
+fn total_lane_caps_report_setting_and_source_for_read_only_lanes() -> TestResult {
+    use provenant_records::diagnostic::{LaneLimit, SettingSource};
+    for (config, expected) in [
+        ("max_lanes = 3\nmax_project_lanes = 3", LaneLimit::HostTotal),
+        (
+            "max_lanes = 8\nmax_project_lanes = 3",
+            LaneLimit::ProjectTotal,
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            read_only_spacing_ms: 0,
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        std::fs::write(
+            store.writer_registry.join("config.toml"),
+            format!("schema_version=1\n[domains.fabric.lanes]\n{config}\n"),
+        )?;
+        let facts = super::tests::HostFacts::new(100);
+        for seed in 80..84 {
+            let run = lane(seed, false);
+            let id = starting(&store, &run, &call)?;
+            let dir = store.attempt_dir(run.run_id, id, false)?;
+            let result = store.admit(id, &dir, &facts, &clock, &cancel);
+            if seed < 83 {
+                assert!(matches!(result?.state, AttemptState::Running { .. }));
+            } else {
+                let Err(error @ RunError::Admission(AdmissionError::LaneCap { kind, origin, .. })) =
+                    result
+                else {
+                    return Err("total cap did not refuse with its typed reason".into());
+                };
+                assert_eq!(kind, expected);
+                assert_eq!(origin, SettingSource::Configuration);
+                assert_eq!(error.code(), "LANE_CAP");
+                let projection =
+                    error.diagnostic(provenant_records::diagnostic::Destination::Local);
+                assert!(projection.detail.unwrap().contains(kind.setting()));
+                assert!(projection.next.unwrap().contains(kind.setting()));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn project_cap_allows_up_to_32_active_lanes() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

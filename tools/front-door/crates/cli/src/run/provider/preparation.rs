@@ -441,9 +441,7 @@ pub(super) fn prepare_with_wait(
             .map_err(|error| error.to_string())?;
         let native = config.domains.fabric.host_native.get(name).ok_or_else(|| {
             PrepareError::Candidates {
-                message: format!(
-                    "host-native {name} is not configured in domains.fabric.host_native"
-                ),
+                message: "the requested host-native route is not configured in domains.fabric.host_native; select a configured route".into(),
                 plans: Vec::new(),
                 skipped_routes: Vec::new(),
                 fallback_outcome: Some(
@@ -1287,7 +1285,7 @@ pub(super) fn prepare_candidates(
                     && requested_adapter.is_none_or(|adapter| e.adapter == adapter)
             });
             let entry = matching.next().ok_or_else(|| PrepareError::Candidates {
-                message: format!("account {label} is not registered for the requested route"),
+                message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
                 plans: Vec::new(),
                 skipped_routes: Vec::new(),
                 fallback_outcome: Some(
@@ -1295,9 +1293,9 @@ pub(super) fn prepare_candidates(
                 ),
             })?;
             if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
-                return Err(PrepareError::Other(format!(
-                    "account alias {label} is ambiguous; use its exact registered key"
-                )));
+                return Err(PrepareError::Other(
+                    "account alias is ambiguous; use its exact registered key".into(),
+                ));
             }
             Ok(entry.key.as_str())
         })
@@ -1635,7 +1633,7 @@ pub(super) fn prepare_candidates(
                         provenant_routing::FallbackOutcome::AdapterUnavailable
                     };
                     let mut skipped = skip(&label, *kind, detail);
-                    skipped.cause = Some(if *kind == SkipKind::AuthRequired {
+                    skipped.set_cause(if *kind == SkipKind::AuthRequired {
                         provenant_records::RouteExclusionReason::AuthRequired
                     } else {
                         reason.clone()
@@ -1664,7 +1662,7 @@ pub(super) fn prepare_candidates(
                         SkipKind::Account,
                         relevant.into_iter().cloned().collect::<Vec<_>>().join("; "),
                     );
-                    skipped.cause = Some(reason.clone());
+                    skipped.set_cause(reason.clone());
                     reasons.push(skipped);
                     continue;
                 }
@@ -1684,7 +1682,7 @@ pub(super) fn prepare_candidates(
                         reason,
                     ),
                 );
-                skipped.cause = Some(reason.clone());
+                skipped.set_cause(reason.clone());
                 reasons.push(skipped);
                 continue;
             }
@@ -1696,7 +1694,7 @@ pub(super) fn prepare_candidates(
             {
                 previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                 let mut skipped = skip(&label, SkipKind::AuthRequired, detail);
-                skipped.cause = Some(provenant_records::RouteExclusionReason::AuthRequired);
+                skipped.set_cause(provenant_records::RouteExclusionReason::AuthRequired);
                 reasons.push(skipped);
                 continue;
             }
@@ -1718,7 +1716,7 @@ pub(super) fn prepare_candidates(
                     },
                 );
             let mut skipped = skip(&label, SkipKind::Unavailable, detail);
-            skipped.cause = Some(reason.clone());
+            skipped.set_cause(reason.clone());
             reasons.push(skipped);
             continue;
         }

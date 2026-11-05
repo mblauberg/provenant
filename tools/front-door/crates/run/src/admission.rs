@@ -396,7 +396,7 @@ impl RunStore {
             ticket.startup_spacing_ms,
             call.clock,
         );
-        let cap = self.writer_cap_hit(&ticket, call);
+        let cap = self.lane_cap_hit(&ticket, call);
         let caps = self.lane_caps();
         let active: rusqlite::Result<i64> = self.db.query_row(
             "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
@@ -983,10 +983,8 @@ impl RunStore {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
                     Ok(None) => {
-                        // Name the writer cap when it is what holds this lane.
-                        if ticket.lane_class == LaneClass::Writer
-                            && let Some(hit) = self.writer_cap_hit(&ticket, &call)
-                        {
+                        // Name the applicable total or writer cap for either lane class.
+                        if let Some(hit) = self.lane_cap_hit(&ticket, &call) {
                             refusal = Some(RunError::Admission(AdmissionError::LaneCap {
                                 active: hit.active,
                                 limit: hit.limit,
@@ -1039,7 +1037,7 @@ impl RunStore {
             &provenant_config::LaneBuildSettings::read(&self.writer_registry).unwrap_or_default(),
         )
     }
-    fn writer_cap_hit(
+    fn lane_cap_hit(
         &self,
         ticket: &AdmissionTicket,
         call: &Request<'_>,

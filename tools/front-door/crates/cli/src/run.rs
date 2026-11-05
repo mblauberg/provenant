@@ -604,7 +604,11 @@ impl Registry<'_> {
         let mut rollout_error = rollout
             .as_ref()
             .and_then(|observed| observed.as_ref().err())
-            .map(|error| format!("Codex rollout identity: {error}"));
+            .map(|_| {
+                provenant_records::diagnostic::ProviderFailureFact::CodexIdentity
+                    .reason()
+                    .to_owned()
+            });
         // OpenCode's stream names no model; its session record does.
         let opencode_model = (model_observation
             == provenant_records::ModelObservation::SessionDatabase)
@@ -622,8 +626,12 @@ impl Registry<'_> {
             });
         let opencode_model = match opencode_model {
             Some(Ok(model)) => Some(model),
-            Some(Err(error)) => {
-                rollout_error = Some(format!("OpenCode session identity: {error}"));
+            Some(Err(_)) => {
+                rollout_error = Some(
+                    provenant_records::diagnostic::ProviderFailureFact::OpenCodeIdentity
+                        .reason()
+                        .to_owned(),
+                );
                 None
             }
             None => None,
@@ -672,7 +680,7 @@ impl Registry<'_> {
             partial_signals: Vec::new(),
         };
         let mut has_usage = false;
-        let mut early_stop = None;
+        let mut early_stop = false;
         for event in &events {
             match event {
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
@@ -681,11 +689,11 @@ impl Registry<'_> {
                         decoded.result.push('\n');
                     }
                 }
-                ProviderEvent::EarlyStop { reason } => {
+                ProviderEvent::EarlyStop { .. } => {
                     decoded
                         .partial_signals
                         .push(run::PartialSignal::ProviderStop);
-                    early_stop = Some(reason.clone());
+                    early_stop = true;
                 }
                 ProviderEvent::Usage {
                     input,
@@ -757,31 +765,9 @@ impl Registry<'_> {
             _ if auth && outcome.status() != OutcomeStatus::Success => (
                 run::Outcome::AuthRequired,
                 Some(
-                    self.roots
-                        .and_then(|roots| {
-                            let config = provenant_config::read_with_domains(
-                                roots,
-                                &crate::domains::SECTIONS,
-                            )
-                            .ok()?;
-                            let records = crate::quota::read_cache(roots).unwrap_or_default();
-                            Some(crate::quota::account_login_diagnostic(
-                                config.domains.accounts.entries.values(),
-                                &records,
-                                adapter.id(),
-                                route.account_key.as_deref(),
-                                &provenant_records::RouteExclusionReason::AuthRequired,
-                            ))
-                        })
-                        .unwrap_or_else(|| {
-                            crate::quota::account_login_diagnostic(
-                                std::iter::empty(),
-                                &[],
-                                adapter.id(),
-                                None,
-                                &provenant_records::RouteExclusionReason::AuthRequired,
-                            )
-                        }),
+                    provenant_records::diagnostic::ProviderFailureFact::AuthRequired
+                        .reason()
+                        .into(),
                 ),
             ),
             OutcomeStatus::Refused => (run::Outcome::Rejected, Some("provider refused".into())),
@@ -804,18 +790,14 @@ impl Registry<'_> {
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
         }
-        if decoded.outcome == run::Outcome::Succeeded
-            && let Some(reason) = early_stop
-        {
-            decoded.reason = Some(format!(
-                "provider stopped early: {}",
-                provenant_confinement::redact::known_shapes(reason.as_bytes())
-                    .ok()
-                    .and_then(|bytes| String::from_utf8(bytes).ok())
-                    .unwrap_or_default()
-            ));
+        if decoded.outcome == run::Outcome::Succeeded && early_stop {
+            decoded.reason = Some(
+                provenant_records::diagnostic::ProviderFailureFact::EarlyStop
+                    .reason()
+                    .into(),
+            );
         }
-        if let Some(ProviderEvent::Denied { action }) = events
+        if let Some(ProviderEvent::Denied { .. }) = events
             .iter()
             .find(|event| matches!(event, ProviderEvent::Denied { .. }))
         {
@@ -827,10 +809,14 @@ impl Registry<'_> {
                     .iter()
                     .any(|event| matches!(event, ProviderEvent::Error))
             {
-                decoded.reason = Some(format!("provider denied: {action}"));
+                decoded.reason = Some(
+                    provenant_records::diagnostic::ProviderFailureFact::Denied
+                        .reason()
+                        .into(),
+                );
             }
         } else if let Some(ProviderEvent::QuotaLimited {
-            message,
+            message: _,
             pool,
             resets_in_seconds,
         }) = events
@@ -838,22 +824,9 @@ impl Registry<'_> {
             .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
         {
             decoded.outcome = run::Outcome::QuotaLimited;
-            let mut reason = provenant_confinement::redact::known_shapes(message.as_bytes())
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or_else(|| {
-                    "provider quota exhausted (message redaction unavailable)".into()
-                });
-            let repair = if pool.as_deref() == Some("opencode-free") {
-                "; free tier exhausted; use a paid route or wait for its allowance reset"
-            } else {
-                ""
+            let fact = provenant_records::diagnostic::ProviderFailureFact::Quota {
+                free_pool: pool.as_deref() == Some("opencode-free"),
             };
-            let mut end = reason.len().min(8192 - repair.len());
-            while !reason.is_char_boundary(end) {
-                end -= 1;
-            }
-            reason.truncate(end);
             // Routing reads the shared quota store, which a lane can neither
             // read nor write: a nested refusal stays in the attempt reason
             // rather than landing in a child store nothing routes from. A
@@ -877,26 +850,24 @@ impl Registry<'_> {
                     return Err("quota evidence has no state root".into());
                 }
             }
-            reason.push_str(repair);
-            decoded.reason = Some(reason);
-        } else if let Some((outcome, message, description)) =
-            events.iter().find_map(|event| match event {
-                ProviderEvent::RateLimited { message } => {
-                    Some((run::Outcome::RateLimited, message, "provider rate limited"))
-                }
-                ProviderEvent::ModelUnavailable { message } => Some((
-                    run::Outcome::ModelUnavailable,
-                    message,
-                    "provider model unavailable",
-                )),
-                ProviderEvent::ModelOverloaded { message } => {
-                    Some((run::Outcome::ModelUnavailable, message, CAPACITY))
-                }
-                _ => None,
-            })
-        {
+            decoded.reason = Some(fact.reason().into());
+        } else if let Some((outcome, fact)) = events.iter().find_map(|event| match event {
+            ProviderEvent::RateLimited { .. } => Some((
+                run::Outcome::RateLimited,
+                provenant_records::diagnostic::ProviderFailureFact::RateLimit,
+            )),
+            ProviderEvent::ModelUnavailable { .. } => Some((
+                run::Outcome::ModelUnavailable,
+                provenant_records::diagnostic::ProviderFailureFact::ModelUnavailable,
+            )),
+            ProviderEvent::ModelOverloaded { .. } => Some((
+                run::Outcome::ModelUnavailable,
+                provenant_records::diagnostic::ProviderFailureFact::Capacity,
+            )),
+            _ => None,
+        }) {
             let mut capacity_config_failed = false;
-            if description == CAPACITY
+            if fact == provenant_records::diagnostic::ProviderFailureFact::Capacity
                 && (host_settlement
                     || std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none())
                 && let Some(roots) = self.roots
@@ -918,37 +889,20 @@ impl Registry<'_> {
                 }
             }
             decoded.outcome = outcome;
-            let mut reason = provenant_confinement::redact::known_shapes(message.as_bytes())
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or_else(|| format!("{description} (message redaction unavailable)"));
-            let prefix = if outcome == run::Outcome::ModelUnavailable {
-                format!("{description}: ")
-            } else {
-                String::new()
-            };
-            let config_note = if capacity_config_failed {
-                "; capacity cooldown configuration unavailable"
-            } else {
-                ""
-            };
-            let mut end = reason.len().min(8192 - prefix.len() - config_note.len());
-            while !reason.is_char_boundary(end) {
-                end -= 1;
+            let mut reason = fact.reason().to_owned();
+            if capacity_config_failed {
+                reason.push_str("; capacity cooldown configuration unavailable");
             }
-            reason.truncate(end);
-            reason.insert_str(0, &prefix);
-            reason.push_str(config_note);
             decoded.reason = Some(reason);
         }
-        if let Some(ProviderEvent::DeniedNote { action }) = events
+        if let Some(ProviderEvent::DeniedNote { .. }) = events
             .iter()
             .find(|event| matches!(event, ProviderEvent::DeniedNote { .. }))
         {
-            let note = format!("provider denied: {action}");
+            let note = provenant_records::diagnostic::ProviderFailureFact::Denied.reason();
             decoded.reason = Some(match decoded.reason.take() {
                 Some(reason) => format!("{reason}; {note}"),
-                None => note,
+                None => note.into(),
             });
         }
         if decoded.outcome == run::Outcome::Succeeded
@@ -973,8 +927,7 @@ impl Registry<'_> {
             let nearest = catalogue.nearest_models(&model);
             if !nearest.is_empty() {
                 let note = format!(
-                    "model {} is not in the catalogue; nearest catalogued IDs: {}",
-                    model.as_str(),
+                    "selected model is not in the catalogue; nearest catalogued IDs: {}",
                     nearest.join(", ")
                 );
                 decoded.reason = Some(match decoded.reason.take() {

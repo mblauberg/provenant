@@ -450,14 +450,16 @@ Run refusals may include `category`, `detail` and `next` alongside the
 established error envelope. These are bounded, terminal-safe facts selected by
 the owner. The local CLI can name an absolute worktree or refused grant;
 remote diagnostics need a repository or home anchor or use an inspection
-action. Unknown account references use `UNKNOWN_ACCOUNT`; pacing profiles
+action. Provider and skipped-route reasons project typed facts, without copying
+captured output, account directories or source errors into diagnostic fields.
+Unknown account references use `UNKNOWN_ACCOUNT`; pacing profiles
 that resolve to the same account use `DUPLICATE_PACING_PROFILE`. Identity or
 credential settings that cannot be synced use `SHARED_SETTINGS_NEVER_SYNCED`;
 the shared-settings owner supplies the corrective action. Resource
 projections name the observed limits and the relevant setting or operating-system
 limit; disk-floor, memory-pressure and configured writer-lane refusals identify
-the host configuration or shipped default that supplied the limit. Fixed total
-lane ceilings are identified separately from configurable writer limits. A
+the host configuration or shipped default that supplied the limit. Total-lane and writer-lane caps
+identify their separate configured settings. A
 process-limit projection names the operating-system soft limit and shipped
 reserved headroom. Actions name the condition to correct. A writer
 with unknown custody remains refused until custody is checked.

@@ -173,7 +173,7 @@ fn lane_cap_projects_its_actual_limit_and_source() {
         ),
         (
             LaneLimit::ProjectTotal,
-            "fixed host safety ceiling",
+            "max_project_lanes",
             SettingSource::ShippedDefault,
         ),
     ] {
@@ -191,14 +191,12 @@ fn lane_cap_projects_its_actual_limit_and_source() {
         assert_eq!(value["code"], "confinement_refused");
         assert!(value["detail"].as_str().unwrap().contains(key));
         assert!(value["next"].as_str().unwrap().contains("lane"));
-        if kind.setting().is_some() {
-            assert!(
-                value["detail"]
-                    .as_str()
-                    .unwrap()
-                    .contains(origin.description())
-            );
-        }
+        assert!(
+            value["detail"]
+                .as_str()
+                .unwrap()
+                .contains(origin.description())
+        );
     }
 }
 

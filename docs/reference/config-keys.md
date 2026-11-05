@@ -29,6 +29,8 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 | `lane_port_base` | 30000 | First port of the range split into per-writer-lane blocks. Each writer lane holds one block for its lifetime and sees it as PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. (1024 to 65535 or -1 for auto). |
 | `lane_port_block` | 16 | Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT). (1 to 1024 or -1 for auto). |
 | `lane_port_blocks` | 64 | Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block. (0 to 1024 or -1 for auto). |
+| `max_lanes` | 64 | Most lanes of any class live at once across the host; a lane beyond it queues and is refused with the limit and source. (1 to 64 or -1 for auto). |
+| `max_project_lanes` | 32 | Most lanes of any class live at once for one project; at most max_lanes. (1 to 32 or -1 for auto). |
 | `max_writer_lanes` | 40 | Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap. (1 to 64 or -1 for auto). |
 | `max_project_writer_lanes` | 30 | Most writer lanes live at once for one project; at most max_writer_lanes. (1 to 32 or -1 for auto). |
 | `cargo_build_jobs` | Half the available cores, at least 1 | Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence. (1 to 1024 or -1 for auto). |
