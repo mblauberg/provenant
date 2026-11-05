@@ -2756,7 +2756,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
+fn own_worktree_pending_reservation_takes_precedence_over_census()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{
         self, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin,
@@ -3046,18 +3046,12 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         &cancel,
         None,
     );
-    match err {
+    assert!(matches!(
+        err,
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
-            provenant_confinement::worktrees::WorktreeError::LiveProcess(proc),
-        ))) => {
-            assert_eq!(proc.pid, 54321);
-            assert_eq!(proc.command.as_deref(), Some("foreign-writer"));
-            assert_eq!(proc.cwd.as_ref(), Some(&path));
-            let msg = proc.to_string();
-            assert!(!msg.contains(&prior_attempt.to_string()));
-        }
-        other => panic!("expected LiveProcess, got {other:?}"),
-    }
+            worktrees::WorktreeError::WriterBusy { holder: Some(holder) }
+        ))) if holder == prior_attempt
+    ));
     assert_eq!(observer.1.load(std::sync::atomic::Ordering::SeqCst), 1);
     let unknown = super::own_worktree(
         &super::OwnedWorktree {
@@ -3078,8 +3072,8 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
     assert!(matches!(
         unknown,
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
-            worktrees::WorktreeError::CensusUnknown { path: ref scope, ref detail }
-        ))) if scope == &path && detail == "injected census incomplete"
+            worktrees::WorktreeError::WriterBusy { holder: Some(holder) }
+        ))) if holder == prior_attempt
     ));
     let (admitted, _) = super::own_worktree(
         &super::OwnedWorktree {
@@ -3264,6 +3258,15 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         )))
     ));
     drop(held);
+    let path_text = path.to_str().ok_or("worktree path is not UTF-8")?;
+    provenant_os::fixture::run_git(&project, &["worktree", "lock", path_text])?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::UnknownOccupancy { path: scope, detail }
+        ))) if scope == path && detail.contains("Git marks the worktree locked")
+    ));
+    provenant_os::fixture::run_git(&project, &["worktree", "unlock", path_text])?;
     std::fs::write(path.join("uncommitted"), "keep")?;
     assert!(matches!(
         attempt_claim(),

@@ -145,15 +145,6 @@ pub(super) fn own_worktree(
                         owner_refused = true;
                         return Err(worktrees::WorktreeError::UnknownWriter);
                     }
-                    let same_operation = owner
-                        .as_ref()
-                        .is_some_and(|owner| owner.operation_id.as_ref() == Some(operation_id));
-                    let settled = owner.is_none()
-                        || same_operation
-                        || owner
-                            .as_ref()
-                            .and_then(|owner| owner.attempt_id)
-                            .is_some_and(&terminal_attempt);
                     match observation.occupancy {
                         Occupancy::Available => {}
                         Occupancy::Held => {
@@ -162,15 +153,6 @@ pub(super) fn own_worktree(
                             });
                         }
                         Occupancy::Observed { process } => {
-                            if !settled
-                                || worktrees::cache_writer_probe(context.project_state, &info.path)
-                                    .is_err()
-                            {
-                                return Err(process.map_or(
-                                    worktrees::WorktreeError::LiveWriter,
-                                    worktrees::WorktreeError::LiveProcess,
-                                ));
-                            }
                             let detail = process.map_or_else(
                                 || "a process was observed".to_owned(),
                                 |process| format!("process {process} ({})", process.kind),
@@ -180,27 +162,18 @@ pub(super) fn own_worktree(
                         Occupancy::Unknown {
                             scope,
                             evidence,
-                            source,
+                            source: OccupancyUnknownSource::Custody,
                         } => {
-                            if !settled
-                                || worktrees::cache_writer_probe(context.project_state, &info.path)
-                                    .is_err()
-                            {
-                                return Err(match source {
-                                    OccupancyUnknownSource::Census => {
-                                        worktrees::WorktreeError::CensusUnknown {
-                                            path: scope,
-                                            detail: evidence,
-                                        }
-                                    }
-                                    OccupancyUnknownSource::Custody => {
-                                        worktrees::WorktreeError::UnknownOccupancy {
-                                            path: scope,
-                                            detail: evidence,
-                                        }
-                                    }
-                                });
-                            }
+                            return Err(worktrees::WorktreeError::UnknownOccupancy {
+                                path: scope,
+                                detail: evidence,
+                            });
+                        }
+                        Occupancy::Unknown {
+                            scope,
+                            evidence,
+                            source: OccupancyUnknownSource::Census,
+                        } => {
                             warn_worktree_census(&scope, &evidence);
                         }
                     }

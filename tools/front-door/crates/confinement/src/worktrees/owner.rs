@@ -116,20 +116,6 @@ pub fn save_lane_owner_when_free(
             WorkerState::Live => WorktreeError::LiveWriter,
             _ => WorktreeError::UnknownWriter,
         })?;
-    let observed = context
-        .workers
-        .observe_roots(&[tree.path().into()])
-        .get(tree.path())
-        .copied()
-        .unwrap_or(WorkerState::Unknown);
-    if matches!(
-        observed,
-        WorkerState::Busy | WorkerState::Live | WorkerState::Unknown
-    ) && !terminal_prior
-        && expected_prior.is_some_and(|prior| prior.operation_id != owner.operation_id)
-    {
-        return Err(live_refusal(context.workers, tree.path()));
-    }
     let current_prior = load_owner(&tree)?;
     if current_prior.as_ref() != expected_prior {
         return Err(WorktreeError::IdentityChanged);
