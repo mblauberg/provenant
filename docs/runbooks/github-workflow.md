@@ -236,13 +236,11 @@ and syncs PR state. Recheck the changed heads and their review evidence.
 Required checks and branch protection apply to every PR, based on the bottom
 PR's base; stack merges cannot bypass them. CI runs for every PR; use
 `github.event.pull_request.stack` to limit expensive jobs when appropriate.
-Land bottom-first with `gh stack merge --merge-method merge` or the asynchronous
-merge API. `gh stack merge` merges through the chosen PR, all-or-nothing; one
-PR, a prefix or the whole stack can land. Upper PRs automatically retarget
-`main`. GitHub also supports squash and rebase merge methods. The legacy REST
-`PUT /pulls/{n}/merge` used by `provenant pr land` cannot merge stacked PRs;
-until Provenant supports stacks, use `gh stack` to land them. Prune merged
-branches and worktrees as usual after landing.
+Land bottom-first with `provenant land`. Stack members use the asynchronous
+REST merge API, with the configured merge method and each verified head pinned.
+An upper PR waits for its lower members; after retargeting, its new head needs
+its own CI and review evidence. A pending or ambiguous merge is reconciled
+before retry. Prune merged branches and worktrees as usual after landing.
 
 See GitHub's [overview](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs),
 [quickstart](https://docs.github.com/en/pull-requests/get-started/stacked-prs-quickstart),

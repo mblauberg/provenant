@@ -35,6 +35,7 @@ pub struct FakeForge {
     pub valid_merge_ids: bool,
     pub merges: Vec<(u64, String, MergeMethod)>,
     pub merge_attempts: Vec<u64>,
+    pub stack_merge_attempts: Vec<u64>,
     pub reverts: Vec<(u64, String, String, String)>,
 }
 impl Forge for FakeForge {
@@ -144,6 +145,36 @@ impl Forge for FakeForge {
             return Err(LandingError::Failed("lost response".into()));
         }
         Ok(landed)
+    }
+    fn merge_stack(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError> {
+        self.stack_merge_attempts.push(number);
+        let result = self.merge(number, head, method);
+        if let Some(stack) = self
+            .pull_requests
+            .get(&number)
+            .and_then(|pr| pr.stack.clone())
+            && self
+                .pull_requests
+                .get(&number)
+                .is_some_and(|pr| pr.state == PullRequestState::Merged)
+            && let Some(members) = self.stacks.get_mut(&stack.number)
+            && let Some(position) = members.iter().position(|member| member.number == number)
+        {
+            members[position].state = PullRequestState::Merged;
+            if let Some(upper) = members[position + 1..]
+                .iter()
+                .find(|member| member.state == PullRequestState::Open)
+                && let Some(pr) = self.pull_requests.get_mut(&upper.number)
+            {
+                pr.base_branch = stack.base_branch;
+            }
+        }
+        result
     }
     fn may_push_directly(&mut self, _branch: &str) -> Result<bool, LandingError> {
         Ok(self.direct_push)

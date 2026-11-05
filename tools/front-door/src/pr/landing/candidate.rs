@@ -17,6 +17,17 @@ pub fn select_batch(
     limit: usize,
     batch_wait_seconds: u64,
 ) -> Result<Vec<EligiblePr>, LandingError> {
+    select_batch_with_dependencies(forge, numbers, numbers, target, limit, batch_wait_seconds)
+}
+
+pub fn select_batch_with_dependencies(
+    forge: &mut dyn Forge,
+    numbers: &[u64],
+    requested: &[u64],
+    target: &str,
+    limit: usize,
+    batch_wait_seconds: u64,
+) -> Result<Vec<EligiblePr>, LandingError> {
     if limit == 0 || numbers.is_empty() {
         return Ok(Vec::new());
     }
@@ -43,16 +54,20 @@ pub fn select_batch(
                             stack.number
                         ))
                     })?;
-                if let Some(lower) = members[..position]
+                let lower = members[..position]
                     .iter()
-                    .find(|member| member.state != PullRequestState::Merged)
+                    .filter(|member| member.state != PullRequestState::Merged)
+                    .collect::<Vec<_>>();
+                if let Some(missing) = lower
+                    .iter()
+                    .find(|member| !requested.contains(&member.number))
                 {
-                    if !numbers.contains(&lower.number) {
-                        return Err(LandingError::Refused(format!(
-                            "pull request #{number} has unmerged lower pull request #{}",
-                            lower.number
-                        )));
-                    }
+                    return Err(LandingError::Refused(format!(
+                        "pull request #{number} has unmerged lower pull request #{}",
+                        missing.number
+                    )));
+                }
+                if !lower.is_empty() {
                     continue;
                 }
             }
@@ -203,6 +218,31 @@ mod tests {
         let error = select_batch(&mut forge, &[2], "main", 1, 0).unwrap_err();
         assert!(error.to_string().contains("#1"));
         assert!(forge.merge_attempts.is_empty());
+    }
+    #[test]
+    fn stack_selection_names_missing_lower_even_when_another_lower_was_requested() {
+        use crate::pr::landing::ports::{StackMember, StackMembership};
+        let mut forge = FakeForge::default();
+        let mut upper = info(3, "author", "middle");
+        upper.stack = Some(StackMembership {
+            number: 42,
+            size: 3,
+            position: 3,
+            base_branch: "main".into(),
+        });
+        forge.pull_requests.insert(3, upper);
+        forge.stacks.insert(
+            42,
+            (1..=3)
+                .map(|number| StackMember {
+                    number,
+                    state: PullRequestState::Open,
+                })
+                .collect(),
+        );
+        let error =
+            select_batch_with_dependencies(&mut forge, &[3], &[1, 3], "main", 1, 0).unwrap_err();
+        assert!(error.to_string().contains("#2"));
     }
     #[test]
     fn selection_requires_independent_approval_at_head_and_target() -> Result<(), LandingError> {

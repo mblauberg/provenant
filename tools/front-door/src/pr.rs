@@ -181,7 +181,13 @@ fn pull_endpoint(number: &str) -> String {
 }
 fn rest_pull(read: &impl Fn(&[&str]) -> Result<ExecOutcome>, number: &str) -> Result<RestPull> {
     let endpoint = pull_endpoint(number);
-    let bytes = successful(read(&["gh", "api", &endpoint])?)?;
+    let bytes = successful(read(&[
+        "gh",
+        "api",
+        &endpoint,
+        "-H",
+        "X-GitHub-Api-Version:2026-03-10",
+    ])?)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 fn head(project: &Path, number: &str) -> Result<GitOid> {

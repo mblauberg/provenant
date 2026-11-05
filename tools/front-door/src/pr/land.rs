@@ -1286,6 +1286,7 @@ pub(crate) fn execute(
             failure_code = "HEAD_MOVED";
             return Err(format!("pull request head moved to {current}").into());
         }
+        let stacked = rest.stack.is_some();
         let view = from_rest(rest);
         let attribution = std::cell::OnceCell::new();
         if !view.cross_repository {
@@ -1332,8 +1333,42 @@ pub(crate) fn execute(
             failure_code = "MERGE_FAILED";
             // A merge that errors or times out may still have taken effect, so
             // the PR's own state decides the outcome, never the command's.
-            let merge_error = merge(&reader, &text, current).err();
-            match read_pull(&reader, &text) {
+            let merge_error = if stacked {
+                let mut forge = super::landing::adapters::GhForge::new(&project);
+                super::landing::publish::merge_member(
+                    &mut forge,
+                    number,
+                    &current.to_string(),
+                    provenant_cli::domains::MergeMethod::Merge,
+                )
+                .map(|_| ())
+                .map_err(|error| -> Box<dyn std::error::Error> {
+                    match error {
+                        super::landing::LandingError::PublicationUnknown => super::wait::failure(
+                            "MERGE_STATE_UNKNOWN",
+                            "asynchronous merge may still be in progress; rerun land to reconcile",
+                        ),
+                        other => Box::new(other),
+                    }
+                })
+                .err()
+            } else {
+                merge(&reader, &text, current).err()
+            };
+            let observed = if stacked {
+                super::rest_pull(&|argv| reader.read(argv), &text).and_then(|pull| {
+                    if pull.merged_at.is_some() && pull.head.sha != current {
+                        return Err(super::wait::failure(
+                            "HEAD_MOVED",
+                            "the merged pull request does not match the verified head",
+                        ));
+                    }
+                    Ok(from_rest(pull))
+                })
+            } else {
+                read_pull(&reader, &text)
+            };
+            match observed {
                 Ok(view) if view.state == "MERGED" => {
                     merge_note = merge_error.map(|error| error.to_string());
                     view

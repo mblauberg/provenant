@@ -213,10 +213,12 @@ fn run_inner(
             open.push(number);
         }
     }
+    let mut deferred = Vec::new();
     for numbers in open.chunks(limit) {
-        let selected = candidate::select_batch(
+        let selected = candidate::select_batch_with_dependencies(
             forge,
             numbers,
+            &open,
             request.target,
             limit,
             request.settings.batch_wait_seconds,
@@ -224,6 +226,18 @@ fn run_inner(
         for number in numbers {
             if !selected.iter().any(|pr| pr.number == *number) {
                 report.outcomes.entry(*number).or_insert(Outcome::Excluded);
+                if let Some(stack) = forge.pull_request(*number)?.stack {
+                    let members = forge.stack_members(stack.number)?;
+                    if let Some(position) =
+                        members.iter().position(|member| member.number == *number)
+                        && members[..position].iter().any(|member| {
+                            member.state != super::ports::PullRequestState::Merged
+                                && open.contains(&member.number)
+                        })
+                    {
+                        deferred.push(*number);
+                    }
+                }
             }
         }
         queue.push_back(selected);
@@ -328,11 +342,12 @@ fn run_inner(
                     }
                 }
                 let decision = cleanup_unpublished(
-                    publish::decide(
+                    publish::decide_candidate(
                         forge,
                         request.target,
                         request.settings.publish,
                         request.settings.method,
+                        &candidate,
                     ),
                     repo,
                     &candidate,
@@ -368,11 +383,12 @@ fn run_inner(
                 return cleanup_unpublished(Err(LandingError::UnmetGate(checks)), repo, &candidate);
             }
             let decision = cleanup_unpublished(
-                publish::decide(
+                publish::decide_candidate(
                     forge,
                     request.target,
                     request.settings.publish,
                     request.settings.method,
+                    &candidate,
                 ),
                 repo,
                 &candidate,
@@ -580,6 +596,35 @@ fn run_inner(
             }
             break;
         }
+        if !request.shadow && !deferred.is_empty() {
+            let mut still_deferred = Vec::new();
+            for number in deferred.drain(..) {
+                let info = forge.pull_request(number)?;
+                let ready = if let Some(stack) = info.stack {
+                    let members = forge.stack_members(stack.number)?;
+                    members
+                        .iter()
+                        .position(|member| member.number == number)
+                        .is_some_and(|position| {
+                            members[..position].iter().all(|member| {
+                                member.state == super::ports::PullRequestState::Merged
+                            })
+                        })
+                } else {
+                    true
+                };
+                if ready {
+                    let selected = candidate::select_batch(forge, &[number], request.target, 1, 0)?;
+                    if !selected.is_empty() {
+                        report.outcomes.remove(&number);
+                        queue.push_back(selected);
+                    }
+                } else {
+                    still_deferred.push(number);
+                }
+            }
+            deferred = still_deferred;
+        }
     }
     Ok(())
 }
@@ -735,6 +780,111 @@ mod tests {
             LandingError::RunFailed { cause, .. } => *cause,
             error => error,
         })
+    }
+
+    #[test]
+    fn stack_lost_response_recovers_without_remerging() -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::ports::{PullRequestState, StackMember, StackMembership};
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
+        let target = std::rc::Rc::new(std::cell::RefCell::new(repo.target.clone()));
+        forge.shared_target = Some(target.clone());
+        repo.shared_target = Some(target);
+        forge.valid_merge_ids = true;
+        forge.lose_merge_response_at = Some(1);
+        repo.trees.insert(format!("{:040x}", 2001), "tree-1".into());
+        for (number, position) in [(1, 1), (2, 2)] {
+            forge.pull_requests.get_mut(&number).unwrap().stack = Some(StackMembership {
+                number: 42,
+                size: 2,
+                position,
+                base_branch: "main".into(),
+            });
+        }
+        forge.pull_requests.get_mut(&2).unwrap().base_branch = "lower".into();
+        forge.stacks.insert(
+            42,
+            vec![
+                StackMember {
+                    number: 1,
+                    state: PullRequestState::Open,
+                },
+                StackMember {
+                    number: 2,
+                    state: PullRequestState::Open,
+                },
+            ],
+        );
+        let state = tempfile::tempdir()?;
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(forge.stack_merge_attempts, vec![1]);
+        assert_eq!(forge.pull_requests[&2].base_branch, "main");
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn stack_requested_out_of_order_gates_each_retargeted_member()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::ports::{PullRequestState, StackMember, StackMembership};
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        settings.batch_size = 1;
+        let target = std::rc::Rc::new(std::cell::RefCell::new(repo.target.clone()));
+        forge.shared_target = Some(target.clone());
+        repo.shared_target = Some(target);
+        forge.valid_merge_ids = true;
+        for number in 1..=2 {
+            repo.trees
+                .insert(format!("{:040x}", 2000 + number), format!("tree-{number}"));
+        }
+        forge.lose_merge_response_at = Some(1);
+        for (number, position) in [(1, 1), (2, 2)] {
+            forge.pull_requests.get_mut(&number).unwrap().stack = Some(StackMembership {
+                number: 42,
+                size: 2,
+                position,
+                base_branch: "main".into(),
+            });
+        }
+        forge.pull_requests.get_mut(&2).unwrap().base_branch = "lower".into();
+        forge.stacks.insert(
+            42,
+            vec![
+                StackMember {
+                    number: 1,
+                    state: PullRequestState::Open,
+                },
+                StackMember {
+                    number: 2,
+                    state: PullRequestState::Open,
+                },
+            ],
+        );
+        let state = tempfile::tempdir()?;
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[2, 1],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(report.outcomes[&2], Outcome::Landed);
+        assert_eq!(forge.stack_merge_attempts, vec![1, 2]);
+        assert_eq!(report.receipts.len(), 2);
+        Ok(())
     }
 
     #[test]

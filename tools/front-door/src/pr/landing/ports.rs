@@ -58,6 +58,13 @@ pub trait Forge {
         head: &str,
         method: MergeMethod,
     ) -> Result<String, LandingError>;
+    /// Merge a stack member through the forge's asynchronous operation.
+    fn merge_stack(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError>;
     fn may_push_directly(&mut self, branch: &str) -> Result<bool, LandingError>;
     fn labels(&mut self, number: u64) -> Result<Vec<String>, LandingError>;
     /// Whether this adapter can open revert-forward pull requests.

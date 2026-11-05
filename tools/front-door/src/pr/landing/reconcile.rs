@@ -495,7 +495,12 @@ pub(crate) fn recover_pending_with(
                                 continue;
                             }
                             let retry = if valid_for_retry(forge, &attempt) {
-                                forge.merge(step.pr.number, &step.pr.head, settings.method)
+                                publish::merge_member(
+                                    forge,
+                                    step.pr.number,
+                                    &step.pr.head,
+                                    settings.method,
+                                )
                             } else {
                                 Err(LandingError::PublicationUnknown)
                             };

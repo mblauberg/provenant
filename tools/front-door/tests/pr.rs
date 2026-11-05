@@ -588,6 +588,8 @@ fn land_guards_head_and_uses_rest_merge() -> Result {
         assert!(!args.contains("author-email"), "{args}");
         assert!(!rig.project.join("watched").exists());
         assert_rest_only(&rig)?;
+        let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+        assert!(calls.contains("X-GitHub-Api-Version:2026-03-10"), "{calls}");
     }
     assert!(!rest_only("pr list --head branch"));
     assert!(!rest_only("api graphql -f query=x"));
