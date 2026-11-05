@@ -32,8 +32,8 @@ head it merges.
 ## Consequences
 
 New pipeline shapes are preset or role data, not new code paths. Checkpoints are
-versioned, so graphs in flight across a release that changes them must finish
-first. The [Fabric spec](../specs/fabric.md#bounded-graphs-and-route-fallback)
+versioned, so drain in-flight graphs before upgrading across a release that
+changes them. The [Fabric spec](../specs/fabric.md#bounded-graphs-and-route-fallback)
 owns node semantics; the [preset runbook](../runbooks/presets.md) owns use.
 Graph MCP calls stay a thin façade per
 [ADR 0022](0022-thin-fabric-mcp-execution-facade.md).

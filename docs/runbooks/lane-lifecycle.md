@@ -221,6 +221,26 @@ intent before removal, then pruning or the retention reason. Failed and
 cancelled lanes retain their worktrees. Explicitly supplied worktrees retain
 their existing GC policy.
 
+Recovery uses the existing commands:
+
+- **Resume:** use `provenant fabric graph resume --document PATH` to advance a
+  retained graph, or `provenant resume ATTEMPT --prompt-file followup.md` to
+  continue an attempt where its provider supports continuation.
+- **Retry:** rerun the same submission to reattach to its identity; inspect the
+  recorded refusal and resolve its cause before another advance. An uncertain
+  effect needs observation of its recorded identity before any new submission.
+- **Fallback:** configured routes and continuation fallback are selected by
+  their existing policies; inspect the attempt and custody evidence before
+  choosing another route manually.
+- **Repair:** correct the named host, checkout or input problem, then resume
+  or rerun the existing operation as its diagnostic directs.
+- **Fresh:** use `--fresh` with a preset for a new graph, or cancel a graph and
+  submit a document with a new `graph_id` when a separate run is intended.
+
+For a background launch, retain its printed ID and check `provenant status` or
+`provenant lanes`; a successful submission alone does not prove that a writer
+started or completed.
+
 `provenant resume ATTEMPT --prompt-file followup.md` generates and prints an
 operation ID; supply `--operation-id ID` for a planned retry. It pins the prior
 attempt's applied provider, model and account, including when dispatch selected
