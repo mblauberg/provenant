@@ -5112,6 +5112,8 @@ which may be reworded.
 | `LANE_CONTEXT` | The lane environment is missing or inconsistent. |
 | `IDENTITY` | The project or actor identity could not be resolved. |
 | `CONFIG` | Configuration could not be loaded or is invalid. |
+| `UNKNOWN_ACCOUNT` | The requested account is not registered. |
+| `DUPLICATE_PACING_PROFILE` | Multiple pacing profiles resolve to the same account. |
 | `GIT` | Git is unavailable or a Git query failed. |
 | `SECRET_INPUT` | The prompt or input appears to contain a secret. |
 | `WORKTREE_REQUIRED` | The requested mode needs a worktree. |

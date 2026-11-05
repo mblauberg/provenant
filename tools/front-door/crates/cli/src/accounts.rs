@@ -101,6 +101,13 @@ pub enum Accounts {
 
 /// Resolves an entry id, or a label unique across adapters, to the entry id.
 pub fn resolve(settings: &Settings, account: &str) -> Result<String, String> {
+    resolve_typed(settings, account).map_err(|(_, message)| message)
+}
+
+fn resolve_typed(
+    settings: &Settings,
+    account: &str,
+) -> Result<String, (Option<provenant_run::ErrorKind>, String)> {
     if settings.entries.contains_key(account) {
         return Ok(account.to_owned());
     }
@@ -111,10 +118,16 @@ pub fn resolve(settings: &Settings, account: &str) -> Result<String, String> {
         .map(|(id, _)| id.clone());
     match (matches.next(), matches.next()) {
         (Some(id), None) => Ok(id),
-        (Some(_), Some(_)) => Err(format!(
-            "account `{account}` is ambiguous; use the entry id (see `provenant accounts list`)"
+        (Some(_), Some(_)) => Err((
+            None,
+            format!(
+                "account `{account}` is ambiguous; use the entry id (see `provenant accounts list`)"
+            ),
         )),
-        _ => Err(format!("unknown account `{account}`")),
+        _ => Err((
+            Some(provenant_run::ErrorKind::UnknownAccount),
+            format!("unknown account `{account}`"),
+        )),
     }
 }
 /// Account configuration directories, in entry order. Only adapters whose
@@ -145,7 +158,21 @@ pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
         .collect()
 }
 
-pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Settings, String> {
+pub fn execute(
+    command: &Accounts,
+    roots: &Roots,
+    home: &Path,
+) -> Result<Settings, (Option<provenant_run::ErrorKind>, String)> {
+    let mut kind = None;
+    execute_inner(command, roots, home, &mut kind).map_err(|message| (kind, message))
+}
+
+fn execute_inner(
+    command: &Accounts,
+    roots: &Roots,
+    home: &Path,
+    kind: &mut Option<provenant_run::ErrorKind>,
+) -> Result<Settings, String> {
     let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
         .map_err(|e| e.to_string())?
         .domains
@@ -162,7 +189,10 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             return Err("accounts set requires at least one option".into());
         }
         return edit_accounts(roots, |mut settings| {
-            let id = resolve(&settings, account)?;
+            let id = resolve_typed(&settings, account).map_err(|(cause, message)| {
+                *kind = cause;
+                message
+            })?;
             let entry = settings.entries.get_mut(&id).ok_or("unknown account")?;
             if let Some(name) = display_name {
                 let name = name.trim();

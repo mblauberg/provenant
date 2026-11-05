@@ -684,6 +684,13 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
     ] {
         fs::write(&config, format!("{registrations}{profile}"))?;
         let result = call(&rig, &["route", "list"], 2)?;
+        assert_eq!(result["error"]["code"], "UNKNOWN_ACCOUNT");
+        assert!(
+            result["error"]["next"]
+                .as_str()
+                .unwrap()
+                .contains("provenant accounts list")
+        );
         let message = result["error"]["message"].as_str().ok_or("error")?;
         assert!(
             message.contains("missing")
@@ -699,6 +706,13 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
         ),
     )?;
     let duplicate = call(&rig, &["route", "list"], 2)?;
+    assert_eq!(duplicate["error"]["code"], "DUPLICATE_PACING_PROFILE");
+    assert!(
+        duplicate["error"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate")
+    );
     assert!(
         duplicate["error"]["message"]
             .as_str()

@@ -565,6 +565,19 @@ pub(crate) enum AccountProfileError {
     Ambiguous,
     Duplicate,
 }
+impl AccountProfileError {
+    fn kind(self) -> Option<provenant_run::ErrorKind> {
+        match self {
+            Self::Unknown => Some(provenant_run::ErrorKind::UnknownAccount),
+            Self::Ambiguous => None,
+            Self::Duplicate => Some(provenant_run::ErrorKind::DuplicatePacingProfile),
+        }
+    }
+
+    fn code(self) -> &'static str {
+        self.kind().map_or("CONFIG", |kind| kind.code())
+    }
+}
 impl From<provenant_config::ConfigError> for EdgeError {
     fn from(error: provenant_config::ConfigError) -> Self {
         let is_pacing = match &error {
@@ -2875,20 +2888,20 @@ pub fn run(
                     (Outcome::Invalid, "INVALID")
                 }
                 EdgeError::Config(_) | EdgeError::PacingConfig(_) => (Outcome::Invalid, "CONFIG"),
-                EdgeError::AccountProfile { kind, .. } => match kind {
-                    AccountProfileError::Unknown
-                    | AccountProfileError::Ambiguous
-                    | AccountProfileError::Duplicate => (Outcome::Invalid, "CONFIG"),
-                },
+                EdgeError::AccountProfile { kind, .. } => (Outcome::Invalid, kind.code()),
                 _ => (Outcome::Error, "IO"),
             };
             let mut result = CommandResult::new(name, status, None);
+            let projection = match &error {
+                EdgeError::AccountProfile { kind, .. } => kind.kind().map(|kind| kind.diagnostic()),
+                _ => None,
+            };
             result.error = Some(CommandError {
-                diagnostic: None,
+                diagnostic: projection.as_ref().map(Into::into),
                 code: code.into(),
                 message: error.to_string(),
                 cause: None,
-                repair: None,
+                repair: projection.and_then(|diagnostic| diagnostic.next),
             });
             result
         }
@@ -3149,6 +3162,30 @@ mod route_tests {
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
     use std::error::Error;
+
+    #[test]
+    fn account_profile_refusals_have_distinct_stable_codes() {
+        use super::AccountProfileError;
+        let error = super::resolve_account_reference(
+            "missing",
+            "account",
+            &provenant_providers::accounts::Settings::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            super::EdgeError::AccountProfile {
+                kind: AccountProfileError::Unknown,
+                ..
+            }
+        ));
+        assert_eq!(AccountProfileError::Unknown.code(), "UNKNOWN_ACCOUNT");
+        assert_eq!(
+            AccountProfileError::Duplicate.code(),
+            "DUPLICATE_PACING_PROFILE"
+        );
+        assert_eq!(AccountProfileError::Ambiguous.code(), "CONFIG");
+    }
 
     #[test]
     fn route_list_does_not_call_omitted_evidence_unprobed() -> Result<(), Box<dyn Error>> {

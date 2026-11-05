@@ -704,18 +704,19 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         }
                         reply
                     }
-                    Err(message) => {
+                    Err((kind, message)) => {
                         let mut result = CommandResult::new(
                             &inv.leaf,
                             Outcome::Refused,
                             serde_json::Value::Null,
                         );
+                        let projection = kind.map(|kind| kind.diagnostic());
                         result.error = Some(CommandError {
-                            diagnostic: None,
-                            code: "ACCOUNT".into(),
+                            diagnostic: projection.as_ref().map(Into::into),
+                            code: kind.map_or("ACCOUNT", |kind| kind.code()).into(),
                             message,
                             cause: None,
-                            repair: None,
+                            repair: projection.and_then(|diagnostic| diagnostic.next),
                         });
                         provenant_cli::run::Reply {
                             result,

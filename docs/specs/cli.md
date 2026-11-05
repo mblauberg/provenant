@@ -450,8 +450,10 @@ Run refusals may include `category`, `detail` and `next` alongside the
 established error envelope. These are bounded, terminal-safe facts selected by
 the owner. The local CLI can name an absolute worktree or refused grant;
 remote diagnostics need a repository or home anchor or use an inspection
-action. Resource projections name the observed limits and the relevant setting
-or operating-system limit; their actions name the condition to correct. A writer
+action. Unknown account references use `UNKNOWN_ACCOUNT`; pacing profiles
+that resolve to the same account use `DUPLICATE_PACING_PROFILE`. Resource
+projections name the observed limits and the relevant setting or operating-system
+limit; their actions name the condition to correct. A writer
 with unknown custody remains refused until custody is checked.
 - Why: agents and tests act on the code, and a reworded message must break
   neither.

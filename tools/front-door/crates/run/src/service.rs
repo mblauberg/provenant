@@ -619,6 +619,8 @@ error_kinds! {
     LaneContext => "LANE_CONTEXT", "The lane environment is missing or inconsistent.";
     Identity => "IDENTITY", "The project or actor identity could not be resolved.";
     Config => "CONFIG", "Configuration could not be loaded or is invalid.";
+    UnknownAccount => "UNKNOWN_ACCOUNT", "The requested account is not registered.";
+    DuplicatePacingProfile => "DUPLICATE_PACING_PROFILE", "Multiple pacing profiles resolve to the same account.";
     Git => "GIT", "Git is unavailable or a Git query failed.";
     SecretInput => "SECRET_INPUT", "The prompt or input appears to contain a secret.";
     WorktreeRequired => "WORKTREE_REQUIRED", "The requested mode needs a worktree.";
@@ -660,12 +662,30 @@ error_kinds! {
     ObjectImportLimit => "OBJECT_IMPORT_LIMIT", "A lane's Git object import exceeded its limits.";
 }
 impl ErrorKind {
+    /// Safe projection for refusal kinds that do not need additional facts.
+    pub fn diagnostic(self) -> provenant_records::diagnostic::Diagnostic {
+        let diagnostic =
+            provenant_records::diagnostic::Diagnostic::new(self.code()).category(self.category());
+        match self {
+            Self::UnknownAccount => {
+                diagnostic.next("run `provenant accounts list` and select a registered account")
+            }
+            Self::DuplicatePacingProfile => {
+                diagnostic.next("remove duplicate pacing profiles for the same account")
+            }
+            _ => diagnostic,
+        }
+    }
+
     /// Stable category shared by the output adapters.
     pub const fn category(self) -> &'static str {
         match self {
-            Self::Invalid | Self::OperationConflict | Self::NotFound | Self::WorktreeMissing => {
-                "invalid"
-            }
+            Self::Invalid
+            | Self::OperationConflict
+            | Self::NotFound
+            | Self::WorktreeMissing
+            | Self::UnknownAccount
+            | Self::DuplicatePacingProfile => "invalid",
             Self::WorktreeUnregistered
             | Self::Refused
             | Self::WriterScope
