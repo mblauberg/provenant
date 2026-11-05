@@ -113,21 +113,23 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
             .as_str()
             .is_some_and(|s| s.contains("missing") && !s.contains("upgrade"))
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if let Ok(bytes) = std::fs::read(rig.state.join("tick/gc-result.json")) {
-            let result: Value = serde_json::from_slice(&bytes)?;
-            if result["state"] == "complete" {
-                break;
-            }
-            assert_ne!(result["state"], "failed", "{result}");
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "scheduled GC did not complete"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    let gc_result = rig.state.join("tick/gc-result.json");
+    let result = provenant_test_support::wait_for(
+        "scheduled GC",
+        std::time::Duration::from_secs(30),
+        || {
+            std::fs::read(&gc_result)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        },
+        |result| {
+            result
+                .as_ref()
+                .is_some_and(|result| result["state"] == "complete" || result["state"] == "failed")
+        },
+    )?
+    .ok_or("scheduled GC wrote no result")?;
+    assert_eq!(result["state"], "complete", "{result}");
     let second = rig.command(&["tick", "--json"])?;
     assert_eq!(code(&second), 0, "{second:?}");
     let second: Value = serde_json::from_slice(&second.stdout.bytes)?;
@@ -241,26 +243,31 @@ fn deadline_free_graph_tick_launches_waiting_fake_provider() -> Result {
     assert_eq!(code(&tick), 0, "{tick:?}");
     let tick: Value = serde_json::from_slice(&tick.stdout.bytes)?;
     assert_eq!(tick["data"]["graphs"]["advanced"], 1, "{tick}");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        let checkpoint =
-            FileJournal::read_checkpoint(&state, project, "waiter")?.ok_or("checkpoint")?;
-        let attempt = checkpoint.nodes[0].attempts.last().ok_or("attempt")?;
-        if attempt.launched {
-            break;
-        }
-        if checkpoint.nodes[0].state == graph::NodeState::Failed {
-            let lanes = rig.command(&["lanes", "--all", "--json"])?;
-            panic!(
-                "fake provider failed: {}",
-                String::from_utf8_lossy(&lanes.stdout.bytes)
-            );
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "fake provider not launched: {checkpoint:?}"
+    let checkpoint = provenant_test_support::wait_for(
+        "fake provider launch",
+        std::time::Duration::from_secs(30),
+        || {
+            FileJournal::read_checkpoint(&state, project, "waiter")
+                .ok()
+                .flatten()
+        },
+        |checkpoint| {
+            checkpoint.as_ref().is_some_and(|checkpoint| {
+                checkpoint.nodes[0].state == graph::NodeState::Failed
+                    || checkpoint.nodes[0]
+                        .attempts
+                        .last()
+                        .is_some_and(|attempt| attempt.launched)
+            })
+        },
+    )?
+    .ok_or("checkpoint")?;
+    if checkpoint.nodes[0].state == graph::NodeState::Failed {
+        let lanes = rig.command(&["lanes", "--all", "--json"])?;
+        panic!(
+            "fake provider failed: {}",
+            String::from_utf8_lossy(&lanes.stdout.bytes)
         );
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     Ok(())
 }
