@@ -273,8 +273,10 @@ impl Admission<'_> {
         match route.readiness {
             RouteReadiness::Ready {
                 expires_unix_seconds,
+                ref extra,
                 ..
-            } if expires_unix_seconds > self.now_unix_seconds => {}
+            } if expires_unix_seconds > self.now_unix_seconds
+                || extra.contains_key("availability_warning") => {}
             _ => return Err(QuotaError::Refused("provider readiness")),
         }
         let key = route
@@ -594,6 +596,27 @@ mod admission_tests {
             }],
         });
         record
+    }
+    #[test]
+    fn stale_availability_warning_does_not_bypass_exhaustion() {
+        let mut route = route();
+        route.readiness = RouteReadiness::Ready {
+            extra: [("availability_warning".into(), serde_json::json!("stale"))]
+                .into_iter()
+                .collect(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 950,
+        };
+        let pools = vec!["pool-a".into()];
+        let admission = |records| Admission {
+            policies: crate::source::TEST_POLICIES,
+            now_unix_seconds: 1000,
+            records,
+            pools: &pools,
+        };
+        assert!(admission(&[]).check(&route).is_ok());
+        let exhausted = [record(QuotaStatus::Available)];
+        assert!(admission(&exhausted).check(&route).is_err());
     }
     #[test]
     fn account_mismatch_blocks_until_identity_verifies_again() {

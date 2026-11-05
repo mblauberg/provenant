@@ -176,12 +176,7 @@ fn refresh(
         Err(ProbeFailure::ProbeDirectory)
     } else {
         result.map(|_| ()).map_err(|error| match error {
-            // An unchanged expired token alone does not prove rejection: the CLI
-            // may have been offline. Retry on the network schedule.
-            crate::ProviderError::CredentialExpired if watched.rejected.load(Ordering::Relaxed) => {
-                ProbeFailure::LoginExpired
-            }
-            crate::ProviderError::CredentialExpired => ProbeFailure::Network,
+            crate::ProviderError::CredentialExpired => ProbeFailure::LoginExpired,
             crate::ProviderError::CredentialNotFound => ProbeFailure::Auth,
             _ => ProbeFailure::Network,
         })
@@ -744,6 +739,42 @@ mod tests {
         };
         assert_eq!(
             refresh(&Reject, &login, &|| 1000, 100000),
+            Err(ProbeFailure::LoginExpired)
+        );
+    }
+
+    #[test]
+    fn unchanged_expired_credential_after_probe_is_reported() {
+        use super::*;
+        struct Completed;
+        impl Executor for Completed {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"fake","expiresAt":1000}}"#,
+        )
+        .unwrap();
+        let login = crate::claude::Login {
+            executable: Path::new("/fake/claude"),
+            home: temp.path(),
+            user: OsStr::new("fake"),
+            config_dir: temp.path(),
+        };
+        assert_eq!(
+            refresh(&Completed, &login, &|| 1000, 100000),
             Err(ProbeFailure::LoginExpired)
         );
     }

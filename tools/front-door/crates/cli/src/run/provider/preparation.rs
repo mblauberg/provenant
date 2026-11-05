@@ -1238,7 +1238,20 @@ pub(super) fn prepare_candidates(
                     )
                 })
                 .map_or_else(
-                    || provenant_routing::exclusion_detail(reason),
+                    || {
+                        route
+                            .extra
+                            .get("account_exclusions")
+                            .and_then(|v| v.as_array())
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            })
+                            .unwrap_or_else(|| provenant_routing::exclusion_detail(reason))
+                    },
                     |error| {
                         reported_plan_errors.insert(route.adapter.clone());
                         format!("confinement plan: {error}")
@@ -1765,6 +1778,13 @@ pub(super) fn prepare_candidates(
             resume.is_some(),
             redirected || current_candidate > 0,
         );
+        if let Some(warning) = provider
+            .extra
+            .get("availability_warning")
+            .and_then(|v| v.as_str())
+        {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        }
         provider.extra.insert(
             "account_source".into(),
             account_source(resume.is_some(), task.account.is_some()).into(),
@@ -1914,7 +1934,21 @@ fn launch_route_record(
     } else {
         "named_route"
     };
-    RouteRecord::from_resolved(route, account_label, source)
+    let mut record = RouteRecord::from_resolved(route, account_label, source);
+    if let provenant_records::RouteReadiness::Ready { extra, .. } = &route.readiness
+        && let Some(state) = extra.get("availability_warning").and_then(|v| v.as_str())
+    {
+        let warning = format!(
+            "account {} availability is {state}; the provider will check it",
+            account_label
+                .or(route.account_key.as_deref())
+                .unwrap_or("unknown")
+        );
+        record
+            .extra
+            .insert("availability_warning".into(), warning.into());
+    }
+    record
 }
 
 #[cfg(test)]
@@ -1973,6 +2007,20 @@ mod receipt_tests {
         assert_eq!(wire["effort"], "high");
         assert_eq!(wire["account_label"], "work");
         assert_eq!(wire["source"], "named_route");
+        let mut uncertain = resolved.clone();
+        uncertain.readiness = provenant_records::RouteReadiness::Ready {
+            extra: [("availability_warning".into(), serde_json::json!("Stale"))]
+                .into_iter()
+                .collect(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 99,
+        };
+        let warned = launch_route_record(&uncertain, Some("work"), &requested, false, false);
+        assert!(
+            warned.extra["availability_warning"]
+                .as_str()
+                .is_some_and(|warning| warning.contains("work") && warning.contains("Stale"))
+        );
         let pinned = run::RequestedRoute::Model {
             extra: Default::default(),
             provider: "codex".into(),

@@ -1615,6 +1615,86 @@ fn availability() -> AvailabilityRecord {
 }
 
 #[test]
+fn stale_availability_is_selectable_but_current_account_wins()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let stale = AvailabilityRecord {
+        account_key: Some("stale".into()),
+        expires_unix_seconds: 90,
+        ..availability()
+    };
+    let current = AvailabilityRecord {
+        account_key: Some("current".into()),
+        ..availability()
+    };
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let records = [current, stale.clone()];
+    let mut context = RoutingContext {
+        availability: &records,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
+    assert_eq!(selected.account_key.as_deref(), Some("current"));
+    let only_stale = [stale];
+    context.availability = &only_stale;
+    let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
+    assert_eq!(selected.account_key.as_deref(), Some("stale"));
+    assert!(
+        matches!(selected.readiness, RouteReadiness::Ready { extra, .. } if extra.contains_key("availability_warning"))
+    );
+    Ok(())
+}
+
+#[test]
+fn all_exhausted_accounts_have_individual_remedies() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = ["one", "two"].map(|key| AvailabilityRecord {
+        account_key: Some(key.into()),
+        ..availability()
+    });
+    let readings = ["one", "two"].map(|key| {
+        let mut reading =
+            quota("codex/gpt-6-luna", key, QuotaStatus::Exhausted, 1, 50, 120).unwrap();
+        reading.snapshot.windows = vec![QuotaWindow {
+            pool: "secondary".into(),
+            window_seconds: Some(604_800),
+            used_basis_points: 10_000,
+            resets_unix_seconds: Some(10_000),
+        }];
+        reading
+    });
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let context = RoutingContext {
+        availability: &records,
+        quota: &readings,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
+    let details = selected.extra["account_exclusions"].to_string();
+    assert!(
+        details.contains("one")
+            && details.contains("two")
+            && details.contains("exhausted")
+            && details.contains("reset")
+    );
+    assert!(!details.contains("UnknownAvailability"));
+    Ok(())
+}
+
+#[test]
 fn resolves_an_available_provider_supplied_only_by_the_registry()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::{

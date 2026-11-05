@@ -1028,7 +1028,12 @@ fn account_reason<'q>(
     access: Option<&AccessContext<'_>>,
     context: &'q RoutingContext<'_>,
 ) -> (Option<RouteExclusionReason>, Option<&'q QuotaObservation>) {
-    let mut reason = availability_reason(Some(availability), context);
+    let mut reason = availability_reason(Some(availability), context).filter(|r| {
+        !matches!(
+            r,
+            RouteExclusionReason::StaleAvailability | RouteExclusionReason::UnknownAvailability
+        )
+    });
     if reason.is_none() && access.is_none_or(|a| a.disclosure_ref.is_empty()) {
         reason = Some(RouteExclusionReason::DisclosureDenied);
     }
@@ -1108,6 +1113,9 @@ pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
         return block.repair().to_owned();
     }
     match reason {
+        RouteExclusionReason::Exhausted => {
+            "exhausted; wait for the quota reset or select another account".to_owned()
+        }
         RouteExclusionReason::LoginExpired => {
             "login expired; check the selected account with `provenant quota`".to_owned()
         }
@@ -1165,10 +1173,56 @@ fn readiness_reason(
                 return None;
             }
             match read.project() {
+                RouteReadiness::Unavailable {
+                    reason:
+                        RouteExclusionReason::UnknownAvailability
+                        | RouteExclusionReason::StaleAvailability
+                        | RouteExclusionReason::LoginExpired,
+                    ..
+                } => None,
                 RouteReadiness::Unavailable { reason, .. } => Some(reason),
                 _ => None,
             }
         })
+}
+
+fn uncertainty(
+    model: &ModelId,
+    availability: &AvailabilityRecord,
+    context: &RoutingContext<'_>,
+) -> Option<String> {
+    if let Some(reason) = availability_reason(Some(availability), context)
+        && matches!(
+            reason,
+            RouteExclusionReason::StaleAvailability | RouteExclusionReason::UnknownAvailability
+        )
+    {
+        return Some(format!("{reason:?}"));
+    }
+    let lookup = context.readiness?;
+    let read = lookup(
+        &provenant_quota::ReadinessScope {
+            host: provenant_quota::LOCAL_HOST.into(),
+            adapter: model.adapter().into(),
+            account_key: availability.account_key.clone()?,
+            route: format!("{}/{}", model.adapter(), model.model()),
+        },
+        context.now_seconds(),
+    );
+    if read.state == provenant_quota::ReadinessState::Unknown
+        || matches!(
+            read.project(),
+            RouteReadiness::Unavailable {
+                reason: RouteExclusionReason::UnknownAvailability
+                    | RouteExclusionReason::StaleAvailability
+                    | RouteExclusionReason::LoginExpired,
+                ..
+            }
+        )
+    {
+        return Some(format!("{:?}", read.reason));
+    }
+    None
 }
 /// The account's latest reading for this model, only a fresh one when
 /// `fresh`. Only a fresh reading may refuse the route; a stale one still ranks
@@ -1420,6 +1474,7 @@ fn candidate(
                 a,
                 reason,
                 (
+                    uncertainty(model, a, context).is_none(),
                     !spent,
                     !avoid_cooling || !cooling(model, a.account_key.as_deref(), context),
                     !standby,
@@ -1448,7 +1503,13 @@ fn candidate(
             reason,
         },
         (None, Some(a)) => RouteReadiness::Ready {
-            extra: Default::default(),
+            extra: uncertainty(model, a, context)
+                .map(|reason| {
+                    [("availability_warning".into(), serde_json::json!(reason))]
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default(),
             availability_ref: a.fixture_ref.clone(),
             expires_unix_seconds: a.expires_unix_seconds,
         },
@@ -1457,8 +1518,24 @@ fn candidate(
             reason: RouteExclusionReason::UnknownAvailability,
         },
     };
+    let mut extra = provenant_records::ExtraFields::default();
+    if evaluated.iter().all(|(_, reason, _)| reason.is_some()) && !evaluated.is_empty() {
+        let details: Vec<_> = evaluated
+            .iter()
+            .filter_map(|(account, reason, _)| {
+                reason.as_ref().map(|reason| {
+                    format!(
+                        "{}: {}",
+                        account.account_key.as_deref().unwrap_or("unknown account"),
+                        exclusion_detail(reason)
+                    )
+                })
+            })
+            .collect();
+        extra.insert("account_exclusions".into(), serde_json::json!(details));
+    }
     Ok(RouteAlternative {
-        extra: Default::default(),
+        extra,
         adapter: model.adapter().into(),
         model: model.model().into(),
         effort: effort.map(str::to_owned),
@@ -1799,7 +1876,7 @@ fn resolve_inner(
         })
         .collect();
     Ok(ResolvedRoute {
-        extra: Default::default(),
+        extra: primary.extra,
         adapter: primary.adapter,
         model: primary.model,
         effort: primary.effort,
