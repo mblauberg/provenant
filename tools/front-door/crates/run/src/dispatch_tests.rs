@@ -2723,7 +2723,7 @@ fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
 }
 
 #[test]
-fn invalid_optional_build_settings_use_defaults_without_blocking_admission() -> TestResult {
+fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
     for (assignment, explicit_policy) in [
         ("cargo_build_jobs = -2", false),
         ("cargo_build_jobs = 'invalid'", false),
