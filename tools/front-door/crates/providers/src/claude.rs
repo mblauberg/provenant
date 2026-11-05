@@ -678,15 +678,8 @@ fn prepare(
     let mut runtime_reads = vec![package.clone()];
     if discover_skills {
         for grant in &skill_reads {
-            // Claude's workspace arguments accept directories only. The
-            // outer profile still grants linked files exactly, never siblings.
-            let directory = match grant.scope {
-                provenant_confinement::permissions::PathScope::Exact => {
-                    grant.path.parent().ok_or(ProviderError::InvalidPath)?
-                }
-                provenant_confinement::permissions::PathScope::Subtree => &grant.path,
-            };
-            argv.extend(["--add-dir".into(), directory.as_os_str().to_owned()]);
+            // Staging produces a directory subtree for Claude's workspace.
+            argv.extend(["--add-dir".into(), grant.path.as_os_str().to_owned()]);
         }
         runtime_reads.extend(skill_reads);
     }

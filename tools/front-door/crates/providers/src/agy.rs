@@ -368,13 +368,7 @@ fn prepare(
             argv.extend(["--add-dir".into(), user_skills.as_os_str().to_owned()]);
         }
         for grant in &skill_reads {
-            let directory = match grant.scope {
-                provenant_confinement::permissions::PathScope::Exact => {
-                    grant.path.parent().ok_or(ProviderError::InvalidPath)?
-                }
-                provenant_confinement::permissions::PathScope::Subtree => &grant.path,
-            };
-            argv.extend(["--add-dir".into(), directory.as_os_str().to_owned()]);
+            argv.extend(["--add-dir".into(), grant.path.as_os_str().to_owned()]);
         }
         // Headless mode auto-denies reads outside the workspace, which holds
         // only the working directory, so every other read root joins it.

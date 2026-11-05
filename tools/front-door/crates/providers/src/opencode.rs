@@ -202,22 +202,9 @@ fn prepare(
         reads.insert(pattern, "allow".into());
     }
     for grant in &skill_reads {
-        let directory = match grant.scope {
-            provenant_confinement::permissions::PathScope::Exact => {
-                grant.path.parent().ok_or(ProviderError::InvalidPath)?
-            }
-            provenant_confinement::permissions::PathScope::Subtree => &grant.path,
-        };
-        external.insert(format!("{}/**", directory.display()), "allow".into());
-        let path = match grant.scope {
-            provenant_confinement::permissions::PathScope::Exact => {
-                grant.path.display().to_string()
-            }
-            provenant_confinement::permissions::PathScope::Subtree => {
-                format!("{}/**", grant.path.display())
-            }
-        };
-        reads.insert(path, "allow".into());
+        let pattern = format!("{}/**", grant.path.display());
+        external.insert(pattern.clone(), "allow".into());
+        reads.insert(pattern, "allow".into());
     }
     if !external.is_empty() {
         permission["external_directory"] = external.into();
