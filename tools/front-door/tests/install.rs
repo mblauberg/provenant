@@ -720,12 +720,12 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
 }
 
 #[test]
-fn retired_legacy_checkout_flag_is_rejected_without_writes() -> Result {
+fn unknown_install_flag_is_rejected_without_writes() -> Result {
     let rig = TestRig::new()?.without_state()?;
     let stage = staged(&rig)?;
     let mut install_args = args(&stage, false);
     install_args.extend([
-        "--legacy-checkout".into(),
+        "--unknown-install-option".into(),
         rig.project.clone().into_os_string(),
     ]);
     let output = rig.execute_os(
@@ -739,7 +739,7 @@ fn retired_legacy_checkout_flag_is_rejected_without_writes() -> Result {
         String::from_utf8_lossy(&output.stdout.bytes),
         String::from_utf8_lossy(&output.stderr.bytes)
     );
-    assert!(message.contains("--legacy-checkout"), "{message}");
+    assert!(message.contains("--unknown-install-option"), "{message}");
     assert!(!rig.state.exists());
     rig.assert_legacy_unchanged()
 }
@@ -799,6 +799,17 @@ fn bare_install_detects_clis_and_claude_directories_then_replays_receipt() -> Re
     )?;
     assert_eq!(before.harnesses.len(), 5);
     assert_eq!(before.harness_targets.len(), 7);
+    for label in ["work", "personal"] {
+        let expected = rig.home.join(format!(".claude-{label}/skills"));
+        assert!(
+            before.harness_targets.iter().any(|target| target
+                .skills_dir
+                .to_path_buf()
+                .ok()
+                .as_deref()
+                == Some(expected.as_path()))
+        );
+    }
     fs::create_dir(rig.home.join(".claude-added-later"))?;
     let upgraded = install(&second, false)?;
     assert_eq!(code(&upgraded), 0, "{upgraded:?}");
@@ -2786,6 +2797,7 @@ fn an_unregistered_account_is_orphaned_not_synced_and_prune_removes_it() -> Resu
         fs::read_to_string(pro.join("settings.json"))?
     );
     assert!(fs::symlink_metadata(work.join("skills/example")).is_ok());
+    assert!(fs::read_to_string(work.join("settings.json"))?.contains("'hook' 'claude'"));
     Ok(())
 }
 

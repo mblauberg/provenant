@@ -538,6 +538,12 @@ pub(super) fn wait_lanes(
     waited_reply(session, waited)
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static AFTER_FIRST_FETCH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// `lanes --wait`: settlements after the wait starts, or after `--since`. Exact
 /// attempt IDs count whenever they settled. Without named lanes, a session's
 /// wait resumes after the settlements it last acknowledged.
@@ -571,9 +577,34 @@ pub(super) fn wait_command(
             } else {
                 None
             };
-            candidates_with_backlog(session, picks, cursor_value, Some(&backlog), Some(&tracked))(
-                remaining,
-            )
+            #[cfg(not(test))]
+            {
+                candidates_with_backlog(
+                    session,
+                    picks,
+                    cursor_value,
+                    Some(&backlog),
+                    Some(&tracked),
+                )(remaining)
+            }
+            #[cfg(test)]
+            {
+                let result = candidates_with_backlog(
+                    session,
+                    picks,
+                    cursor_value,
+                    Some(&backlog),
+                    Some(&tracked),
+                )(remaining);
+                if result.is_ok() {
+                    AFTER_FIRST_FETCH.with(|hook| {
+                        if let Some(hook) = hook.borrow_mut().take() {
+                            hook();
+                        }
+                    });
+                }
+                result
+            }
         },
         watch::Scope {
             entered,

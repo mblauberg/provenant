@@ -36,6 +36,18 @@ fn admission_planner_fragment_capability() {
 }
 
 #[test]
+fn planner_fragment_inherits_skill_requirement() {
+    let mut doc = planner(2);
+    doc.nodes[0].require_skill_location = true;
+    let output = result(vec![slice("child", &[])]);
+    let mut owner = fixture_owner(&[&output, "done", "done"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.expansions.len(), 1);
+    assert!(run.checkpoint.expansions[0].nodes.iter().any(|node| node.require_skill_location));
+    assert!(owner.skill_requirements.iter().take(2).all(|required| *required));
+}
+
+#[test]
 fn raw_expansion_rejects_each_injected_topology_field() {
     let doc = planner(2);
     let output = result(vec![slice("child", &[])]);
@@ -196,7 +208,7 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned-fallback", "nodes":[
             {"id":"before", "access":"read_only", "prompt":"Prepare inputs", "route":{"alias":"junior"}},
-            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan",
+            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan", "require_skill_location":true,
              "route":{"alias":"senior"}, "depends_on":["before"],
              "inputs":[{"node":"before", "outputs":["result"]}],
              "plan":{"kinds":["task"], "max_nodes":2,
@@ -226,6 +238,7 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     assert!(run.checkpoint.successful());
     assert_eq!(owner.calls.len(), 4);
     assert!(owner.calls[2].0.node_id.contains("plan--fallback--static"));
+    assert_eq!(owner.skill_requirements, [false, true, true, false]);
     assert!(owner.prompts[2].contains("prepared result"));
     assert!(owner.prompts[3].contains("static result"));
     let plan = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
@@ -726,14 +739,21 @@ fn skipped_writer_does_not_connect_separate_checkouts_during_expansion() {
 
 #[test]
 fn planner_prompt_uses_wire_kinds_and_required_field_names() {
-    let prompt = plans::prompt(&planner(2).nodes[0]);
-    assert!(prompt.contains(r#"["task","plan","gate"]"#));
-    assert!(prompt.contains("`worktree`"));
-    assert!(prompt.contains("`inputs`"));
-    assert!(prompt.contains("`acceptance_checks`"));
+    let mut document = planner(2);
+    document.nodes[0].plan.as_mut().unwrap().kinds = vec![
+        NodeKind::Composite, NodeKind::Plan, NodeKind::Task, NodeKind::Synthesise,
+        NodeKind::Gate, NodeKind::Loop, NodeKind::Decide, NodeKind::Land,
+    ];
+    let node = &document.nodes[0];
+    let prompt = plans::prompt(node);
+    for kind in &node.plan.as_ref().unwrap().kinds {
+        let wire = serde_json::to_value(kind).unwrap();
+        assert!(prompt.contains(wire.as_str().unwrap()), "{prompt}");
+    }
+    for field in ["id", "goal", "access", "acceptance_checks", "depends_on", "worktree", "write_scope", "inputs"] {
+        assert!(prompt.contains(field), "missing {field}: {prompt}");
+    }
     assert!(prompt.contains(r#"{"node":"id","outputs":["result"]}"#));
-    assert!(prompt.contains(r#""id"` (which selects `result`)"#));
-    assert!(prompt.contains("Do not emit presets or review shapes"));
 }
 
 #[test]

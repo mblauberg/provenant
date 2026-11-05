@@ -635,6 +635,19 @@ fn read_readiness_file(
     Ok(Some(ReadinessFile::decode(&bytes, adapter, key)?))
 }
 
+/// Read one account's bounded readiness file for a shared display snapshot.
+pub(crate) fn recorded_readiness_file(
+    state: &Path,
+    adapter: &str,
+    key: &str,
+) -> Result<Option<ReadinessFile>, EdgeError> {
+    if !component(adapter) || !component(key) {
+        return Err(QuotaError::Invalid("readiness scope").into());
+    }
+    open_readiness_account(state, key)?
+        .map_or(Ok(None), |dir| read_readiness_file(&dir, adapter, key))
+}
+
 /// The readiness of one route, read without locks, directory creation or
 /// provider I/O. A missing, stale, mismatched or damaged record is unknown;
 /// nothing here reads as ready unless fresh evidence says so. Routing and the
@@ -666,11 +679,7 @@ pub(crate) fn read_readiness_after_probe(
     if !component(&scope.adapter) || !component(&scope.account_key) {
         return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
     }
-    let read = open_readiness_account(state, &scope.account_key).and_then(|dir| {
-        dir.map_or(Ok(None), |dir| {
-            read_readiness_file(&dir, &scope.adapter, &scope.account_key)
-        })
-    });
+    let read = recorded_readiness_file(state, &scope.adapter, &scope.account_key);
     match read {
         Ok(Some(mut file)) => {
             if let Some(reprobe) = reprobe {
@@ -874,10 +883,7 @@ fn detections(
 ) -> Vec<Detection> {
     registry
         .iter()
-        .filter(|r| {
-            provenant_records::AdapterSpec::get(r.adapter.id())
-                .is_some_and(|spec| spec.quota_probe != provenant_records::QuotaProbeKind::None)
-        })
+        .filter(|r| r.quota_source.is_some())
         .map(|r| {
             let status = r.adapter.stream(None).and_then(|s| r.adapter.account(&s));
             Detection {
@@ -1192,6 +1198,16 @@ fn decorate_login(
     now: i64,
 ) {
     for row in &mut report.accounts {
+        row.readiness = Some(read_readiness(
+            state,
+            &ReadinessScope {
+                host: LOCAL_HOST.into(),
+                adapter: row.account.adapter.clone(),
+                account_key: row.account.account_key.clone(),
+                route: provenant_quota::ACCOUNT_ROUTE.into(),
+            },
+            now,
+        ));
         row.login_expiry = Some(login_expiry_at(state, &row.account, warning_seconds, now));
         if row.repair.is_none()
             && row.error != Some(provenant_quota::ProbeFailure::Network)
@@ -1292,7 +1308,7 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
     );
     Ok(report.accounts)
 }
-fn execute(
+pub(crate) fn execute(
     command: &Quota,
     roots: &Roots,
     registry: &[provenant_providers::Registration],
@@ -1389,8 +1405,28 @@ fn execute(
             &tick,
             home.as_deref(),
         )?;
+        let missing_readiness: Vec<_> = detected
+            .iter()
+            .filter_map(|detection| detection.accounts.as_ref())
+            .flatten()
+            .filter(|account| {
+                recorded_readiness_file(
+                    roots.state.as_path(),
+                    &account.adapter,
+                    &account.account_key,
+                )
+                .is_ok_and(|file| file.is_none())
+            })
+            .map(|account| (account.adapter.clone(), account.account_key.clone()))
+            .collect();
         let plan = schedule::plan_tick_with_settings(
-            &policies, &records, &detected, &tick, now, &settings,
+            &policies,
+            &records,
+            &detected,
+            &tick,
+            now,
+            &settings,
+            &missing_readiness,
         )?;
         for drop in &plan.drops {
             write_intent(&dir, roots.state.as_path(), drop, &mut records)?;
@@ -1418,13 +1454,26 @@ fn execute(
                         && r.account.account_key == account.account_key
                 })
                 .cloned();
+            let missing_readiness = recorded_readiness_file(
+                roots.state.as_path(),
+                &account.adapter,
+                &account.account_key,
+            )
+            .is_ok_and(|file| file.is_none());
+            let trigger = schedule::trigger_for_readiness(
+                &policies,
+                current.as_ref(),
+                tick.trigger,
+                tick.power,
+                missing_readiness,
+            )?;
             let intent = match schedule::reserve(
                 &policies,
                 current.as_ref(),
                 account,
                 at,
                 &token,
-                tick.trigger,
+                trigger,
                 tick.power,
             ) {
                 Ok(intent) => intent,
@@ -1899,6 +1948,39 @@ pub(crate) fn cache_share(cache: &provenant_telemetry::CacheSummary) -> String {
     }
 }
 
+/// A bounded account or model readiness observation, rendered for people.
+pub fn readiness_words(readiness: &ReadinessRead) -> String {
+    let state = match readiness.state {
+        provenant_quota::ReadinessState::Ready => "ready",
+        provenant_quota::ReadinessState::Unavailable => "unavailable",
+        provenant_quota::ReadinessState::Unknown => "unknown",
+    };
+    let reason = readiness
+        .reason
+        .and_then(|reason| serde_json::to_value(reason).ok())
+        .and_then(|value| value.as_str().map(|text| text.replace('_', " ")));
+    let mut result = state.to_owned();
+    if let Some(reason) = reason {
+        result.push_str(&format!(" ({reason})"));
+    }
+    if let Some(scope) = &readiness.observed_scope {
+        result.push_str(&format!("; scope {}", scope.route.escape_debug()));
+    }
+    if let Some(observed) = readiness.observed_unix_seconds {
+        result.push_str(&format!("; observed {observed}"));
+    }
+    if let Some(expires) = readiness.expires_unix_seconds {
+        result.push_str(&format!("; valid until {expires}"));
+    }
+    if let Some(evidence) = &readiness.evidence_ref {
+        result.push_str(&format!("; source {}", evidence.escape_debug()));
+    }
+    if readiness.state == provenant_quota::ReadinessState::Unknown {
+        result.push_str("; run `provenant quota tick` to probe");
+    }
+    result
+}
+
 fn quota_human(report: &QuotaReport) -> String {
     quota_human_at(report, jiff::tz::TimeZone::system())
 }
@@ -1930,6 +2012,12 @@ fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String
             row.account.adapter,
             reset.map_or_else(String::new, |label| format!(" {label}"))
         ));
+        if let Some(readiness) = &row.readiness {
+            human.push_str(&format!(
+                "; account readiness {}",
+                readiness_words(readiness)
+            ));
+        }
         if let Some(login) = &row.login_expiry {
             match (
                 login.state,
@@ -2410,6 +2498,7 @@ mod tests {
             rows[0].login_expiry.as_ref().unwrap().state,
             LoginExpiryState::Expired
         );
+        let read_at = SystemClock::new().unix_seconds();
         let readiness = read_readiness(
             roots.state.as_path(),
             &ReadinessScope {
@@ -2418,9 +2507,26 @@ mod tests {
                 account_key: "key".into(),
                 route: "claude/model".into(),
             },
-            SystemClock::new().unix_seconds(),
+            read_at,
         );
         assert_eq!(readiness.reason, Some(ReadinessReason::LoginExpired));
+        assert_eq!(rows[0].readiness.as_ref(), Some(&readiness));
+        let settings = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
+            .domains
+            .accounts;
+        let model = provenant_routing::ModelId::parse("claude/model")?;
+        let routes = crate::route::recorded_model_readiness(
+            &settings,
+            &model,
+            &[],
+            Some("key"),
+            None,
+            |scope| read_readiness(roots.state.as_path(), scope, read_at),
+        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].observation, readiness);
+        assert!(readiness_words(&readiness).contains("login expired"));
+        assert!(readiness.observed_unix_seconds.is_some());
         assert!(matches!(
             readiness.project(),
             provenant_records::RouteReadiness::Unavailable {
@@ -2505,6 +2611,7 @@ mod tests {
                         account_key: "agy-google-abc".into(),
                         label: "work".into(),
                     },
+                    readiness: None,
                     login_expiry: None,
                     snapshot: None,
                     status: QuotaStatus::AuthRequired,
@@ -2552,6 +2659,7 @@ mod tests {
                 account_key: "agy-google-abc".into(),
                 label: label.into(),
             },
+            readiness: None,
             login_expiry: None,
             snapshot: None,
             status: QuotaStatus::KeychainUnavailable,
@@ -2600,6 +2708,7 @@ mod tests {
                     account_key: "agy-google-abc".into(),
                     label: "legacy".into(),
                 },
+                readiness: None,
                 login_expiry: None,
                 snapshot: None,
                 status: QuotaStatus::KeychainUnavailable,
@@ -2639,6 +2748,7 @@ mod tests {
                 account_key: "key".into(),
                 label: format!("{status:?}"),
             },
+            readiness: None,
             login_expiry: None,
             snapshot: None,
             status,
@@ -2684,6 +2794,7 @@ mod tests {
                 account_key: label.into(),
                 label: label.into(),
             },
+            readiness: None,
             login_expiry: None,
             snapshot: None,
             status: QuotaStatus::Exhausted,
@@ -2887,6 +2998,7 @@ mod tests {
                 account_key: "k".into(),
                 label: "agy".into(),
             },
+            readiness: None,
             login_expiry: None,
             snapshot,
             status,
@@ -4175,17 +4287,24 @@ mod tests {
         assert_eq!(headline, "Quota: 3/3 current readings\n");
     }
 
-    struct AuthRequiredAdapter;
-    impl provenant_providers::Adapter for AuthRequiredAdapter {
+    struct FixtureAdapter {
+        id: &'static str,
+        auth_required: bool,
+    }
+    impl provenant_providers::Adapter for FixtureAdapter {
         fn id(&self) -> &'static str {
-            "claude"
+            self.id
         }
         fn account(
             &self,
             _: &provenant_providers::StreamState,
         ) -> Result<provenant_providers::AccountDetection, provenant_providers::ProviderError>
         {
-            Ok(provenant_providers::AccountDetection::AuthRequired)
+            Ok(if self.auth_required {
+                provenant_providers::AccountDetection::AuthRequired
+            } else {
+                provenant_providers::AccountDetection::Unknown
+            })
         }
         fn prepare(
             &self,
@@ -4234,7 +4353,10 @@ mod tests {
         }
     }
 
-    static AUTH_REQUIRED_ADAPTER: AuthRequiredAdapter = AuthRequiredAdapter;
+    static AUTH_REQUIRED_ADAPTER: FixtureAdapter = FixtureAdapter {
+        id: "claude",
+        auth_required: true,
+    };
 
     #[test]
     fn auth_required_adapter_with_registered_account_shows_stale_cached_reading() {
@@ -4248,7 +4370,7 @@ mod tests {
         };
         let registration = provenant_providers::Registration {
             adapter: &AUTH_REQUIRED_ADAPTER,
-            quota_source: None,
+            quota_source: provenant_providers::claude::REGISTRATION.quota_source,
             stdout_decoder: None,
             stderr_decoder: None,
             display_name: "Claude",
@@ -4264,5 +4386,172 @@ mod tests {
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].status, QuotaStatus::AuthRequired);
         assert_eq!(detected[0].accounts, Some(configured.clone()));
+    }
+
+    #[test]
+    fn registry_only_quota_source_is_probed_and_reported() -> Result<(), Box<dyn std::error::Error>>
+    {
+        struct Source;
+        impl QuotaSource for Source {
+            fn adapter_id(&self) -> &'static str {
+                "fixture-provider"
+            }
+            fn probe(
+                &self,
+                account: &AccountScope,
+                input: &QuotaProbeInput,
+            ) -> Result<QuotaProbePlan, QuotaError> {
+                Ok(QuotaProbePlan {
+                    kind: QuotaEffectKind::Command,
+                    account: account.clone(),
+                    input: input.clone(),
+                })
+            }
+            fn decode(
+                &self,
+                plan: &QuotaProbePlan,
+                _: &ProbeCapture,
+            ) -> Result<QuotaSnapshot, QuotaError> {
+                Ok(QuotaSnapshot {
+                    schema_version: 1,
+                    account: plan.account.clone(),
+                    revision: 0,
+                    status: QuotaStatus::Available,
+                    observed_unix_seconds: plan.input.now_unix_seconds,
+                    source_ref: "fixture".into(),
+                    authority_ref: None,
+                    windows: vec![],
+                    details: None,
+                })
+            }
+        }
+        struct Effects(std::cell::Cell<u32>);
+        impl QuotaEffects for Effects {
+            fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
+                Ok(vec![AccountScope {
+                    adapter: "fixture-provider".into(),
+                    account_key: "work".into(),
+                    label: "work".into(),
+                }])
+            }
+            fn capture(
+                &self,
+                _: &QuotaProbePlan,
+                _: Option<&AccountRecord>,
+            ) -> Result<ProbeCapture, ProbeFailure> {
+                self.0.set(self.0.get() + 1);
+                Ok(ProbeCapture {
+                    stdout: vec![],
+                    stderr: vec![],
+                    exit_code: Some(0),
+                    overflowed: false,
+                })
+            }
+        }
+        static ADAPTER: FixtureAdapter = FixtureAdapter {
+            id: "fixture-provider",
+            auth_required: false,
+        };
+        static SOURCE: Source = Source;
+        let registry = [provenant_providers::Registration {
+            adapter: &ADAPTER,
+            quota_source: Some(&SOURCE),
+            stdout_decoder: None,
+            stderr_decoder: None,
+            display_name: "Fixture",
+            quota: QuotaPolicy {
+                adapter: "fixture-provider",
+                timer_seconds: 300,
+                panel_seconds: 120,
+                probe_seconds: 10,
+                low_power: true,
+                solo: false,
+            },
+        }];
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let effects = Effects(std::cell::Cell::new(0));
+        let report = execute(
+            &Quota::Tick {
+                adapter: Filter {
+                    adapter: Some("fixture-provider".into()),
+                },
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
+            &roots,
+            &registry,
+            &effects,
+        )?;
+        assert_eq!(effects.0.get(), 1);
+        let row = report
+            .accounts
+            .iter()
+            .find(|row| row.account.adapter == "fixture-provider")
+            .ok_or("fixture quota row")?;
+        assert_eq!(row.status, QuotaStatus::Available);
+        assert!(row.snapshot.is_some());
+
+        // A fresh quota snapshot does not replace missing readiness evidence.
+        // Once the configured panel interval has elapsed, a timer tick refreshes it.
+        let root = private(roots.state.as_path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let mut records = read_cache(&roots)?;
+        let previous = records.first().ok_or("fixture quota record")?.clone();
+        let mut replacement = previous.clone();
+        replacement.revision += 1;
+        replacement.last_attempt_unix_seconds = Some(SystemClock::new().unix_seconds() - 180);
+        write_intent(
+            &dir,
+            roots.state.as_path(),
+            &UpdateIntent {
+                account: previous.account.clone(),
+                expected: Some(previous),
+                replacement: Some(replacement),
+                readiness_probe_result: None,
+                login_probe_expiry: None,
+            },
+            &mut records,
+        )?;
+        std::fs::remove_file(
+            roots
+                .state
+                .as_path()
+                .join("readiness/work/fixture-provider.json"),
+        )?;
+        let report = execute(
+            &Quota::Tick {
+                adapter: Filter {
+                    adapter: Some("fixture-provider".into()),
+                },
+                trigger: Trigger::Timer,
+                power: Power::Ac,
+            },
+            &roots,
+            &registry,
+            &effects,
+        )?;
+        assert_eq!(effects.0.get(), 2);
+        assert_eq!(report.accounts[0].status, QuotaStatus::Available);
+        assert!(
+            recorded_readiness_file(roots.state.as_path(), "fixture-provider", "work")?.is_some()
+        );
+        execute(
+            &Quota::Tick {
+                adapter: Filter {
+                    adapter: Some("fixture-provider".into()),
+                },
+                trigger: Trigger::Timer,
+                power: Power::Ac,
+            },
+            &roots,
+            &registry,
+            &effects,
+        )?;
+        assert_eq!(effects.0.get(), 2);
+        Ok(())
     }
 }

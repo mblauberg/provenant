@@ -109,7 +109,7 @@ jobs:
         # checked for presence, so it must be absent on Linux.
         run: |
           if [ "$RUNNER_OS" = macOS ]; then export PROVENANT_CONFINEMENT_REQUIRED=1; fi
-          cargo nextest run --profile ci --workspace --locked \
+          cargo nextest run --profile ci --ignore-default-filter --workspace --locked \
             --features provenant-providers/recording --stress-count 5 --retries 0 \
             -E 'binary(=worktrees) | binary(=custody) | binary(=dispatch_provider) |
             binary(=process) | binary(=pr) | binary(=publication) | binary(=fake_provider)'

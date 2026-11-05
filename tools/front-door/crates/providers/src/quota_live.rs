@@ -646,7 +646,9 @@ pub fn registered_claude(
     use crate::identity::{Accounts, RegisteredAccount};
     let mut accounts = Vec::new();
     for registration in settings.entries.values() {
-        if registration.adapter != "claude" {
+        if !provenant_records::AdapterSpec::get(&registration.adapter)
+            .is_some_and(|spec| spec.chair_switch)
+        {
             continue;
         }
         let path = &registration.directory;
@@ -657,7 +659,11 @@ pub fn registered_claude(
         if !path.is_dir() {
             return Err("registered Claude directory is unavailable".into());
         }
-        accounts.push(RegisteredAccount::new("claude", &registration.key, path)?);
+        accounts.push(RegisteredAccount::new(
+            &registration.adapter,
+            &registration.key,
+            path,
+        )?);
     }
     Accounts::new(accounts.clone())?;
     Ok(accounts)

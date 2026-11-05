@@ -330,6 +330,9 @@ impl UpdateIntent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRow {
     pub account: AccountScope,
+    /// Readiness scoped to this account, not to any particular model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<crate::ReadinessRead>,
     /// Account-scoped login expiry evidence, independent of quota status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_expiry: Option<LoginExpiryView>,

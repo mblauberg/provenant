@@ -586,6 +586,48 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
 }
 
 #[test]
+fn explicit_skill_location_is_rechecked_before_dispatch() -> TestResult {
+    for (provider, required, accepted) in [
+        ("command", false, true),
+        ("command", true, false),
+        ("codex", true, true),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut input = submission("skill location");
+        let operation = input.operation_id.clone();
+        input.tasks[0].profile.require_skill_location = required;
+        input.tasks[0].route = if provider == "command" {
+            RequestedRoute::Adapter {
+                extra: Default::default(),
+                provider: provider.into(),
+                name: "fixture".into(),
+            }
+        } else {
+            RequestedRoute::Model {
+                extra: Default::default(),
+                provider: provider.into(),
+                model: "codex/m".into(),
+                effort: None,
+            }
+        };
+        let result = Service::new(&store).dispatch(input, temp.path(), &call);
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{provider} required={required}: {result:?}"
+        );
+        assert_eq!(store.operation(&operation, &call)?.is_some(), accepted);
+        if let Err(error) = result {
+            assert_eq!(error.to_string(), "command does not support skill location");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn every_task_is_checked_before_any_writer_is_prepared() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

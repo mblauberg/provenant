@@ -829,6 +829,7 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
             resume: false,
             network: task.access.network,
             write,
+            skill_location: task.profile.require_skill_location,
         })
         .map_err(|error| input_error(ErrorKind::Unsupported, error.to_string()))
     };

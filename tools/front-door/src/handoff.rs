@@ -439,11 +439,12 @@ fn execute(
             "coordination mutations are not allowed inside a lane",
         ));
     }
-    if args.provider != "claude" {
+    if !provenant_records::AdapterSpec::get(&args.provider).is_some_and(|spec| spec.session_handoff)
+    {
         return Err(Refusal::new(
             Outcome::Unavailable,
             "UNSUPPORTED",
-            "only the claude provider can take a hand-off",
+            "the selected provider cannot take a hand-off",
         ));
     }
     if args.model.as_deref().is_some_and(|m| !valid_model(m)) {

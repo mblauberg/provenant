@@ -59,14 +59,114 @@ fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
     rig.assert_legacy_unchanged()?;
     Ok(value)
 }
+
+#[test]
+fn config_retains_registry_only_account_and_quota_policy() -> Result {
+    let rig = rig()?;
+    let account = rig.home.join("fixture-account");
+    fs::create_dir_all(&account)?;
+    support::register_account(&rig, "fixture-provider", "work", "key-one", &account)?;
+    let config = rig.state.join("config.toml");
+    let mut text = fs::read_to_string(&config)?;
+    text.push_str("\n[domains.quota.polling_intervals.fixture-provider]\ntimer_seconds=17\n");
+    fs::write(config, text)?;
+    let result = call(&rig, &["config", "show"], 0)?;
+    assert_eq!(
+        result["data"]["domains"]["accounts"]["entries"]["fixture-provider-work"]["adapter"],
+        "fixture-provider"
+    );
+    assert_eq!(
+        result["data"]["domains"]["quota"]["polling_intervals"]["fixture-provider"]["timer_seconds"],
+        17
+    );
+    Ok(())
+}
 #[test]
 fn resolve_reports_effort_controls_and_nearby_models() -> Result {
+    use provenant_core::Clock;
     let rig = rig()?;
+    let account = rig.home.join("account-one");
+    fs::create_dir_all(&account)?;
+    support::register_account(&rig, "codex", "one", "key-one", &account)?;
+    let observed = provenant_os::clock::SystemClock::new().unix_seconds();
+    let file = provenant_quota::ReadinessFile {
+        records: vec![provenant_quota::RouteReadiness {
+            schema_version: 1,
+            scope: provenant_quota::ReadinessScope {
+                host: provenant_quota::LOCAL_HOST.into(),
+                adapter: "codex".into(),
+                account_key: "key-one".into(),
+                route: "codex/gpt-6-luna".into(),
+            },
+            state: provenant_quota::ReadinessState::Unavailable,
+            reason: Some(provenant_quota::ReadinessReason::ProviderRefusal),
+            observed_unix_seconds: observed,
+            expires_unix_seconds: observed + 300,
+            reset_unix_seconds: None,
+            evidence_ref: Some("fixture".into()),
+        }],
+        ..Default::default()
+    };
+    let dir = rig.state.join("readiness/key-one");
+    fs::create_dir_all(&dir)?;
+    fs::set_permissions(
+        rig.state.join("readiness"),
+        fs::Permissions::from_mode(0o700),
+    )?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    let path = dir.join("codex.json");
+    fs::write(&path, serde_json::to_vec(&file)?)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     let known = call(&rig, &["route", "resolve", "codex/gpt-6-luna"], 0)?;
+    assert_eq!(
+        known["data"]["recorded_readiness"][0]["account_key"],
+        "key-one"
+    );
+    assert_eq!(
+        known["data"]["recorded_readiness"][0]["observation"]["reason"],
+        "provider_refusal"
+    );
+    assert_eq!(
+        known["data"]["recorded_readiness"][0]["observation"]["observed_scope"]["route"],
+        "codex/gpt-6-luna"
+    );
+    assert_eq!(
+        known["data"]["recorded_readiness"][0]["observation"]["observed_unix_seconds"],
+        observed
+    );
     assert_eq!(
         known["data"]["supported_efforts"],
         serde_json::json!(["low", "medium", "high", "xhigh"])
     );
+    let human = rig.command(&["route", "resolve", "codex/gpt-6-luna"])?;
+    assert_eq!(code(&human), 0);
+    let text = String::from_utf8_lossy(&human.stdout.bytes);
+    assert!(text.contains("recorded readiness one [key-one]"), "{text}");
+    assert!(text.contains("unavailable (provider refusal)"), "{text}");
+    assert!(text.contains("scope codex/gpt-6-luna"), "{text}");
+    assert!(!rig.home.join("provider-started").exists());
+    let listed = call(&rig, &["route", "list", "--adapter", "codex"], 0)?;
+    let list_row = listed["data"]["recorded_readiness"]
+        .as_array()
+        .ok_or("recorded readiness")?
+        .iter()
+        .find(|row| row["model"] == "codex/gpt-6-luna" && row["account_key"] == "key-one")
+        .ok_or("listed model readiness")?;
+    assert_eq!(list_row["observation"]["reason"], "provider_refusal");
+    assert_eq!(list_row["observation"]["observed_unix_seconds"], observed);
+    let compact = rig.command(&["route", "list", "--adapter", "codex"])?;
+    assert_eq!(code(&compact), 0);
+    assert!(String::from_utf8_lossy(&compact.stdout.bytes).contains("recorded readiness"));
+    let listed_human = rig.command(&["route", "list", "--adapter", "codex", "--full"])?;
+    assert_eq!(code(&listed_human), 0);
+    let text = String::from_utf8_lossy(&listed_human.stdout.bytes);
+    assert!(
+        text.contains(
+            "recorded readiness one [key-one] for codex/gpt-6-luna: unavailable (provider refusal)"
+        ),
+        "{text}"
+    );
+    assert!(!rig.home.join("provider-started").exists());
     let none = call(
         &rig,
         &["route", "resolve", "opencode/opencode-go/glm-5.3-flash"],
@@ -439,14 +539,13 @@ fn override_list_shows_active_future_and_expired_schedules() -> Result {
 }
 
 #[test]
-fn fallback_and_retired_key_warnings_are_revision_scoped() -> Result {
+fn fallback_warnings_are_revision_scoped() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
-    let config = "schema_version=1\n[domains.routing]\npacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n[domains.routing.model_policy.defaults.result]\nfallback='codex/not-catalogued'\n";
+    let config = "schema_version=1\n[domains.routing]\n[domains.routing.model_policy.defaults.result]\nfallback='codex/not-catalogued'\n";
     fs::write(rig.state.join("config.toml"), config)?;
     let first = rig.command(&["route", "list"])?;
     let stderr = String::from_utf8(first.stderr.bytes)?;
-    assert!(stderr.contains("schedule.expires"), "{stderr}");
     assert!(stderr.contains("unknown_fallback"), "{stderr}");
     assert_eq!(stderr.matches("unknown_fallback").count(), 1);
     let second = rig.command(&["route", "list"])?;
@@ -457,42 +556,14 @@ fn fallback_and_retired_key_warnings_are_revision_scoped() -> Result {
     )?;
     let third = rig.command(&["route", "list"])?;
     let stderr = String::from_utf8(third.stderr.bytes)?;
-    assert!(stderr.contains("schedule.expires"), "{stderr}");
-    assert!(stderr.contains("unknown_fallback"), "{stderr}");
+    assert_eq!(stderr.matches("unknown_fallback").count(), 1, "{stderr}");
     Ok(())
 }
 
 #[test]
-fn retired_schedule_keys_drop_only_their_record_with_a_named_warning() -> Result {
+fn invalid_lane_restriction_rule_refuses_configuration() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
-    for (config, path, replacement) in [
-        (
-            "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\nexpires_unix_seconds=2000000000\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n",
-            "domains.routing.pacing_overrides.0",
-            "moved_to_schedule.expires",
-        ),
-        (
-            "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nwindows=[{start_hour=1,end_hour=4}]\n[domains.routing.model_policy.rules.policy.cache]\nttl_seconds=60\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n",
-            "domains.routing.model_policy.rules.0",
-            "moved_to_schedule.windows",
-        ),
-    ] {
-        fs::write(rig.state.join("config.toml"), config)?;
-        let out = rig.command(&["route", "override", "list", "--json"])?;
-        assert_eq!(code(&out), 0);
-        let stderr = String::from_utf8(out.stderr.bytes)?;
-        assert!(
-            stderr.contains(&format!(
-                "{path}: ignored invalid configuration (domain: {replacement})"
-            )),
-            "{stderr}"
-        );
-        let listed: Value = serde_json::from_slice(&out.stdout.bytes)?;
-        let rows = listed["data"]["overrides"].as_array().ok_or("overrides")?;
-        assert_eq!(rows.len(), 1, "{listed}");
-        assert_eq!(rows[0]["scope"], "provider claude");
-    }
     // A rule that enforces a lane restriction stays strict.
     fs::write(
         rig.state.join("config.toml"),

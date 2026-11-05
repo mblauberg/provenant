@@ -128,7 +128,7 @@ impl DomainConfig for Settings {
         })
         .collect();
         for (adapter, intervals) in &self.polling_intervals {
-            if provenant_records::AdapterSpec::get(adapter).is_none() {
+            if !crate::component(adapter) {
                 errors.push(SectionError {
                     field: format!("polling_intervals.{adapter}"),
                     code: "adapter",
@@ -278,9 +278,32 @@ mod tests {
     }
 
     #[test]
-    fn polling_intervals_reject_unknown_adapters_zero_and_overflow() {
+    fn polling_intervals_accept_registered_policy_and_reject_invalid_values() {
+        let configured = parse(&format!(
+            "{BASE}[polling_intervals.fixture_provider]\ntimer_seconds=17\n"
+        ))
+        .unwrap();
+        assert!(configured.validate().is_empty());
+        let mut policies = [crate::QuotaPolicy {
+            adapter: "fixture_provider",
+            timer_seconds: 300,
+            panel_seconds: 120,
+            probe_seconds: 10,
+            low_power: true,
+            solo: false,
+        }];
+        configured.apply_polling_intervals(&mut policies);
+        assert_eq!(
+            crate::schedule::interval(
+                &policies,
+                "fixture_provider",
+                crate::schedule::Trigger::Timer,
+                crate::schedule::Power::Ac,
+            ),
+            Some(17)
+        );
         for text in [
-            "[polling_intervals.unknown]\ntimer_seconds=1\n",
+            "[polling_intervals.'../invalid']\ntimer_seconds=1\n",
             "[polling_intervals.claude]\ntimer_seconds=0\n",
             "[polling_intervals.codex]\npanel_seconds=9223372036854775807\n",
         ] {

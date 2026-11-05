@@ -469,11 +469,7 @@ pub(crate) fn pool_effort_refusal(
         .map(|spec| spec.check_launch(&request))
         .collect();
     let refused: Vec<_> = refusals.into_iter().filter_map(Result::err).collect();
-    let known = adapters
-        .iter()
-        .filter(|name| provenant_records::AdapterSpec::get(name).is_some())
-        .count();
-    (known > 0 && refused.len() == known)
+    (!adapters.is_empty() && refused.len() == adapters.len())
         .then(|| refused.into_iter().next())
         .flatten()
 }
@@ -488,6 +484,11 @@ pub(super) fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> 
     let catalogue = provenant_routing::Catalogue::bundled()
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
     let Some(entry) = catalogue.model(&id) else {
+        // A registry-only adapter has no built-in catalogue to consult.
+        // Routing checks that its identity is actually registered.
+        if provenant_records::AdapterSpec::get(id.adapter()).is_none() {
+            return Ok(());
+        }
         let nearest = catalogue.nearest_models(&id);
         let hint = if nearest.is_empty() {
             String::new()
@@ -558,6 +559,7 @@ pub(super) fn check_flag_capabilities_with_writes(
             resume: false,
             network,
             write: has_writes,
+            ..Default::default()
         })
         .map_err(refused)
     };
@@ -1093,6 +1095,7 @@ pub(super) fn dispatch_inner(
                 task.deliver.or_else(|| flag_delivery.clone()),
                 task.base.or_else(|| command.base.clone()),
                 task.build_heavy || command.build_heavy,
+                task.require_skill_location || command.require_skill_location,
                 task.context,
                 network,
             ));
@@ -1133,6 +1136,7 @@ pub(super) fn dispatch_inner(
             flag_delivery,
             command.base.clone(),
             command.build_heavy,
+            command.require_skill_location,
             None,
             None,
         ));
@@ -1157,6 +1161,7 @@ pub(super) fn dispatch_inner(
                 deliver,
                 base,
                 build_heavy,
+                require_skill_location,
                 context,
                 network,
             ),
@@ -1177,6 +1182,7 @@ pub(super) fn dispatch_inner(
             placed.push(remote::Task {
                 context,
                 build_heavy,
+                require_skill_location,
                 title,
                 base,
                 head: command.head.clone(),
@@ -1209,7 +1215,7 @@ pub(super) fn dispatch_inner(
         .operation(&command.operation_id, &call)?
         .is_none()
     {
-        for (_, _, _, _, _, _, _, delivery, _, _, _, _) in &tasks {
+        for (_, _, _, _, _, _, _, delivery, _, _, _, _, _) in &tasks {
             if let Some(delivery) = delivery {
                 check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
@@ -1234,7 +1240,7 @@ pub(super) fn dispatch_inner(
     config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    for (_, title, prompt, _, models, _, _, _, _, _, _, _) in &tasks {
+    for (_, title, prompt, _, models, _, _, _, _, _, _, _, _) in &tasks {
         run::Service::scan(prompt)?;
         if let Some(title) = title {
             provenant_core::validate_task_title(title)
@@ -1509,6 +1515,7 @@ pub(super) fn dispatch_inner(
                 deliver,
                 base,
                 build_heavy,
+                require_skill_location,
                 context,
                 network,
             )| {
@@ -1518,6 +1525,7 @@ pub(super) fn dispatch_inner(
                 }
                 Submitted {
                     cloud: cloud.clone(),
+                    require_skill_location,
                     settlement_retry_limit: None,
                     context,
                     build_heavy,
@@ -1911,9 +1919,10 @@ pub(super) fn replay_owned_dispatch(
     };
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    let profile = config
+    let mut profile = config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    profile.require_skill_location = command.require_skill_location;
     if task.title != command.title
         || task.build_heavy != command.build_heavy
         || task.prompt_digest != CanonicalV1::file_digest(prompt.as_bytes())
@@ -2472,7 +2481,7 @@ pub(super) fn launch_on_host_with_wait(
                 .unwrap_or_default(),
             git: provenant_os::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
-            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            default_account_directories: run::HostLaunchContext::default_account_directories(),
             cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
             #[cfg(feature = "fixture")]
             fixture_state_write: false,

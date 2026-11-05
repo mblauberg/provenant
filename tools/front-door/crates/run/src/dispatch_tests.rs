@@ -2767,7 +2767,7 @@ fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
 }
 
 #[test]
-fn invalid_optional_build_settings_use_defaults_without_blocking_admission() -> TestResult {
+fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
     for (assignment, explicit_policy) in [
         ("cargo_build_jobs = -2", false),
         ("cargo_build_jobs = 'invalid'", false),
@@ -4627,209 +4627,6 @@ fn a_start_ahead_of_the_host_clock_in_the_same_boot_never_frees_the_class() -> T
     Ok(())
 }
 
-/// A ledger as an earlier build left it, under the store's host root. Tables
-/// come from `schema`; the file is created private like the real one.
-fn old_ledger(store: &RunStore, schema: &str) -> TestResult {
-    use std::os::unix::fs::PermissionsExt;
-    let file = store.writer_registry.join("admission.sqlite3");
-    std::fs::create_dir_all(&store.writer_registry)?;
-    let old = rusqlite::Connection::open(&file)?;
-    old.execute_batch(schema)?;
-    drop(old);
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[test]
-fn a_version_2_ledger_that_kept_wall_milliseconds_starts_every_class_free() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
-    let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    old_ledger(
-        &store,
-        "CREATE TABLE leases (
-          attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL,
-          class TEXT NOT NULL DEFAULT 'writer' CHECK(class IN ('writer','read_only'))
-         ) STRICT;
-         CREATE INDEX lease_projects ON leases(project);
-         CREATE TABLE spacing (
-          class TEXT PRIMARY KEY CHECK(class IN ('writer','read_only')),
-          last_start INTEGER NOT NULL
-         ) STRICT;
-         INSERT INTO spacing(class,last_start) VALUES ('writer', 4000000000000);
-         PRAGMA user_version=2;",
-    )?;
-    let [first, second] = writers(&store, [96, 97], &call)?;
-    assert!(
-        store.claim(first, &host, &call)?.is_some(),
-        "wall milliseconds from before boot-keyed spacing hold no class"
-    );
-    assert!(store.claim(second, &host, &call)?.is_none());
-    Ok(())
-}
-
-#[test]
-fn upgrading_a_version_1_ledger_is_atomic() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
-    let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let version_1 = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
-         CREATE INDEX lease_projects ON leases(project);";
-    // A spacing that cannot be dropped fails the upgrade after it has added
-    // the lease class column. A crash at that point must leave version 1 whole.
-    old_ledger(
-        &store,
-        &format!(
-            "{version_1}
-             CREATE VIEW spacing AS SELECT 1 AS id, 4000000000000 AS last_start;
-             PRAGMA user_version=1;"
-        ),
-    )?;
-    let [first, second] = writers(&store, [98, 99], &call)?;
-    assert!(store.claim(first, &host, &call).is_err());
-    let file = store.writer_registry.join("admission.sqlite3");
-    let raw = rusqlite::Connection::open(&file)?;
-    let classes: i64 = raw.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('leases') WHERE name='class'",
-        [],
-        |r| r.get(0),
-    )?;
-    let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    assert_eq!(
-        (classes, version),
-        (0, 1),
-        "the failed upgrade left no trace"
-    );
-    raw.execute_batch(
-        "DROP VIEW spacing;
-         CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;
-         INSERT INTO spacing(id,last_start) VALUES (1,4000000000000);",
-    )?;
-    drop(raw);
-    assert!(
-        store.claim(first, &host, &call)?.is_none(),
-        "the upgrade carried the start into the new ledger"
-    );
-    host.pass_ms(20_500);
-    assert!(
-        store.claim(first, &host, &call)?.is_some(),
-        "a start in the wall future held the class one spacing, and no longer"
-    );
-    assert!(store.claim(second, &host, &call)?.is_none());
-    Ok(())
-}
-
-const VERSION_1_LEDGER: &str = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
-     CREATE INDEX lease_projects ON leases(project);
-     CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;";
-
-/// A version 1 ledger whose one start was `ago_ms` before the clock's wall now
-/// (negative: in the wall future).
-fn version_1_start(store: &RunStore, host: &Stepped, ago_ms: i64) -> TestResult {
-    let started = host.wall_now()?.as_micros() / 1000 - ago_ms;
-    old_ledger(
-        store,
-        &format!(
-            "{VERSION_1_LEDGER}
-             INSERT INTO spacing(id,last_start) VALUES (1,{started});
-             PRAGMA user_version=1;"
-        ),
-    )
-}
-
-#[test]
-fn a_version_1_start_of_any_age_holds_each_class_one_full_spacing() -> TestResult {
-    // Old (a spacing and more), recent, and in the wall future: the upgrade
-    // reads no wall clock, so the recorded age changes nothing.
-    for (case, ago_ms) in [
-        ("old", 3_600_000),
-        ("recent", 5_000),
-        ("future", -3_600_000),
-    ] {
-        let temp = tempfile::tempdir()?;
-        let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
-        let call = stepped_call(&host, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
-        version_1_start(&store, &host, ago_ms)?;
-        let writer = starting(&store, &lane(100, true), &call)?;
-        let reader = starting(&store, &lane(101, false), &call)?;
-        assert!(
-            store.claim(writer, &host, &call)?.is_none(),
-            "{case}: the writer is held from the upgrade"
-        );
-        assert!(
-            store.claim(reader, &host, &call)?.is_none(),
-            "{case}: the read-only class is held from the upgrade"
-        );
-        host.pass_ms(1_500);
-        assert!(
-            store.claim(reader, &host, &call)?.is_none(),
-            "{case}: the read-only spacing has not run out"
-        );
-        host.pass_ms(1_000);
-        assert!(
-            store.claim(reader, &host, &call)?.is_some(),
-            "{case}: the 2 s read-only spacing has run out"
-        );
-        host.pass_ms(17_000);
-        assert!(
-            store.claim(writer, &host, &call)?.is_none(),
-            "{case}: the writer is held the full 20 s, not less"
-        );
-        host.pass_ms(1_000);
-        assert!(
-            store.claim(writer, &host, &call)?.is_some(),
-            "{case}: held one spacing, and no longer"
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn a_version_1_ledger_with_no_start_holds_nothing() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
-    let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    old_ledger(
-        &store,
-        &format!("{VERSION_1_LEDGER} PRAGMA user_version=1;"),
-    )?;
-    let writer = starting(&store, &lane(104, true), &call)?;
-    let reader = starting(&store, &lane(105, false), &call)?;
-    assert!(store.claim(writer, &host, &call)?.is_some());
-    assert!(store.claim(reader, &host, &call)?.is_some());
-    Ok(())
-}
-
-#[test]
-fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
-    let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    version_1_start(&store, &host, 5_000)?;
-    let writer = starting(&store, &lane(103, true), &call)?;
-    *host.boot_readable.lock().unwrap() = false;
-    assert!(matches!(
-        store.claim(writer, &host, &call),
-        Err(RunError::Admission(AdmissionError::Clock))
-    ));
-    let raw = rusqlite::Connection::open(store.writer_registry.join("admission.sqlite3"))?;
-    let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    let rows: i64 = raw.query_row("SELECT COUNT(*) FROM spacing", [], |r| r.get(0))?;
-    assert_eq!(
-        (version, rows),
-        (1, 1),
-        "the refused upgrade dropped nothing"
-    );
-    *host.boot_readable.lock().unwrap() = true;
-    assert!(store.claim(writer, &host, &call)?.is_none());
-    Ok(())
-}
-
 /// Probes memory, and while it does another process starts a writer.
 struct RivalStarts<'a> {
     store: &'a RunStore,
@@ -5034,18 +4831,6 @@ fn batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins() {
             .collect(),
         ..HarnessProfile::default()
     };
-    let registry = profile(&[
-        ("lanes.max_concurrency", 8),
-        ("lanes.max_concurrency_read_only", 16),
-    ]);
-    assert_eq!(concurrency(None, &registry, false, None), 8, "writer batch");
-    assert_eq!(
-        concurrency(None, &registry, true, None),
-        16,
-        "read-only batch"
-    );
-    assert_eq!(concurrency(Some(3), &registry, false, None), 3);
-    assert_eq!(concurrency(Some(3), &registry, true, None), 3);
     let tuned = profile(&[
         ("lanes.max_concurrency", 2),
         ("lanes.max_concurrency_read_only", 5),
@@ -5058,44 +4843,13 @@ fn batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins() {
     assert!(reader_default >= writer_default);
     assert_eq!(concurrency(Some(3), &bare, false, None), 3);
     assert_eq!(concurrency(Some(3), &bare, true, None), 3);
-    assert_eq!(concurrency(None, &registry, true, Some(3)), 3, "bounded");
+    assert_eq!(concurrency(None, &tuned, true, Some(3)), 3, "bounded");
     assert_eq!(
         concurrency(None, &tuned, true, Some(7)),
         5,
         "a cap, not a floor"
     );
-    assert_eq!(
-        concurrency(Some(12), &registry, true, Some(3)),
-        12,
-        "explicit"
-    );
-}
-
-#[test]
-fn sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let mut run = batch(90, 16);
-    run.request.concurrency = 16;
-    store.create(&run, &call)?;
-    for (index, attempt) in run.attempts.iter().enumerate() {
-        let id = attempt.attempt_id;
-        store.mark_starting(
-            &store.record(id, &call)?,
-            &route(),
-            &[],
-            &Default::default(),
-            None,
-            &call,
-        )?;
-        assert!(
-            store.claim(id, &at(index as i64 * 2_000), &call)?.is_some(),
-            "lane {index} of a 16-lane read-only batch"
-        );
-    }
-    Ok(())
+    assert_eq!(concurrency(Some(12), &tuned, true, Some(3)), 12, "explicit");
 }
 
 #[test]
@@ -5163,55 +4917,6 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
         blocked[0].waiting_for,
         "run concurrency: 1 of 1 lanes of this run are active"
     );
-    Ok(())
-}
-
-#[test]
-fn legacy_tickets_without_a_class_are_treated_as_writers() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    // A ledger from before lane classes, holding one lease and no start, so
-    // the upgrade holds no class (the carried start has its own tests).
-    old_ledger(
-        &store,
-        "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
-         CREATE INDEX lease_projects ON leases(project);
-         CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;
-         INSERT INTO leases(attempt,project,store) VALUES ('legacy','project',x'2f6e6f77686572652f');
-         PRAGMA user_version=1;",
-    )?;
-
-    let old = starting(&store, &lane(80, true), &call)?;
-    // A ticket recorded before classes has no class field; strip it.
-    let raw: Vec<u8> = store.db.query_row(
-        "SELECT record FROM admission WHERE attempt=?1",
-        [old.to_string()],
-        |r| r.get(0),
-    )?;
-    let mut ticket: serde_json::Value = db::decode(&raw)?;
-    ticket
-        .as_object_mut()
-        .ok_or("ticket object")?
-        .remove("lane_class");
-    store.db.execute(
-        "UPDATE admission SET record=?1 WHERE attempt=?2",
-        rusqlite::params![db::bytes(&ticket)?, old.to_string()],
-    )?;
-    let writer = starting(&store, &lane(81, true), &call)?;
-    let reader = starting(&store, &lane(82, false), &call)?;
-
-    assert!(store.claim(old, &at(11_000), &call)?.is_some());
-    assert!(
-        store.claim(writer, &at(11_001), &call)?.is_none(),
-        "a ticket with no class is a writer, spaced 20 s from the last writer start"
-    );
-    assert!(
-        store.claim(reader, &at(11_001), &call)?.is_some(),
-        "the writer start holds no read-only lane"
-    );
-    assert!(store.claim(writer, &at(31_000), &call)?.is_some());
     Ok(())
 }
 
@@ -6537,122 +6242,6 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
         } else {
             assert_eq!(found, vec![(sibling, Reconciled::Queued)]);
         }
-    }
-    Ok(())
-}
-
-#[test]
-fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> TestResult {
-    for path_kind in ["absent", "directory", "unreadable"] {
-        let temp = tempfile::tempdir()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let context = context(temp.path())?;
-        let store = RunStore::open(&context, &call)?;
-        let run = input();
-        let id = run.attempts[0].attempt_id;
-        store.create(&run, &call)?;
-        let temporary = store.temporary_path(id, &call)?;
-        let before = store
-            .withdraw(
-                id,
-                AttemptState::Queued {
-                    extra: Default::default(),
-                },
-                Outcome::Cancelled,
-                "fixture",
-                WallTime::from_micros(150)?,
-                &call,
-            )?
-            .ok_or("not withdrawn")?;
-        // Reproduce leaks left by an older binary without a cleanup hint.
-        if path_kind == "directory" {
-            // Older binaries also created tmp private to the store owner.
-            std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
-                .create(&temporary)?;
-            std::fs::write(temporary.join("legacy.lock"), "discard")?;
-        } else if path_kind == "unreadable" {
-            let attempt = temporary.parent().ok_or("attempt directory")?;
-            std::fs::rename(attempt, attempt.with_extension("moved"))?;
-            std::os::unix::fs::symlink(attempt.with_extension("moved"), attempt)?;
-        }
-        store.db.execute_batch("DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; PRAGMA user_version=3;")?;
-        drop(store);
-
-        let store = RunStore::open(&context, &call)?;
-        if path_kind == "unreadable" {
-            let attempt = temporary.parent().ok_or("attempt directory")?;
-            std::fs::remove_file(attempt)?;
-            std::fs::rename(attempt.with_extension("moved"), attempt)?;
-        }
-        // Records from before the receipt table carry no receipts.
-        let mut legacy = before.clone();
-        legacy.settlement_receipts = None;
-        assert_eq!(store.record(id, &call)?, legacy);
-        assert!(
-            store
-                .db
-                .execute(
-                    "UPDATE attempts SET record=record WHERE id=?1",
-                    [id.to_string()]
-                )
-                .is_err()
-        );
-        for alias in ["rowid", "oid", "_rowid_"] {
-            assert!(
-                store
-                    .db
-                    .execute(
-                        &format!("UPDATE attempts SET {alias}={alias}+100 WHERE id=?1"),
-                        [id.to_string()]
-                    )
-                    .is_err()
-            );
-        }
-        assert!(
-            store
-                .db
-                .execute("DELETE FROM attempts WHERE id=?1", [id.to_string()])
-                .is_err()
-        );
-        let expected = if path_kind == "absent" {
-            vec![]
-        } else {
-            vec![run.run_id]
-        };
-        assert_eq!(store.open_runs(10, &call)?, expected);
-        if path_kind == "directory" {
-            assert_eq!(
-                store.reconcile_with_observer(
-                    run.run_id,
-                    &Fake::default(),
-                    &call,
-                    &provenant_supervisor::census::SystemProcessObserver
-                )?,
-                vec![(id, Reconciled::TemporaryRemoved)]
-            );
-            assert!(!temporary.exists());
-            assert!(store.open_runs(10, &call)?.is_empty());
-        } else if path_kind == "unreadable" {
-            // The migration retained the unreadable candidate. Now that its
-            // anchor is repaired, absence clears the hint without a result.
-            assert!(
-                store
-                    .reconcile_with_observer(
-                        run.run_id,
-                        &Fake::default(),
-                        &call,
-                        &provenant_supervisor::census::SystemProcessObserver
-                    )?
-                    .is_empty()
-            );
-        }
-        drop(store);
-        let store = RunStore::open(&context, &call)?;
-        let mut legacy = before.clone();
-        legacy.settlement_receipts = None;
-        assert_eq!(store.record(id, &call)?, legacy);
-        assert!(store.open_runs(10, &call)?.is_empty());
     }
     Ok(())
 }
@@ -9282,6 +8871,370 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
                 .all(|route| route.kind == SkipKind::AuthRequired),
             !mixed
         );
+    }
+    Ok(())
+}
+
+fn old_ledger(store: &RunStore, schema: &str) -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let file = store.writer_registry.join("admission.sqlite3");
+    std::fs::create_dir_all(&store.writer_registry)?;
+    let old = rusqlite::Connection::open(&file)?;
+    old.execute_batch(schema)?;
+    drop(old);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[test]
+fn upgrading_a_version_1_ledger_is_atomic() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let version_1 = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
+         CREATE INDEX lease_projects ON leases(project);";
+    // A spacing that cannot be dropped fails the upgrade after it has added
+    // the lease class column. A crash at that point must leave version 1 whole.
+    old_ledger(
+        &store,
+        &format!(
+            "{version_1}
+             CREATE VIEW spacing AS SELECT 1 AS id, 4000000000000 AS last_start;
+             PRAGMA user_version=1;"
+        ),
+    )?;
+    let [first, second] = writers(&store, [98, 99], &call)?;
+    assert!(store.claim(first, &host, &call).is_err());
+    let file = store.writer_registry.join("admission.sqlite3");
+    let raw = rusqlite::Connection::open(&file)?;
+    let classes: i64 = raw.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('leases') WHERE name='class'",
+        [],
+        |r| r.get(0),
+    )?;
+    let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    assert_eq!(
+        (classes, version),
+        (0, 1),
+        "the failed upgrade left no trace"
+    );
+    raw.execute_batch(
+        "DROP VIEW spacing;
+         CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;
+         INSERT INTO spacing(id,last_start) VALUES (1,4000000000000);",
+    )?;
+    drop(raw);
+    assert!(
+        store.claim(first, &host, &call)?.is_none(),
+        "the upgrade carried the start into the new ledger"
+    );
+    host.pass_ms(20_500);
+    assert!(
+        store.claim(first, &host, &call)?.is_some(),
+        "a start in the wall future held the class one spacing, and no longer"
+    );
+    assert!(store.claim(second, &host, &call)?.is_none());
+    Ok(())
+}
+
+const VERSION_1_LEDGER: &str = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
+     CREATE INDEX lease_projects ON leases(project);
+     CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;";
+
+fn version_1_start(store: &RunStore, host: &Stepped, ago_ms: i64) -> TestResult {
+    let started = host.wall_now()?.as_micros() / 1000 - ago_ms;
+    old_ledger(
+        store,
+        &format!(
+            "{VERSION_1_LEDGER}
+             INSERT INTO spacing(id,last_start) VALUES (1,{started});
+             PRAGMA user_version=1;"
+        ),
+    )
+}
+
+#[test]
+fn a_version_1_start_of_any_age_holds_each_class_one_full_spacing() -> TestResult {
+    // Old (a spacing and more), recent, and in the wall future: the upgrade
+    // reads no wall clock, so the recorded age changes nothing.
+    for (case, ago_ms) in [
+        ("old", 3_600_000),
+        ("recent", 5_000),
+        ("future", -3_600_000),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+        let call = stepped_call(&host, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        version_1_start(&store, &host, ago_ms)?;
+        let writer = starting(&store, &lane(100, true), &call)?;
+        let reader = starting(&store, &lane(101, false), &call)?;
+        assert!(
+            store.claim(writer, &host, &call)?.is_none(),
+            "{case}: the writer is held from the upgrade"
+        );
+        assert!(
+            store.claim(reader, &host, &call)?.is_none(),
+            "{case}: the read-only class is held from the upgrade"
+        );
+        host.pass_ms(1_500);
+        assert!(
+            store.claim(reader, &host, &call)?.is_none(),
+            "{case}: the read-only spacing has not run out"
+        );
+        host.pass_ms(1_000);
+        assert!(
+            store.claim(reader, &host, &call)?.is_some(),
+            "{case}: the 2 s read-only spacing has run out"
+        );
+        host.pass_ms(17_000);
+        assert!(
+            store.claim(writer, &host, &call)?.is_none(),
+            "{case}: the writer is held the full 20 s, not less"
+        );
+        host.pass_ms(1_000);
+        assert!(
+            store.claim(writer, &host, &call)?.is_some(),
+            "{case}: held one spacing, and no longer"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_version_1_ledger_with_no_start_holds_nothing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    old_ledger(
+        &store,
+        &format!("{VERSION_1_LEDGER} PRAGMA user_version=1;"),
+    )?;
+    let writer = starting(&store, &lane(104, true), &call)?;
+    let reader = starting(&store, &lane(105, false), &call)?;
+    assert!(store.claim(writer, &host, &call)?.is_some());
+    assert!(store.claim(reader, &host, &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    version_1_start(&store, &host, 5_000)?;
+    let writer = starting(&store, &lane(103, true), &call)?;
+    *host.boot_readable.lock().unwrap() = false;
+    assert!(matches!(
+        store.claim(writer, &host, &call),
+        Err(RunError::Admission(AdmissionError::Clock))
+    ));
+    let raw = rusqlite::Connection::open(store.writer_registry.join("admission.sqlite3"))?;
+    let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let rows: i64 = raw.query_row("SELECT COUNT(*) FROM spacing", [], |r| r.get(0))?;
+    assert_eq!(
+        (version, rows),
+        (1, 1),
+        "the refused upgrade dropped nothing"
+    );
+    *host.boot_readable.lock().unwrap() = true;
+    assert!(store.claim(writer, &host, &call)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_version_2_ledger_that_kept_wall_milliseconds_starts_every_class_free() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
+    let call = stepped_call(&host, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    old_ledger(
+        &store,
+        "CREATE TABLE leases (
+          attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL,
+          class TEXT NOT NULL DEFAULT 'writer' CHECK(class IN ('writer','read_only'))
+         ) STRICT;
+         CREATE INDEX lease_projects ON leases(project);
+         CREATE TABLE spacing (
+          class TEXT PRIMARY KEY CHECK(class IN ('writer','read_only')),
+          last_start INTEGER NOT NULL
+         ) STRICT;
+         INSERT INTO spacing(class,last_start) VALUES ('writer', 4000000000000);
+         PRAGMA user_version=2;",
+    )?;
+    let [first, second] = writers(&store, [96, 97], &call)?;
+    assert!(
+        store.claim(first, &host, &call)?.is_some(),
+        "wall milliseconds from before boot-keyed spacing hold no class"
+    );
+    assert!(store.claim(second, &host, &call)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn legacy_tickets_without_a_class_are_treated_as_writers() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    // A ledger from before lane classes, holding one lease and no start, so
+    // the upgrade holds no class (the carried start has its own tests).
+    old_ledger(
+        &store,
+        "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
+         CREATE INDEX lease_projects ON leases(project);
+         CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;
+         INSERT INTO leases(attempt,project,store) VALUES ('legacy','project',x'2f6e6f77686572652f');
+         PRAGMA user_version=1;",
+    )?;
+
+    let old = starting(&store, &lane(80, true), &call)?;
+    // A ticket recorded before classes has no class field; strip it.
+    let raw: Vec<u8> = store.db.query_row(
+        "SELECT record FROM admission WHERE attempt=?1",
+        [old.to_string()],
+        |r| r.get(0),
+    )?;
+    let mut ticket: serde_json::Value = db::decode(&raw)?;
+    ticket
+        .as_object_mut()
+        .ok_or("ticket object")?
+        .remove("lane_class");
+    store.db.execute(
+        "UPDATE admission SET record=?1 WHERE attempt=?2",
+        rusqlite::params![db::bytes(&ticket)?, old.to_string()],
+    )?;
+    let writer = starting(&store, &lane(81, true), &call)?;
+    let reader = starting(&store, &lane(82, false), &call)?;
+
+    assert!(store.claim(old, &at(11_000), &call)?.is_some());
+    assert!(
+        store.claim(writer, &at(11_001), &call)?.is_none(),
+        "a ticket with no class is a writer, spaced 20 s from the last writer start"
+    );
+    assert!(
+        store.claim(reader, &at(11_001), &call)?.is_some(),
+        "the writer start holds no read-only lane"
+    );
+    assert!(store.claim(writer, &at(31_000), &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> TestResult {
+    for path_kind in ["absent", "directory", "unreadable"] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        let temporary = store.temporary_path(id, &call)?;
+        let before = store
+            .withdraw(
+                id,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
+                Outcome::Cancelled,
+                "fixture",
+                WallTime::from_micros(150)?,
+                &call,
+            )?
+            .ok_or("not withdrawn")?;
+        // Reproduce leaks left by an older binary without a cleanup hint.
+        if path_kind == "directory" {
+            // Older binaries also created tmp private to the store owner.
+            std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+                .create(&temporary)?;
+            std::fs::write(temporary.join("legacy.lock"), "discard")?;
+        } else if path_kind == "unreadable" {
+            let attempt = temporary.parent().ok_or("attempt directory")?;
+            std::fs::rename(attempt, attempt.with_extension("moved"))?;
+            std::os::unix::fs::symlink(attempt.with_extension("moved"), attempt)?;
+        }
+        store.db.execute_batch("DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; PRAGMA user_version=3;")?;
+        drop(store);
+
+        let store = RunStore::open(&context, &call)?;
+        if path_kind == "unreadable" {
+            let attempt = temporary.parent().ok_or("attempt directory")?;
+            std::fs::remove_file(attempt)?;
+            std::fs::rename(attempt.with_extension("moved"), attempt)?;
+        }
+        // Records from before the receipt table carry no receipts.
+        let mut legacy = before.clone();
+        legacy.settlement_receipts = None;
+        assert_eq!(store.record(id, &call)?, legacy);
+        assert!(
+            store
+                .db
+                .execute(
+                    "UPDATE attempts SET record=record WHERE id=?1",
+                    [id.to_string()]
+                )
+                .is_err()
+        );
+        for alias in ["rowid", "oid", "_rowid_"] {
+            assert!(
+                store
+                    .db
+                    .execute(
+                        &format!("UPDATE attempts SET {alias}={alias}+100 WHERE id=?1"),
+                        [id.to_string()]
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            store
+                .db
+                .execute("DELETE FROM attempts WHERE id=?1", [id.to_string()])
+                .is_err()
+        );
+        let expected = if path_kind == "absent" {
+            vec![]
+        } else {
+            vec![run.run_id]
+        };
+        assert_eq!(store.open_runs(10, &call)?, expected);
+        if path_kind == "directory" {
+            assert_eq!(
+                store.reconcile_with_observer(
+                    run.run_id,
+                    &Fake::default(),
+                    &call,
+                    &provenant_supervisor::census::SystemProcessObserver
+                )?,
+                vec![(id, Reconciled::TemporaryRemoved)]
+            );
+            assert!(!temporary.exists());
+            assert!(store.open_runs(10, &call)?.is_empty());
+        } else if path_kind == "unreadable" {
+            // The migration retained the unreadable candidate. Now that its
+            // anchor is repaired, absence clears the hint without a result.
+            assert!(
+                store
+                    .reconcile_with_observer(
+                        run.run_id,
+                        &Fake::default(),
+                        &call,
+                        &provenant_supervisor::census::SystemProcessObserver
+                    )?
+                    .is_empty()
+            );
+        }
+        drop(store);
+        let store = RunStore::open(&context, &call)?;
+        let mut legacy = before.clone();
+        legacy.settlement_receipts = None;
+        assert_eq!(store.record(id, &call)?, legacy);
+        assert!(store.open_runs(10, &call)?.is_empty());
     }
     Ok(())
 }

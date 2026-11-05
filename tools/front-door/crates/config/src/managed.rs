@@ -2677,10 +2677,7 @@ pub fn uninstall(
         let before = snapshot(&path)?;
         // A deleted plist can still have a loaded service. Keep its stop in the
         // same locked, retryable removal path as an unchanged recorded plist.
-        if before.is_none()
-            && !scheduler_entry(&entry.selector)
-            && (entry.selector != "peer-agent" || !recorded_peer_agent)
-        {
+        if before.is_none() && !scheduler_entry(&entry.selector) && entry.selector != "peer-agent" {
             continue;
         }
         if before

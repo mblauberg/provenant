@@ -1,5 +1,11 @@
 use super::*;
 
+/// Apply provider setup with the same path checks used by launch preparation.
+#[cfg(feature = "fixture")]
+pub fn apply_fixture_setup(steps: &[SetupStep], roots: &[&Path]) -> Result<(), String> {
+    apply_setup(steps, roots, None)
+}
+
 /// Fixture access to the production plan builder; installed builds omit it.
 #[cfg(feature = "fixture")]
 pub fn writer_fixture_plan(
