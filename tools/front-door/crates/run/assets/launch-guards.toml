@@ -228,7 +228,7 @@ reason = "Request digest and host-owned retry checks bind launch to the validate
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
 boundary = "configurable_default"
 setting = "domains.run.grant_limit"
-reason = "Profile family counts, including authentication and native controls, use the configured grant limit."
+reason = "Profile family counts use the configured grant limit; authentication and native controls preserve historical minimum caps of 16 and 64."
 
 [[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"

@@ -244,6 +244,9 @@ fn profile_family_limits_follow_configured_grant_limit() {
         in_place_writes: vec![],
     });
     assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 17).is_err());
+    spec.authentication.truncate(2);
+    spec.native_controls = vec!["first".into(), "second".into()];
+    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 1).is_ok());
 }
 
 #[test]

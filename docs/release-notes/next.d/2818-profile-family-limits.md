@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- Authentication and native-control profile counts now follow the configured lane grant limit.
+- Authentication and native-control profile limits can be raised through the lane grant limit.

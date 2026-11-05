@@ -208,13 +208,13 @@ fn validate_profile_spec_impl(
     if spec.process_executables.len() > grant_limit
         || spec.runtime_reads.len() > grant_limit
         || spec.discovery_reads.len() > grant_limit
-        || spec.authentication.len() > grant_limit
+        || spec.authentication.len() > grant_limit.max(16)
         || spec.continuation_reads.len() > grant_limit
         || spec.state_writes.len() > grant_limit
         || spec.tool_exec_roots.len() > grant_limit
         || spec.tool_writes.len() > grant_limit
         || spec.provider_api.len() > grant_limit
-        || spec.native_controls.len() > grant_limit
+        || spec.native_controls.len() > grant_limit.max(64)
     {
         return Err(PermissionError::InvalidFixture);
     }
