@@ -309,6 +309,7 @@ impl StoreSettings {
 pub struct GcSettings {
     pub schedule: bool,
     pub idle_days: u64,
+    pub graph_checkpoint_days: u64,
     pub free_floor: Option<String>,
     pub alert_below: Option<String>,
     pub projects: BTreeMap<String, ProjectGcSettings>,
@@ -319,6 +320,7 @@ impl Default for GcSettings {
         Self {
             schedule: true,
             idle_days: 7,
+            graph_checkpoint_days: 90,
             free_floor: None,
             alert_below: None,
             projects: BTreeMap::new(),
@@ -375,6 +377,9 @@ impl GcSettings {
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if !(1..=3650).contains(&self.idle_days) {
             return Err("idle_days_range");
+        }
+        if !(1..=3650).contains(&self.graph_checkpoint_days) {
+            return Err("graph_checkpoint_days_range");
         }
         if let Some(size) = &self.free_floor {
             parse_cache_size(size)?;

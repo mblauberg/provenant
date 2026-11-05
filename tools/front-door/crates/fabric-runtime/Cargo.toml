@@ -22,6 +22,8 @@ toml_edit = { workspace = true }
 [features]
 # Lets tests seed associations sealed before derived child run IDs existed.
 retained-seed = []
+# Records checkpoint reads for host-path counting fixtures.
+fixture = []
 
 [dev-dependencies]
 provenant-test-support = { path = "../test-support" }
