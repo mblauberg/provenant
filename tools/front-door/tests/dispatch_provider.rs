@@ -2935,6 +2935,15 @@ fn writer_pool_redraw_fixture() -> Result<TestRig> {
     )?;
     fs::set_permissions(&cursor, fs::Permissions::from_mode(0o700))?;
     rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+    // The fake stream reports ses_x; model identity comes from the session DB.
+    let data = rig.home.join(".local/share/opencode");
+    fs::create_dir_all(&data)?;
+    let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+    db.execute_batch(
+        r#"CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
+        INSERT INTO session_message VALUES ('ses_x', 'assistant',
+        '{"model":{"providerID":"opencode-go","id":"deepseek-v4.1-flash"},"finish":"stop"}');"#,
+    )?;
     rig.env.retain(|(key, _)| key != "PATH");
     rig.env.push((
         "PATH".into(),
@@ -2959,6 +2968,14 @@ fn assert_writer_pool_peer_launched(lanes: &Value) -> Result {
         .find(|row| row["applied_route"]["provider"] == "opencode")
         .ok_or_else(|| format!("second pool member did not launch: {lanes}"))?;
     assert_eq!(lane["state"], "succeeded", "{lanes}");
+    assert_eq!(
+        lane["observed_route"]["model"], "opencode/opencode-go/deepseek-v4.1-flash",
+        "{lanes}"
+    );
+    assert_eq!(
+        lane["observed_route"]["source"], "opencode_session",
+        "{lanes}"
+    );
     let skipped = lane["skipped_routes"].as_array().ok_or("skipped routes")?;
     assert!(
         skipped.iter().any(|row| row["route"]
@@ -2988,7 +3005,7 @@ fn direct_writer_launches_second_eligible_pool_member() -> Result {
         "--worktree-branch",
         "fixture/redraw",
         "--base",
-        "main",
+        "HEAD",
         "--deliver",
         "none",
         "--prompt-file",
