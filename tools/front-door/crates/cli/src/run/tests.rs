@@ -4085,6 +4085,43 @@ fn lanes_give_a_settled_lane_its_settlement_reason() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn lanes_distinguish_exhausted_continuations_from_a_retry() -> Result<(), Box<dyn std::error::Error>>
+{
+    let now = WallTime::from_micros(100)?;
+    let stopped = |reason: &str| run::AttemptState::Terminal {
+        extra: Default::default(),
+        outcome: run::Outcome::Failed,
+        exit_code: Some(0),
+        finished_at: now,
+        reason: Some(reason.into()),
+    };
+    let pending = lane_fixture(1, 4, stopped("model reported unfinished work"))?;
+    let exhausted = lane_fixture(
+        2,
+        5,
+        stopped("model reported unfinished work; continuations exhausted"),
+    )?;
+    let next = AttemptId::from_bytes([3; 16]);
+    let successors = [(pending.attempt_id, next)].into_iter().collect();
+    let (data, human) = render_lanes_with_lineage(
+        &[pending, exhausted],
+        &[],
+        None,
+        Path::new("/state"),
+        None,
+        &successors,
+    );
+    assert_eq!(data["lanes"][0]["superseded_by"], json!(next));
+    assert_eq!(
+        data["lanes"][1]["reason"],
+        "model reported unfinished work; continuations exhausted"
+    );
+    assert!(human.contains("retrying"));
+    assert!(human.contains("continuations exhausted"));
+    Ok(())
+}
+
+#[test]
 fn newest_settled_of_names_the_settled_attempt_of_one_task()
 -> Result<(), Box<dyn std::error::Error>> {
     let now = WallTime::from_micros(100)?;

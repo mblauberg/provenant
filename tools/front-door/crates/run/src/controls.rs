@@ -841,6 +841,53 @@ mod lineage_tests {
                 &store.attempt_dir(record.run_id, prior, false)?,
                 RunStore::scope(&record),
             )?;
+            if origin.is_none() {
+                let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+                worktrees::save_owner(
+                    &launch.worktree,
+                    &WorktreeOwner {
+                        attempt_id: None,
+                        operation_id: None,
+                        branch: format!("explicit-{index}"),
+                        base: info.head.to_string(),
+                        host: provenant_core::HostId::from_bytes([3; 16]),
+                        created_at: original.created_at,
+                        origin: WorktreeOrigin::Adopted,
+                        label: None,
+                    },
+                )?;
+                assert!(matches!(
+                    crate::writer::seal_writer_ownership(
+                        &store.attempt_dir(record.run_id, prior, false)?,
+                        &launch.worktree
+                    ),
+                    Err(RunError::Conflict)
+                ));
+                std::fs::remove_file(
+                    launch
+                        .worktree
+                        .repo()
+                        .private_git_dir()
+                        .join("provenant-owner.json"),
+                )?;
+            }
+            if origin == Some(WorktreeOrigin::Lane) {
+                let attempt = store.attempt_dir(record.run_id, prior, false)?;
+                let snapshot = attempt.current_path()?.join("writer-owned.json");
+                let legacy = br#"{"schema_version":1,"lane_owned":true}"#;
+                std::fs::write(&snapshot, legacy)?;
+                let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+                crate::writer::seal_writer_ownership(&attempt, &launch.worktree)?;
+                assert_eq!(std::fs::read(&snapshot)?, legacy);
+                assert!(matches!(
+                    store.check_writer_lineage(&record, &launch.worktree, &call),
+                    Err(RunError::Validation(
+                        "continuation worktree belongs to another lane"
+                    ))
+                ));
+                std::fs::remove_file(snapshot)?;
+                crate::writer::seal_writer_ownership(&attempt, &launch.worktree)?;
+            }
             std::fs::write(info.path.join("pending.txt"), "keep these edits")?;
             store.withdraw(
                 prior,

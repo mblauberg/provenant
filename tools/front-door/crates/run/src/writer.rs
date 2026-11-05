@@ -1751,20 +1751,7 @@ impl WriterLaunch {
         attempt: &Directory,
         scope: provenant_supervisor::custody::Scope,
     ) -> Result<()> {
-        let owner = worktrees::load_owner(&self.worktree)?;
-        let owned = owner
-            .as_ref()
-            .is_some_and(|owner| owner.origin == worktrees::WorktreeOrigin::Lane);
-        crate::artifacts::seal(
-            attempt,
-            "writer-owned.json",
-            &crate::db::bytes(&WriterOwnership {
-                schema_version: 1,
-                lane_owned: owned,
-                owner,
-            })?,
-            crate::RECORD_LIMIT,
-        )?;
+        seal_writer_ownership(attempt, &self.worktree)?;
         let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), true)?;
         let utility = runtime(state)?;
         let executor =
@@ -2216,6 +2203,45 @@ pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
         attempt.sync()?;
     }
     Ok(())
+}
+
+/// Preserve pre-upgrade launch evidence on replay without weakening its check.
+pub(crate) fn seal_writer_ownership(
+    attempt: &Directory,
+    tree: &provenant_confinement::VerifiedWorktree,
+) -> Result<()> {
+    let owner = worktrees::load_owner(tree)?;
+    let owned = owner
+        .as_ref()
+        .is_some_and(|owner| owner.origin == worktrees::WorktreeOrigin::Lane);
+    let ownership = WriterOwnership {
+        schema_version: 1,
+        lane_owned: owned,
+        owner,
+    };
+    if let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "writer-owned.json", crate::RECORD_LIMIT)?
+    {
+        let prior: WriterOwnership = crate::db::decode(&raw)?;
+        let fields: serde_json::Value = crate::db::decode(&raw)?;
+        let has_owner = fields
+            .as_object()
+            .is_some_and(|object| object.contains_key("owner"));
+        if prior.schema_version != 1
+            || prior.lane_owned != ownership.lane_owned
+            || (has_owner && prior.owner != ownership.owner)
+        {
+            return Err(RunError::Conflict);
+        }
+        Ok(())
+    } else {
+        crate::artifacts::seal(
+            attempt,
+            "writer-owned.json",
+            &crate::db::bytes(&ownership)?,
+            crate::RECORD_LIMIT,
+        )
+    }
 }
 
 /// Launch-time lifecycle evidence, sealed while writer custody is held.
