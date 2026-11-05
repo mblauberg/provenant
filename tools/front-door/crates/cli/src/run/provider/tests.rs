@@ -2114,7 +2114,24 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         std::fs::create_dir_all(login.parent().unwrap())?;
         std::fs::write(&login, b"fixture")?;
         let fake_agy = assets.join("agy");
-        std::fs::write(&fake_agy, b"#!/bin/sh\nprintf 'agy 1.0.0\\n'\n")?;
+        std::fs::write(
+            &fake_agy,
+            br##"#!/bin/sh
+if [ "${IDENTITY_PROBE:-}" = writer ]; then
+  [ "$PROVENANT_PRIMARY_CHECKOUT" = "$EXPECTED_PRIMARY" ] || exit 10
+  [ "$PROVENANT_WORKTREE_GITDIR" = "$EXPECTED_ADMIN" ] || exit 11
+  [ "$(git rev-parse --git-common-dir)" = "$EXPECTED_PRIVATE" ] || exit 12
+  ! /usr/bin/touch "$PROVENANT_WORKTREE_GITDIR/identity-probe" || exit 13
+elif [ "${IDENTITY_PROBE:-}" = reader ]; then
+  [ "$PROVENANT_PRIMARY_CHECKOUT" = "$EXPECTED_PRIMARY" ] || exit 14
+  [ -z "${PROVENANT_WORKTREE_GITDIR+x}" ] || exit 15
+elif [ "${IDENTITY_PROBE:-}" = linked ]; then
+  [ "$PROVENANT_PRIMARY_CHECKOUT" = "$EXPECTED_PRIMARY" ] || exit 16
+  [ "$PROVENANT_WORKTREE_GITDIR" = "$EXPECTED_ADMIN" ] || exit 17
+fi
+printf 'agy 1.0.0\n'
+"##,
+        )?;
         std::fs::set_permissions(&fake_agy, std::fs::Permissions::from_mode(0o700))?;
         std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
         let backend = system_backend(&BackendContext {
@@ -2127,7 +2144,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
                 "agy fixture execution requires native sandbox: {error}"
             ))?;
         }
-        for (n, write) in [(7u8, true), (8u8, false)] {
+        for (n, write, linked) in [(7u8, true, false), (8u8, false, false), (9u8, false, true)] {
             let mut request = task.clone();
             request.route = run::RequestedRoute::Model {
                 extra: Default::default(),
@@ -2156,8 +2173,13 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
                 std::fs::create_dir_all(path)?;
             }
+            let linked_cwd = project.join(".worktrees/writer");
+            let selected_registry = Registry {
+                cwd: Some(if linked { &linked_cwd } else { &project }),
+                ..registry
+            };
             let prepared = prepare_with(
-                &registry,
+                &selected_registry,
                 &request,
                 "fixture",
                 &paths,
@@ -2223,9 +2245,39 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             if backend.is_err() {
                 continue;
             }
+            let mut environment = prepared.environment.clone();
+            environment.push(("EXPECTED_PRIMARY".into(), project.as_os_str().to_owned()));
+            if write {
+                let worktree = &request.writer.as_ref().ok_or("writer")?.worktree;
+                let admin = String::from_utf8(provenant_os::fixture::run_git(
+                    worktree,
+                    &["rev-parse", "--absolute-git-dir"],
+                )?)?;
+                let admin = std::fs::canonicalize(admin.trim())?;
+                let private = paths.temporary.join("candidate-0/git-common");
+                std::fs::create_dir_all(private.join("objects"))?;
+                std::fs::create_dir_all(private.join("refs"))?;
+                std::fs::write(private.join("HEAD"), b"ref: refs/heads/writer\n")?;
+                std::fs::copy(project.join(".git/config"), private.join("config"))?;
+                environment.push(("IDENTITY_PROBE".into(), "writer".into()));
+                environment.push(("EXPECTED_ADMIN".into(), admin.into_os_string()));
+                environment.push(("EXPECTED_PRIVATE".into(), private.into_os_string()));
+            } else if linked {
+                let admin = String::from_utf8(provenant_os::fixture::run_git(
+                    &linked_cwd,
+                    &["rev-parse", "--absolute-git-dir"],
+                )?)?;
+                environment.push(("IDENTITY_PROBE".into(), "linked".into()));
+                environment.push((
+                    "EXPECTED_ADMIN".into(),
+                    std::fs::canonicalize(admin.trim())?.into_os_string(),
+                ));
+            } else {
+                environment.push(("IDENTITY_PROBE".into(), "reader".into()));
+            }
             let argv = compiled.command(&prepared.argv, &attempt_id)?;
             let mut options = ExecOptions::new(&argv, &prepared.cwd, Duration::from_secs(10));
-            options.env = Some(&prepared.environment);
+            options.env = Some(&environment);
             let result = executor.execute(options)?;
             assert_eq!(result.termination, Termination::Exit(0), "{result:?}");
             assert!(String::from_utf8_lossy(&result.stdout.bytes).contains("agy 1.0.0"));
