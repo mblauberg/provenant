@@ -132,8 +132,7 @@ pub(super) fn own_worktree(
         cancel,
         |context| {
             use provenant_confinement::worktrees::{
-                self, Occupancy, OccupancyUnknownSource, WorktreeCreate, WorktreeOrigin,
-                WorktreeOwner,
+                self, Occupancy, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
             };
             let context = &worktrees::WorktreeContext {
                 workers,
@@ -172,17 +171,7 @@ pub(super) fn own_worktree(
                             base,
                         });
                     }
-                    if let Occupancy::Unknown {
-                        scope,
-                        evidence,
-                        source: OccupancyUnknownSource::Custody,
-                    } = &observation.occupancy
-                    {
-                        return Err(worktrees::WorktreeError::UnknownOccupancy {
-                            path: scope.clone(),
-                            detail: evidence.clone(),
-                        });
-                    }
+                    warn_advisory_occupancy(&info.path, &observation.occupancy)?;
                     let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
                     let owner = worktrees::load_owner(&tree)?;
                     if owner
@@ -192,37 +181,10 @@ pub(super) fn own_worktree(
                         owner_refused = true;
                         return Err(worktrees::WorktreeError::UnknownWriter);
                     }
-                    match observation.occupancy {
-                        Occupancy::Available => {}
-                        Occupancy::Held => {
-                            return Err(worktrees::WorktreeError::WriterBusy {
-                                holder: owner.and_then(|owner| owner.attempt_id),
-                            });
-                        }
-                        Occupancy::Observed { process } => {
-                            let detail = process.map_or_else(
-                                || "a process was observed".to_owned(),
-                                |process| format!("process {process} ({})", process.kind),
-                            );
-                            warn_worktree_census(&info.path, &detail);
-                        }
-                        Occupancy::Unknown {
-                            scope,
-                            evidence,
-                            source: OccupancyUnknownSource::Custody,
-                        } => {
-                            return Err(worktrees::WorktreeError::UnknownOccupancy {
-                                path: scope,
-                                detail: evidence,
-                            });
-                        }
-                        Occupancy::Unknown {
-                            scope,
-                            evidence,
-                            source: OccupancyUnknownSource::Census,
-                        } => {
-                            warn_worktree_census(&scope, &evidence);
-                        }
+                    if matches!(observation.occupancy, Occupancy::Held) {
+                        return Err(worktrees::WorktreeError::WriterBusy {
+                            holder: owner.and_then(|owner| owner.attempt_id),
+                        });
                     }
                     (info, None)
                 }
