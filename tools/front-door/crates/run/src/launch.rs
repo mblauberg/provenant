@@ -463,7 +463,7 @@ enum HandOff {
     /// The guardian may have received the launch.
     Uncertain(String),
 }
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Started {
     Launched(AttemptId),
     /// Held child custody is full, or a policy retry's launch time has not
@@ -480,7 +480,7 @@ pub enum Started {
         error: String,
     },
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefusalKind {
     Policy,
     Preparation,

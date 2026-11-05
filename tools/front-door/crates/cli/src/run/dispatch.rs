@@ -623,12 +623,16 @@ impl From<WorktreeAdmissionError> for Fail {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
 pub(super) fn dispatch_inner(
     mut command: Dispatch,
     edge: &Edge<'_>,
     created: &mut Option<(PathBuf, String)>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<(Value, String, bool), Fail> {
+    let deadline = command
+        .wait
+        .and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds)));
     // Explain is a preview-only operation. Return before worktree preflight,
     // operation replay, or any preparation that could lead to submission.
     if command.explain {
@@ -743,7 +747,9 @@ pub(super) fn dispatch_inner(
         // Initialise the state before entering the shared confinement context.
         let call = request(&clock, &cancel)?;
         let session = open(edge, &call)?;
-        if let Some(replayed) = replay_owned_dispatch(&command, edge, &session, &call, workers)? {
+        if let Some(replayed) =
+            replay_owned_dispatch(&command, edge, &session, &call, workers, deadline)?
+        {
             return Ok(replayed);
         }
         if let Some(mode) = &command.deliver
@@ -1391,10 +1397,16 @@ pub(super) fn dispatch_inner(
         },
         &call,
         None,
-        command.wait,
+        deadline,
     )?;
-    let (mut data, mut human, timed_out) =
-        report(&session, &record, &started, command.wait, edge, &call)?;
+    let (mut data, mut human, timed_out) = report(
+        &session,
+        &record,
+        &started,
+        deadline.map(|end| end.saturating_duration_since(Instant::now())),
+        edge,
+        &call,
+    )?;
     record_warnings(&mut data, brief_warnings);
     human.push_str(&warnings_text(&data));
     if let Some(worktree) = worktree {
@@ -1567,12 +1579,14 @@ pub(super) fn worktree_was_pruned(receipt: &Value, path: &Path) -> bool {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
+#[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
 pub(super) fn replay_owned_dispatch(
     command: &Dispatch,
     edge: &Edge<'_>,
     session: &Session,
     call: &run::Request<'_>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    deadline: Option<Instant>,
 ) -> Result<Option<(Value, String, bool)>, Fail> {
     let Some(operation) = session.store.operation(&command.operation_id, call)? else {
         return Ok(None);
@@ -1678,8 +1692,24 @@ pub(super) fn replay_owned_dispatch(
         return Err(run::RunError::OperationConflict.into());
     }
     let run = session.store.run(operation.run_id, call)?;
-    let started = launch(session, run.run_id, edge, call)?;
-    let (mut data, human, timed_out) = report(session, &run, &started, command.wait, edge, call)?;
+    let started = match deadline {
+        Some(end) => launch_with_deadline(
+            session,
+            &run,
+            edge,
+            call,
+            end.saturating_duration_since(Instant::now()),
+        )?,
+        None => launch(session, run.run_id, edge, call)?,
+    };
+    let (mut data, human, timed_out) = report(
+        session,
+        &run,
+        &started,
+        deadline.map(|end| end.saturating_duration_since(Instant::now())),
+        edge,
+        call,
+    )?;
     data["worktree"] = json!({"path": writer.worktree, "branch": branch, "owned":true});
     if let Some(settlement) = settlement {
         data["worktree_settlement"] = settlement;
@@ -1785,6 +1815,85 @@ pub fn launch(
     call: &run::Request<'_>,
 ) -> Result<Vec<run::Started>, Fail> {
     launch_prepared(session, run, edge, call, None)
+}
+
+/// The detached launcher's entry point. It reopens the admitted run and uses
+/// the ordinary host launch path, including writer custody and guardian handoff.
+pub fn launch_worker(id: RunId, edge: &Edge<'_>) -> Reply {
+    let outcome = (|| {
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel)?;
+        let session = open(edge, &call)?;
+        let started = launch_prepared(&session, id, edge, &call, None)?;
+        Ok((json!({"started": started}), String::new()))
+    })();
+    reply("internal launch", outcome)
+}
+
+/// A waited caller gives launch to a separately reaped process, so returning
+/// cannot drop a writer lease while preparation is still in progress.
+pub(super) fn launch_with_deadline(
+    session: &Session,
+    record: &run::RunRecord,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    wait: Duration,
+) -> Result<Vec<run::Started>, Fail> {
+    let executable = std::env::current_exe()
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    let argv = vec![
+        executable.into_os_string(),
+        "--state-dir".into(),
+        edge.roots.state.as_path().as_os_str().into(),
+        "internal".into(),
+        "launch".into(),
+        record.run_id.to_string().into(),
+    ];
+    let result = provenant_os::exec::detached_receipt(&argv, edge.cwd, wait);
+    // Unit tests run inside a test harness, which cannot re-execute itself as
+    // the CLI. End-to-end tests exercise the actual worker process.
+    #[cfg(test)]
+    if matches!(result, Err(provenant_os::exec::ExecError::TestHarness)) {
+        return launch_prepared(session, record.run_id, edge, call, None);
+    }
+    let _ = (session, call);
+    let receipt =
+        result.map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    let unknown = || {
+        Fail::new(
+            Status::Error,
+            ErrorKind::LaunchUnknown,
+            format!(
+                "launch preparation: outcome unknown; rerun with --operation-id {} to recover the receipt",
+                record.operation_id
+            ),
+        )
+    };
+    let receipt = receipt.ok_or_else(unknown)?;
+    let value: Value = serde_json::from_slice(&receipt).map_err(|_| unknown())?;
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        let kind = error["code"]
+            .as_str()
+            .and_then(|code| {
+                ErrorKind::ALL
+                    .iter()
+                    .copied()
+                    .find(|kind| kind.code() == code)
+            })
+            .unwrap_or(ErrorKind::Io);
+        let status = match kind.category() {
+            "invalid" => Status::Invalid,
+            "refused" => Status::Refused,
+            _ => Status::Error,
+        };
+        return Err(Fail::new(
+            status,
+            kind,
+            error["message"].as_str().unwrap_or("launch worker failed"),
+        ));
+    }
+    serde_json::from_value(value["data"]["started"].clone()).map_err(|_| unknown())
 }
 
 pub(super) fn launch_prepared(

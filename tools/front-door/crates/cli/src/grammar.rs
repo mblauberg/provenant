@@ -1370,6 +1370,10 @@ pub enum GitHook {
 }
 #[derive(Debug, Subcommand)]
 pub enum Internal {
+    /// Resume preparation of an admitted local run in a separate process.
+    Launch {
+        run: RunId,
+    },
     Settle {
         /// Private durable-settlement resume request from the host.
         request: String,

@@ -3,6 +3,25 @@ use std::sync::Mutex;
 struct Decoder(Mutex<Vec<Vec<u8>>>);
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Exercise a real process deadline.
+fn detached_receipt_timeout_leaves_worker_running() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("while [ ! -f release ]; do /bin/sleep 0.02; done; printf done > finished"),
+    ];
+    assert!(detached_receipt(&argv, temp.path(), Duration::from_millis(100))?.is_none());
+    std::fs::write(temp.path().join("release"), b"release")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !temp.path().join("finished").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(temp.path().join("finished").exists());
+    Ok(())
+}
+
+#[test]
 fn detached_worker_refuses_to_relaunch_a_test_harness() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let argv = [

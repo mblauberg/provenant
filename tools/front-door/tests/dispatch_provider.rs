@@ -3024,6 +3024,79 @@ fn direct_writer_launches_second_eligible_pool_member() -> Result {
     Ok(())
 }
 
+fn local_wait_returns_while_writer_seed_is_held() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let mut rig = writer_pool_redraw_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let gate = rig.root.join("seed-gate");
+    fs::create_dir(&gate)?;
+    fs::write(gate.join("hold"), b"hold")?;
+    rig.env.push((
+        "PROVENANT_FIXTURE_HOLD_SEED".into(),
+        gate.clone().into_os_string(),
+    ));
+    let prompt = rig.root.join("held-prompt.txt");
+    fs::write(&prompt, "reply OK")?;
+    let args = [
+        "run",
+        "--operation-id",
+        "held-local-seed",
+        "--route",
+        "writer-redraw",
+        "--mode",
+        "worktree-write",
+        "--worktree-branch",
+        "fixture/held-seed",
+        "--base",
+        "HEAD",
+        "--deliver",
+        "none",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait",
+        "1s",
+        "--json",
+    ];
+    let start = std::time::Instant::now();
+    let output = rig.command(&args)?;
+    let elapsed = start.elapsed();
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    // Release even if an assertion fails, so no fixture worker remains held.
+    let entered = provenant_test_support::wait_for(
+        "seed preparation entered",
+        std::time::Duration::from_secs(20),
+        || gate.join("entered").exists(),
+        |ready| *ready,
+    );
+    fs::remove_file(gate.join("hold"))?;
+    entered?;
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "{elapsed:?}: {result}"
+    );
+    assert_eq!(result["error"]["code"], "LAUNCH_UNKNOWN", "{result}");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("launch preparation")),
+        "{result}"
+    );
+    assert_eq!(
+        result["data"]["operation_id"], "held-local-seed",
+        "{result}"
+    );
+    let mut retry = args;
+    let wait_index = retry.len() - 2;
+    retry[wait_index] = "30s";
+    let replay = rig.command(&retry)?;
+    let replay: Value = serde_json::from_slice(&replay.stdout.bytes)?;
+    assert_writer_pool_peer_launched(&replay)?;
+    cleanup.disarm();
+    Ok(())
+}
+
 fn graph_writer_launches_second_eligible_pool_member() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -5365,6 +5438,7 @@ fn main() -> ExitCode {
                 "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
+                "local_wait_returns_while_writer_seed_is_held",
                 "printed_credentials_leave_no_plaintext_in_run_files",
                 "codex_dispatch_observes_rollout",
                 "policy_empty_result_falls_back_without_a_chair_turn",
@@ -5428,6 +5502,7 @@ fn main() -> ExitCode {
                     "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation" => {
                         owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
                     }
+                    "local_wait_returns_while_writer_seed_is_held" => local_wait_returns_while_writer_seed_is_held(),
                     "printed_credentials_leave_no_plaintext_in_run_files" => printed_credentials_leave_no_plaintext_in_run_files(),
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),

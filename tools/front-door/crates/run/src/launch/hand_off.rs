@@ -181,6 +181,8 @@ impl RunStore {
             // fresh lock before constructing the confined command and launch.
             let seed_attempt = directory()?;
             seed_without_setup_lock(&mut _git_setup_lock, || {
+                #[cfg(feature = "fixture")]
+                hold_seed_for_fixture();
                 confinement.seed_cargo(&plan.environment, &seed_attempt);
             });
             _git_setup_lock = match retry_setup_lock(
@@ -311,6 +313,23 @@ impl RunStore {
 pub(crate) fn seed_without_setup_lock<T>(lock: &mut Option<T>, seed: impl FnOnce()) {
     drop(lock.take());
     seed();
+}
+
+/// Integration fixtures can hold the actual handoff at the seed boundary.
+#[cfg(feature = "fixture")]
+#[allow(clippy::disallowed_methods)]
+fn hold_seed_for_fixture() {
+    let Some(directory) = std::env::var_os("PROVENANT_FIXTURE_HOLD_SEED") else {
+        return;
+    };
+    let directory = std::path::Path::new(&directory);
+    if std::fs::write(directory.join("entered"), b"entered").is_err() {
+        return;
+    }
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while directory.join("hold").exists() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 // A setup lock timeout occurs before Git preparation and before any guardian

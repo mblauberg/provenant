@@ -498,7 +498,7 @@ pub(super) fn report(
     session: &Session,
     record: &run::RunRecord,
     started: &[run::Started],
-    wait: Option<u64>,
+    wait: Option<Duration>,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
 ) -> Result<(Value, String, bool), Fail> {
@@ -509,13 +509,7 @@ pub(super) fn report(
         attempt: None,
     };
     let (mut data, human, timed_out) = match wait {
-        Some(seconds) => wait_lanes(
-            session,
-            &[target],
-            Condition::All,
-            Duration::from_secs(seconds),
-            edge,
-        )?,
+        Some(duration) => wait_lanes(session, &[target], Condition::All, duration, edge)?,
         None => {
             let page = session
                 .service()
