@@ -78,7 +78,7 @@ fn validate(owner: &WorktreeOwner) -> Result<(), WorktreeError> {
 /// excluded. Reassignment requires the caller's owner snapshot to remain
 /// current and the worktree HEAD must still be the one the caller observed
 /// (and validated, for example for base ancestry); only a verified terminal
-/// prior may permit an unknown census.
+/// prior may permit a live or unknown census observation.
 #[allow(clippy::too_many_arguments)]
 pub fn save_lane_owner_when_free(
     context: &WorktreeContext<'_>,
@@ -121,9 +121,8 @@ pub fn save_lane_owner_when_free(
         .get(tree.path())
         .copied()
         .unwrap_or(WorkerState::Unknown);
-    if observed == WorkerState::Live
-        || observed == WorkerState::Busy
-        || observed == WorkerState::Unknown && !terminal_prior
+    if observed == WorkerState::Busy
+        || matches!(observed, WorkerState::Live | WorkerState::Unknown) && !terminal_prior
     {
         return Err(live_refusal(context.workers, tree.path()));
     }

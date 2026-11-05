@@ -156,7 +156,28 @@ pub(super) fn own_worktree(
                             });
                         }
                         WriterState::Live => {
-                            return Err(worktrees::live_refusal(context.workers, &info.path));
+                            let settled = owner
+                                .as_ref()
+                                .and_then(|owner| owner.attempt_id)
+                                .is_some_and(&terminal_attempt);
+                            if !settled
+                                || observation.registration_unknown
+                                || worktrees::cache_writer_probe(context.project_state, &info.path)
+                                    .is_err()
+                            {
+                                return Err(worktrees::live_refusal(context.workers, &info.path));
+                            }
+                            use std::io::Write;
+                            let detail = format!(
+                                "{}: {}; the previous lane attempt has finished",
+                                info.path.display(),
+                                worktrees::live_refusal(context.workers, &info.path)
+                            );
+                            let _ = writeln!(
+                                std::io::stderr().lock(),
+                                "warning: {}",
+                                plain_text(&detail, 4096)
+                            );
                         }
                         WriterState::Unknown => {
                             let settled = owner

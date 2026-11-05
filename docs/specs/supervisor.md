@@ -37,6 +37,12 @@ process that does not take the advisory writer lock may start after the
 observation; the census is not atomic exclusion and never grants signalling
 authority.
 
+A lane owner whose recorded attempt is confirmed terminal may be reassigned
+when the writer lock is free even if the census sees a process in the tree.
+Admission warns about that observation. Reassignment rechecks the owner and
+HEAD under repository and writer custody, and still refuses dirty trees, Git
+operations and retained writer fences.
+
 ### Closed stop reasons; natural exit wins
 
 Only `ProviderGroup::stop(StopReason)` signals a provider: explicit cancellation, wall deadline, protocol rejection, supervisor signal or post-terminal

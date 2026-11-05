@@ -3185,6 +3185,32 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
     )?;
     assert_eq!(admitted.0.path, path);
     assert_eq!(admitted.0.head, head);
+
+    let attempt = provenant_core::AttemptId::from_bytes([42; 16]);
+    worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
+        let mut owner =
+            worktrees::load_owner(&tree)?.ok_or(worktrees::WorktreeError::UnknownWriter)?;
+        owner.attempt_id = Some(attempt);
+        worktrees::save_owner(&tree, &owner)
+    })?;
+    let admitted_after_terminal = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(3)?,
+        },
+        None,
+        &OperationId::parse("after-terminal")?,
+        &edge_inside,
+        &ordinary,
+        |id| id == attempt,
+        &mut None,
+        &clock,
+        &cancel,
+        None,
+    )?;
+    assert_eq!(admitted_after_terminal.0.path, path);
     Ok(())
 }
 

@@ -1148,6 +1148,46 @@ fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn E
         load_owner(&tree)?.and_then(|owner| owner.attempt_id),
         Some(attempt)
     );
+    let next = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("next-lease".parse()?),
+        ..owner.clone()
+    };
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &next,
+            info.head,
+            Some(&owner),
+            true,
+            &cancel()
+        ),
+        Err(WorktreeError::LockBusy)
+    ));
+    drop(_held);
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &next,
+            info.head,
+            Some(&owner),
+            false,
+            &cancel()
+        ),
+        Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
+    ));
+    save_lane_owner_when_free(
+        &context,
+        &tree,
+        &next,
+        info.head,
+        Some(&owner),
+        true,
+        &cancel(),
+    )?;
+    assert_eq!(load_owner(&tree)?, Some(next));
     Ok(())
 }
 
