@@ -823,14 +823,20 @@ pub(crate) mod peer_tests {
         let node = || graph::NodeInput { settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
             read_roots: &[], distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             review_base: Some(&pinned), title: "review", prompt: "review", required_verdict: None, deadline_seconds: None, inputs_dir: None };
-        let first = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, None,
-            graph::Replay { delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor })?;
+        let first = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
+            graph::Replay { delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor }).map_err(|error| format!("first launch: {error:?}"))?;
         let reference = match first { graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("attempt reference")? };
         git(&["branch", "-f", "review-pin", &head])?;
+        git(&["commit", "--allow-empty", "-qm", "move source checkout"])?;
+        assert_ne!(git(&["rev-parse", "HEAD"])?, head);
+        let reattached = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
+            graph::Replay { delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor }).map_err(|error| format!("operation replay: {error:?}"))?;
+        let replayed = match reattached { graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("replay reference")? };
+        assert_eq!(replayed, reference);
         let other_factory = factory.for_graph_directory(&other)?;
         let mut replay_owner = BoundGraphOwner { factory: &other_factory, integration_base: None,
             integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
-        replay_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, None,
+        replay_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
             graph::Replay { delivery: None, branch: None, fast_forward_only: false, stored_ref: Some(&reference), launch_actor: &actor })?;
         let run_owner = BinaryRunOwner { factory: &other_factory, allow_remote: true, actor: None, chair: None };
         let call = run_owner.call(&cancel);
@@ -839,6 +845,7 @@ pub(crate) mod peer_tests {
         let request = store.request(operation.run_id, &call)?;
         assert_eq!(request.tasks[0].base.as_deref(), Some(base.as_str()));
         assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+        assert_eq!(request.tasks[0].access.source_root.as_deref(), Some(rig.project.as_path()));
         let scratch = rig.root.join("review-evidence");
         std::fs::create_dir(&scratch)?;
         let directory = provenant_os::fs::Directory::open_anchor(&scratch)?;

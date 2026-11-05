@@ -10,7 +10,7 @@ mod preset_graph;
 use graph_human::graph_ci_waiting;
 pub(crate) use graph_human::graph_human;
 use graph_human::graph_summary;
-use graph_status::{graph_snapshot, graph_status_elapsed};
+use graph_status::{graph_snapshot, graph_status_elapsed, redact_checkout_paths};
 pub use peer::{hosts, peer};
 #[cfg(test)]
 #[allow(unused_imports)] // unused where integration tests include this file
@@ -5265,6 +5265,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let mut accepted_knobs = None;
             let mut accepted_route = None;
             let mut accepted_retry_limit = None;
+            let mut accepted_source_root = None;
             let context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
                     Ok(request) => {
@@ -5273,6 +5274,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             accepted_knobs = Some(task.profile.overrides.clone());
                             accepted_route = Some(task.route.clone());
                             accepted_retry_limit = Some(task.profile.settlement_retry_limit);
+                            accepted_source_root = task.access.source_root.clone();
                         }
                         task.context.clone()
                     }
@@ -5383,7 +5385,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     });
                 }
             }
-            if !accepted && let (Some(path), Some(commit)) = (worktree, node.source_commit) {
+            if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && let (Some(path), Some(commit)) = (worktree, node.source_commit)
+            {
                 let head = commit
                     .parse()
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?;
@@ -5517,7 +5522,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     head: node.source_commit.map(str::to_owned),
                     account: route.account.clone(),
                     access,
-                    worktree: worktree.map(str::to_owned),
+                    worktree: (access
+                        == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
+                        .then(|| worktree.map(str::to_owned))
+                        .flatten(),
                     prompt: node.prompt.into(),
                     title: Some(node.title.to_owned()),
                     route: accepted_route.unwrap_or(match &route.model {
@@ -5622,6 +5630,27 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             )
             .map_err(dispatch_refused)?;
             grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
+            if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                && node.source_commit.is_some()
+            {
+                grants.source_root = if accepted {
+                    accepted_source_root
+                } else {
+                    let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);
+                    let source = provenant_run::resolve_reader_source(
+                        self.factory.context.roots.state.as_path(),
+                        &self.factory.cwd,
+                        path,
+                    )
+                    .map_err(|_| FacadeError::DispatchRefused {
+                        fact: None,
+                        disk: None,
+                        reason: "graph source checkout is no longer registered with the project"
+                            .into(),
+                    })?;
+                    Some(source)
+                };
+            }
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
             let receipt =
                 owner.submit_with_access(input, self.budget, self.cancel, grants, retry_limit)?;
@@ -6454,6 +6483,8 @@ impl Factory {
                 }
                 _ => FacadeError::StateCorrupt,
             })?;
+            let mut run = run;
+            redact_checkout_paths(&mut run.checkpoint);
             // A manual advance that succeeded supersedes an earlier failure.
             FileJournal::set_advance_error(
                 &self.context.roots.state,

@@ -843,6 +843,22 @@ mod result_tests {
     }
 
     #[test]
+    fn graph_status_hides_bound_host_checkout_paths() {
+        let mut run = graph_status_fixture();
+        run.checkpoint.nodes[0].writer_binding = Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {
+            extra: Default::default(),
+            worktree: "/private/host/writer".into(),
+            head: "1".repeat(40),
+        });
+        let snapshot = super::graph_snapshot(run.checkpoint);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("/private/host/writer"));
+        assert!(json.contains("[redacted]"));
+        assert!(json.contains(&"1".repeat(40)));
+        assert!(!super::graph_human::graph_human_full(&snapshot).contains("/private/host/writer"));
+    }
+
+    #[test]
     fn graph_full_status_connects_attempts_inputs_and_settlement() {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[0];

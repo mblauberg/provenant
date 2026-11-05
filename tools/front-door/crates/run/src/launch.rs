@@ -538,6 +538,12 @@ fn child_access_within_impl(
             "child database IPC exceeds parent access",
         ));
     }
+    // A child cannot select a different host-bound graph source.
+    if child.access.source_root.is_some() && child.access.source_root != parent.access.source_root {
+        return Err(RunError::Validation(
+            "child graph source exceeds parent access",
+        ));
+    }
     // Materialised graph inputs belong to the node that was given them.
     if child.access.inputs_root.is_some() && child.access.inputs_root != parent.access.inputs_root {
         return Err(RunError::Validation(

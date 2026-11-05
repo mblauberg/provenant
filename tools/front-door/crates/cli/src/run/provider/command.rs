@@ -48,7 +48,7 @@ pub(super) fn prepare_command(
         .first()
         .filter(|program| !program.is_empty())
         .ok_or("configured command has no executable")?;
-    let cwd = canonical(registry.cwd.ok_or("working directory is unavailable")?)?;
+    let cwd = source_cwd(registry, task)?;
     let invocation = if program.contains('/') {
         cwd.join(program)
     } else {
@@ -97,6 +97,7 @@ pub(super) fn prepare_command(
     )?;
     let (plan, observed_head, repository, worktree_gitdir) =
         read_only_plan(roots, project, &cwd, &git, request)?;
+    require_source_head(task, observed_head)?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?

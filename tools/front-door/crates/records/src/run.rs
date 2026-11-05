@@ -258,6 +258,9 @@ pub struct LaneAccess {
     /// where a `--read-root` may not reach; any other path is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inputs_root: Option<std::path::PathBuf>,
+    /// Host-verified graph source checkout for a read-only launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<std::path::PathBuf>,
 }
 impl LaneAccess {
     pub fn is_default(&self) -> bool {

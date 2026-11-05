@@ -99,6 +99,39 @@ fn budget() -> Result<UtilityBudget> {
 pub fn resolve_writer(state: &Path, cwd: &Path, path: &Path) -> Result<WriterRequest> {
     resolve_writer_with(state, cwd, path, true)
 }
+/// Resolve a read-only graph source in the selected Git project. Unlike writer
+/// authority, a reader may use the primary checkout or a detached worktree.
+pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<PathBuf> {
+    let utility = runtime(state)?;
+    let executor =
+        SystemExecutor::new(1).map_err(error("initialise source system executor", None))?;
+    let selected = utility
+        .project_location(&executor, cwd, budget()?, &CancelToken::new())
+        .map_err(error("locate source project", Some(cwd)))?;
+    let repo = selected
+        .repository
+        .ok_or(RunError::Validation("source needs a Git project"))?;
+    let project = repo
+        .common_git_dir()
+        .parent()
+        .ok_or_else(|| RunError::unsafe_path(repo.common_git_dir(), PathCheck::Containment))?;
+    let selected = project.join(path);
+    let path = canonicalize(&selected).map_err(|error| {
+        if error.is_not_found() {
+            RunError::WorktreeMissing(selected)
+        } else {
+            error.into()
+        }
+    })?;
+    if path == project {
+        return Ok(path);
+    }
+    provenant_confinement::verify_worktree(&repo, &path)
+        .map(|worktree| worktree.path().to_path_buf())
+        .map_err(worktrees::WorktreeError::from)
+        .map_err(Into::into)
+}
+
 /// A lane's writer proposal: the path is resolved but not registry-verified,
 /// because a confined lane cannot read another worktree's `.git`. The host
 /// verifies the registration in `prepare_writer` before it launches the child.

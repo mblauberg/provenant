@@ -2691,11 +2691,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     },
                     &route,
                     node.access,
-                    checkpoint.nodes[node_index]
-                        .writer_binding
-                        .as_ref()
-                        .map(|binding| binding.worktree.as_str())
-                        .or(node.worktree.as_deref()),
+                    if node.access == AccessMode::ReadOnly {
+                        source_worktree(node, &plan, &checkpoint, &positions)
+                            .or(node.worktree.as_deref())
+                    } else {
+                        checkpoint.nodes[node_index]
+                            .writer_binding
+                            .as_ref()
+                            .map(|binding| binding.worktree.as_str())
+                            .or(node.worktree.as_deref())
+                    },
                     Replay {
                         delivery: land::delivery(node),
                         branch: continued.as_deref(),

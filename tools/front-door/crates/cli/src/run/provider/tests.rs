@@ -4489,3 +4489,197 @@ fn staged_skill_files_are_written_outside_writable_scratch()
     assert!(!scratch.starts_with(&stage));
     Ok(())
 }
+
+#[test]
+fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, OperationId, RunId, WallTime};
+    use provenant_os::exec::{ExecOptions, Executor, Termination};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let assets = base.join("assets");
+    let git_home = base.join("git-home");
+    for path in [&home, &state, &project, &assets, &git_home] {
+        std::fs::create_dir(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    let head = run::resolve_git_base(&git, &project, "HEAD")?;
+    let source = base.join("source");
+    let added_args = vec![
+        git.clone().into_os_string(),
+        "worktree".into(),
+        "add".into(),
+        "--detach".into(),
+        "-q".into(),
+        source.clone().into_os_string(),
+        head.clone().into(),
+    ];
+    let added = executor.execute(ExecOptions::new(
+        &added_args,
+        &project,
+        Duration::from_secs(5),
+    ))?;
+    assert_eq!(added.termination, Termination::Exit(0));
+    std::fs::write(project.join("subject"), "wrong checkout")?;
+    std::fs::write(source.join("subject"), "verified checkout")?;
+    let fake = assets.join("fake-provider");
+    std::fs::write(&fake, "#!/bin/sh\ncat subject\n")?;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        state.join("config.toml"),
+        format!(
+            "schema_version = 1\n[domains.fabric.commands.fake]\nargv = ['{}']\nruntimes = ['/bin/sh']\n",
+            fake.display()
+        ),
+    )?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let budget = provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?;
+    let cancel = provenant_core::CancelToken::new();
+    let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        assets: Some(&assets),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: Some(binding.project_id()),
+        host: None,
+        cancel: Some(&cancel),
+    };
+    let mut task = super::super::tests::trace_run(
+        50,
+        AttemptId::from_bytes([51; 16]),
+        WallTime::from_micros(100)?,
+    )?
+    .request
+    .tasks
+    .remove(0);
+    task.head = Some(head.clone());
+    task.base = Some(head.clone());
+    task.access.source_root = Some(source.clone());
+    task.route = run::RequestedRoute::Adapter {
+        extra: Default::default(),
+        provider: "command".into(),
+        name: "fake".into(),
+    };
+    let paths = run::LaunchPaths {
+        attempt_id: AttemptId::from_bytes([52; 16]),
+        operation_id: OperationId::parse("source-test")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id: RunId::from_bytes([53; 16]),
+        deadline_unix_ms: u64::MAX,
+        scratch: base.join("scratch"),
+        provider_state: base.join("provider-state"),
+        temporary: base.join("tmp"),
+        temporary_alias: None,
+    };
+    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+        std::fs::create_dir(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let mut primary = task.clone();
+    primary.access.source_root = Some(project.clone());
+    assert_eq!(source_cwd(&registry, &primary)?, project);
+    let mut protected = task.clone();
+    protected.access.source_root = Some(state.clone());
+    assert!(
+        source_cwd(&registry, &protected)
+            .unwrap_err()
+            .contains("not an allowed read root")
+    );
+    let foreign = base.join("foreign");
+    std::fs::create_dir(&foreign)?;
+    init_fixture_repository(&executor, &foreign, &git_home)?;
+    protected.access.source_root = Some(foreign.clone());
+    let error = source_cwd(&registry, &protected).unwrap_err();
+    assert!(error.contains("no longer registered"));
+    assert!(!error.contains(&foreign.to_string_lossy().into_owned()));
+    let launch = prepare_command(
+        &registry,
+        &task,
+        &paths,
+        None,
+        &|_| Ok(fake.clone()),
+        "command",
+        "fake",
+    )?;
+    assert_eq!(launch.cwd, source);
+    let plan = &launch
+        .confinement
+        .as_ref()
+        .ok_or("missing confinement")?
+        .plan;
+    assert!(
+        plan.permissions()
+            .read_roots
+            .iter()
+            .any(|grant| grant.path == source)
+    );
+    assert!(
+        !plan
+            .permissions()
+            .read_roots
+            .iter()
+            .any(|grant| grant.path == project)
+    );
+    let output = executor.execute(ExecOptions::new(
+        &launch.argv,
+        &launch.cwd,
+        Duration::from_secs(5),
+    ))?;
+    assert_eq!(output.termination, Termination::Exit(0));
+    assert_eq!(output.stdout.bytes, b"verified checkout");
+    let moved_args: Vec<std::ffi::OsString> = [
+        git.as_os_str(),
+        "-c".as_ref(),
+        "user.name=Fixture".as_ref(),
+        "-c".as_ref(),
+        "user.email=fixture@example.invalid".as_ref(),
+        "commit".as_ref(),
+        "--allow-empty".as_ref(),
+        "-qm".as_ref(),
+        "move".as_ref(),
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect();
+    let moved = executor.execute(ExecOptions::new(
+        &moved_args,
+        &source,
+        Duration::from_secs(5),
+    ))?;
+    assert_eq!(moved.termination, Termination::Exit(0));
+    let error = prepare_command(
+        &registry,
+        &task,
+        &paths,
+        None,
+        &|_| Ok(fake.clone()),
+        "command",
+        "fake",
+    )
+    .err()
+    .ok_or("moved source accepted")?;
+    assert!(
+        error.to_string().contains("graph source checkout moved"),
+        "{error}"
+    );
+    Ok(())
+}

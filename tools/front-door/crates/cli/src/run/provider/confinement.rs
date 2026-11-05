@@ -245,6 +245,53 @@ pub(super) fn host_git_home(
     provenant_providers::host::HostProbeDir::create(host_root).map_err(|error| error.to_string())
 }
 
+/// Reopen the graph-bound checkout at launch, refusing a moved or replaced
+/// worktree rather than falling back to the daemon's checkout.
+pub(super) fn source_cwd(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+) -> Result<PathBuf, String> {
+    let cwd = registry.cwd.ok_or("working directory is unavailable")?;
+    let Some(source) = &task.access.source_root else {
+        return canonical(cwd);
+    };
+    if task.writer.is_some() || task.head.is_none() {
+        return Err("read-only source needs a pinned head and no writer".into());
+    }
+    let state = registry.state_root.ok_or("state root is unavailable")?;
+    if !run::access_root_allowed(source, state, true)
+        || provenant_confinement::refuses_lane_root(source, true, registry.home)
+    {
+        return Err("graph source checkout is not an allowed read root".into());
+    }
+    let verified = run::resolve_reader_source(state, cwd, source)
+        .map_err(|_| "graph source checkout is no longer registered with the project")?;
+    if verified != *source {
+        return Err("graph source checkout changed location".into());
+    }
+    Ok(verified)
+}
+
+pub(super) fn require_source_head(
+    task: &run::TaskRequest,
+    observed: Option<provenant_core::GitOid>,
+) -> Result<(), String> {
+    if task.access.source_root.is_some() {
+        let expected = task
+            .head
+            .as_deref()
+            .ok_or("graph source head missing")?
+            .parse::<provenant_core::GitOid>()
+            .map_err(|_| "invalid graph source head")?;
+        if observed != Some(expected) {
+            return Err(format!(
+                "graph source checkout moved from pinned head {expected}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Verify the selected repository on the host and match the persisted dispatch
 /// project before deriving any Git read authority from that binding.
 pub(super) type PreparedReadPlan = (

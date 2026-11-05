@@ -524,7 +524,7 @@ pub(super) fn prepare_candidates(
     };
     let cwd = match writer.as_ref() {
         Some(writer) => writer.worktree.path().to_owned(),
-        None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
+        None => source_cwd(registry, task)?,
     };
     // Status is evidence for both the brief and a source refusal. Failure to
     // collect it must never masquerade as a clean predecessor worktree.
@@ -1370,7 +1370,10 @@ pub(super) fn prepare_candidates(
                     )
                 })
                 .map_err(|error| error.to_string()),
-            None => read_only_plan(roots, project_id, &cwd, &git, request),
+            None => read_only_plan(roots, project_id, &cwd, &git, request).and_then(|planned| {
+                require_source_head(task, planned.1)?;
+                Ok(planned)
+            }),
         }) {
             Ok(planned) => planned,
             Err(error) => {

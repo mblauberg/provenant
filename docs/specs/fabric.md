@@ -617,6 +617,15 @@ the node becomes ready. The checkpoint retains the pinned source for replay
 and route fallback. A read-only review receives this exact subject as its
 attempt head; its own lane launch head is not a combined integration commit.
 Missing subjects fail closed rather than falling back to the current checkout.
+A read-only node bound to an upstream writer uses that writer's verified
+checkout as its working directory and read-only source root. Other pinned
+readers use the graph execution's checkout. Before each new launch the host
+reopens the registered worktree and requires its HEAD to match the pinned
+source; a removed, replaced or advanced checkout is refused. An already
+accepted operation reattaches to its original authority instead of selecting
+a new checkout. A checkout may still have uncommitted edits; readers do not
+acquire a writer lease. Graph status redacts the host checkout path while
+retaining its pinned head.
 The checkpoint also pins the first resolved integration head. A synthesise
 node, or a writer whose source is that pinned commit, that has not yet
 attempted fails if the integration branch has moved, and a rerun starts a new

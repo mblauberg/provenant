@@ -3180,6 +3180,17 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
     assert_eq!(reader.source_commit.as_deref(), Some(predecessor.as_str()));
     assert_eq!(reader.review_base.as_deref(), Some(base.as_str()));
     assert_eq!(owner.review_base_resolutions, 1);
+    let reader_locations: Vec<_> = owner
+        .calls
+        .iter()
+        .zip(&owner.permissions)
+        .filter(|((key, _), _)| key.node_id == "reader")
+        .map(|(_, (_, path))| path.as_deref())
+        .collect();
+    assert_eq!(
+        reader_locations,
+        vec![Some("/fixture/lane"), Some("/fixture/lane")]
+    );
 }
 
 #[test]
