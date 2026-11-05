@@ -2985,6 +2985,7 @@ pub(super) struct Fake {
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.
     quota_stderr: Option<&'static [u8]>,
     assess_empty: bool,
+    failure_note: Option<String>,
 }
 
 #[test]
@@ -3016,6 +3017,10 @@ fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() ->
 }
 
 impl Providers for Fake {
+    fn failure_diagnostic(&self, _: &RouteRecord, _: &[u8]) -> Option<String> {
+        self.failure_note.clone()
+    }
+
     fn assess_result(
         &self,
         _: &TaskRequest,
@@ -3381,7 +3386,7 @@ fn empty_success_is_assessed_before_settlement_rejects_it() -> TestResult {
 }
 
 #[test]
-fn failed_lane_reason_preserves_path_denial_evidence() -> TestResult {
+fn failed_lane_reason_reports_path_denial_without_captured_text() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -3403,7 +3408,7 @@ fn failed_lane_reason_preserves_path_denial_evidence() -> TestResult {
     artifacts::seal(
         &dir,
         "stderr.log",
-        b"tool: /fixture/missing-grant: Permission denied\n",
+        b"tool: /fixture/missing-grant: Permission denied TOKEN_SENTINEL\n",
         CAPTURE_LIMIT,
     )?;
     let mut observed = exit();
@@ -3411,11 +3416,14 @@ fn failed_lane_reason_preserves_path_denial_evidence() -> TestResult {
     seal_exit(&store, &observed)?;
     let fake = Fake {
         outcome: Some(Outcome::Failed),
+        failure_note: Some("TOKEN_SENTINEL /private/source".into()),
         ..Fake::default()
     };
     store.finish(id, &dir, &observed, &fake, &call)?;
     let reason = terminal_reason(&store, id, &call)?;
-    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("/private/source"), "{reason}");
+    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
     assert!(reason.contains("access grant"), "{reason}");
     Ok(())
 }
@@ -3442,7 +3450,7 @@ fn a_lane_without_a_handoff_reports_a_stdout_path_denial_in_its_reason() -> Test
     artifacts::seal(
         &dir,
         "stdout.log",
-        b"tool: /fixture/missing-grant: Permission denied\n",
+        b"tool: /fixture/missing-grant: Permission denied TOKEN_SENTINEL\n",
         CAPTURE_LIMIT,
     )?;
     artifacts::seal(&dir, "stderr.log", b"", CAPTURE_LIMIT)?;
@@ -3456,7 +3464,8 @@ fn a_lane_without_a_handoff_reports_a_stdout_path_denial_in_its_reason() -> Test
     };
     store.finish(id, &dir, &observed, &fake, &call)?;
     let reason = terminal_reason(&store, id, &call)?;
-    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
     assert!(reason.contains("access grant"), "{reason}");
     assert_eq!(terminal(&store, id, &call)?, Outcome::ReviewRequired);
     Ok(())
@@ -3497,7 +3506,8 @@ fn a_path_denial_leaves_a_finished_lanes_answer_and_success_intact() -> TestResu
     let result = artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or("result")?;
     assert_eq!(String::from_utf8(result)?, answer);
     let reason = terminal_reason(&store, id, &call)?;
-    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
     Ok(())
 }
 
@@ -3523,7 +3533,7 @@ fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
     artifacts::seal(
         &dir,
         "stdout.log",
-        b"tool: /fixture/missing-grant: Permission denied\n",
+        b"tool: /fixture/missing-grant: Permission denied TOKEN_SENTINEL\n",
         CAPTURE_LIMIT,
     )?;
     artifacts::seal(&dir, "stderr.log", b"", CAPTURE_LIMIT)?;
@@ -3538,7 +3548,8 @@ fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
     };
     let record = store.finish(id, &dir, &observed, &fake, &call)?;
     let reason = terminal_reason(&store, id, &call)?;
-    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
     assert!(reason.contains("access grant"), "{reason}");
     assert_eq!(terminal(&store, id, &call)?, Outcome::Failed);
     assert!(store.staged_policy_retry(&record)?.is_some());

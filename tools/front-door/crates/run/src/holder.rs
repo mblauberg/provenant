@@ -1160,9 +1160,13 @@ impl RunStore {
             }
             decoded.result.push_str(&note);
             decoded.result.push('\n');
+            // The provider's note is captured output, not an approved safe fact.
+            // Keep it in the explicit result, but do not project it as a reason.
+            const FAILURE_NOTE: &str =
+                "provider reported a failure; inspect the captured output for details";
             decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{reason}; {note}"),
-                None => note,
+                Some(reason) => format!("{reason}; {FAILURE_NOTE}"),
+                None => FAILURE_NOTE.into(),
             });
         }
         // A provider can report a tool denial even when the provider itself
@@ -1791,10 +1795,11 @@ impl RunStore {
         }
         // A denial is a diagnostic, not part of the provider's answer: the
         // handoff, findings and verdict blocks must stay as the provider wrote them.
-        if let Some(note) = denial {
+        if let Some(denial) = denial {
+            let note = denial.diagnostic();
             decoded.reason = Some(match decoded.reason.take() {
                 Some(reason) => format!("{reason}; {note}"),
-                None => note,
+                None => note.into(),
             });
         }
         // External delivery runs only from the committed decision below.
@@ -1965,18 +1970,31 @@ fn reports_verdict(result: &str) -> bool {
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
 const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";
 
-/// Preserve a path-bearing OS denial as evidence, not a definitive diagnosis:
-/// filesystem permissions and other sandboxes can produce the same errors.
-fn path_denial_hint(stderr: &[u8]) -> Option<String> {
+/// Captured text can suggest a denial, but cannot establish its source or
+/// supply a path safe for a remote diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObservedAccessDenial {
+    Path,
+}
+
+impl ObservedAccessDenial {
+    fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Path => {
+                "A path access denial was observed; check the declared access grant and filesystem permissions, then inspect the captured output locally if needed"
+            }
+        }
+    }
+}
+
+fn path_denial_hint(stderr: &[u8]) -> Option<ObservedAccessDenial> {
     let text = String::from_utf8_lossy(stderr);
-    let line = text.lines().find(|line| {
-        line.contains('/')
-            && (line.contains("Permission denied") || line.contains("Operation not permitted"))
-    })?;
-    Some(format!(
-        "Path access was denied; the missing access grant may be for this path (also check filesystem permissions): {}",
-        provenant_confinement::redact::bounded_line(line, 240)
-    ))
+    text.lines()
+        .any(|line| {
+            line.contains('/')
+                && (line.contains("Permission denied") || line.contains("Operation not permitted"))
+        })
+        .then_some(ObservedAccessDenial::Path)
 }
 
 /// Terminal evidence refuses a longer reason, so every published reason fits.
@@ -2024,15 +2042,17 @@ mod host_clock_tests {
     }
 
     #[test]
-    fn path_denial_hints_require_a_path_and_redact_known_tokens() {
-        assert!(path_denial_hint(b"Permission denied").is_none());
-        assert!(path_denial_hint(b"/fixture/path: unrelated error").is_none());
-        let hint = path_denial_hint(
-            b"/fixture/path: Operation not permitted ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-        )
-        .expect("path denial");
-        assert!(hint.contains("/fixture/path"));
-        assert!(!hint.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    fn path_denial_hints_do_not_project_captured_text() {
+        assert_eq!(path_denial_hint(b"Permission denied"), None);
+        assert_eq!(path_denial_hint(b"/fixture/path: unrelated error"), None);
+        let cause =
+            path_denial_hint(b"/private/host: Operation not permitted TOKEN_SENTINEL \x1b[31m")
+                .expect("path denial");
+        let hint = cause.diagnostic();
+        assert!(hint.contains("access grant"));
+        assert!(!hint.contains("/private/host"));
+        assert!(!hint.contains("TOKEN_SENTINEL"));
+        assert!(!hint.contains('\u{1b}'));
     }
 
     #[test]
