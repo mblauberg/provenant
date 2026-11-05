@@ -796,3 +796,271 @@ fn disk_report_json_and_human_output_leave_missing_state_absent() -> support::Re
     rig.assert_legacy_unchanged()?;
     Ok(())
 }
+
+#[test]
+fn preset_reader_uses_writer_checkout_from_another_checkout() -> Result {
+    use provenant_core::Clock;
+    use provenant_fabric_runtime::graph::{self, AttemptOwner};
+    use std::convert::Infallible;
+
+    struct CompletedWriter {
+        head: String,
+    }
+    impl AttemptOwner for CompletedWriter {
+        type Error = Infallible;
+        fn actor(&self) -> String {
+            provenant_core::ActorId::from_bytes([34; 16]).to_string()
+        }
+        fn bind_writer_worktree(
+            &mut self,
+            path: &str,
+        ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Infallible> {
+            let metadata = provenant_os::fs::Directory::open_anchor(Path::new(path))
+                .unwrap()
+                .metadata()
+                .unwrap();
+            Ok(Some(graph::WriterWorktreeBinding {
+                extra: [(
+                    "source_directory_identity".into(),
+                    json!({"device":metadata.device,"inode":metadata.inode}),
+                )]
+                .into(),
+                worktree: path.into(),
+                head: self.head.clone(),
+            }))
+        }
+        fn observe_or_start(
+            &mut self,
+            key: &graph::AttemptKey,
+            _: graph::NodeInput<'_>,
+            _: &graph::GraphRoute,
+            _: graph::AccessMode,
+            _: Option<&str>,
+            _: graph::Replay<'_>,
+        ) -> std::result::Result<graph::AttemptObservation, Infallible> {
+            if key.node_id == "writer" {
+                Ok(graph::AttemptObservation::Terminal {
+                    attempt_ref: None,
+                    outcome: graph::AttemptOutcome::Succeeded,
+                    launched: true,
+                    result: None,
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: Some(self.head.clone()),
+                })
+            } else {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: None })
+            }
+        }
+    }
+
+    let mut rig = TestRig::new()?;
+    configure_commands(
+        &rig,
+        json!({"source-check":{"argv":["/bin/sh","-c","cat subject; printf '\\nVERDICT: PASS\\n'"]}}),
+    )?;
+    let _cleanup = rig.process_cleanup();
+    let product = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))?;
+    for (key, value) in &mut rig.env {
+        if key == "PROVENANT_ROOT" {
+            *value = product.clone().into_os_string();
+        }
+    }
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    fs::write(rig.project.join("subject"), "writer checkout")?;
+    for args in [
+        vec!["add", "subject"],
+        vec!["commit", "-qm", "writer source"],
+    ] {
+        let out = rig.execute(&git, &args, None)?;
+        assert_eq!(
+            code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stderr.bytes)
+        );
+    }
+    let out = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+    let head = String::from_utf8(out.stdout.bytes)?.trim().to_owned();
+    let writer = rig.project.join(".worktrees/writer");
+    fs::create_dir_all(writer.parent().ok_or("worktree parent")?)?;
+    let out = rig.execute(
+        &git,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "writer",
+            writer.to_str().ok_or("writer path")?,
+            &head,
+        ],
+        None,
+    )?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stderr.bytes)
+    );
+    fs::write(rig.project.join("subject"), "invoking checkout")?;
+    for args in [
+        vec!["add", "subject"],
+        vec!["commit", "-qm", "invoking source"],
+    ] {
+        let out = rig.execute(&git, &args, None)?;
+        assert_eq!(
+            code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stderr.bytes)
+        );
+    }
+    let presets = rig.project.join(".provenant/presets");
+    fs::create_dir_all(&presets)?;
+    fs::write(
+        presets.join("bound-reader.toml"),
+        r#"
+stages = [
+  { id = "writer", role = "write" },
+  { id = "reader", role = "read", source = { type = "node", node = "writer" } },
+]
+[parameters]
+worktree = { type = "string", default = "" }
+head = { type = "string", default = "" }
+[roles.write]
+access = "worktree_write"
+worktree = "${worktree}"
+source = { type = "commit", commit = "${head}" }
+tier = { adapter = "fixture", model = "fixture/model" }
+[roles.read]
+access = "read_only"
+worktree = "${worktree}"
+routes = [{ adapter = "command", name = "source-check" }]
+"#,
+    )?;
+    let prompt = rig.project.join("brief");
+    fs::write(&prompt, "Inspect the writer source")?;
+    let worktree_setting = format!(
+        "parameters.worktree={}",
+        serde_json::to_string(writer.to_str().ok_or("writer path")?)?
+    );
+    let head_setting = format!("parameters.head=\"{head}\"");
+    let args = [
+        "run",
+        "--preset",
+        "bound-reader",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt path")?,
+        "--set",
+        &worktree_setting,
+        "--set",
+        &head_setting,
+        "--plan",
+        "off",
+    ];
+    let mut explain_args = args.to_vec();
+    explain_args.extend(["--explain", "--json"]);
+    let explain = rig.command(&explain_args)?;
+    assert_eq!(
+        code(&explain),
+        0,
+        "{}",
+        String::from_utf8_lossy(&explain.stdout.bytes)
+    );
+    let explanation: Value = serde_json::from_slice(&explain.stdout.bytes)?;
+    let document: graph::GraphDocument =
+        serde_json::from_value(explanation["data"]["graph"].clone())?;
+    let project: provenant_core::ProjectId = {
+        let identity = rig.command(&["fabric", "identity", "--json"])?;
+        assert_eq!(code(&identity), 0);
+        serde_json::from_slice::<Value>(&identity.stdout.bytes)?["data"]["project"]
+            .as_str()
+            .ok_or("project id")?
+            .parse()?
+    };
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let state = provenant_core::StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 20)?;
+    {
+        let mut journal =
+            graph::FileJournal::open(&state, project, &document.graph_id, budget, &cancel, &clock)?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(),
+            directory: rig.project.clone(),
+            document: document.clone(),
+            review_base: None,
+            integration_base: None,
+        })?;
+        let mut owner = CompletedWriter { head: head.clone() };
+        let config = provenant_fabric_runtime::config::GraphConfig::default();
+        let mut result = graph::advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &config.limits,
+            &config.budget,
+        )?;
+        if result
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "reader")
+            .is_none_or(|node| node.attempts.is_empty())
+        {
+            result = graph::advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &config.limits,
+                &config.budget,
+            )?;
+        }
+        assert!(
+            result
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "reader")
+                .is_some_and(|node| !node.attempts.is_empty())
+        );
+    }
+    if !available()? {
+        return Ok(());
+    }
+    let mut run_args = args.to_vec();
+    run_args.extend(["--wait", "20s", "--json"]);
+    let launched = rig.command(&run_args)?;
+    assert_eq!(
+        code(&launched),
+        0,
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&launched.stdout.bytes),
+        String::from_utf8_lossy(&launched.stderr.bytes)
+    );
+    let status = rig.command(&[
+        "fabric",
+        "graph",
+        "status",
+        &document.graph_id,
+        "--full",
+        "--json",
+    ])?;
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    let reader = status["data"]["checkpoint"]["nodes"]
+        .as_array()
+        .ok_or("nodes")?
+        .iter()
+        .find(|node| node["id"] == "reader")
+        .ok_or("reader")?;
+    assert_eq!(reader["state"], "succeeded", "{status}");
+    let excerpt = reader["outputs"]["result"]["excerpt"]
+        .as_str()
+        .ok_or("result excerpt")?;
+    assert!(excerpt.contains("writer checkout"), "{excerpt}");
+    assert!(!excerpt.contains("invoking checkout"), "{excerpt}");
+    Ok(())
+}

@@ -323,6 +323,7 @@ pub(super) fn read_only_plan(
     cwd: &Path,
     git: &Path,
     request: PlanRequest,
+    isolated: bool,
 ) -> Result<PreparedReadPlan, String> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
@@ -381,18 +382,23 @@ pub(super) fn read_only_plan(
             .ok()
             .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
             .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
-            run::read_only_plan(&roots.state, &repo, &binding, request)
-                .map(|plan| {
-                    (
-                        plan,
-                        head,
-                        provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
-                        Some(repo.private_git_dir().to_owned()),
-                    )
-                })
-                .map_err(|error| error.to_string())
+            let plan = if isolated {
+                run::isolated_read_only_plan(&roots.state, &repo, &binding, request)
+            } else {
+                run::read_only_plan(&roots.state, &repo, &binding, request)
+            };
+            plan.map(|plan| {
+                (
+                    plan,
+                    head,
+                    provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
+                    Some(repo.private_git_dir().to_owned()),
+                )
+            })
+            .map_err(|error| error.to_string())
         }
         // Non-Git workspaces have no Git metadata or repository exceptions.
+        None if isolated => Err("pinned source requires a Git repository".into()),
         None => ConfinedPlan::new(request)
             .map(|plan| (plan, None, None, None))
             .map_err(|error| error.to_string()),

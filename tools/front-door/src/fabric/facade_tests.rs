@@ -820,8 +820,9 @@ pub(crate) mod peer_tests {
         let actor = owner.actor();
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"pinned-range","node_id":"review","route_index":0}))?;
         let route = serde_json::from_value(serde_json::json!({"adapter":"fixture","model":"fixture/model"}))?;
+        let source_roots = vec![rig.project.to_str().ok_or("source path")?.to_owned()];
         let node = || graph::NodeInput { settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
-            read_roots: &[], distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
+            read_roots: &source_roots, distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             review_base: Some(&pinned), title: "review", prompt: "review", required_verdict: None, deadline_seconds: None, inputs_dir: None };
         let first = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
             graph::Replay { delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor }).map_err(|error| format!("first launch: {error:?}"))?;
@@ -846,6 +847,7 @@ pub(crate) mod peer_tests {
         assert_eq!(request.tasks[0].base.as_deref(), Some(base.as_str()));
         assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
         assert_eq!(request.tasks[0].access.source_root.as_deref(), Some(rig.project.as_path()));
+        assert!(request.tasks[0].access.read_roots.is_empty());
         let scratch = rig.root.join("review-evidence");
         std::fs::create_dir(&scratch)?;
         let directory = provenant_os::fs::Directory::open_anchor(&scratch)?;

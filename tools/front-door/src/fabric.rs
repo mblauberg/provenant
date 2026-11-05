@@ -5299,8 +5299,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let mut accepted_knobs = None;
             let mut accepted_route = None;
             let mut accepted_retry_limit = None;
-            let mut accepted_source_root = None;
-            let mut accepted_source_identity = None;
+            let mut accepted_access = None;
             let context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
                     Ok(request) => {
@@ -5309,8 +5308,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             accepted_knobs = Some(task.profile.overrides.clone());
                             accepted_route = Some(task.route.clone());
                             accepted_retry_limit = Some(task.profile.settlement_retry_limit);
-                            accepted_source_root = task.access.source_root.clone();
-                            accepted_source_identity = task.access.source_identity.clone();
+                            accepted_access = Some(task.access.clone());
                         }
                         task.context.clone()
                     }
@@ -5641,79 +5639,90 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 provenant_core::ActorId::parse(replay.launch_actor)
                     .map_err(|_| FacadeError::StateCorrupt)?,
             );
-            let mut grants = provenant_cli::run::lane_access(
-                &provenant_cli::Access {
-                    mode: Some(provenant_cli::Mode::ReadOnly),
-                    worktree: None,
-                    read_root: node
-                        .read_roots
-                        .iter()
-                        .map(|root| {
-                            let path = Path::new(root);
-                            if path.is_absolute() {
-                                path.to_path_buf()
-                            } else {
-                                self.factory.cwd.join(path)
-                            }
-                        })
-                        .collect(),
-                    write_root: Vec::new(),
-                    network: self.network,
-                    capability: Vec::new(),
-                },
-                self.factory.context.roots.state.as_path(),
-                &self.factory.home,
-            )
-            .map_err(dispatch_refused)?;
-            grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
-            if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                && node.source_commit.is_some()
-            {
-                grants.source_root = if accepted {
-                    grants.source_identity = accepted_source_identity;
-                    accepted_source_root
-                } else {
-                    let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);
-                    let source = provenant_run::resolve_reader_source(
-                        self.factory.context.roots.state.as_path(),
-                        &self.factory.cwd,
-                        path,
-                    )
-                    .map_err(|_| FacadeError::DispatchRefused {
-                        fact: None,
-                        disk: None,
-                        reason: "graph source checkout is no longer registered with the project"
-                            .into(),
-                    })?;
-                    let directory = provenant_os::fs::Directory::open_anchor(&source)
-                        .map_err(|_| FacadeError::ConfinementRefused)?;
-                    let identity = directory
-                        .metadata()
-                        .map_err(|_| FacadeError::ConfinementRefused)?;
-                    let source_identity = provenant_records::run::SourceIdentity {
-                        device: identity.device,
-                        inode: identity.inode,
-                    };
-                    if worktree.is_some()
-                        && let Some(checkpoint) =
-                            provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
-                                &self.factory.context.roots.state,
-                                self.factory.context.identity.project,
-                                &key.graph_id,
-                            )
-                            .map_err(graph_journal_error)?
-                        && !writer_source_identity_matches(&checkpoint, &source, &source_identity)
-                    {
-                        return Err(FacadeError::DispatchRefused {
+            let mut grants = if accepted {
+                accepted_access.ok_or(FacadeError::StateCorrupt)?
+            } else {
+                provenant_cli::run::lane_access(
+                    &provenant_cli::Access {
+                        mode: Some(provenant_cli::Mode::ReadOnly),
+                        worktree: None,
+                        read_root: node
+                            .read_roots
+                            .iter()
+                            .map(|root| {
+                                let path = Path::new(root);
+                                if path.is_absolute() {
+                                    path.to_path_buf()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
+                        write_root: Vec::new(),
+                        network: self.network,
+                        capability: Vec::new(),
+                    },
+                    self.factory.context.roots.state.as_path(),
+                    &self.factory.home,
+                )
+                .map_err(dispatch_refused)?
+            };
+            if !accepted {
+                grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
+                if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                    && node.source_commit.is_some()
+                {
+                    grants.source_root = {
+                        let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);
+                        let source = provenant_run::resolve_reader_source(
+                            self.factory.context.roots.state.as_path(),
+                            &self.factory.cwd,
+                            path,
+                        )
+                        .map_err(|_| FacadeError::DispatchRefused {
                             fact: None,
                             disk: None,
-                            reason: "graph source checkout identity changed or is unavailable"
-                                .into(),
-                        });
-                    }
-                    grants.source_identity = Some(source_identity);
-                    Some(source)
-                };
+                            reason:
+                                "graph source checkout is no longer registered with the project"
+                                    .into(),
+                        })?;
+                        let directory = provenant_os::fs::Directory::open_anchor(&source)
+                            .map_err(|_| FacadeError::ConfinementRefused)?;
+                        let identity = directory
+                            .metadata()
+                            .map_err(|_| FacadeError::ConfinementRefused)?;
+                        let source_identity = provenant_records::run::SourceIdentity {
+                            device: identity.device,
+                            inode: identity.inode,
+                        };
+                        if worktree.is_some()
+                            && let Some(checkpoint) =
+                                provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                                    &self.factory.context.roots.state,
+                                    self.factory.context.identity.project,
+                                    &key.graph_id,
+                                )
+                                .map_err(graph_journal_error)?
+                            && !writer_source_identity_matches(
+                                &checkpoint,
+                                &source,
+                                &source_identity,
+                            )
+                        {
+                            return Err(FacadeError::DispatchRefused {
+                                fact: None,
+                                disk: None,
+                                reason: "graph source checkout identity changed or is unavailable"
+                                    .into(),
+                            });
+                        }
+                        grants.source_identity = Some(source_identity);
+                        // A preset may lower its source worktree to a read root.
+                        // The immutable view replaces those live-source grants.
+                        grants.read_roots.retain(|root| !root.starts_with(&source));
+                        Some(source)
+                    };
+                }
             }
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
             let receipt =

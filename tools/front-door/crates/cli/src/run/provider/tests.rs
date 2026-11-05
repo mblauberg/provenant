@@ -3189,7 +3189,14 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         agy_state: None,
     };
     // The unbound project is refused, but only after host git has run.
-    let result = read_only_plan(&roots, ProjectId::from_bytes([1; 16]), &repo, &git, request);
+    let result = read_only_plan(
+        &roots,
+        ProjectId::from_bytes([1; 16]),
+        &repo,
+        &git,
+        request,
+        false,
+    );
     assert!(result.is_err());
 
     let seen = std::fs::read_to_string(&record)?;
@@ -4491,7 +4498,7 @@ fn staged_skill_files_are_written_outside_writable_scratch()
 }
 
 #[test]
-fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
+fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, OperationId, RunId, WallTime};
     use provenant_os::exec::{ExecOptions, Executor, Termination};
@@ -4510,6 +4517,25 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
     }
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
+    std::fs::write(project.join("subject"), "verified checkout")?;
+    for args in [
+        vec!["add", "subject"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "subject",
+        ],
+    ] {
+        let argv: Vec<std::ffi::OsString> = std::iter::once(git.clone().into_os_string())
+            .chain(args.into_iter().map(Into::into))
+            .collect();
+        let result = executor.execute(ExecOptions::new(&argv, &project, Duration::from_secs(5)))?;
+        assert_eq!(result.termination, Termination::Exit(0));
+    }
     let head = run::resolve_git_base(&git, &project, "HEAD")?;
     let source = base.join("source");
     let added_args = vec![
@@ -4528,9 +4554,12 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
     ))?;
     assert_eq!(added.termination, Termination::Exit(0));
     std::fs::write(project.join("subject"), "wrong checkout")?;
-    std::fs::write(source.join("subject"), "verified checkout")?;
+    std::fs::write(source.join("subject"), "uncommitted source edit")?;
     let fake = assets.join("fake-provider");
-    std::fs::write(&fake, "#!/bin/sh\ncat subject\n")?;
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\ncat subject; : > \"$SOURCE_READY\"; while [ ! -f \"$SOURCE_GO\" ]; do sleep 0.05; done; cat subject\n",
+    )?;
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700))?;
     std::fs::write(
         state.join("config.toml"),
@@ -4669,7 +4698,8 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
         "command",
         "fake",
     )?;
-    assert_eq!(launch.cwd, source);
+    assert!(launch.cwd.starts_with(&paths.temporary));
+    assert_ne!(launch.cwd, source);
     let plan = &launch
         .confinement
         .as_ref()
@@ -4677,6 +4707,13 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
         .plan;
     assert!(
         plan.permissions()
+            .read_roots
+            .iter()
+            .any(|grant| grant.path == launch.cwd)
+    );
+    assert!(
+        !plan
+            .permissions()
             .read_roots
             .iter()
             .any(|grant| grant.path == source)
@@ -4688,13 +4725,99 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
             .iter()
             .any(|grant| grant.path == project)
     );
-    let output = executor.execute(ExecOptions::new(
-        &launch.argv,
+    let git_reads: Vec<_> = plan
+        .permissions()
+        .read_only
+        .as_ref()
+        .ok_or("Git authority")?
+        .git_read_paths()
+        .collect();
+    assert_eq!(
+        git_reads,
+        vec![repo.common_git_dir().join("objects").as_path()]
+    );
+    let live_source = source.clone();
+    let ready = base.join("provider-ready");
+    let proceed = base.join("provider-proceed");
+    let thread_ready = ready.clone();
+    let thread_proceed = proceed.clone();
+    let thread_git = git.clone();
+    let thread_home = git_home.clone();
+    let move_while_running = std::thread::spawn(move || -> std::io::Result<()> {
+        use provenant_core::Clock;
+        let clock = provenant_os::clock::SystemClock::new();
+        let deadline =
+            provenant_core::WaitBudget::cli(clock.mono_now(), 5).map_err(std::io::Error::other)?;
+        let (_sender, wait) = std::sync::mpsc::channel::<()>();
+        while !thread_ready.exists() {
+            if deadline.remaining(clock.mono_now()).as_micros() == 0 {
+                return Err(std::io::Error::other("provider did not start"));
+            }
+            let _ = wait.recv_timeout(Duration::from_millis(10));
+        }
+        std::fs::write(live_source.join("subject"), "changed while provider ran")?;
+        let args: Vec<std::ffi::OsString> = [
+            thread_git.as_os_str(),
+            "-c".as_ref(),
+            "user.name=Fixture".as_ref(),
+            "-c".as_ref(),
+            "user.email=fixture@example.invalid".as_ref(),
+            "-c".as_ref(),
+            "core.hooksPath=/dev/null".as_ref(),
+            "commit".as_ref(),
+            "--allow-empty".as_ref(),
+            "-qm".as_ref(),
+            "concurrent move".as_ref(),
+        ]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect();
+        let env = vec![
+            ("HOME".into(), thread_home.into_os_string()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ];
+        let mut options = ExecOptions::new(&args, &live_source, Duration::from_secs(5));
+        options.env = Some(&env);
+        let result = provenant_os::exec::SystemExecutor::new(1)
+            .map_err(std::io::Error::other)?
+            .execute(options)
+            .map_err(std::io::Error::other)?;
+        if result.termination != Termination::Exit(0) {
+            return Err(std::io::Error::other("source checkout did not advance"));
+        }
+        std::fs::write(thread_proceed, "continue")
+    });
+    let env = vec![
+        ("SOURCE_READY".into(), ready.into_os_string()),
+        ("SOURCE_GO".into(), proceed.into_os_string()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ];
+    let mut options = ExecOptions::new(&launch.argv, &launch.cwd, Duration::from_secs(10));
+    options.env = Some(&env);
+    let output = executor.execute(options)?;
+    move_while_running
+        .join()
+        .map_err(|_| "source mutation thread panicked")??;
+    assert_eq!(output.termination, Termination::Exit(0));
+    assert_eq!(output.stdout.bytes, b"verified checkoutverified checkout");
+    let status_args: Vec<std::ffi::OsString> =
+        [git.as_os_str(), "status".as_ref(), "--porcelain".as_ref()]
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
+    let status = executor.execute(ExecOptions::new(
+        &status_args,
         &launch.cwd,
         Duration::from_secs(5),
     ))?;
-    assert_eq!(output.termination, Termination::Exit(0));
-    assert_eq!(output.stdout.bytes, b"verified checkout");
+    assert_eq!(status.termination, Termination::Exit(0));
+    assert!(
+        status.stdout.bytes.is_empty(),
+        "snapshot status: {:?}",
+        status.stdout.bytes
+    );
     let moved_args: Vec<std::ffi::OsString> = [
         git.as_os_str(),
         "-c".as_ref(),
@@ -4715,7 +4838,31 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
         Duration::from_secs(5),
     ))?;
     assert_eq!(moved.termination, Termination::Exit(0));
-    let error = prepare_command(
+    let historical = prepare_command(
+        &registry,
+        &task,
+        &paths,
+        None,
+        &|_| Ok(fake.clone()),
+        "command",
+        "fake",
+    )?;
+    assert_eq!(
+        std::fs::read(historical.cwd.join("subject"))?,
+        b"verified checkout"
+    );
+    // An exception that would grant writes into the live checkout cannot be
+    // carried into an isolated source view.
+    std::fs::create_dir(source.join("mutable"))?;
+    let project_state = state
+        .join("projects")
+        .join(binding.project_id().to_string());
+    std::fs::create_dir_all(&project_state)?;
+    std::fs::set_permissions(&project_state, std::fs::Permissions::from_mode(0o700))?;
+    let policy = project_state.join("read-only.json");
+    std::fs::write(&policy, r#"{"readOnlyWritable":["mutable"]}"#)?;
+    std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o600))?;
+    let refused = prepare_command(
         &registry,
         &task,
         &paths,
@@ -4725,11 +4872,14 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
         "fake",
     )
     .err()
-    .ok_or("moved source accepted")?;
+    .ok_or("live-source write exception was accepted")?;
     assert!(
-        error.to_string().contains("graph source checkout moved"),
-        "{error}"
+        refused
+            .to_string()
+            .contains("read-only project write policy"),
+        "{refused}"
     );
+    std::fs::remove_file(policy)?;
     // Replacing the path with another registered worktree at the same head
     // must not silently replace the source selected at admission.
     let moved_path = base.join("moved-source");

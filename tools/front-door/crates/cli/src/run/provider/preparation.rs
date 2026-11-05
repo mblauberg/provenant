@@ -522,9 +522,16 @@ pub(super) fn prepare_candidates(
         ),
         None => None,
     };
-    let cwd = match writer.as_ref() {
+    let source = match writer.as_ref() {
         Some(writer) => writer.worktree.path().to_owned(),
         None => source_cwd(registry, task)?,
+    };
+    let isolated = writer.is_none() && task.access.source_root.is_some();
+    let cwd = if isolated {
+        super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
+        super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
+    } else {
+        source.clone()
     };
     // Status is evidence for both the brief and a source refusal. Failure to
     // collect it must never masquerade as a clean predecessor worktree.
@@ -579,8 +586,8 @@ pub(super) fn prepare_candidates(
         .base
         .as_deref()
         .map(|base| match task.head.as_deref() {
-            Some(head) => run::GitContext::capture_at(&git, &cwd, base, head),
-            None => run::GitContext::capture(&git, &cwd, base),
+            Some(head) => run::GitContext::capture_at(&git, &source, base, head),
+            None => run::GitContext::capture(&git, &source, base),
         })
         .transpose()?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
@@ -1370,10 +1377,23 @@ pub(super) fn prepare_candidates(
                     )
                 })
                 .map_err(|error| error.to_string()),
-            None => read_only_plan(roots, project_id, &cwd, &git, request).and_then(|planned| {
-                require_source_head(task, planned.1)?;
-                Ok(planned)
-            }),
+            None => read_only_plan(roots, project_id, &source, &git, request, isolated).and_then(
+                |mut planned| {
+                    if isolated {
+                        planned.1 = Some(
+                            task.head
+                                .as_deref()
+                                .ok_or("graph source head missing")?
+                                .parse()
+                                .map_err(|_| "invalid graph source head")?,
+                        );
+                        planned.3 = Some(cwd.join(".git"));
+                    } else {
+                        require_source_head(task, planned.1)?;
+                    }
+                    Ok(planned)
+                },
+            ),
         }) {
             Ok(planned) => planned,
             Err(error) => {
@@ -1608,6 +1628,13 @@ pub(super) fn prepare_candidates(
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
         spec.complete_tool_requirements(&plan, &home, &cwd);
+        if isolated {
+            super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)?;
+            super::source_tree::ensure_view_read_only(
+                &cwd,
+                &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
+            )?;
+        }
         let transcript_account = account
             .as_ref()
             .filter(|_| adapter.id() == provenant_records::Harness::Claude.spec().name)

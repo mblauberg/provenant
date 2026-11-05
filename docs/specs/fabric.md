@@ -617,16 +617,27 @@ the node becomes ready. The checkpoint retains the pinned source for replay
 and route fallback. A read-only review receives this exact subject as its
 attempt head; its own lane launch head is not a combined integration commit.
 Missing subjects fail closed rather than falling back to the current checkout.
-A read-only node bound to an upstream writer uses that writer's verified
-checkout as its working directory and read-only source root. Other pinned
-readers use the graph execution's checkout. Before each new launch the host
-reopens the registered worktree, checks its bound directory identity and
-requires its HEAD to match the pinned source; a removed, replaced or advanced
-checkout is refused. An already
-accepted operation reattaches to its original authority instead of selecting
-a new checkout. A checkout may still have uncommitted edits; readers do not
-acquire a writer lease. Graph status redacts the host checkout path while
-retaining its pinned head.
+For a read-only node bound to an upstream writer, the host verifies the
+writer's registered checkout and its recorded directory identity. Other pinned
+readers use the graph execution's verified checkout. Before launch, the host
+materialises the pinned commit into an attempt-owned source tree and gives the
+provider that tree as its working directory. Its detached Git HEAD and index
+name the pinned commit; the live checkout and its mutable refs are not granted.
+A later commit or uncommitted edit in the source checkout cannot change the
+provider's view, and an available historical commit can be reviewed after the
+checkout advances. A removed or replaced source checkout is refused; accepted
+operations reattach to their original authority. Unpinned read-only scouts keep
+the ordinary live-checkout and explicit read-root behavior. Graph status
+redacts the host checkout path and directory identity while retaining the
+pinned head.
+
+Source trees are bounded to 100,000 entries, 512 MiB total and 64 MiB per
+object; Git submodules and symlinks with absolute or parent-traversing targets are refused. A read
+root inside the source checkout is covered by the pinned view instead. A host
+read-only write exception or a broader grant overlapping the live source
+refuses this isolated launch. These refusals name the issue before the
+provider starts; reduce the source or use an explicitly scoped unpinned task
+when its access is appropriate.
 The checkpoint also pins the first resolved integration head. A synthesise
 node, or a writer whose source is that pinned commit, that has not yet
 attempted fails if the integration branch has moved, and a rerun starts a new
