@@ -11,6 +11,31 @@ fn document(version: u32, nodes: Value) -> GraphDocument {
 }
 
 #[test]
+fn admission_refuses_unenforced_required_output_fields() {
+    for key in ["required", "required_outputs"] {
+        let mut selector = json!({"node":"source", "outputs":["findings"]});
+        selector[key] = json!(["findings"]);
+        let graph = document(
+            2,
+            json!([
+            {"id":"source","prompt":"source","access":"read_only","routes":[{"alias":"senior"}]},
+            {"id":"consumer","prompt":"consumer","access":"read_only", "routes":[{"alias":"senior"}], "depends_on":["source"], "inputs":[selector]}
+            ]),
+        );
+        let error = graph
+            .admit(&crate::config::GraphLimits::default())
+            .unwrap_err();
+        assert!(error.contains("required output"), "{key}: {error}");
+        let round_trip: GraphDocument =
+            serde_json::from_value(serde_json::to_value(&graph).unwrap()).unwrap();
+        assert_eq!(
+            round_trip.nodes[1].inputs[0].extra[key],
+            json!(["findings"])
+        );
+    }
+}
+
+#[test]
 fn admission_schema_matrix() {
     let plain = json!([{"id":"n","prompt":"x","access":"read_only"}]);
     assert!(validate_schema(&document(1, plain.clone())).is_ok());

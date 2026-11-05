@@ -98,6 +98,13 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Stri
                 .iter()
                 .flat_map(|composite| &composite.exports),
         ) {
+            if input.extra.contains_key("required") || input.extra.contains_key("required_outputs")
+            {
+                return Err(format!(
+                    "node {} declares required output semantics that this runtime cannot enforce",
+                    consumer.id
+                ));
+            }
             let source_id = input.node.strip_prefix("previous.").unwrap_or(&input.node);
             let Some(source) = by_id.get(source_id) else {
                 continue;
@@ -519,6 +526,10 @@ pub(super) fn validate_flat_plan(
         }
         let mut input_nodes = std::collections::BTreeSet::new();
         for input in &node.inputs {
+            if input.extra.contains_key("required") || input.extra.contains_key("required_outputs")
+            {
+                return Err("required output semantics are not supported");
+            }
             if !node.depends_on.contains(&input.node)
                 || !input_nodes.insert(&input.node)
                 || input.outputs.is_empty()
