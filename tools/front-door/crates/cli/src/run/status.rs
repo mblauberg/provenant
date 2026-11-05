@@ -1338,11 +1338,14 @@ pub(super) fn attach_cloud_jobs(
         else {
             continue;
         };
-        let mut value = match cloud_owner::load(store, lane.attempt_id, call)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
-        {
-            Some(job) => cloud_owner::view(&job),
-            None => json!({"target": placement.target, "state": {"state": "submitting"}}),
+        let mut value = match lane.cloud_view.0.clone() {
+            Some(view) => view,
+            None => match cloud_owner::load(store, lane.attempt_id, call)
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
+            {
+                Some(job) => cloud_owner::view(&job),
+                None => json!({"target": placement.target, "state": {"state": "submitting"}}),
+            },
         };
         value["attempt_id"] = json!(lane.attempt_id);
         let state = value["state"]["state"].as_str().unwrap_or("unknown");
@@ -1352,6 +1355,9 @@ pub(super) fn attach_cloud_jobs(
             plain_text(&placement.target, usize::MAX),
             state
         ));
+        if value["stale"] == true {
+            human.push_str(" (saved state may be stale)");
+        }
         if let Some(passed) = value["passed"].as_bool() {
             human.push_str(if passed {
                 " (advisory pass)"

@@ -1774,17 +1774,6 @@ impl RunStore {
         call: &Request<'_>,
         _observer: &dyn ProcessObserver,
     ) -> Result<CancelReceipt> {
-        let record = self.record(id, call)?;
-        if self
-            .request(record.run_id, call)?
-            .tasks
-            .iter()
-            .any(|task| task.task_id == record.task_id && task.cloud.is_some())
-        {
-            return Ok(CancelReceipt::Unobservable {
-                reason: "cloud cancellation must be requested through the cloud owner; cancellation is unconfirmed".into(),
-            });
-        }
         // A child this host handed to a guardian stops through the directory,
         // scope and requester held then. The lane can rewrite the child's
         // record and launch summary, so neither decides whether or for whom
@@ -1829,6 +1818,17 @@ impl RunStore {
                 Ok(StopReceipt::Requested) => CancelReceipt::Requested,
                 Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
                 Err(reason) => CancelReceipt::Unobservable { reason },
+            });
+        }
+        let record = self.record(id, call)?;
+        if self
+            .request(record.run_id, call)?
+            .tasks
+            .iter()
+            .any(|task| task.task_id == record.task_id && task.cloud.is_some())
+        {
+            return Ok(CancelReceipt::Unobservable {
+                reason: "cloud cancellation must be requested through the cloud owner; cancellation is unconfirmed".into(),
             });
         }
         loop {

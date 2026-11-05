@@ -50,6 +50,7 @@ if args[:2] == ['cloud', 'exec']:
     with open(path, 'w') as out: json.dump(result, out)
     print('{"id":"fake-cloud-1"}')
 elif args[:2] == ['cloud', 'status']:
+    if os.path.exists(path + '.fail'): sys.exit(1)
     print('{"status":"completed"}' if os.path.exists(path + '.finish') else '{"status":"running"}')
 elif args[:2] == ['cloud', 'diff']:
     with open(path) as src: result = json.load(src)
@@ -151,9 +152,17 @@ else:
         cancel["data"]["receipts"][0]["cloud"]["state"]["state"],
         "cancellation_unconfirmed"
     );
+    fs::write(rig.root.join("fake-cloud.json.fail"), "fail")?;
+    let stale = command(&rig, &["status", &id, "--json"])?;
+    assert_eq!(code(&stale), 0, "{stale:?}");
+    let stale: Value = serde_json::from_slice(&stale.stdout.bytes)?;
+    assert_eq!(stale["data"]["cloud_jobs"][0]["stale"], true);
+    fs::remove_file(rig.root.join("fake-cloud.json.fail"))?;
     fs::write(rig.root.join("fake-cloud.json.finish"), "done")?;
-    let reconcile = command(&rig, &["reconcile", "--id", &id, "--json"])?;
-    assert_eq!(code(&reconcile), 0, "{reconcile:?}");
+    let fresh = command(&rig, &["status", &id, "--json"])?;
+    assert_eq!(code(&fresh), 0, "{fresh:?}");
+    let fresh: Value = serde_json::from_slice(&fresh.stdout.bytes)?;
+    assert_eq!(fresh["data"]["lanes"][0]["cloud_state"], "cloud_passed");
     let lanes = command(&rig, &["lanes", "--id", &id, "--json"])?;
     assert_eq!(code(&lanes), 0, "{lanes:?}");
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
@@ -225,6 +234,7 @@ else:
         &config,
         format!("{prior}\n[domains.lanes.projects.\"{project}\"]\ncloud_target = 'verify'\n"),
     )?;
+    fs::remove_file(rig.root.join("fake-cloud.json.finish"))?;
     let configured = command(
         &rig,
         &[
@@ -241,6 +251,14 @@ else:
     assert_eq!(code(&configured), 0, "{configured:?}");
     let configured: Value = serde_json::from_slice(&configured.stdout.bytes)?;
     assert_eq!(configured["data"]["cloud_jobs"][0]["target"], "verify");
+    let configured_id = configured["data"]["lanes"][0]["attempt_id"]
+        .as_str()
+        .ok_or("configured attempt")?;
+    fs::write(rig.root.join("fake-cloud.json.finish"), "done")?;
+    let observed = command(&rig, &["lanes", "--id", configured_id, "--json"])?;
+    assert_eq!(code(&observed), 0, "{observed:?}");
+    let observed: Value = serde_json::from_slice(&observed.stdout.bytes)?;
+    assert_eq!(observed["data"]["lanes"][0]["state"], "cloud_passed");
     assert_eq!(
         fs::read_to_string(rig.root.join("fake-cloud.json.count"))?,
         "2"

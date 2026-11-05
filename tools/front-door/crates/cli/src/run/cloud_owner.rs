@@ -243,8 +243,8 @@ pub(super) fn submit_installed(
         cwd: cwd.to_owned(),
         timeout: std::time::Duration::from_secs(120),
     };
-    match job.provider.as_str() {
-        "claude" => submit(
+    match provenant_records::AdapterSpec::get(&job.provider).map(|spec| spec.id) {
+        Some(provenant_records::Harness::Claude) => submit(
             &mut ClaudeCloud {
                 cli,
                 pending_cleanup: None,
@@ -255,10 +255,12 @@ pub(super) fn submit_installed(
             task,
             call,
         ),
-        "codex" => submit(&mut CodexCloud { cli }, store, id, job, task, call),
-        provider => Err(format!(
-            "cloud target {} has unsupported provider {provider}",
-            job.target
+        Some(provenant_records::Harness::Codex) => {
+            submit(&mut CodexCloud { cli }, store, id, job, task, call)
+        }
+        _ => Err(format!(
+            "cloud target {} has unsupported provider {}",
+            job.target, job.provider
         )),
     }
 }
@@ -330,16 +332,88 @@ pub(super) fn observe_installed(
             }
         }};
     }
-    match job.provider.as_str() {
-        "claude" => observe!(ClaudeCloud {
+    match provenant_records::AdapterSpec::get(&job.provider).map(|spec| spec.id) {
+        Some(provenant_records::Harness::Claude) => observe!(ClaudeCloud {
             cli,
             pending_cleanup: None
         }),
-        "codex" => observe!(CodexCloud { cli }),
-        provider => Err(format!(
-            "cloud target {} has unsupported provider {provider}",
-            job.target
+        Some(provenant_records::Harness::Codex) => observe!(CodexCloud { cli }),
+        _ => Err(format!(
+            "cloud target {} has unsupported provider {}",
+            job.target, job.provider
         )),
+    }
+}
+
+struct ViewCli<'a> {
+    inner: provenant_providers::cloud_cli::InstalledCloudCli<'a>,
+    deadline: std::time::Instant,
+}
+
+#[allow(clippy::disallowed_methods)] // Bound real subprocess time across a provider observation.
+impl provenant_providers::cloud_cli::CloudCli for ViewCli<'_> {
+    fn run(&mut self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+        self.inner.timeout = self
+            .deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or("cloud observation timed out")?;
+        provenant_providers::cloud_cli::CloudCli::run(&mut self.inner, program, args, stdin)
+    }
+}
+
+// Read-only status observation: do not save the result or modify the run store.
+#[allow(clippy::disallowed_methods)] // This is the real-time provider boundary.
+fn observe_for_view(job: &RemoteJob, cwd: &std::path::Path) -> Result<RemoteJob, String> {
+    use provenant_providers::cloud::{CloudProvider, RemoteState};
+    use provenant_providers::cloud_cli::{ClaudeCloud, CodexCloud, InstalledCloudCli};
+    fn observe<P: CloudProvider<Error = String>>(
+        provider: &mut P,
+        saved: &RemoteJob,
+    ) -> Result<RemoteJob, String> {
+        let mut job = saved.clone();
+        if matches!(job.state, RemoteState::Submitting) {
+            job.remote_id = provider
+                .recover(&job)?
+                .filter(|id| !id.trim().is_empty())
+                .ok_or("cloud submission not yet found")?;
+            job.state = RemoteState::Running;
+        }
+        let mut state = provider.observe(&job)?;
+        if matches!(saved.state, RemoteState::CancellationUnconfirmed)
+            && matches!(state, RemoteState::Running | RemoteState::Unknown { .. })
+        {
+            state = RemoteState::CancellationUnconfirmed;
+        }
+        if let RemoteState::Finished { result } = &state {
+            result
+                .clone()
+                .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
+                .map_err(|error| error.to_string())?;
+        }
+        job.state = state;
+        Ok(job)
+    }
+    let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?;
+    let timeout = std::time::Duration::from_secs(3);
+    let cli = ViewCli {
+        inner: InstalledCloudCli {
+            executor: &executor,
+            cwd: cwd.to_owned(),
+            timeout,
+        },
+        deadline: std::time::Instant::now() + timeout,
+    };
+    match provenant_records::AdapterSpec::get(&job.provider).map(|spec| spec.id) {
+        Some(provenant_records::Harness::Claude) => observe(
+            &mut ClaudeCloud {
+                cli,
+                pending_cleanup: None,
+            },
+            job,
+        ),
+        Some(provenant_records::Harness::Codex) => observe(&mut CodexCloud { cli }, job),
+        _ => Err(format!("unsupported cloud provider {}", job.provider)),
     }
 }
 
@@ -384,10 +458,30 @@ pub(super) fn hydrate(
         let Some(placement) = placement(store, lane, call)? else {
             continue;
         };
-        let job = load(store, lane.attempt_id, call)?;
+        let mut job = load(store, lane.attempt_id, call)?;
+        let mut stale = false;
+        if let Some(saved) = &job
+            && !matches!(
+                saved.state,
+                RemoteState::Finished { .. }
+                    | RemoteState::Cancelled
+                    | RemoteState::SetupFailed { .. }
+            )
+        {
+            match std::env::current_dir()
+                .map_err(|error| error.to_string())
+                .and_then(|cwd| observe_for_view(saved, &cwd))
+            {
+                Ok(observed) => job = Some(observed),
+                Err(_) => stale = true,
+            }
+        }
         let mut cloud_view = job.as_ref().map(view).unwrap_or_else(
             || serde_json::json!({"target": placement.target, "state": {"state": "submitting"}}),
         );
+        if stale {
+            cloud_view["stale"] = serde_json::json!(true);
+        }
         cloud_view["attempt_id"] = serde_json::json!(lane.attempt_id);
         lane.cloud_view.0 = Some(cloud_view);
         let observation = match job {

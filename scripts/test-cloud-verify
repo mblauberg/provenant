@@ -8,6 +8,9 @@ import sys
 import tempfile
 import unittest
 
+import test_git_env
+test_git_env.isolate()
+
 
 HELPER = Path(__file__).resolve().with_name("cloud-verify")
 
