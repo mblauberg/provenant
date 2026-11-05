@@ -364,7 +364,11 @@ impl provenant_providers::cloud_cli::CloudCli for ViewCli<'_> {
 
 // Read-only status observation: do not save the result or modify the run store.
 #[allow(clippy::disallowed_methods)] // This is the real-time provider boundary.
-fn observe_for_view(job: &RemoteJob, cwd: &std::path::Path) -> Result<RemoteJob, String> {
+fn observe_for_view(
+    job: &RemoteJob,
+    cwd: &std::path::Path,
+    budget_end: std::time::Instant,
+) -> Result<RemoteJob, String> {
     use provenant_providers::cloud::{CloudProvider, RemoteState};
     use provenant_providers::cloud_cli::{ClaudeCloud, CodexCloud, InstalledCloudCli};
     fn observe<P: CloudProvider<Error = String>>(
@@ -402,7 +406,7 @@ fn observe_for_view(job: &RemoteJob, cwd: &std::path::Path) -> Result<RemoteJob,
             cwd: cwd.to_owned(),
             timeout,
         },
-        deadline: std::time::Instant::now() + timeout,
+        deadline: budget_end.min(std::time::Instant::now() + timeout),
     };
     match provenant_records::AdapterSpec::get(&job.provider).map(|spec| spec.id) {
         Some(provenant_records::Harness::Claude) => observe(
@@ -448,12 +452,20 @@ pub(super) fn view(job: &RemoteJob) -> serde_json::Value {
 }
 
 /// Decorate read-only lane projections with their saved cloud observation.
+// One status or lanes view spends a fixed total on provider calls, however many
+// jobs are unfinished. A job past the budget shows its saved state, marked stale.
+#[allow(clippy::disallowed_methods)] // This is the real-time provider boundary.
+fn view_observation_budget() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(5)
+}
+
 pub(super) fn hydrate(
     store: &provenant_run::RunStore,
     lanes: &mut [provenant_run::AttemptRecord],
     call: &provenant_run::Request<'_>,
 ) -> Result<(), String> {
     use provenant_records::run::CloudObservation as State;
+    let budget_end = view_observation_budget();
     for lane in lanes {
         let Some(placement) = placement(store, lane, call)? else {
             continue;
@@ -470,7 +482,7 @@ pub(super) fn hydrate(
         {
             match std::env::current_dir()
                 .map_err(|error| error.to_string())
-                .and_then(|cwd| observe_for_view(saved, &cwd))
+                .and_then(|cwd| observe_for_view(saved, &cwd, budget_end))
             {
                 Ok(observed) => job = Some(observed),
                 Err(_) => stale = true,
