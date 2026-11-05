@@ -1002,11 +1002,11 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     assert!(assess_recovered(&Registry::default())?.retry.is_some());
     const NOW: i64 = 1_800_000_000;
     let assess_at = |record: &run::AttemptRecord,
-                     _task: &run::TaskRequest,
+                     task: &run::TaskRequest,
                      decoded: &run::Decoded,
                      attempt: u64,
                      _others: bool| {
-        assess_settlement_retry(&config, record, decoded, attempt, NOW, false)
+        assess_settlement_retry(&config, task, record, decoded, attempt, NOW, false)
     };
     let assess = |task: &run::TaskRequest, decoded: &run::Decoded, attempt: u64, others: bool| {
         assess_at(&record, task, decoded, attempt, others)
@@ -1056,42 +1056,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     }];
     assert!(assess(&fallback, &sessionless, 1, false).retry.is_none());
     fallback.access.write_roots.push(temp.path().to_owned());
-<<<<<<< HEAD
-    let writer = assess(&fallback, &sessionless, 1, false)
-        .retry
-        .ok_or("writer")?;
-    assert_eq!(writer.route, fallback.route);
-    assert!(writer.instruction.contains("git status"));
-    assert!(writer.instruction.contains("already pushed"));
-    // The settlement assessor cannot establish the extra graph writer safety
-    // evidence. It must not redraw an alias until the graph has checked it.
-    fallback.context = Some(provenant_records::run::WorkContext {
-        graph_id: Some("graph".into()),
-        node_id: Some("writer".into()),
-        ..Default::default()
-    });
-    let graph_writer = assess(&fallback, &sessionless, 1, false);
-    assert_eq!(graph_writer.cause, Some(run::PolicyCause::Capacity));
-    assert!(graph_writer.retry.is_none());
-    let mut separated = fallback.clone();
-    separated.route = run::RequestedRoute::Review {
-        extra: Default::default(),
-        name: "implement".into(),
-        effort: None,
-        excluded_families: vec!["other".into()],
-        distinct_families: true,
-        require_distinct: true,
-    };
-    assert!(assess(&separated, &sessionless, 1, false).retry.is_none());
-    separated.access.write_roots.clear();
-    assert!(assess(&separated, &sessionless, 1, false).retry.is_none());
-    assert!(assess(&fallback, &capacity, 1, false).retry.unwrap().resume);
-    fallback.access.write_roots.clear();
-    assert!(assess(&fallback, &sessionless, 1, false).retry.is_some());
-    // Other model failures are not capacity.
-=======
     assert!(assess(&fallback, &sessionless, 1, false).retry.is_none());
->>>>>>> origin/main
     let unavailable = decoded(
         run::Outcome::ModelUnavailable,
         Some("thread"),
@@ -1103,110 +1068,24 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         None,
         "You've hit your weekly limit",
     );
-<<<<<<< HEAD
-    fallback.access.write_roots.push(temp.path().to_owned());
-    let graph_writer_quota = assess(&fallback, &quota, 1, true);
-    assert_eq!(graph_writer_quota.cause, Some(run::PolicyCause::Quota));
-    assert!(graph_writer_quota.retry.is_none());
-    // A named route on its only account, or every other account spent,
-    // has nowhere to go: a redraw could reach the spent account again
-    // through another model.
-    assert!(assess(&task, &quota, 1, false).retry.is_none());
-    let spent = assess(&task, &quota, 1, true);
-    let retry = spent.retry.ok_or("quota retry")?;
-    assert!(!retry.resume && retry.not_before_unix_seconds.is_none());
-    // It keeps the applied model, so admission refuses the spent account
-    // and resolution falls through to another for that model.
-=======
     assert!(assess(&task, &quota, 1, true).retry.is_none());
-    let recovery = assess_settlement_retry(&config, &record, &quota, 1, NOW, true)
+    let recovery = assess_settlement_retry(&config, &task, &record, &quota, 1, NOW, true)
         .retry
         .ok_or("verified handoff continuation")?;
     assert!(!recovery.resume);
->>>>>>> origin/main
     assert!(
         matches!(&recovery.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
     );
     let mut pinned = task.clone();
     pinned.account = Some("work".into());
     assert!(assess(&pinned, &quota, 1, true).retry.is_none());
-<<<<<<< HEAD
-    let mut exact = task.clone();
-    exact.route = input.request.tasks[0].route.clone();
-    assert!(assess(&exact, &quota, 1, false).retry.is_none());
-    assert!(
-        matches!(&assess(&exact, &quota, 1, true).retry.ok_or("exact")?.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
-    );
-    exact.account = Some("work".into());
-    assert!(assess(&exact, &quota, 1, true).retry.is_none());
-    let mut graph_reader = task.clone();
-    graph_reader.context = Some(provenant_records::run::WorkContext {
-        graph_id: Some("graph".into()),
-        node_id: Some("reader".into()),
-        ..Default::default()
-    });
-    for outcome in [
-        run::Outcome::QuotaLimited,
-        run::Outcome::RateLimited,
-        run::Outcome::AuthRequired,
-        run::Outcome::ModelUnavailable,
-    ] {
-        let refused = decoded(outcome, None, "refused");
-        let retry = assess(&graph_reader, &refused, 1, false)
-            .retry
-            .ok_or("graph alias redraw")?;
-        assert_eq!(retry.route, graph_reader.route);
-        assert!(!retry.resume);
-        assert_eq!(retry.max_attempts, 3);
-        assert!(assess(&graph_reader, &refused, 3, true).retry.is_none());
-    }
-    for outcome in [
-        run::Outcome::Failed,
-        run::Outcome::ReviewRequired,
-        run::Outcome::Lost,
-        run::Outcome::Unsettled,
-    ] {
-        assert!(
-            assess(
-                &graph_reader,
-                &decoded(outcome, None, "uncertain or task failure"),
-                1,
-                true
-            )
-            .retry
-            .is_none()
-        );
-    }
-    graph_reader
-        .profile
-        .overrides
-        .push("domains.routing.settlement_retries=0".into());
-    graph_reader.profile.knobs.insert(
-        "domains.routing.settlement_retries".into(),
-        serde_json::json!(0),
-    );
-    assert!(assess(&graph_reader, &quota, 1, true).retry.is_none());
-    graph_reader.profile.knobs.insert(
-        "domains.routing.settlement_retries".into(),
-        serde_json::json!(1),
-    );
-    assert_eq!(
-        assess(&graph_reader, &quota, 1, true)
-            .retry
-            .unwrap()
-            .max_attempts,
-        2
-    );
-    assert!(assess(&graph_reader, &quota, 2, true).retry.is_none());
-=======
->>>>>>> origin/main
     // Zero retries turns the behaviour off.
     let off = provenant_routing::RoutingConfig {
         settlement_retries: 0,
         ..Default::default()
     };
     assert!(
-        assess_settlement_retry(&off, &record, &quota, 1, NOW, false)
+        assess_settlement_retry(&off, &task, &record, &quota, 1, NOW, false)
             .retry
             .is_none()
     );
@@ -1218,7 +1097,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         retry_delay_ceiling_seconds: 7_200,
         ..Default::default()
     };
-    let capped = assess_settlement_retry(&tuned, &record, &capacity, 4, NOW, false)
+    let capped = assess_settlement_retry(&tuned, &task, &record, &capacity, 4, NOW, false)
         .retry
         .ok_or("tuned retry")?;
     assert_eq!(capped.max_attempts, 6);
@@ -1227,7 +1106,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         retry_delay_ceiling_seconds: 45,
         ..tuned
     };
-    let ceiled = assess_settlement_retry(&ceiling, &record, &capacity, 1, NOW, false)
+    let ceiled = assess_settlement_retry(&ceiling, &task, &record, &capacity, 1, NOW, false)
         .retry
         .ok_or("ceiled retry")?;
     assert_eq!(wait(&ceiled), Some(45));
@@ -6555,7 +6434,6 @@ fn wait_follows_a_policy_chain_to_the_ceiling_reading_state_before_tail() {
 }
 
 #[test]
-<<<<<<< HEAD
 fn run_explain_reports_admission_timeout_with_visible_origin()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -7189,7 +7067,8 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
     )??;
     Ok(())
 }
-=======
+
+#[test]
 fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn std::error::Error>> {
     use run::Providers;
     let fixtures: &[(&str, &[u8])] = &[
@@ -7580,4 +7459,3 @@ fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
             .contains("TOKEN_SENTINEL")
     );
 }
->>>>>>> origin/main

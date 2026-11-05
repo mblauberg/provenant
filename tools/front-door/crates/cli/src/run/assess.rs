@@ -19,16 +19,7 @@ pub(super) fn assess_model_result(
     handoff: Option<&provenant_records::handoff::Handoff>,
     policy_attempt: u64,
 ) -> Result<run::ResultAssessment, String> {
-<<<<<<< HEAD
     if failed_result_check(policy, decoded) {
-=======
-    let failed_check = !policy.result_valid(&decoded.result);
-    if policy.result.check == Some(true)
-        && decoded.outcome == run::Outcome::Succeeded
-        && decoded.complete
-        && failed_check
-    {
->>>>>>> origin/main
         let retry = if !run::Service::has_writes(task.writer.is_some(), &task.access.write_roots)
             && record.continuation.as_deref() != Some("policy_fallback")
         {
@@ -171,6 +162,7 @@ pub(super) fn unspent_alternative<'k>(
 
 pub(super) fn assess_settlement_retry(
     config: &provenant_routing::RoutingConfig,
+    task: &run::TaskRequest,
     record: &run::AttemptRecord,
     decoded: &run::Decoded,
     policy_attempt: u64,
@@ -197,27 +189,8 @@ pub(super) fn assess_settlement_retry(
     let max_attempts = allowance + 1;
     let capacity = decoded.outcome == run::Outcome::ModelUnavailable
         && decoded.reason.as_deref().is_some_and(capacity_reason);
-    let quota = matches!(
-        decoded.outcome,
-        run::Outcome::QuotaLimited | run::Outcome::RateLimited
-    );
-    let graph_pool = task
-        .context
-        .as_ref()
-        .is_some_and(|context| context.graph_id.is_some())
-        && !run::Service::has_writes(task.writer.is_some(), &task.access.write_roots)
-        && task.account.is_none()
-        && provenant_routing::may_redraw(
-            !matches!(task.route, run::RequestedRoute::Named { .. }),
-            matches!(task.route, run::RequestedRoute::Review { .. }),
-            provenant_routing::RefusalKind::Infrastructure,
-        );
-    let unavailable = graph_pool
-        && matches!(
-            decoded.outcome,
-            run::Outcome::AuthRequired | run::Outcome::ModelUnavailable
-        );
-    if !(capacity || quota || unavailable) {
+    let quota = decoded.outcome == run::Outcome::QuotaLimited;
+    if !(capacity || quota) {
         let cause = record.applied_route.as_ref().and_then(|route| {
             let model = ModelId::parse(route.model.as_deref()?).ok()?;
             let now = WallTime::from_unix_seconds(now_unix_seconds).ok()?;
@@ -234,12 +207,8 @@ pub(super) fn assess_settlement_retry(
     }
     let typed_cause = if capacity {
         run::PolicyCause::Capacity
-    } else if quota {
-        run::PolicyCause::Quota
-    } else if decoded.outcome == run::Outcome::AuthRequired {
-        run::PolicyCause::AuthRequired
     } else {
-        run::PolicyCause::AdapterUnavailable
+        run::PolicyCause::Quota
     };
     let Some(route) = record.applied_route.as_ref() else {
         return run::ResultAssessment {
@@ -262,84 +231,33 @@ pub(super) fn assess_settlement_retry(
             .as_deref()
             .and_then(provenant_records::AdapterSpec::get)
             .is_some_and(|spec| spec.launch.resume);
-<<<<<<< HEAD
-    // A graph writer may only redraw after the graph has verified released
-    // custody, its pinned source, a clean checkout and no publication. The
-    // settlement assessor has none of that evidence, so it must not redraw an
-    // alias or switch accounts on its own. Family-constrained routes must not
-    // be redrawn either.
-    // Session continuation stays on the applied model.
-    if task
-        .context
-        .as_ref()
-        .is_some_and(|context| context.graph_id.is_some())
-        && ((quota && writes)
-            || (capacity
-                && !session
-                && (matches!(task.route, run::RequestedRoute::Review { .. })
-                    || (writes && matches!(task.route, run::RequestedRoute::Named { .. })))))
-    {
+    if !(capacity && session || quota && quota_handoff_recovery) {
         return run::ResultAssessment {
             cause: Some(typed_cause),
             ..Default::default()
         };
     }
-    let (route_choice, resume) = if graph_pool {
-        (Some(task.route.clone()), false)
-    } else if capacity && session {
-        (applied(), true)
-    } else if quota {
-        // A pinned account is the caller's choice. Otherwise another unspent
-        // account must serve the applied model, and the retry keeps that model
-        // so a redraw cannot reach the spent account through another model;
-        // admission then refuses the spent account and resolution falls through.
-        let elsewhere = task.account.is_none()
-            && route
-                .provider
-                .as_deref()
-                .zip(route.account_key.as_deref())
-                .is_some_and(|(adapter, key)| other_account(adapter, key));
-        (elsewhere.then(applied).flatten(), false)
-    } else if !writes && let Some(fallback) = task.fallback.first() {
-        let fallback = fallback
-            .model
-=======
-    if !(capacity && session || quota && quota_handoff_recovery) {
-        return Default::default();
-    }
     let Some(route_choice) =
         route
             .provider
->>>>>>> origin/main
             .clone()
             .zip(route.model.clone())
             .map(|(provider, model)| run::RequestedRoute::Model {
                 extra: Default::default(),
                 provider,
                 model,
-<<<<<<< HEAD
-                effort: fallback.effort.clone(),
-            });
-        (fallback, false)
-    } else {
-        (Some(task.route.clone()), false)
-    };
-    let Some(route_choice) = route_choice else {
+                effort: route.effort.clone(),
+            })
+    else {
         return run::ResultAssessment {
             cause: Some(typed_cause),
             ..Default::default()
         };
-=======
-                effort: route.effort.clone(),
-            })
-    else {
-        return Default::default();
->>>>>>> origin/main
     };
     let resume = capacity;
     // Linear backoff with up to a quarter more, drawn from the attempt ID so
     // lanes that hit the same capacity error do not retry in step.
-    let backoff_seconds = if capacity && !graph_pool {
+    let backoff_seconds = if capacity {
         let base = config.capacity_retry_seconds.saturating_mul(policy_attempt);
         let draw = u64::from_le_bytes(
             record.attempt_id.as_bytes()[..8]
@@ -352,16 +270,6 @@ pub(super) fn assess_settlement_retry(
     } else {
         0
     };
-<<<<<<< HEAD
-    let cause = if capacity {
-        "the provider was at capacity"
-    } else if quota {
-        "the account's usage limit was reached"
-    } else {
-        "the provider was unavailable"
-    };
-=======
->>>>>>> origin/main
     let instruction = if resume {
         "This session stopped because the provider was at capacity. Continue the original task from where it stopped and complete its verification."
     } else {
@@ -506,24 +414,24 @@ mod tests {
         decoded.outcome = run::Outcome::QuotaLimited;
         let decision = assess_settlement_retry(
             &provenant_routing::RoutingConfig::default(),
-            |_, _| false,
             task,
             &record,
             &decoded,
             1,
             0,
+            false,
         );
         assert_eq!(decision.cause, Some(run::PolicyCause::Quota));
         decoded.outcome = run::Outcome::ModelUnavailable;
         decoded.reason = Some("provider capacity: busy".into());
         let decision = assess_settlement_retry(
             &provenant_routing::RoutingConfig::default(),
-            |_, _| false,
             task,
             &record,
             &decoded,
             1,
             0,
+            false,
         );
         assert_eq!(decision.cause, Some(run::PolicyCause::Capacity));
         assert_eq!(

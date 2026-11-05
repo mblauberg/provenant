@@ -377,6 +377,7 @@ impl run::Providers for Registry<'_> {
             };
         Ok(assess_settlement_retry(
             &routing,
+            task,
             record,
             decoded,
             policy_attempt,
