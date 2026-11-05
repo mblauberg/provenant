@@ -98,10 +98,8 @@ available. Git-locked or prunable entries remain protected. An incomplete
 native census alone does not identify a live writer; ordinary removal can
 proceed with a free writer lock, while landing requires a complete census.
 
-Legacy `identity.json` and registry reservation files do not gate membership,
-listing, cache collection or removal. Git confirms the common directory and
-backlink on each operation; persistent schema, inode, device and path pins are
-not a registry. Per-attempt supervisor records still bind launched work and
+Git confirms the common directory and backlink on each operation; persistent
+schema, inode, device and path pins are not a registry. Per-attempt supervisor records still bind launched work and
 support crash recovery. These do not create worktree membership.
 
 `worktree list` prints one terse line per tree. The path is a plain path,
@@ -242,8 +240,8 @@ version and host triple match the lane's toolchain. Cargo fingerprints decide
 which units can be reused when source, profile, features or flags differ. The
 host probes an installed release compiler directly, without executing a toolchain
 or binary from the writer checkout. Verification requires an explicit fixed
-release pin in `tools/front-door/rust-toolchain.toml` or the legacy
-`rust-toolchain`, an unambiguous host installation, and no rustup overrides or
+release pin in `tools/front-door/rust-toolchain.toml`, an unambiguous host
+installation, and no rustup overrides or
 lane environment overrides. The lane's PATH must resolve to the protected host
 rustup shim and the lane must not be able to write its toolchain. The one
 writable PATH entry allowed is the host's own `<scratch>/bin` (the build-slot
