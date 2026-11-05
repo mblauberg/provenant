@@ -2687,7 +2687,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
-| `--worktree` | `{"description": "Writer worktree; local run creates an owned worktree for a missing branch name", "name": "worktree"}` |
+| `--worktree` | `{"description": "Checkout to read or write; a writer can create an owned worktree for a missing branch name", "name": "worktree"}` |
 | `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
 | `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
 | `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
