@@ -102,8 +102,13 @@ reason = "The stored prompt must match its recorded length and digest before a h
 
 [[guard]]
 site = "run/src/artifacts.rs#RunStore::artifact_bytes"
+boundary = "object_integrity"
+reason = "At launch the validated attempt record already limits its recorded prompt to RECORD_LIMIT; a file exceeding that read bound cannot match the recorded length. Length and digest are then verified before use."
+
+[[guard]]
+site = "run/src/artifacts.rs#RunStore::artifact_bytes"
 boundary = "unclassified"
-reason = "The fixed prompt artifact byte limit can refuse before the digest check and needs a configurable default or a safe warning fallback."
+reason = "Filesystem failures while reopening an otherwise valid prompt require a caller-specific fallback or classification."
 
 [[guard]]
 site = "run/src/launch.rs#start_inner"
