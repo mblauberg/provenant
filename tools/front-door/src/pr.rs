@@ -204,12 +204,27 @@ fn pull_for_branch_with(
         head: RestBranch,
         base: RestBranch,
     }
+    #[derive(Deserialize)]
+    struct RepositoryOwner {
+        owner: RestUser,
+    }
+    let repository: RepositoryOwner =
+        serde_json::from_slice(&read(&["gh", "api", "repos/{owner}/{repo}"])?)?;
+    let head_filter = format!("head={}:{}", repository.owner.login, branch);
     let bytes = read(&[
         "gh",
         "api",
+        "--method",
+        "GET",
         "--paginate",
         "--slurp",
-        "repos/{owner}/{repo}/pulls?state=all&per_page=100",
+        "repos/{owner}/{repo}/pulls",
+        "-f",
+        "state=all",
+        "-f",
+        "per_page=100",
+        "-f",
+        &head_filter,
     ])?;
     let mut matching: Vec<PullRequest> = serde_json::from_slice::<Vec<Vec<PullRequest>>>(&bytes)?
         .into_iter()
@@ -407,6 +422,12 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
 #[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
 mod branch_pull_tests {
     use super::*;
+    mod rest_calls {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/rest_calls.rs"
+        ));
+    }
 
     const HEAD: &str = "1111111111111111111111111111111111111111";
     const OTHER: &str = "2222222222222222222222222222222222222222";
@@ -414,14 +435,27 @@ mod branch_pull_tests {
     fn select(pulls: serde_json::Value) -> Result<BranchPull> {
         pull_for_branch_with("123", HEAD.parse().unwrap(), &|argv| {
             // `gh pr view 123` would select pull request #123, not branch 123.
+            assert!(rest_calls::rest_only(&argv[1..].join(" ")));
+            assert!(!rest_calls::rest_only("pr list --head 123"));
+            if argv == ["gh", "api", "repos/{owner}/{repo}"] {
+                return Ok(br#"{"owner":{"login":"owner"}}"#.to_vec());
+            }
             assert_eq!(
                 argv,
                 [
                     "gh",
                     "api",
+                    "--method",
+                    "GET",
                     "--paginate",
                     "--slurp",
-                    "repos/{owner}/{repo}/pulls?state=all&per_page=100"
+                    "repos/{owner}/{repo}/pulls",
+                    "-f",
+                    "state=all",
+                    "-f",
+                    "per_page=100",
+                    "-f",
+                    "head=owner:123",
                 ]
             );
             Ok(serde_json::to_vec(&serde_json::json!([pulls]))?)
@@ -430,6 +464,24 @@ mod branch_pull_tests {
 
     fn pull(number: u64, state: &str, head: &str, cross: bool) -> serde_json::Value {
         serde_json::json!({"number":number, "state":if state == "OPEN" { "open" } else { "closed" }, "merged_at":if state == "MERGED" { Some("2020") } else { None }, "head":{"sha":head,"ref":"123","repo":{"full_name":if cross { "fork/repo" } else { "owner/repo" }}}, "base":{"sha":head,"ref":"main","repo":{"full_name":"owner/repo"}}})
+    }
+
+    #[test]
+    fn branch_lookup_passes_the_head_filter_as_a_single_argument() {
+        let result = pull_for_branch_with("feature/a&b", HEAD.parse().unwrap(), &|argv| {
+            assert!(rest_calls::rest_only(&argv[1..].join(" ")));
+            if argv == ["gh", "api", "repos/{owner}/{repo}"] {
+                return Ok(br#"{"owner":{"login":"owner"}}"#.to_vec());
+            }
+            assert_eq!(argv.last(), Some(&"head=owner:feature/a&b"));
+            Ok(b"[[]]".to_vec())
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no same-repository")
+        );
     }
 
     #[test]

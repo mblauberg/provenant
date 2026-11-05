@@ -1089,6 +1089,13 @@ mod tests {
     use serde_json::json;
     use std::process::Command;
 
+    mod rest_calls {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/rest_calls.rs"
+        ));
+    }
+
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = provenant_os::fixture::git_command()
             .args(args)
@@ -1171,6 +1178,12 @@ mod tests {
             );
             let mut forge = GhForge::new(&project);
             let ssh = forge.repository_identity().unwrap();
+            const HEAD: &str = "1111111111111111111111111111111111111111";
+            assert_eq!(forge.pull_request(7).unwrap().head, HEAD);
+            assert!(forge.approvals(7, HEAD).unwrap().is_empty());
+            assert_eq!(forge.checks(HEAD).unwrap().len(), 1);
+            assert_eq!(forge.merge(7, HEAD, MergeMethod::Merge).unwrap(), HEAD);
+
             git(
                 &project,
                 &[
@@ -1189,6 +1202,18 @@ mod tests {
                 42
             );
             let calls = std::fs::read_to_string(project.join("calls")).unwrap();
+            let landing_calls = calls
+                .split("api repos/{owner}/{repo}/pulls --method POST")
+                .next()
+                .unwrap();
+            assert!(rest_calls::rest_only(landing_calls), "{landing_calls}");
+            assert!(!rest_calls::rest_only(&format!(
+                "{landing_calls}api graphql -f query=x\n"
+            )));
+            assert!(!rest_calls::rest_only(&format!(
+                "{landing_calls}pr list --head branch\n"
+            )));
+            assert!(calls.contains(&format!("sha={HEAD}")), "{calls}");
             assert_eq!(
                 calls
                     .lines()
@@ -1203,6 +1228,12 @@ mod tests {
         std::fs::write(&gh, r##"#!/bin/sh
 echo "$*" >> calls
 case "$*" in
+  *"--method PUT"*) echo '{"merged":true,"sha":"1111111111111111111111111111111111111111"}' ;;
+  *"check-runs?"*) echo '[{"total_count":0,"check_runs":[]}]' ;;
+  *"statuses?"*) echo '[[]]' ;;
+  *"git/commits/"*) echo '{"tree":{"sha":"2222222222222222222222222222222222222222"}}' ;;
+  *"pulls/7/reviews"*) echo '[[]]' ;;
+  *"pulls/7"*) echo '{"state":"open","head":{"sha":"1111111111111111111111111111111111111111","ref":"feature","repo":{"full_name":"Owner/Repo"}},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main","repo":{"full_name":"Owner/Repo"}},"mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"fixture"}' ;;
   *"--method POST"*) touch posted; echo 'HTTP 422 duplicate' >&2; exit 1 ;;
   *"--paginate"*)
     if test -e posted; then
