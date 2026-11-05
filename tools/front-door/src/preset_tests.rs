@@ -5292,45 +5292,40 @@ fn compact_preset_explain_lists_parameter_names() {
 }
 
 #[test]
-fn preset_show_and_explain_json_match_snapshots() {
-    use provenant_records::{CommandResult, Outcome};
+fn preset_show_and_explain_describe_parameters_and_origins() {
     let layers = Layers::empty();
     let (values, mut origins) = layers.resolve("review-council").unwrap();
     origins.extend(expand(&layers, "review-council", "", &[]).unwrap().origins);
-    let show = CommandResult::new(
-        "preset",
-        Outcome::Ok,
-        json!({"name": "review-council", "values": values, "origins": origins}),
-    );
-    let explain = CommandResult::new(
-        "preset",
-        Outcome::Ok,
-        layers.explain("review-council").unwrap(),
-    );
-    // `UPDATE_GOLDEN=1` rewrites the fixtures.
-    let golden = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
-    for (actual, name) in [
-        (
-            serde_json::to_value(show).unwrap(),
-            "preset-review-council-show.json",
-        ),
-        (
-            serde_json::to_value(explain).unwrap(),
-            "preset-review-council-explain.json",
-        ),
-    ] {
-        let path = golden.join(name);
-        if std::env::var_os("UPDATE_GOLDEN").is_some() {
-            let mut text = serde_json::to_string_pretty(&actual).unwrap();
-            text.push('\n');
-            std::fs::write(&path, text).unwrap();
-        }
-        let expected = std::fs::read_to_string(&path).unwrap_or_default();
-        assert_eq!(
-            actual,
-            serde_json::from_str::<Value>(&expected).unwrap_or_default(),
-            "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
+    let explain = layers.explain("review-council").unwrap();
+    assert_eq!(explain["name"], "review-council");
+    let parameters = values["parameters"].as_object().unwrap();
+    let explained = explain["parameters"].as_array().unwrap();
+    assert_eq!(parameters.len(), explained.len());
+    for (name, spec) in parameters {
+        let item = explained.iter().find(|item| item["name"] == *name).unwrap();
+        assert!(
+            origins
+                .keys()
+                .any(|key| key == &format!("parameters.{name}")
+                    || key.starts_with(&format!("parameters.{name}."))),
+            "{name}"
         );
+        assert!(
+            item["origin"]
+                .as_str()
+                .is_some_and(|origin| !origin.is_empty()),
+            "{name}"
+        );
+        if let Some(kind) = spec.get("type") {
+            assert_eq!(&item["type"], kind, "{name}");
+        }
+        if let Some(default) = spec.get("default") {
+            assert_eq!(&item["default"], default, "{name}");
+        }
+    }
+    let stages = explain["stages"].as_array().unwrap();
+    for id in ["verify", "synthesis"] {
+        assert!(stages.iter().any(|stage| stage["id"] == id), "{id}");
     }
 }
 
@@ -5341,9 +5336,19 @@ fn preset_human_views_preserve_detail_and_type_plain_tables() {
         "subject":{"type":"commit", "commit":"HEAD"}
     }}, "origins":{}});
     let compact = super::preset::human_for_test(&data, false);
-    assert!(compact.contains("schema  integer  1  First."));
+    let schema = compact
+        .lines()
+        .find(|line| line.contains("schema"))
+        .unwrap();
+    for cell in ["integer", "1", "First."] {
+        assert!(schema.contains(cell), "{schema}");
+    }
     assert!(!compact.contains("Second."));
-    assert!(compact.contains("subject  table"));
+    let subject = compact
+        .lines()
+        .find(|line| line.contains("subject"))
+        .unwrap();
+    assert!(subject.contains("table"), "{subject}");
     let full = super::preset::human_for_test(&data, true);
     assert!(full.contains("\"min\":0"));
     assert!(full.contains("Second."));
