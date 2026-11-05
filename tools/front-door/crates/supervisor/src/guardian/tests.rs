@@ -2,6 +2,30 @@ use super::*;
 use crate::census::{Census, ProcessFact};
 use std::collections::BTreeSet;
 
+#[test]
+fn census_fallback_is_recorded_once_even_if_the_source_keeps_failing() {
+    let mut recorded = false;
+    assert_eq!(super::census_fallback_notice(false, &mut recorded), None);
+    assert!(super::census_fallback_notice(true, &mut recorded).is_some());
+    assert_eq!(super::census_fallback_notice(true, &mut recorded), None);
+}
+
+#[test]
+fn event_burst_has_bounded_walks_and_failures_request_full_scan() {
+    let mut last = None;
+    let mut walks = 0;
+    for now in 0..1_000 {
+        if super::census_walk_due(now, last) {
+            last = Some(now);
+            walks += 1;
+        }
+    }
+    assert!(walks > 0 && walks < 100, "{walks} walks for 1000 events");
+    assert!(super::census_full_due(101, Some(100), true));
+    assert!(!super::census_full_due(101, Some(100), false));
+    assert!(super::census_full_due(u64::MAX, Some(100), false));
+}
+
 #[cfg(all(feature = "fixture", target_os = "macos"))]
 #[test]
 #[allow(clippy::disallowed_methods)]
@@ -653,6 +677,63 @@ fn wait_for_guardian(guardian: &mut crate::fixture::ChildGuard) -> std::process:
 }
 
 #[cfg(all(feature = "fixture", target_os = "macos"))]
+struct RemoveWriterEvidence;
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+impl ExitPublisher for RemoveWriterEvidence {
+    fn commit_reservation(&self, directory: &Directory, _: &[u8]) -> Result<Publication> {
+        let path = directory.current_path()?;
+        std::fs::remove_dir_all(&path).map_err(|source| provenant_os::fs::FsError::Io {
+            operation: "remove fixture writer evidence",
+            path: path.clone(),
+            source,
+        })?;
+        Err(CustodyError::Io(io::Error::from(io::ErrorKind::NotFound)))
+    }
+
+    fn publish(&self, _: &Directory, _: &[u8]) -> Result<Publication> {
+        Err(CustodyError::InvalidRecord)
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+fn guardian_retires_after_unlinked_writer_evidence_and_quiescence() {
+    const CHILD_ARGS: &str = "PROVENANT_TEST_GUARDIAN_UNLINKED_WRITER_FDS";
+    if let Some(args) = child_descriptors(CHILD_ARGS) {
+        let observer = crate::fixture::RecordedBootObserver;
+        let error = supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&RemoveWriterEvidence),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, CustodyError::Io(error) if error.kind() == io::ErrorKind::NotFound)
+        );
+        return;
+    }
+    let (_root, mut guardian, writer_path, attempt_path, scope) = spawn_missing_attempt_guardian(
+        "guardian::tests::guardian_retires_after_unlinked_writer_evidence_and_quiescence",
+        CHILD_ARGS,
+        vec![b"/usr/bin/true".to_vec()],
+    );
+    assert!(wait_for_guardian(&mut guardian).success());
+    assert!(!writer_path.join(scope.attempt.to_string()).exists());
+    assert!(!attempt_path.join("process-exit.json").exists());
+    let writer_dir = Directory::open_anchor(&writer_path).unwrap();
+    let _lease = writer_dir
+        .try_lock(
+            OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )
+        .unwrap();
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
 #[test]
 #[allow(clippy::disallowed_methods)]
 fn guardian_missing_attempt_after_rename_stops_publication_and_settlement() {
@@ -1196,6 +1277,52 @@ fn census(facts: Vec<ProcessFact>, complete: bool) -> Census {
         .collect();
     Census::from_observations(facts, [], absent, complete, false, 100).unwrap()
 }
+#[test]
+fn unlinked_writer_retirement_requires_the_original_lock_to_be_free() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = Directory::open_anchor(root.path()).unwrap();
+    let lease = directory
+        .try_lock(
+            OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )
+        .unwrap();
+    let expected = lease.metadata().unwrap();
+    let inherited = lease.handoff_file().try_clone().unwrap();
+    let probe = directory.open_read(OsStr::new("writer.lock")).unwrap();
+    let other = directory.open_read(OsStr::new("writer.lock")).unwrap();
+    let mut writer = Some(lease);
+    assert!(!try_unlinked_writer_lease(&probe, expected, &mut writer));
+    assert!(writer.is_some(), "a linked entry must retain custody");
+    std::fs::rename(root.path().join("writer.lock"), root.path().join("renamed")).unwrap();
+    assert!(!try_unlinked_writer_lease(&probe, expected, &mut writer));
+    assert!(writer.is_some(), "a renamed inode remains linked");
+    std::fs::remove_file(root.path().join("renamed")).unwrap();
+    let mut different = expected;
+    different.inode = different.inode.wrapping_add(1);
+    assert!(!try_unlinked_writer_lease(&probe, different, &mut writer));
+    assert!(writer.is_some(), "a different inode cannot prove custody");
+    assert!(!try_unlinked_writer_lease(&probe, expected, &mut writer));
+    assert!(writer.is_none());
+    drop(inherited);
+    assert!(try_unlinked_writer_lease(&probe, expected, &mut writer));
+    assert!(
+        provenant_os::sys::fs::try_flock(
+            other.handoff_file(),
+            provenant_os::fs::LockMode::Exclusive
+        )
+        .is_err()
+    );
+    drop(probe);
+    assert!(
+        provenant_os::sys::fs::try_flock(
+            other.handoff_file(),
+            provenant_os::fs::LockMode::Exclusive
+        )
+        .is_ok()
+    );
+}
+
 #[test]
 fn fresh_writer_lease_refuses_a_replaced_or_unlinked_original() {
     for unlink in [false, true] {

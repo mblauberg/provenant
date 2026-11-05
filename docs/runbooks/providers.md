@@ -509,6 +509,22 @@ push, or set an upstream with `-u`, because shared Git state is read-only. The h
 best-effort refreshes the lane branch's `origin` tracking ref at settlement;
 shared upstream configuration remains read-only.
 
+## Native lane probes
+
+The macOS native writer capability invocation runs named socket, credential,
+Git (including stash and rebase), ripgrep, Cargo, nextest, Swift, Python, shell and
+Node/pnpm probes independently and reports their failures together. It also
+removes the compiled scratch execution grant and checks that the temporary
+script fails while Python and the here-document still pass. It currently
+exercises the Claude writer profile; it is not yet a complete adapter and
+access-mode matrix.
+
+When a lane's decoded answer or captured stdout or stderr contains a path-bearing
+permission error, the result includes a bounded excerpt identifying the path whose
+access grant may be missing. The error alone does not establish which rule denied
+the operation: filesystem permissions or another sandbox may be responsible.
+Errors kept only in an unreported provider transcript are not visible there.
+
 ## General guidance
 
 Use the Rust provider source for launch behaviour. Dispatch still requires an

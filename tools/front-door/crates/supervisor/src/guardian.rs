@@ -1,7 +1,7 @@
 //! Dedicated same-binary guardian. Run composes provider decoding at this edge.
 mod cleanup;
 #[cfg(test)]
-use cleanup::{darwin_census_clear, try_writer_lease};
+use cleanup::{darwin_census_clear, try_unlinked_writer_lease, try_writer_lease};
 
 use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
 use crate::custody::*;
@@ -35,6 +35,30 @@ const TERMINAL_RETRY_MS: [u64; 4] = PRODUCTION_TERMINAL_RETRY_MS;
 
 fn retry_terminal(terminal: impl FnMut() -> bool, wait: impl FnMut(Duration)) -> bool {
     retry_terminal_with(TERMINAL_RETRY_MS, terminal, wait)
+}
+
+fn census_fallback_notice(fallback: bool, recorded: &mut bool) -> Option<&'static str> {
+    if fallback && !*recorded {
+        *recorded = true;
+        Some("process events or scoped census unavailable; using full scan")
+    } else {
+        None
+    }
+}
+
+// Bound live walks to the former 10 Hz census rate, even during fork storms.
+// A five-second backstop finds missed events; wait errors back off by one tick.
+const CENSUS_INTERVAL_MS: u64 = 100;
+const FULL_CENSUS_INTERVAL_MS: u64 = 5_000;
+const EVENT_DRAIN_BACKOFF_MS: u64 = 10;
+
+fn census_full_due(now: u64, last_full: Option<u64>, event_failure: bool) -> bool {
+    event_failure
+        || last_full.is_none_or(|last| now.saturating_sub(last) >= FULL_CENSUS_INTERVAL_MS)
+}
+
+fn census_walk_due(now: u64, last_walk: Option<u64>) -> bool {
+    last_walk.is_none_or(|last| now.saturating_sub(last) >= CENSUS_INTERVAL_MS)
 }
 
 fn retry_terminal_with(
@@ -436,6 +460,19 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let exit_publisher = None;
     #[cfg(target_os = "macos")]
     let writer_identity = inherited.writer.metadata()?;
+    // Open a separate description while the original entry is still linked.
+    // It can prove inherited descriptions are gone even if the namespace is
+    // later removed; it cannot authorise releasing or clearing the fence.
+    #[cfg(target_os = "macos")]
+    let writer_retirement_probe = inherited
+        .writer_directory
+        .open_read(OsStr::new("writer.lock"))
+        .ok()
+        .filter(|probe| {
+            probe.metadata().is_ok_and(|metadata| {
+                metadata.links == 1 && metadata.same_identity(&writer_identity)
+            })
+        });
     // Both locks and the durable pre-spawn reservation are held before ACK.
     crate::process_os::handoff::send(
         &mut inherited.channel,
@@ -470,6 +507,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         writer: Some(inherited.writer),
         #[cfg(target_os = "macos")]
         writer_identity,
+        #[cfg(target_os = "macos")]
+        writer_retirement_probe,
         _custody: Some(inherited.custody),
         guardian,
         requester: message.requester,
@@ -498,6 +537,8 @@ struct Driver<'a> {
     writer: Option<provenant_os::fs::LockGuard>,
     #[cfg(target_os = "macos")]
     writer_identity: provenant_os::fs::Metadata,
+    #[cfg(target_os = "macos")]
+    writer_retirement_probe: Option<provenant_os::fs::FileHandle>,
     _custody: Option<provenant_os::fs::LockGuard>,
     guardian: ProcessIdentity,
     requester: provenant_core::ActorId,
@@ -609,6 +650,10 @@ impl Driver<'_> {
     ) -> Result<()> {
         let mut warnings = Vec::new();
         let mut omitted_warnings = 0_u64;
+        // Keep the original inode and path even if the caller later removes
+        // its state. A rename alone must not end a publication retry.
+        let writer_evidence_identity = DirectoryIdentity::of(&self.writer_dir).ok();
+        let writer_evidence_path = self.writer_dir.current_path().ok();
         let warn = |warnings: &mut Vec<String>, omitted: &mut u64, label: &str| {
             if warnings.len() < 24 {
                 warnings.push(label.to_owned());
@@ -770,7 +815,15 @@ impl Driver<'_> {
         let mut previous_cpu_micros = None;
         let mut last_cpu_progress_ms = None;
         let mut census_warning_active = false;
-        let cleanup_complete;
+        let mut last_full_census_ms: Option<u64> = None;
+        let mut last_census_ms: Option<u64> = None;
+        let mut scoped_fallback_recorded = false;
+        let mut census_event_pending = false;
+        let mut census_event_failed = false;
+        let mut census_reactor_failed = false;
+        let mut reactor_warning_recorded = false;
+        let mut process_watch_unavailable = false;
+        let mut cleanup_complete;
         let mut drain_deadline = None;
         let mut cleanup_pending = false;
         loop {
@@ -873,6 +926,7 @@ impl Driver<'_> {
             });
             #[cfg(feature = "fixture")]
             let request = if fixture_owner_gone {
+                last_cancel_ms = Some(now);
                 Some(machine::StopReason::ExplicitCancellation)
             } else if cancel_due {
                 last_cancel_ms = Some(now);
@@ -888,13 +942,22 @@ impl Driver<'_> {
                 None
             };
             let polled_signal = match self.reactor.wait(&[], Duration::ZERO) {
-                Ok(event) => event.supervisor_signal,
+                Ok(event) => {
+                    census_event_pending |= event.process_changed;
+                    census_event_failed |= event.process_overflow;
+                    event.supervisor_signal
+                }
                 Err(_) => {
-                    warn(
-                        &mut warnings,
-                        &mut omitted_warnings,
-                        "signal observation failed",
-                    );
+                    census_event_failed = true;
+                    census_reactor_failed = true;
+                    if !reactor_warning_recorded {
+                        warn(
+                            &mut warnings,
+                            &mut omitted_warnings,
+                            "signal observation failed",
+                        );
+                        reactor_warning_recorded = true;
+                    }
                     false
                 }
             };
@@ -1080,11 +1143,65 @@ impl Driver<'_> {
             if !disk_paused || exit.is_some() || stop_reason.is_some() {
                 child.resume_builds();
             }
-            // Keep safety history at 100 ms; slowing census can miss a short
-            // lived parent before an escaped descendant changes session/group.
-            if cpu_sample_due {
-                if let Some(census) = self.refresh_census(&mut child) {
-                    census_warning_active = false;
+            // Process events wake the scoped tree and provider-group walk;
+            // a 100 ms timer also samples when no event arrives. A full scan
+            // backs it up every five seconds and is mandatory for cleanup.
+            // Failed events, overflow or a racing walk require a full scan.
+            if census_walk_due(now, last_census_ms) {
+                last_census_ms = Some(now);
+                census_event_pending = false;
+                let event_fallback =
+                    std::mem::take(&mut census_event_failed) || process_watch_unavailable;
+                let full_due = census_full_due(now, last_full_census_ms, event_fallback);
+                let (mut census, mut fallback) = if full_due {
+                    (self.refresh_census(&mut child), false)
+                } else {
+                    self.refresh_live_census(&mut child)
+                };
+                // A saturated drain is normal during a burst; only failed watches
+                // and failed scoped walks produce a fallback warning.
+                fallback |= process_watch_unavailable || std::mem::take(&mut census_reactor_failed);
+                if census.is_some() {
+                    let mut pids = std::collections::BTreeSet::from([child.id()]);
+                    pids.extend(self.history.iter().map(|identity| identity.pid));
+                    pids.extend(self.tracked.iter().map(|identity| identity.pid));
+                    pids.extend(self.protected.iter().map(|identity| identity.pid));
+                    pids.extend(self.spared.spared_identities().map(|identity| identity.pid));
+                    match self.reactor.watch_processes(&pids) {
+                        Ok((added, failures)) => {
+                            process_watch_unavailable = failures != 0;
+                            // Close the gap between observing a new process
+                            // and registering its fork filter.
+                            census_event_pending |= added;
+                        }
+                        Err(_) => process_watch_unavailable = true,
+                    }
+                    if process_watch_unavailable {
+                        if !full_due && !fallback {
+                            census = self.refresh_census(&mut child);
+                        }
+                        fallback = true;
+                    }
+                }
+                if let Some(notice) =
+                    census_fallback_notice(fallback, &mut scoped_fallback_recorded)
+                {
+                    warn(&mut warnings, &mut omitted_warnings, notice);
+                }
+                if census.is_some() && (full_due || fallback) {
+                    last_full_census_ms = Some(now);
+                }
+                if let Some(census) = census {
+                    if full_due || fallback {
+                        if !census.is_complete() && !census_warning_active {
+                            warn(
+                                &mut warnings,
+                                &mut omitted_warnings,
+                                "live process census incomplete",
+                            );
+                        }
+                        census_warning_active = !census.is_complete();
+                    }
                     if disk_paused
                         && exit.is_none()
                         && stop_reason.is_none()
@@ -1184,9 +1301,59 @@ impl Driver<'_> {
                 last_observation_ms = Some(now);
             }
             let watches = child.watches();
-            match self.reactor.wait(&watches, Duration::from_millis(5)) {
-                Ok(event) => signal_pending |= event.supervisor_signal,
-                Err(_) => warn(&mut warnings, &mut omitted_warnings, "guardian wait failed"),
+            // Pipes and signals wake the reactor. Timer-only work wakes at
+            // its next deadline, including the unchanged 100 ms census.
+            let wait_now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let wall_ms = wall_started.zip(wall_now()).map_or(0, |(began, current)| {
+                u64::try_from(current.as_micros().saturating_sub(began.as_micros()) / 1000)
+                    .unwrap_or(0)
+            });
+            let mut wait_ms = last_cpu_observation_ms
+                .saturating_add(100)
+                .saturating_sub(wait_now);
+            if let Some(last) = last_cancel_ms {
+                wait_ms = wait_ms.min(last.saturating_add(100).saturating_sub(wait_now));
+            }
+            if let Some(deadline) = state.deadline_in_ms(wait_now, wall_ms) {
+                wait_ms = wait_ms.min(deadline);
+            }
+            if let Some(at) = stop_at.filter(|_| !killed) {
+                wait_ms = wait_ms.min(
+                    at.saturating_add(plan.root_flush_ms.max(plan.descendant_grace_ms))
+                        .saturating_sub(wait_now),
+                );
+            }
+            if cleanup_pending && let Some(deadline) = drain_deadline {
+                wait_ms = wait_ms.min(deadline.saturating_sub(wait_now));
+            }
+            if census_event_pending || census_event_failed {
+                wait_ms = wait_ms.min(
+                    last_census_ms
+                        .unwrap_or(0)
+                        .saturating_add(CENSUS_INTERVAL_MS)
+                        .saturating_sub(wait_now),
+                );
+            }
+            match self.reactor.wait(&watches, Duration::from_millis(wait_ms)) {
+                Ok(event) => {
+                    signal_pending |= event.supervisor_signal;
+                    census_event_pending |= event.process_changed;
+                    census_event_failed |= event.process_overflow;
+                    if event.process_changed && !census_walk_due(wait_now, last_census_ms) {
+                        provenant_os::sys::wait_pause(Duration::from_millis(
+                            EVENT_DRAIN_BACKOFF_MS,
+                        ));
+                    }
+                }
+                Err(_) => {
+                    census_event_failed = true;
+                    census_reactor_failed = true;
+                    provenant_os::sys::wait_pause(Duration::from_millis(CENSUS_INTERVAL_MS));
+                    if !reactor_warning_recorded {
+                        warn(&mut warnings, &mut omitted_warnings, "guardian wait failed");
+                        reactor_warning_recorded = true;
+                    }
+                }
             }
         }
         let mut settled =
@@ -1251,9 +1418,40 @@ impl Driver<'_> {
             // The exit must agree with a durable reservation. A visible
             // replacement followed by failed directory sync is not a durable
             // transition; retain the locks and retry the same proven facts.
-            // Intentionally unbounded: dropping custody before durable proof
-            // would admit a second writer. Signals cannot waive this invariant.
+            // A linked evidence directory may recover from ENOSPC or a sync
+            // error, so keep custody and retry indefinitely. An unlinked one
+            // cannot accept a reservation at all. In that case only, finish
+            // the same full-census and fresh-lease proof before retiring; do
+            // not publish an exit or clear a fence without its reservation.
             while !self.persist_reservation() {
+                if writer_evidence_identity.is_some_and(|identity| {
+                    attempt_removed(&self.writer_dir, writer_evidence_path.as_deref(), identity)
+                }) {
+                    if !cleanup_complete {
+                        cleanup_complete = self
+                            .cleanup(
+                                &mut child,
+                                plan,
+                                stop_reason == Some(machine::StopReason::ExplicitCancellation),
+                                &mut warnings,
+                                &mut omitted_warnings,
+                            )
+                            .unwrap_or(false);
+                    }
+                    #[cfg(target_os = "macos")]
+                    if !cleanup_complete && self.retire_unlinked_writer(&mut child) {
+                        return Err(CustodyError::Io(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "writer evidence and original lock removed before exit publication",
+                        )));
+                    }
+                    if cleanup_complete {
+                        return Err(CustodyError::Io(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "writer evidence directory removed before exit publication",
+                        )));
+                    }
+                }
                 let _ = self.reactor.wait(&[], Duration::from_millis(25));
             }
         }
@@ -1322,6 +1520,12 @@ impl Driver<'_> {
                     if published {
                         self.republish_settled(record, cancelled)?;
                     }
+                    break;
+                }
+                // The old lock inode can be proven idle even after its name is
+                // removed. Leave the durable unresolved fence untouched.
+                #[cfg(target_os = "macos")]
+                if self.retire_unlinked_writer(&mut child) {
                     break;
                 }
                 match self.reactor.wait(&[], Duration::from_millis(100)) {

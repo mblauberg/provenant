@@ -63,7 +63,7 @@ fn execute(project: &Path, argv: &[&str], watch: bool) -> Result<ExecOutcome> {
 }
 /// Run an external command to completion within `timeout`. A `watch` run
 /// discards repeated progress so a long CI wait cannot fill capture.
-fn execute_for(
+pub(crate) fn execute_for(
     project: &Path,
     argv: &[&str],
     timeout: Duration,
@@ -121,7 +121,7 @@ fn execute_cancellable(
     }
     Ok(output)
 }
-fn successful(output: ExecOutcome) -> Result<Vec<u8>> {
+pub(crate) fn successful(output: ExecOutcome) -> Result<Vec<u8>> {
     if output.termination != Termination::Exit(0) {
         return Err(format!(
             "external command failed: {}",

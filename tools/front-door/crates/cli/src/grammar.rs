@@ -185,6 +185,9 @@ pub enum Command {
     /// Check reviews and keep receipts and session checkpoints
     #[command(subcommand)]
     Workflow(crate::workflow::Workflow),
+    /// Inspect issue specifications for stale or misleading references
+    #[command(subcommand)]
+    Tracker(Tracker),
     /// Run fast repository checks
     #[command(subcommand)]
     Check(Check),
@@ -193,6 +196,21 @@ pub enum Command {
     Hook(Hook),
     #[command(subcommand, hide = true)]
     Internal(Internal),
+}
+#[derive(Debug, Subcommand)]
+pub enum Tracker {
+    /// Advise on issue specifications without blocking work
+    Lint {
+        /// Issue numbers to inspect
+        #[arg(catalog_u64_range = 1..)]
+        numbers: Vec<u64>,
+        /// Read an issue body from a local file
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Kind of local issue (task, feature, bug or epic)
+        #[arg(long, default_value = "task", value_parser = ["task", "feature", "bug", "epic"])]
+        kind: String,
+    },
 }
 #[derive(Debug, Subcommand)]
 pub enum Preset {

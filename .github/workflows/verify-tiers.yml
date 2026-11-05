@@ -1,0 +1,49 @@
+name: Verify tiers
+run-name: verify-${{ inputs.request }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request:
+        required: true
+        type: string
+      commit:
+        required: true
+        type: string
+      tier:
+        required: true
+        type: choice
+        options: ['2', '3']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Verify the dispatched ref
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+          DISPATCH_COMMIT: ${{ github.sha }}
+        run: test "$REQUESTED_COMMIT" = "$DISPATCH_COMMIT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Rust
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install nextest
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: cargo-nextest@0.9.149
+      - name: Install mutation testing
+        if: inputs.tier == '3'
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: cargo-mutants
+      - name: Run selected tier
+        env:
+          VERIFY_TIER: ${{ inputs.tier }}
+        run: scripts/verify-tier --tier "$VERIFY_TIER"
