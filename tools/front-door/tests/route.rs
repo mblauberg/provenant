@@ -123,6 +123,28 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     assert!(text.contains("unavailable (provider refusal)"), "{text}");
     assert!(text.contains("scope codex/gpt-6-luna"), "{text}");
     assert!(!rig.home.join("provider-started").exists());
+    let listed = call(&rig, &["route", "list", "--adapter", "codex"], 0)?;
+    let list_row = listed["data"]["recorded_readiness"]
+        .as_array()
+        .ok_or("recorded readiness")?
+        .iter()
+        .find(|row| row["model"] == "codex/gpt-6-luna" && row["account_key"] == "key-one")
+        .ok_or("listed model readiness")?;
+    assert_eq!(list_row["observation"]["reason"], "provider_refusal");
+    assert_eq!(list_row["observation"]["observed_unix_seconds"], observed);
+    let compact = rig.command(&["route", "list", "--adapter", "codex"])?;
+    assert_eq!(code(&compact), 0);
+    assert!(String::from_utf8_lossy(&compact.stdout.bytes).contains("recorded readiness"));
+    let listed_human = rig.command(&["route", "list", "--adapter", "codex", "--full"])?;
+    assert_eq!(code(&listed_human), 0);
+    let text = String::from_utf8_lossy(&listed_human.stdout.bytes);
+    assert!(
+        text.contains(
+            "recorded readiness one [key-one] for codex/gpt-6-luna: unavailable (provider refusal)"
+        ),
+        "{text}"
+    );
+    assert!(!rig.home.join("provider-started").exists());
     let none = call(
         &rig,
         &["route", "resolve", "opencode/opencode-go/glm-5.3-flash"],

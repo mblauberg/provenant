@@ -635,6 +635,19 @@ fn read_readiness_file(
     Ok(Some(ReadinessFile::decode(&bytes, adapter, key)?))
 }
 
+/// Read one account's bounded readiness file for a shared display snapshot.
+pub(crate) fn recorded_readiness_file(
+    state: &Path,
+    adapter: &str,
+    key: &str,
+) -> Result<Option<ReadinessFile>, EdgeError> {
+    if !component(adapter) || !component(key) {
+        return Err(QuotaError::Invalid("readiness scope").into());
+    }
+    open_readiness_account(state, key)?
+        .map_or(Ok(None), |dir| read_readiness_file(&dir, adapter, key))
+}
+
 /// The readiness of one route, read without locks, directory creation or
 /// provider I/O. A missing, stale, mismatched or damaged record is unknown;
 /// nothing here reads as ready unless fresh evidence says so. Routing and the
@@ -666,11 +679,7 @@ pub(crate) fn read_readiness_after_probe(
     if !component(&scope.adapter) || !component(&scope.account_key) {
         return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
     }
-    let read = open_readiness_account(state, &scope.account_key).and_then(|dir| {
-        dir.map_or(Ok(None), |dir| {
-            read_readiness_file(&dir, &scope.adapter, &scope.account_key)
-        })
-    });
+    let read = recorded_readiness_file(state, &scope.adapter, &scope.account_key);
     match read {
         Ok(Some(mut file)) => {
             if let Some(reprobe) = reprobe {

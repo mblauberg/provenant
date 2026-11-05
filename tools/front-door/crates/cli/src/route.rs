@@ -585,11 +585,28 @@ impl From<provenant_config::ConfigError> for EdgeError {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum Data {
-    List(Box<provenant_routing::RouteList>),
+    List(Box<RouteListDisplay>),
     Resolved(Box<RoutePreview>),
     Pacing(Box<PacingReport>),
     Overrides(Box<OverrideReport>),
 }
+#[derive(Serialize)]
+pub struct RouteListDisplay {
+    #[serde(flatten)]
+    pub routes: Box<provenant_routing::RouteList>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recorded_readiness: Vec<RecordedReadiness>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub readiness_truncated: bool,
+}
+
+impl std::ops::Deref for RouteListDisplay {
+    type Target = provenant_routing::RouteList;
+    fn deref(&self) -> &Self::Target {
+        &self.routes
+    }
+}
+
 /// What a `route override` command recorded or cleared, and every scheduled
 /// override afterwards. Fields are always present; `recorded` is null and
 /// `cleared` empty when the command did neither.
@@ -883,7 +900,6 @@ fn recorded_model_readiness(
                 observation,
             })
         })
-        .take(128)
         .collect()
 }
 
@@ -1075,6 +1091,7 @@ fn with_context<T>(
         &RoutingContext<'_>,
         &[provenant_quota::AccountRecord],
         &[provenant_quota::QuotaPolicy],
+        &provenant_providers::accounts::Settings,
     ) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
     let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
@@ -1199,6 +1216,7 @@ fn with_context<T>(
         },
         &quota_records,
         &policies,
+        &domains.accounts,
     )
 }
 /// Resolve one production dispatch against fresh provider facts and validated
@@ -1438,7 +1456,7 @@ fn resolve_dispatch_excluding(
         host,
         &requested_models,
         true,
-        |context, records, policies| {
+        |context, records, policies, _| {
             let mut excluded_members = initial_exclusions.to_vec();
             let mut refusals = Vec::new();
             // Resolution already skips persisted mismatch and refusals, so this
@@ -1694,6 +1712,19 @@ fn list_data(
     roots: &Roots,
     query: &RouteListRequest,
 ) -> Result<Box<provenant_routing::RouteList>, EdgeError> {
+    list_data_and_accounts(roots, query).map(|(routes, _)| routes)
+}
+
+fn list_data_and_accounts(
+    roots: &Roots,
+    query: &RouteListRequest,
+) -> Result<
+    (
+        Box<provenant_routing::RouteList>,
+        provenant_providers::accounts::Settings,
+    ),
+    EdgeError,
+> {
     with_context(
         roots,
         &[],
@@ -1701,17 +1732,93 @@ fn list_data(
         "local-preview",
         &[],
         false,
-        |context, _, _| {
-            Ok(Box::new(provenant_routing::list(
-                &provenant_routing::RouteListQuery {
-                    adapter: query.adapter.clone(),
-                    pool: query.pool.clone(),
-                    valid: query.valid,
-                },
-                context,
-            )?))
+        |context, _, _, accounts| {
+            Ok((
+                Box::new(provenant_routing::list(
+                    &provenant_routing::RouteListQuery {
+                        adapter: query.adapter.clone(),
+                        pool: query.pool.clone(),
+                        valid: query.valid,
+                    },
+                    context,
+                )?),
+                accounts.clone(),
+            ))
         },
     )
+}
+
+fn display_list_data(
+    roots: &Roots,
+    query: &RouteListRequest,
+) -> Result<Box<RouteListDisplay>, EdgeError> {
+    let (routes, accounts) = list_data_and_accounts(roots, query)?;
+    let catalogue = Catalogue::bundled()?;
+    let now = SystemClock::new().unix_seconds();
+    let mut models = BTreeSet::new();
+    models.extend(routes.models.iter().map(|entry| entry.model.clone()));
+    models.extend(routes.valid_pairs.iter().map(|pair| pair.model.clone()));
+    models.extend(
+        routes
+            .named_routes
+            .values()
+            .map(|route| route.model.clone()),
+    );
+    models.extend(
+        routes
+            .pools
+            .values()
+            .flatten()
+            .map(|member| member.model.clone()),
+    );
+    // Read each account's bounded file once for this display, without probing or writes.
+    let files = std::cell::RefCell::new(std::collections::BTreeMap::new());
+    let lookup = |scope: &provenant_quota::ReadinessScope| {
+        let key = (scope.adapter.clone(), scope.account_key.clone());
+        let mut files = files.borrow_mut();
+        let file = files.entry(key).or_insert_with(|| {
+            crate::quota::recorded_readiness_file(
+                roots.state.as_path(),
+                &scope.adapter,
+                &scope.account_key,
+            )
+            .map_err(|_| ())
+        });
+        match file {
+            Ok(Some(file)) => file.get(scope, now),
+            Ok(None) => provenant_quota::ReadinessRead::absent(),
+            Err(()) => provenant_quota::ReadinessRead::unknown(
+                provenant_quota::ReadinessReason::InvalidEvidence,
+            ),
+        }
+    };
+    let mut recorded_readiness = Vec::new();
+    let mut readiness_truncated = false;
+    for model in models {
+        let rows = recorded_model_readiness(
+            &accounts,
+            &model,
+            &catalogue.admission_pools(&model),
+            None,
+            None,
+            &lookup,
+        );
+        for row in rows {
+            if recorded_readiness.len() == 256 {
+                readiness_truncated = true;
+                break;
+            }
+            recorded_readiness.push(row);
+        }
+        if readiness_truncated {
+            break;
+        }
+    }
+    Ok(Box::new(RouteListDisplay {
+        routes,
+        recorded_readiness,
+        readiness_truncated,
+    }))
 }
 
 pub(crate) fn effective_members(
@@ -2237,7 +2344,7 @@ fn edit_model_exclusion(
 
 fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeError> {
     match command {
-        Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
+        Route::List(query) => Ok(Data::List(display_list_data(roots, query)?)),
         Route::Resolve(query) => with_context(
             roots,
             &[],
@@ -2245,7 +2352,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
             "local-preview",
             &[],
             false,
-            |context, records, _| {
+            |context, records, _, accounts| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),
                     ..*context
@@ -2298,26 +2405,18 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                             | provenant_records::RouteExclusionReason::LoginExpired
                             | provenant_records::RouteExclusionReason::AccountMismatch),
                         ..
-                    } => {
-                        let config =
-                            provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
-                        Some(crate::quota::account_login_diagnostic(
-                            config.domains.accounts.entries.values(),
-                            records,
-                            &route.adapter,
-                            route.account_key.as_deref(),
-                            reason,
-                        ))
-                    }
+                    } => Some(crate::quota::account_login_diagnostic(
+                        accounts.entries.values(),
+                        records,
+                        &route.adapter,
+                        route.account_key.as_deref(),
+                        reason,
+                    )),
                     _ => None,
                 };
                 let pacing = provenant_routing::pacing_preview(&model, context);
-                let accounts =
-                    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
-                        .domains
-                        .accounts;
                 let recorded_readiness = recorded_model_readiness(
-                    &accounts,
+                    accounts,
                     &model,
                     &context.catalogue.admission_pools(&model),
                     route.account_key.as_deref(),
@@ -2357,7 +2456,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
         ),
         Route::Set(request) => {
             set_pool(roots, request)?;
-            Ok(Data::List(list_data(
+            Ok(Data::List(display_list_data(
                 roots,
                 &RouteListRequest {
                     valid: false,
@@ -2368,7 +2467,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
         }
         Route::Remove(request) => {
             remove_pool_member(roots, request)?;
-            Ok(Data::List(list_data(
+            Ok(Data::List(display_list_data(
                 roots,
                 &RouteListRequest {
                     valid: false,
@@ -2379,7 +2478,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
         }
         Route::Reset(request) => {
             reset_pool(roots, request)?;
-            Ok(Data::List(list_data(
+            Ok(Data::List(display_list_data(
                 roots,
                 &RouteListRequest {
                     valid: false,
@@ -2501,7 +2600,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
         "local-preview",
         &[],
         false,
-        |context, records, policies| {
+        |context, records, policies, _| {
             let request = resolve_request(&query, context)?;
             let rules = effective_exclusion_rules(exclude, roots)?;
             let now = context.now.as_timestamp().as_second();
@@ -2612,6 +2711,20 @@ fn readiness_text(readiness: &RouteReadiness) -> String {
                 .unwrap_or_else(|| "unknown reason".into());
             format!("unavailable ({label})")
         }
+    }
+}
+
+fn unobserved_model(model: &ModelId, list: &RouteListDisplay) -> &'static str {
+    if list
+        .recorded_readiness
+        .iter()
+        .any(|record| record.model == model.as_str())
+    {
+        ""
+    } else if list.readiness_truncated {
+        "; readiness not shown (display limit reached)"
+    } else {
+        "; readiness unknown (not probed; run `provenant quota tick` to refresh quota)"
     }
 }
 
@@ -2778,16 +2891,21 @@ pub fn run(
                         pair.effort.as_deref().unwrap_or("unspecified")
                     )
                 }));
-                lines.extend(
-                    list.models
-                        .iter()
-                        .map(|m| format!("{} efforts=[{}]", m.model.as_str(), m.efforts.join(","))),
-                );
-                lines.extend(
-                    list.named_routes
-                        .iter()
-                        .map(|(name, r)| format!("route {name} = {}", r.model.as_str())),
-                );
+                lines.extend(list.models.iter().map(|m| {
+                    format!(
+                        "{} efforts=[{}]{}",
+                        m.model.as_str(),
+                        m.efforts.join(","),
+                        unobserved_model(&m.model, list)
+                    )
+                }));
+                lines.extend(list.named_routes.iter().map(|(name, r)| {
+                    format!(
+                        "route {name} = {}{}",
+                        r.model.as_str(),
+                        unobserved_model(&r.model, list)
+                    )
+                }));
                 lines.extend(list.account_pacing.iter().map(|entry| {
                     format!(
                         "account {}/{} pacing={:?} source={} profile={:?} expires={:?}",
@@ -2822,12 +2940,29 @@ pub fn run(
                             .map(|row| OverrideRow::model_exclusion(row, now).line()),
                     );
                 }
+                if list.recorded_readiness.is_empty() {
+                    lines.push("readiness unknown (not probed; run `provenant quota tick` to refresh quota)".into());
+                }
+                lines.extend(list.recorded_readiness.iter().map(|record| {
+                    format!(
+                        "recorded readiness {} [{}] for {}: {}",
+                        record.account.escape_debug(),
+                        record.account_key.escape_debug(),
+                        record.model,
+                        crate::quota::readiness_words(&record.observation)
+                    )
+                }));
+                if list.readiness_truncated {
+                    lines.push(
+                        "warning: readiness display limited to 256 account/model rows".into(),
+                    );
+                }
                 lines.extend(list.pools.iter().map(|(name, members)| {
                     let models = members
                         .iter()
                         .map(|member| {
                             format!(
-                                "{} weight={} pacing={:?}{}",
+                                "{} weight={} pacing={:?}{}{}",
                                 member.model.as_str(),
                                 member.weight,
                                 member.pacing,
@@ -2835,6 +2970,7 @@ pub fn run(
                                     .effort
                                     .as_ref()
                                     .map_or(String::new(), |effort| format!(" effort={effort}")),
+                                unobserved_model(&member.model, list),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -2875,12 +3011,33 @@ pub fn run(
                 ("model exclusions", list.model_exclusions.len()),
                 ("exclusion notes", list.exclusion_notes.len()),
             ];
-            let rows = list
-                .named_routes
-                .iter()
-                .map(|(name, r)| format!("route {name} = {}", r.model.as_str()))
-                .chain(list.pools.keys().map(|name| format!("pool {name}")))
-                .collect();
+            let mut rows = Vec::new();
+            if list.readiness_truncated {
+                rows.push("warning: readiness display limited to 256 account/model rows".into());
+            }
+            if list.recorded_readiness.is_empty() {
+                rows.push(
+                    "readiness unknown (not probed; run `provenant quota tick` to refresh quota)"
+                        .into(),
+                );
+            }
+            rows.extend(list.recorded_readiness.iter().map(|record| {
+                format!(
+                    "recorded readiness {} [{}] for {}: {}",
+                    record.account.escape_debug(),
+                    record.account_key.escape_debug(),
+                    record.model,
+                    crate::quota::readiness_words(&record.observation)
+                )
+            }));
+            rows.extend(list.named_routes.iter().map(|(name, r)| {
+                format!(
+                    "route {name} = {}{}",
+                    r.model.as_str(),
+                    unobserved_model(&r.model, list)
+                )
+            }));
+            rows.extend(list.pools.keys().map(|name| format!("pool {name}")));
             Some(crate::Summary::new(
                 format!(
                     "catalogue {}: {}",
@@ -2977,6 +3134,23 @@ mod route_tests {
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
     use std::error::Error;
+
+    #[test]
+    fn route_list_does_not_call_omitted_evidence_unprobed() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        let query = super::RouteListRequest {
+            valid: false,
+            adapter: Some("codex".into()),
+            pool: None,
+        };
+        let mut list = super::display_list_data(&roots, &query)?;
+        let model = super::ModelId::parse("codex/gpt-6-luna")?;
+        assert!(super::unobserved_model(&model, &list).contains("not probed"));
+        list.readiness_truncated = true;
+        assert!(super::unobserved_model(&model, &list).contains("not shown"));
+        Ok(())
+    }
 
     #[test]
     fn recorded_route_readiness_keeps_model_and_account_scope() -> Result<(), Box<dyn Error>> {
