@@ -540,13 +540,15 @@ fn is_spec(value: &Value) -> bool {
     is_fragment(value)
 }
 
+type RequestBindings = (Vec<(String, Value)>, Vec<String>);
+
 /// Offer request values only to parameters that explicitly bind them.
 pub(super) fn request_bindings(
     layers: &Layers,
     name: &str,
     risk: Option<&str>,
     kind: Option<&str>,
-) -> Result<(Vec<(String, Value)>, Vec<String>), String> {
+) -> Result<RequestBindings, String> {
     let (config, _) = layers.resolve(name)?;
     let mut bindings = Vec::new();
     let mut warnings = Vec::new();
