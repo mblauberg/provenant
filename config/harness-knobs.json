@@ -1,5 +1,11 @@
 {
   "schema_version": 1,
+  "host_gc_settings": {
+    "path": "gc",
+    "settings": {
+      "graph_checkpoint_days": {"type": "int", "allowed": "1 to 3650 days", "default": "90", "effect": "Retain terminal graph checkpoints for at least this many days after their last save"}
+    }
+  },
   "provider_updates": {
     "path": "providers.<id>",
     "provider_ids": ["claude", "codex", "cursor", "agy", "opencode"],
