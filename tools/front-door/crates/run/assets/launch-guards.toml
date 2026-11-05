@@ -375,6 +375,11 @@ reason = "Unrepresentable Fabric MCP paths warn and omit that optional integrati
 
 [[guard]]
 site = "providers/src/lane.rs#LaneRuntime::claude"
+boundary = "authority"
+reason = "Claude's isolated settings must retain the Provenant pre-tool guard; an unrepresentable hook executable or state path cannot safely substitute inherited settings."
+
+[[guard]]
+site = "providers/src/lane.rs#LaneRuntime::claude"
 boundary = "unclassified"
 reason = "Remaining MCP and runtime setup path failures require classification."
 
