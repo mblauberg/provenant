@@ -7853,3 +7853,39 @@ fn tool_search_path_preserves_native_home_and_omits_unusable_entry() {
         Some(PathBuf::from("/usr/bin"))
     );
 }
+
+#[test]
+fn claude_writer_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let original = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let mut permissions = original.permissions().clone();
+    permissions.private_state = None;
+    let plan = ConfinedPlan::new(PlanRequest {
+        scope: original.scope(),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .expect("fixture plan");
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let launch = claude::Claude.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    ))?;
+    let config = plan.permissions().scratch.path.join("claude-config");
+    assert!(
+        launch
+            .env
+            .iter()
+            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR" && value == config.as_os_str())
+    );
+    assert!(launch.setup.contains(&SetupStep::CreateDir(config)));
+    Ok(())
+}

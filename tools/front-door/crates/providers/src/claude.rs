@@ -654,12 +654,15 @@ fn prepare(
     let omitted_discovery = package_omissions;
     let discover_skills = user_skills.is_some();
     if shell || discover_skills {
-        let config = plan
-            .private_state
-            .as_ref()
-            .ok_or(ProviderError::UnsupportedPolicy)?
-            .path
-            .join("claude-config");
+        let private = plan.private_state.as_ref().map_or_else(
+            || {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: Claude private state is unavailable; using the attempt scratch directory");
+                &plan.scratch.path
+            },
+            |state| &state.path,
+        );
+        let config = private.join("claude-config");
         env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
         setup.push(SetupStep::CreateDir(config.clone()));
         if let Some(user_skills) = &user_skills {

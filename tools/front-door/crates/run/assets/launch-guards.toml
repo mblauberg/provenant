@@ -242,8 +242,13 @@ reason = "The token must match the selected account and a resumed invocation mus
 
 [[guard]]
 site = "providers/src/claude.rs#prepare"
+boundary = "warning"
+reason = "Absent separate private state warns and uses the already-confined attempt scratch directory for Claude configuration."
+
+[[guard]]
+site = "providers/src/lane.rs#LaneRuntime::claude"
 boundary = "unclassified"
-reason = "Remaining private-state, path and runtime setup failures require classification."
+reason = "Remaining MCP and runtime setup path failures require classification."
 
 [[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
