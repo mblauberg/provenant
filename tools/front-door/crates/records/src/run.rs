@@ -646,6 +646,9 @@ pub struct OperationRefusal {
     /// Registered worktree identifier, when the request names a worktree.
     pub worktree: Option<PathWire>,
     pub refused_at: WallTime,
+    /// Sealed request identity, when admission reached request preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<CanonicalRequest>,
     /// The chair bound at dispatch, retained for idempotent notice delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chair: Option<ChairBinding>,
@@ -1253,6 +1256,7 @@ mod tests {
                 .next("inspect the worktree"),
             worktree: Some(PathWire::from_relative(&relative).unwrap()),
             refused_at: WallTime::from_micros(1).unwrap(),
+            request: None,
             chair: None,
         };
         let value = serde_json::to_value(&refusal).unwrap();
@@ -1288,6 +1292,7 @@ mod tests {
                     .unwrap(),
                 ),
                 refused_at: WallTime::from_micros(1).unwrap(),
+                request: None,
                 chair: None,
             }),
         };

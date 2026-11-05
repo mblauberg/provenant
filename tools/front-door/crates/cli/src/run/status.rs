@@ -1892,6 +1892,7 @@ mod refusal_projection_tests {
                     .unwrap(),
                 ),
                 refused_at: WallTime::from_micros(100).unwrap(),
+                request: None,
                 chair: None,
             }),
         };

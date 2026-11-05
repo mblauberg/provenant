@@ -366,6 +366,57 @@ fn chair_binding_replays_the_original_submission() -> TestResult {
 }
 
 #[test]
+fn dispatch_replays_a_refusal_only_for_the_same_canonical_request() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let service = Service::new(&store);
+    let accepted = service.dispatch(submission("review this code"), temp.path(), &call)?;
+    let request = store.request(accepted.run_id, &call)?;
+    let operation_id = OperationId::parse("refused-dispatch")?;
+    let diagnostic = provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+        .detail("writer scope refused")
+        .next("inspect the worktree");
+    store.record_refusal(
+        &OperationRecord {
+            extra: Default::default(),
+            schema_version: 1,
+            project_id: context.project_id,
+            actor_id: context.actor_id,
+            operation_id: operation_id.clone(),
+            kind: OperationKind::Dispatch,
+            request_digest: request.digest()?,
+            run_id: provenant_core::RunId::from_bytes([44; 16]),
+            state: OperationState::Terminal,
+            refusal: Some(OperationRefusal {
+                extra: Default::default(),
+                diagnostic: diagnostic.clone(),
+                worktree: None,
+                refused_at: call.clock.wall_now()?,
+                request: Some(request),
+                chair: None,
+            }),
+        },
+        &call,
+    )?;
+    let mut replay = submission("review this code");
+    replay.operation_id = operation_id.clone();
+    assert!(matches!(
+        service.dispatch(replay, temp.path(), &call),
+        Err(RunError::RecordedRefusal(saved)) if *saved == diagnostic
+    ));
+    let mut different = submission("changed prompt");
+    different.operation_id = operation_id;
+    assert!(matches!(
+        service.dispatch(different, temp.path(), &call),
+        Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
+
+#[test]
 fn task_title_roundtrip() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

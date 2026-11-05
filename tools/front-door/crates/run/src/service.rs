@@ -65,6 +65,18 @@ impl<'a> Service<'a> {
         // the same operation must work even after its caller-supplied ref vanishes.
         let operation = self.store.operation(&input.operation_id, call)?;
         let previous = match &operation {
+            Some(operation) if operation.refusal.is_some() => {
+                let request = operation
+                    .refusal
+                    .as_ref()
+                    .and_then(|refusal| refusal.request.clone());
+                if let Some(request) = &request
+                    && request.digest()? != operation.request_digest
+                {
+                    return Err(RunError::Validation("refusal request identity"));
+                }
+                request
+            }
             Some(operation) => match self.store.request(operation.run_id, call) {
                 Ok(request) => Some(request),
                 // A prepared operation may have crashed before request publication;

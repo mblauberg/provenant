@@ -3219,9 +3219,35 @@ fn refused_operation(context: &ExecutionContext) -> OperationRecord {
                 .unwrap(),
             ),
             refused_at: WallTime::from_micros(100).unwrap(),
+            request: None,
             chair: None,
         }),
     }
+}
+
+#[test]
+fn refused_operation_seals_the_canonical_request() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut refusal = refused_operation(&context);
+    let request = input().request;
+    refusal.refusal.as_mut().unwrap().request = Some(request.clone());
+    assert!(matches!(
+        store.record_refusal(&refusal, &call),
+        Err(RunError::Validation("invalid dispatch refusal"))
+    ));
+    assert!(store.operation(&refusal.operation_id, &call)?.is_none());
+    refusal.request_digest = request.digest()?;
+    assert_eq!(store.record_refusal(&refusal, &call)?, refusal);
+    assert_eq!(
+        store.operation(&refusal.operation_id, &call)?,
+        Some(refusal)
+    );
+    Ok(())
 }
 
 #[test]

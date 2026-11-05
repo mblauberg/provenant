@@ -103,6 +103,16 @@ impl RunStore {
             })
         });
         let diagnostic = &refusal.diagnostic;
+        let valid_request = refusal
+            .request
+            .as_ref()
+            .map(|request| {
+                request
+                    .digest()
+                    .map(|digest| digest == record.request_digest)
+            })
+            .transpose()?
+            .unwrap_or(true);
         let valid_diagnostic = !diagnostic.code.is_empty()
             && provenant_records::diagnostic::safe_text(&diagnostic.code) == diagnostic.code
             && [&diagnostic.category, &diagnostic.detail, &diagnostic.next]
@@ -123,6 +133,7 @@ impl RunStore {
             || record.state != OperationState::Terminal
             || !valid_worktree
             || !valid_diagnostic
+            || !valid_request
         {
             return Err(RunError::Validation("invalid dispatch refusal"));
         }
