@@ -1,7 +1,7 @@
 #[cfg(test)]
 #[test]
-fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
--> Result<(), Box<dyn std::error::Error>> {
+fn peer_remote_base_pins_a_commit_reachable_from_the_remote(
+) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{self, WorkerObserver, WorkerState};
     use std::collections::BTreeMap;
     struct Free;
@@ -66,7 +66,146 @@ fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
             Ok(())
         },
     )?;
-    provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "local only"])?;
+    let absent = temp.path().join("absent.git");
+    provenant_os::fixture::run_git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "a-unavailable",
+            absent.to_str().ok_or("absent path")?,
+        ],
+    )?;
+    worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            assert_eq!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    false,
+                    &cancel
+                )
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?
+                .to_string(),
+                initial.trim()
+            );
+            Ok(())
+        },
+    )?;
+    provenant_os::fixture::run_git(&project, &["remote", "remove", "a-unavailable"])?;
+    // Fetch leaves a deleted remote-tracking ref behind; it must not make the
+    // old tip appear to remain advertised by the remote.
+    provenant_os::fixture::run_git(&remote, &["update-ref", "-d", "refs/heads/main"])?;
+    worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            assert!(matches!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    true,
+                    &cancel
+                ),
+                Err(FacadeError::BaseUnreachable)
+            ));
+            Ok(())
+        },
+    )?;
+    provenant_os::fixture::run_git(&remote, &["update-ref", "refs/heads/main", initial.trim()])?;
+    let limited = worktrees::RepoFacts::with_limits(provenant_os::exec::DEFAULT_CAPTURE_LIMIT, 1)?;
+    worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            let context = &worktrees::WorktreeContext {
+                facts: &limited,
+                ..*context
+            };
+            let error = remote_base(
+                context,
+                "HEAD",
+                std::time::Duration::from_secs(30),
+                false,
+                &cancel,
+            )
+            .expect_err("bounded fact output must be reported");
+            assert!(matches!(
+                &error,
+                FacadeError::Io { operation, .. }
+                    if operation == provenant_fabric_runtime::coordination::facade::REPOSITORY_FACT_LIMIT_OPERATION
+            ));
+            let wire = serde_json::to_value(&error)
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            assert_eq!(wire["operation"], "repository fact output limit exceeded");
+            let cancelled = CancelToken::new();
+            cancelled.cancel();
+            assert!(matches!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    false,
+                    &cancelled
+                ),
+                Err(FacadeError::Cancelled)
+            ));
+            Ok(())
+        },
+    )?;
+    // A replacement object must not make a local-only root look reachable
+    // from the real remote-tracking commit.
+    let tree = String::from_utf8(provenant_os::fixture::run_git(
+        &project,
+        &["rev-parse", "HEAD^{tree}"],
+    )?)?;
+    let local = String::from_utf8(provenant_os::fixture::run_git(
+        &project,
+        &["commit-tree", tree.trim(), "-m", "local only"],
+    )?)?;
+    let replacement = String::from_utf8(provenant_os::fixture::run_git(
+        &project,
+        &[
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            local.trim(),
+            "-m",
+            "poisoned ancestry",
+        ],
+    )?)?;
+    provenant_os::fixture::run_git(&project, &["update-ref", "HEAD", local.trim()])?;
+    provenant_os::fixture::run_git(&project, &["replace", initial.trim(), replacement.trim()])?;
+    let contains = format!("--contains={}", local.trim());
+    let poisoned = provenant_os::fixture::run_git(
+        &project,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            &contains,
+            "refs/remotes",
+        ],
+    )?;
+    assert!(
+        !poisoned.is_empty(),
+        "fixture must poison ordinary reachability"
+    );
     worktrees::with_context_using_workers(
         &roots,
         &home,
@@ -85,6 +224,36 @@ fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
                 ),
                 Err(FacadeError::BaseUnreachable)
             ));
+            provenant_os::fixture::run_git(&project, &["replace", "-d", initial.trim()])
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            let grafts = project.join(".git/info/grafts");
+            std::fs::write(&grafts, format!("{} {}\n", initial.trim(), local.trim()))
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            let poisoned = provenant_os::fixture::run_git(
+                &project,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    &contains,
+                    "refs/remotes",
+                ],
+            )
+            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            assert!(
+                !poisoned.is_empty(),
+                "fixture must poison ordinary reachability"
+            );
+            assert!(matches!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    false,
+                    &cancel
+                ),
+                Err(FacadeError::BaseUnreachable)
+            ));
+            std::fs::remove_file(grafts).map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
             std::fs::rename(&project, temp.path().join("moved-project"))
                 .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
             std::fs::create_dir(&project).map_err(|_| worktrees::WorktreeError::InvalidOutput)?;

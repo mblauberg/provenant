@@ -388,12 +388,16 @@ fn serialise_unanchored_optional_path<S: serde::Serializer>(
     Option::<String>::None.serialize(serializer)
 }
 
+/// Safe wire description for a bounded repository fact that did not fit.
+pub const REPOSITORY_FACT_LIMIT_OPERATION: &str = "repository fact output limit exceeded";
+
 fn serialise_io_operation<S: serde::Serializer>(
     operation: &str,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     let operation = match operation {
         "access Fabric store"
+        | REPOSITORY_FACT_LIMIT_OPERATION
         | "create peer worktree"
         | "submit: create peer worktree"
         | "read file"
@@ -453,6 +457,9 @@ impl FacadeError {
             }
             Self::HostDeliveryStage { stage } | Self::Io { delivery_stage: Some(stage), .. } => projected = projected.detail(format!("host writer delivery failed at {stage:?}")).next("inspect host delivery before retrying"),
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
+            Self::Io { operation, .. } if operation == REPOSITORY_FACT_LIMIT_OPERATION => {
+                projected = projected.detail("repository fact output exceeded its capture limit");
+            }
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {

@@ -1104,6 +1104,18 @@ fn account_directory(
         .find(|a| a.key() == label)
         .map(|a| a.directory().to_path_buf())
 }
+/// Reuse tracking refs only after a base has been fetched and verified.
+fn fetch_recreation_base<T, E>(
+    fetched: &mut bool,
+    resolve: impl FnOnce(bool) -> Result<T, E>,
+) -> Result<T, E> {
+    let result = resolve(!*fetched);
+    if result.is_ok() {
+        *fetched = true;
+    }
+    result
+}
+
 /// Recreate each branch's worktree with this host's own worktree owner, from
 /// `origin/<branch>`. A worktree already on the branch is kept. Failures are
 /// reported per branch; the hand-off still lands.
@@ -1130,30 +1142,32 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
             if time.is_zero() {
                 return failed("the peer call budget ran out".into());
             }
-            let base = crate::worktrees::with_context(
-                &target.context.roots,
-                target.home,
-                target.cwd,
-                remaining(),
-                target.workers,
-                |context, cancel| {
-                    let context = &worktrees::WorktreeContext {
-                        facts: &facts,
-                        ..*context
-                    };
-                    Ok(crate::fabric::remote_base(
-                        context,
-                        &format!("origin/{branch}"),
-                        time / 2,
-                        !fetched,
-                        cancel,
-                    ))
-                },
-            );
-            fetched = true;
+            let base = fetch_recreation_base(&mut fetched, |fetch| {
+                crate::worktrees::with_context(
+                    &target.context.roots,
+                    target.home,
+                    target.cwd,
+                    remaining(),
+                    target.workers,
+                    |context, cancel| {
+                        let context = &worktrees::WorktreeContext {
+                            facts: &facts,
+                            ..*context
+                        };
+                        Ok(crate::fabric::remote_base(
+                            context,
+                            &format!("origin/{branch}"),
+                            time / 2,
+                            fetch,
+                            cancel,
+                        ))
+                    },
+                )
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())
+            });
             let base = match base {
-                Ok(Ok(base)) => base,
-                Ok(Err(error)) => return failed(format!("origin/{branch}: {error}")),
+                Ok(base) => base,
                 Err(error) => return failed(format!("origin/{branch}: {error}")),
             };
             let made = crate::worktrees::with_context(
@@ -1366,6 +1380,31 @@ mod tests {
         // Output within the bound is still returned whole.
         let text = git_text(temp.path(), &["--version"]).unwrap();
         assert!(text.starts_with("git version"), "{text}");
+    }
+
+    #[test]
+    fn failed_recreation_fetch_never_authorises_stale_tracking_refs() {
+        let mut fetched = false;
+        let mut attempts = 0;
+        for _ in 0..2 {
+            let result = fetch_recreation_base(&mut fetched, |fetch| {
+                assert!(fetch, "a failed fetch must be retried");
+                attempts += 1;
+                Err::<(), _>("fetch failed")
+            });
+            assert!(result.is_err());
+        }
+        assert_eq!(attempts, 2);
+        fetch_recreation_base(&mut fetched, |fetch| {
+            assert!(fetch);
+            Ok::<_, &str>(())
+        })
+        .expect("fetch succeeds");
+        fetch_recreation_base(&mut fetched, |fetch| {
+            assert!(!fetch, "a verified fetch may be reused");
+            Ok::<_, &str>(())
+        })
+        .expect("verified tracking refs may be reused");
     }
 
     #[test]

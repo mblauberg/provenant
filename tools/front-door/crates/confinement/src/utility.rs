@@ -159,6 +159,17 @@ impl UtilityBudget {
         })
     }
 
+    /// Restrict a utility read to the remaining command deadline.
+    pub fn with_timeout_cap(self, cap: Duration) -> Result<Self, UtilityError> {
+        if cap.is_zero() {
+            return Err(UtilityError::InvalidBudget);
+        }
+        Ok(Self {
+            timeout: self.timeout.min(cap),
+            ..self
+        })
+    }
+
     pub fn bounded(timeout: Duration) -> Result<Self, UtilityError> {
         Self::new(
             timeout,
