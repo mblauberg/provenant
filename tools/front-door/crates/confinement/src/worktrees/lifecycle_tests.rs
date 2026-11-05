@@ -101,7 +101,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
         }
     }
     impl WorkerObserver for Counting {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             super::census::observe_worker_roots(roots, self, self, &self.current, false).0
         }
     }
@@ -1477,34 +1477,43 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
 fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<(), Box<dyn Error>> {
     let scope = Path::new("/fixture/worktree");
     assert!(matches!(
-        combine_occupancy(scope, Occupancy::custody_unknown(scope.to_path_buf(), "fixture"), WorkerState::Live),
+        combine_occupancy(scope, Occupancy::custody_unknown(scope.to_path_buf(), "fixture"), Occupancy::Observed { process: None }),
         Occupancy::Unknown { scope: actual, source: OccupancyUnknownSource::Custody, .. } if actual == scope
     ));
     assert_eq!(
-        combine_occupancy(scope, Occupancy::Held, WorkerState::Live),
+        combine_occupancy(
+            scope,
+            Occupancy::Held,
+            Occupancy::Observed { process: None }
+        ),
         Occupancy::Held
     );
     assert!(matches!(
-        combine_occupancy(scope, Occupancy::Available, WorkerState::Busy),
+        combine_occupancy(scope, Occupancy::Available, Occupancy::Held),
         Occupancy::Unknown { scope: actual, source: OccupancyUnknownSource::Census, .. } if actual == scope
     ));
     struct Incomplete;
     struct Contended;
     impl WorkerObserver for Contended {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|path| (path, WorkerState::Busy))
+                .map(|path| (path, Occupancy::Held))
                 .collect()
         }
     }
     impl WorkerObserver for Incomplete {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|path| (path, WorkerState::Unknown))
+                .map(|path| {
+                    (
+                        path.clone(),
+                        Occupancy::census_unknown(path, "fixture census unavailable"),
+                    )
+                })
                 .collect()
         }
         fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
@@ -1635,11 +1644,11 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
 fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn Error>> {
     struct Live;
     impl WorkerObserver for Live {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|path| (path, WorkerState::Live))
+                .map(|path| (path, Occupancy::Observed { process: None }))
                 .collect()
         }
     }
@@ -2351,11 +2360,11 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
 }
 
 impl WorkerObserver for FreeWorkers {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         roots
             .iter()
             .cloned()
-            .map(|root| (root, WorkerState::Free))
+            .map(|root| (root, Occupancy::Available))
             .collect()
     }
 }
@@ -2364,11 +2373,11 @@ impl WorkerObserver for FreeWorkers {
 pub(super) struct NamedLive;
 
 impl WorkerObserver for NamedLive {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         roots
             .iter()
             .cloned()
-            .map(|root| (root, WorkerState::Live))
+            .map(|root| (root, Occupancy::Observed { process: None }))
             .collect()
     }
 
@@ -2476,11 +2485,16 @@ fn detached_removal_keeps_dirty_unmerged_and_live_work() -> Result<(), Box<dyn E
 }
 
 impl WorkerObserver for UnknownWorkers {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         roots
             .iter()
             .cloned()
-            .map(|root| (root, WorkerState::Unknown))
+            .map(|root| {
+                (
+                    root.clone(),
+                    Occupancy::census_unknown(root, "fixture census unavailable"),
+                )
+            })
             .collect()
     }
 }
@@ -3135,19 +3149,20 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
     }
     struct CwdWorker(ProcessFact);
     impl WorkerObserver for CwdWorker {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             let mut states = roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect();
             match observe_same_process(&SystemProcessObserver, &SystemCwdObserver, &self.0) {
                 NativeCwd::Path(path) => {
                     record_live_path(&mut states, &path);
                 }
                 _ => {
-                    for state in states.values_mut() {
-                        *state = WorkerState::Unknown;
+                    for (root, state) in &mut states {
+                        *state =
+                            Occupancy::census_unknown(root.clone(), "fixture process unavailable");
                     }
                 }
             }
@@ -3182,7 +3197,7 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
     let worker = CwdWorker(fact);
     assert_eq!(
         worker.observe_roots(std::slice::from_ref(&path)).get(&path),
-        Some(&WorkerState::Live)
+        Some(&Occupancy::Observed { process: None })
     );
     context.workers = &worker;
     let report = collect(
@@ -3748,7 +3763,7 @@ struct LockProbeWorkers<'a> {
 }
 
 impl WorkerObserver for LockProbeWorkers<'_> {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         let held = self
             .project_state
             .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
@@ -3757,7 +3772,7 @@ impl WorkerObserver for LockProbeWorkers<'_> {
         roots
             .iter()
             .cloned()
-            .map(|root| (root, WorkerState::Free))
+            .map(|root| (root, Occupancy::Available))
             .collect()
     }
 }
@@ -3833,11 +3848,11 @@ fn inventory_census_runs_after_repository_snapshot_lock_is_released() -> Result<
 fn locked_registration_stays_unknown_when_census_reports_live() -> Result<(), Box<dyn Error>> {
     struct LiveWorkers;
     impl WorkerObserver for LiveWorkers {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Live))
+                .map(|root| (root, Occupancy::Observed { process: None }))
                 .collect()
         }
     }
@@ -3871,21 +3886,27 @@ struct FlippingWorkers {
 }
 
 impl WorkerObserver for FlippingWorkers {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        let state = if call >= self.unknown_from {
-            WorkerState::Unknown
-        } else {
-            WorkerState::Free
-        };
-        roots.iter().cloned().map(|root| (root, state)).collect()
+        roots
+            .iter()
+            .cloned()
+            .map(|root| {
+                let state = if call >= self.unknown_from {
+                    Occupancy::census_unknown(root.clone(), "fixture census unavailable")
+                } else {
+                    Occupancy::Available
+                };
+                (root, state)
+            })
+            .collect()
     }
 
     fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         let states = self.observe_roots(roots);
         let details = states
             .iter()
-            .filter(|(_, state)| **state != WorkerState::Free)
+            .filter(|(_, state)| !state.is_available())
             .map(|(root, _)| {
                 (
                     root.clone(),
@@ -3905,14 +3926,18 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
         complete_required: bool,
     }
     impl WorkerObserver for AppearingAfterPreparation {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let state = if self.artifact.exists() {
-                WorkerState::Free
+                Occupancy::Available
             } else {
-                WorkerState::Live
+                Occupancy::Observed { process: None }
             };
-            roots.iter().cloned().map(|root| (root, state)).collect()
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, state.clone()))
+                .collect()
         }
         fn requires_complete_census(&self) -> bool {
             self.complete_required
@@ -3975,13 +4000,17 @@ fn custody_refresh_rechecks_a_cached_free_observation() -> Result<(), Box<dyn Er
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Appearing(AtomicUsize);
     impl WorkerObserver for Appearing {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             let state = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                WorkerState::Free
+                Occupancy::Available
             } else {
-                WorkerState::Live
+                Occupancy::Observed { process: None }
             };
-            roots.iter().cloned().map(|root| (root, state)).collect()
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, state.clone()))
+                .collect()
         }
         fn requires_complete_census(&self) -> bool {
             true
@@ -3994,7 +4023,7 @@ fn custody_refresh_rechecks_a_cached_free_observation() -> Result<(), Box<dyn Er
     let session = CensusSession::new(&observer, &test.clock);
     assert_eq!(
         session.observe_roots(std::slice::from_ref(&fixture.root))[&fixture.root],
-        WorkerState::Free
+        Occupancy::Available
     );
     context.workers = &session;
     assert!(matches!(
@@ -4012,14 +4041,18 @@ fn removal_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> 
         complete_required: bool,
     }
     impl WorkerObserver for Appearing {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let state = if call == 0 {
-                WorkerState::Free
+                Occupancy::Available
             } else {
-                WorkerState::Live
+                Occupancy::Observed { process: None }
             };
-            roots.iter().cloned().map(|root| (root, state)).collect()
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, state.clone()))
+                .collect()
         }
         fn requires_complete_census(&self) -> bool {
             self.complete_required
@@ -4044,7 +4077,7 @@ fn removal_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> 
         let session = CensusSession::new(&observer, &test.clock);
         assert_eq!(
             session.observe_roots(std::slice::from_ref(&info.path))[&info.path],
-            WorkerState::Free
+            Occupancy::Available
         );
         context.workers = &session;
         let error = remove(
@@ -4076,14 +4109,20 @@ fn removal_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> 
 fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Error>> {
     struct BecomingUnknown(std::sync::atomic::AtomicUsize);
     impl WorkerObserver for BecomingUnknown {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let state = if call == 0 {
-                WorkerState::Free
-            } else {
-                WorkerState::Unknown
-            };
-            roots.iter().cloned().map(|root| (root, state)).collect()
+            roots
+                .iter()
+                .cloned()
+                .map(|root| {
+                    let state = if call == 0 {
+                        Occupancy::Available
+                    } else {
+                        Occupancy::census_unknown(root.clone(), "fixture census unavailable")
+                    };
+                    (root, state)
+                })
+                .collect()
         }
     }
     let fixture = Fixture::new()?;
@@ -4102,7 +4141,7 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
     let session = CensusSession::new(&observer, &test.clock);
     assert_eq!(
         session.observe_roots(std::slice::from_ref(&path))[&path],
-        WorkerState::Free
+        Occupancy::Available
     );
     context.workers = &session;
     let report = collect(
@@ -4130,14 +4169,18 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
 fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
     struct Appearing(std::sync::atomic::AtomicUsize);
     impl WorkerObserver for Appearing {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let state = if call == 0 {
-                WorkerState::Free
+                Occupancy::Available
             } else {
-                WorkerState::Live
+                Occupancy::Observed { process: None }
             };
-            roots.iter().cloned().map(|root| (root, state)).collect()
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, state.clone()))
+                .collect()
         }
     }
     let fixture = Fixture::new()?;
@@ -4148,7 +4191,7 @@ fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
     let session = CensusSession::new(&observer, &test_context.clock);
     assert_eq!(
         session.observe_roots(std::slice::from_ref(&lane.path))[&lane.path],
-        WorkerState::Free
+        Occupancy::Available
     );
     context.workers = &session;
     let report = collect(

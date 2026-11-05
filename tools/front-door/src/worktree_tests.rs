@@ -24,12 +24,12 @@ impl provenant_confinement::worktrees::WorkerObserver for FreeWorkers {
     fn observe_roots(
         &self,
         roots: &[std::path::PathBuf],
-    ) -> std::collections::BTreeMap<std::path::PathBuf, provenant_confinement::worktrees::WorkerState>
+    ) -> std::collections::BTreeMap<std::path::PathBuf, provenant_confinement::worktrees::Occupancy>
     {
         roots
             .iter()
             .cloned()
-            .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+            .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
             .collect()
     }
 }
@@ -39,17 +39,26 @@ impl provenant_confinement::worktrees::WorkerObserver for UnknownWorkers {
     fn observe_roots(
         &self,
         roots: &[PathBuf],
-    ) -> BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
+    ) -> BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
         static OBSERVATIONS: std::sync::atomic::AtomicUsize =
             std::sync::atomic::AtomicUsize::new(0);
         let late = std::env::var("FIXTURE_UNKNOWN_WORKERS").is_ok_and(|mode| mode == "late");
-        let observed = if late && OBSERVATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2
-        {
-            provenant_confinement::worktrees::WorkerState::Free
-        } else {
-            provenant_confinement::worktrees::WorkerState::Unknown
-        };
-        roots.iter().cloned().map(|root| (root, observed)).collect()
+        let free = late && OBSERVATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2;
+        roots
+            .iter()
+            .cloned()
+            .map(|root| {
+                let observed = if free {
+                    provenant_confinement::worktrees::Occupancy::Available
+                } else {
+                    provenant_confinement::worktrees::Occupancy::census_unknown(
+                        root.clone(),
+                        "fixture census unavailable",
+                    )
+                };
+                (root, observed)
+            })
+            .collect()
     }
 }
 

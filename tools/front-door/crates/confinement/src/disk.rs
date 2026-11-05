@@ -41,7 +41,7 @@ use crate::permissions::PermissionError;
 use crate::repo::VerifiedRepo;
 use crate::utility::{GitRead, UtilityBudget, UtilityRuntime, run_utility};
 use crate::worktrees::{
-    WorkerObserver, WorkerState, WorktreeCondition, WorktreeError, WorktreeInfo, combine_occupancy,
+    WorkerObserver, WorktreeCondition, WorktreeError, WorktreeInfo, combine_occupancy,
     disk_writer_state, parse_worktree_list,
 };
 use provenant_core::CancelToken;
@@ -242,10 +242,12 @@ pub fn worktrees(
         let occupancy = combine_occupancy(
             &listed.path,
             registered,
-            observed
-                .get(&listed.path)
-                .copied()
-                .unwrap_or(WorkerState::Unknown),
+            observed.get(&listed.path).cloned().unwrap_or_else(|| {
+                crate::worktrees::Occupancy::census_unknown(
+                    listed.path.clone(),
+                    "process census did not return the requested root",
+                )
+            }),
         );
         let info = WorktreeInfo {
             path: listed.path,

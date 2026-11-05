@@ -1462,25 +1462,25 @@ mod tests {
 
     #[test]
     fn wip_holds_the_writer_lease_during_git_mutation() -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+        use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
         use std::collections::BTreeMap;
         struct Free;
         impl WorkerObserver for Free {
-            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
                 roots
                     .iter()
                     .cloned()
-                    .map(|path| (path, WorkerState::Free))
+                    .map(|path| (path, Occupancy::Available))
                     .collect()
             }
         }
         struct Bystander;
         impl WorkerObserver for Bystander {
-            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
                 roots
                     .iter()
                     .cloned()
-                    .map(|path| (path, WorkerState::Live))
+                    .map(|path| (path, Occupancy::Observed { process: None }))
                     .collect()
             }
         }

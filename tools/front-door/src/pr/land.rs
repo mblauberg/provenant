@@ -388,7 +388,7 @@ impl WorkerObserver for LandWorkers<'_> {
     fn observe_roots(
         &self,
         roots: &[PathBuf],
-    ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
+    ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
         self.0.observe_roots_for_land(roots)
     }
 
@@ -1711,14 +1711,14 @@ mod land_log_tests {
     fn land_policy_preserves_combined_evidence_and_ancestor_mode()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_confinement::worktrees::{
-            CensusPolicyWorkers, CensusSession, WorkerEvidence, WorkerObserver, WorkerState,
+            CensusPolicyWorkers, CensusSession, Occupancy, WorkerEvidence, WorkerObserver,
         };
         use std::collections::BTreeMap;
         use std::path::PathBuf;
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct Observer(AtomicUsize);
         impl WorkerObserver for Observer {
-            fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
                 panic!("combined evidence required")
             }
             fn observe_evidence_with_policy(
@@ -1733,7 +1733,7 @@ mod land_log_tests {
                     states: roots
                         .iter()
                         .cloned()
-                        .map(|root| (root, WorkerState::Live))
+                        .map(|root| (root, Occupancy::Observed { process: None }))
                         .collect(),
                     holders: roots
                         .iter()
@@ -1771,15 +1771,12 @@ mod land_log_tests {
         let clock = provenant_os::clock::SystemClock;
         let session = CensusSession::new(&policy, &clock);
         assert!(session.requires_complete_census());
-        assert_eq!(
-            session.observe_roots(std::slice::from_ref(&checkout))[&checkout],
-            WorkerState::Live
-        );
-        assert_eq!(
+        assert!(session.observe_roots(std::slice::from_ref(&checkout))[&checkout].is_observed());
+        assert!(
             session
                 .observe_roots_with_details(std::slice::from_ref(&checkout))
-                .0[&checkout],
-            WorkerState::Live
+                .0[&checkout]
+                .is_observed()
         );
         assert_eq!(
             session.live_process(&checkout).map(|holder| holder.pid),

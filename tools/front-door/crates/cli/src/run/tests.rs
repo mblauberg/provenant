@@ -259,7 +259,7 @@ fn project_default_dispatch_renders_ipc_only_for_writer() -> Result<(), Box<dyn 
         AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
         ProviderProfileSpec, WorktreeWriteAuthority,
     };
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use std::os::unix::fs::DirBuilderExt;
     const MARKER: &str = "PROVENANT_TEST_CAPABILITY_DISPATCH";
@@ -332,11 +332,11 @@ fn project_default_dispatch_renders_ipc_only_for_writer() -> Result<(), Box<dyn 
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -451,17 +451,17 @@ fn project_default_branch_dispatch_renders_database_ipc() -> Result<(), Box<dyn 
         AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
         ProviderProfileSpec, WorktreeWriteAuthority,
     };
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     struct Free;
     impl WorkerObserver for Free {
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -2336,7 +2336,7 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
 #[test]
 fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{
-        self, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+        self, Occupancy, WorkerObserver, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
     };
     use provenant_core::RootInputs;
     use provenant_os::fixture::run_git;
@@ -2346,11 +2346,11 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -2359,11 +2359,16 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Unknown))
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, "fixture census unavailable"),
+                    )
+                })
                 .collect()
         }
     }
@@ -2759,7 +2764,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
 fn own_worktree_pending_reservation_takes_precedence_over_census()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{
-        self, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin,
+        self, ObservedProcess, Occupancy, WorkerObserver, WorktreeCreate, WorktreeOrigin,
         WorktreeOwner,
     };
     use provenant_core::RootInputs;
@@ -2768,10 +2773,10 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
-                .map(|root| (root.clone(), WorkerState::Live))
+                .map(|root| (root.clone(), Occupancy::Observed { process: None }))
                 .collect()
         }
 
@@ -2786,7 +2791,7 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
                 states: roots
                     .iter()
                     .cloned()
-                    .map(|root| (root, WorkerState::Live))
+                    .map(|root| (root, Occupancy::Observed { process: None }))
                     .collect(),
                 holders: roots
                     .iter()
@@ -2821,10 +2826,10 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
-                .map(|root| (root.clone(), WorkerState::Free))
+                .map(|root| (root.clone(), Occupancy::Available))
                 .collect()
         }
     }
@@ -2833,11 +2838,16 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Unknown))
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, "fixture census unavailable"),
+                    )
+                })
                 .collect()
         }
 
@@ -2849,7 +2859,12 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
             (
                 roots
                     .iter()
-                    .map(|root| (root.clone(), WorkerState::Unknown))
+                    .map(|root| {
+                        (
+                            root.clone(),
+                            Occupancy::census_unknown(root.clone(), "fixture census unavailable"),
+                        )
+                    })
                     .collect(),
                 roots
                     .iter()
@@ -3136,7 +3151,7 @@ fn worktree_census_warning_includes_scope_and_evidence() -> Result<(), Box<dyn s
 fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{
-        self, CensusPolicyWorkers, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate,
+        self, CensusPolicyWorkers, ObservedProcess, Occupancy, WorkerObserver, WorktreeCreate,
     };
     use provenant_core::RootInputs;
     struct ControlledObserver {
@@ -3146,16 +3161,16 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .map(|root| {
                     (
                         root.clone(),
                         if root == &self.target {
-                            WorkerState::Live
+                            Occupancy::Observed { process: None }
                         } else {
-                            WorkerState::Free
+                            Occupancy::Available
                         },
                     )
                 })
@@ -3165,10 +3180,10 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         fn observe_roots_for_land(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
-                .map(|root| (root.clone(), WorkerState::Free))
+                .map(|root| (root.clone(), Occupancy::Available))
                 .collect()
         }
 
@@ -3190,10 +3205,10 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
-                .map(|root| (root.clone(), WorkerState::Free))
+                .map(|root| (root.clone(), Occupancy::Available))
                 .collect()
         }
     }
@@ -3412,7 +3427,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
 
 #[test]
 fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     use provenant_core::RootInputs;
     use std::ffi::OsString;
     // A census that cannot clear any tree: cleanup after a late failure
@@ -3422,11 +3437,16 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Unknown))
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, "fixture census unavailable"),
+                    )
+                })
                 .collect()
         }
     }
@@ -3529,7 +3549,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
         {
             if !self.moved.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 provenant_os::fixture::run_git(
@@ -3541,7 +3561,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }
@@ -7656,7 +7676,7 @@ fn admission_window_deadline_is_preserved_on_restart() -> Result<(), Box<dyn std
 fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{
-        self, WorkerObserver, WorkerState, WorktreeOrigin, WorktreeOwner,
+        self, Occupancy, WorkerObserver, WorktreeOrigin, WorktreeOwner,
     };
 
     struct Free;
@@ -7664,11 +7684,11 @@ fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -7790,7 +7810,7 @@ fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
 
 #[test]
 fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     use provenant_os::fs::{Directory, LockMode};
 
     struct Free;
@@ -7798,11 +7818,11 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -7924,7 +7944,7 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
 
 #[test]
 fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     use provenant_os::fs::{Directory, LockMode};
 
     struct Free;
@@ -7932,11 +7952,11 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -8040,19 +8060,19 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
 #[test]
 fn dispatch_restart_honours_saved_admission_wake_and_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Counting(AtomicUsize);
     impl WorkerObserver for Counting {
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             self.0.fetch_add(1, Ordering::SeqCst);
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }

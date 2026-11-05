@@ -533,7 +533,13 @@ fn census_refusal_detail(context: &WorktreeContext<'_>, path: &Path) -> Option<S
         .workers
         .observe_roots_with_details(std::slice::from_ref(&path.to_path_buf()));
     match states.get(path) {
-        Some(WorkerState::Free) => None,
+        Some(Occupancy::Available) => None,
+        Some(Occupancy::Unknown { evidence, .. }) => Some(
+            details
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| evidence.clone()),
+        ),
         Some(_) => Some(
             details
                 .get(path)

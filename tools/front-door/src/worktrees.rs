@@ -855,8 +855,8 @@ pub(crate) fn land_cleanup(
                 .workers
                 .observe_roots_with_details(std::slice::from_ref(&lane.path));
             match observations.get(&lane.path) {
-                Some(worktrees::WorkerState::Free) => {}
-                Some(worktrees::WorkerState::Live) => {
+                Some(worktrees::Occupancy::Available) => {}
+                Some(worktrees::Occupancy::Observed { .. }) => {
                     landed.kept =
                         Some(worktrees::live_refusal(context.workers, &lane.path).to_string());
                     return Ok(landed);

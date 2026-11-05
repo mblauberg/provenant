@@ -2422,12 +2422,12 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
             roots: &[std::path::PathBuf],
         ) -> std::collections::BTreeMap<
             std::path::PathBuf,
-            provenant_confinement::worktrees::WorkerState,
+            provenant_confinement::worktrees::Occupancy,
         > {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }
@@ -2584,12 +2584,12 @@ fn review_delivery_requires_acceptance_and_exact_head()
             roots: &[std::path::PathBuf],
         ) -> std::collections::BTreeMap<
             std::path::PathBuf,
-            provenant_confinement::worktrees::WorkerState,
+            provenant_confinement::worktrees::Occupancy,
         > {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }
@@ -2737,12 +2737,12 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
             roots: &[std::path::PathBuf],
         ) -> std::collections::BTreeMap<
             std::path::PathBuf,
-            provenant_confinement::worktrees::WorkerState,
+            provenant_confinement::worktrees::Occupancy,
         > {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }
@@ -4277,12 +4277,12 @@ pub(super) fn registered_landed_writer_fixture(
             roots: &[std::path::PathBuf],
         ) -> std::collections::BTreeMap<
             std::path::PathBuf,
-            provenant_confinement::worktrees::WorkerState,
+            provenant_confinement::worktrees::Occupancy,
         > {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }

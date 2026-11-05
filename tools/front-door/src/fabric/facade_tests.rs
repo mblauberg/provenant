@@ -2,15 +2,15 @@
 #[test]
 fn peer_remote_base_pins_a_commit_reachable_from_the_remote(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{self, WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{self, WorkerObserver, Occupancy};
     use std::collections::BTreeMap;
     struct Free;
     impl WorkerObserver for Free {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|path| (path, WorkerState::Free))
+                .map(|path| (path, Occupancy::Available))
                 .collect()
         }
     }
@@ -277,12 +277,12 @@ fn peer_remote_base_pins_a_commit_reachable_from_the_remote(
 #[test]
 fn peer_adoption_checks_lease_and_treats_census_as_advisory()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{self, WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{self, WorkerObserver, Occupancy};
     use std::collections::BTreeMap;
-    struct Observer(WorkerState);
+    struct Observer(Occupancy);
     impl WorkerObserver for Observer {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
-            roots.iter().cloned().map(|path| (path, self.0)).collect()
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots.iter().cloned().map(|path| (path, self.0.clone())).collect()
         }
     }
     let temp = tempfile::tempdir()?;
@@ -309,7 +309,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
         &project,
         &clock,
         &cancel,
-        &Observer(WorkerState::Free),
+        &Observer(Occupancy::Available),
         |context| {
             let info = worktrees::create(
                 context,
@@ -344,7 +344,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
         &project,
         &clock,
         &cancel,
-        &Observer(WorkerState::Free),
+        &Observer(Occupancy::Available),
         |context| {
             worktrees::cache_writer_guard(context.project_state, &info.path)
                 .map_err(|_| worktrees::WorktreeError::UnknownWriter)
@@ -367,7 +367,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             },
         )
     };
-    let busy = observe(WorkerState::Live).expect_err("a held lease must refuse adoption");
+    let busy = observe(Occupancy::Observed { process: None }).expect_err("a held lease must refuse adoption");
     assert!(matches!(
         &busy,
         worktrees::WorktreeError::WriterBusy { holder: Some(id) } if *id == attempt
@@ -382,7 +382,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
         &project,
         &clock,
         &cancel,
-        &Observer(WorkerState::Free),
+        &Observer(Occupancy::Available),
         |context| {
             worktrees::list(context, &cancel)?
                 .into_iter()
@@ -399,20 +399,20 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             &project,
             &clock,
             &cancel,
-            &Observer(WorkerState::Free),
+            &Observer(Occupancy::Available),
             |context| peer_adoption_custody(context, &stale_held, &cancel),
         )?
         .is_none()
     );
-    assert!(observe(WorkerState::Live)?.is_some());
-    assert!(observe(WorkerState::Unknown)?.is_some());
+    assert!(observe(Occupancy::Observed { process: None })?.is_some());
+    assert!(observe(Occupancy::census_unknown(info.path.clone(), "fixture census unavailable"))?.is_some());
     let stale = worktrees::with_context_using_workers(
         &roots,
         &home,
         &project,
         &clock,
         &cancel,
-        &Observer(WorkerState::Free),
+        &Observer(Occupancy::Available),
         |context| {
             worktrees::list(context, &cancel)?
                 .into_iter()
@@ -428,7 +428,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             &project,
             &clock,
             &cancel,
-            &Observer(WorkerState::Free),
+            &Observer(Occupancy::Available),
             |context| peer_adoption_custody(context, &stale, &cancel),
         ),
         Err(worktrees::WorktreeError::Dirty(_))
@@ -444,7 +444,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
         &project,
         &clock,
         &cancel,
-        &Observer(WorkerState::Free),
+        &Observer(Occupancy::Available),
         |context| {
             Ok(
                 provenant_confinement::verify_worktree(context.repo, &info.path)?
@@ -462,7 +462,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             &project,
             &clock,
             &cancel,
-            &Observer(WorkerState::Free),
+            &Observer(Occupancy::Available),
             |context| peer_adoption_custody(context, &stale, &cancel),
         ),
         Err(worktrees::WorktreeError::GitOperationInProgress)
@@ -477,7 +477,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             &project,
             &clock,
             &cancel,
-            &Observer(WorkerState::Free),
+            &Observer(Occupancy::Available),
             |context| peer_adoption_custody(context, &stale, &cancel),
         ),
         Err(worktrees::WorktreeError::IdentityChanged)
@@ -487,7 +487,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
         &["worktree", "lock", info.path.to_str().ok_or("path")?],
     )?;
     assert!(
-        matches!(observe(WorkerState::Free), Err(worktrees::WorktreeError::UnknownOccupancy { path, detail }) if path == info.path && detail.contains("locked"))
+        matches!(observe(Occupancy::Available), Err(worktrees::WorktreeError::UnknownOccupancy { path, detail }) if path == info.path && detail.contains("locked"))
     );
     Ok(())
 }
@@ -1052,12 +1052,12 @@ pub(crate) mod peer_tests {
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
         {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }
@@ -3992,7 +3992,7 @@ pub(crate) mod peer_tests {
                 _: &[std::path::PathBuf],
             ) -> std::collections::BTreeMap<
                 std::path::PathBuf,
-                provenant_confinement::worktrees::WorkerState,
+                provenant_confinement::worktrees::Occupancy,
             > {
                 std::collections::BTreeMap::new()
             }

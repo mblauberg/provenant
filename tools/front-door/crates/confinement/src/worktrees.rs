@@ -458,6 +458,22 @@ impl Occupancy {
         matches!(self, Self::Available)
     }
 
+    pub fn is_observed(&self) -> bool {
+        matches!(self, Self::Observed { .. })
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown { .. })
+    }
+
+    pub fn census_unknown(scope: PathBuf, evidence: impl Into<String>) -> Self {
+        Self::Unknown {
+            scope,
+            evidence: evidence.into(),
+            source: OccupancyUnknownSource::Census,
+        }
+    }
+
     pub fn custody_unknown(scope: PathBuf, evidence: impl Into<String>) -> Self {
         Self::Unknown {
             scope,
@@ -569,14 +585,6 @@ pub struct DiscardedRef {
     pub head: GitOid,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorkerState {
-    Free,
-    Busy,
-    Live,
-    Unknown,
-}
-
 /// The typed reason a worktree root is tainted (not free).
 ///
 /// Distinguishes contention (which can be retried with backoff)
@@ -643,13 +651,10 @@ impl std::fmt::Display for UncertaintyReason {
 }
 
 /// Per-root custody states and reasons for unknown states.
-pub type WorkerObservations = (BTreeMap<PathBuf, WorkerState>, BTreeMap<PathBuf, String>);
+pub type WorkerObservations = (BTreeMap<PathBuf, Occupancy>, BTreeMap<PathBuf, String>);
 
 /// Per-root custody states and typed causes for tainted states.
-pub type WorkerTaintObservations = (
-    BTreeMap<PathBuf, WorkerState>,
-    BTreeMap<PathBuf, TaintCause>,
-);
+pub type WorkerTaintObservations = (BTreeMap<PathBuf, Occupancy>, BTreeMap<PathBuf, TaintCause>);
 
 #[cfg(test)]
 mod census_tests;

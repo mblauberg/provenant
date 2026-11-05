@@ -346,22 +346,26 @@ pub(super) fn lock_worktree(
     // observation of a live process refuses. Landing also needs this root
     // observed free, which a process the kernel refuses to describe does not
     // prevent.
-    match observations
-        .get(&canonical)
-        .copied()
-        .unwrap_or(WorkerState::Unknown)
-    {
-        WorkerState::Unknown if context.workers.requires_complete_census() => {
+    match observations.get(&canonical) {
+        Some(Occupancy::Unknown { evidence, .. }) if context.workers.requires_complete_census() => {
             Err(WorktreeError::IncompleteCensus {
                 detail: details
                     .get(&canonical)
                     .cloned()
-                    .unwrap_or_else(|| context.workers.incomplete_census_detail()),
+                    .unwrap_or_else(|| evidence.clone()),
             })
         }
-        WorkerState::Free | WorkerState::Unknown => Ok(LockedWorktree { verified, writer }),
-        WorkerState::Live => Err(live_refusal(context.workers, &canonical)),
-        WorkerState::Busy => Err(WorktreeError::LockBusy),
+        Some(Occupancy::Available | Occupancy::Unknown { .. }) => {
+            Ok(LockedWorktree { verified, writer })
+        }
+        Some(Occupancy::Observed { .. }) => Err(live_refusal(context.workers, &canonical)),
+        Some(Occupancy::Held) => Err(WorktreeError::LockBusy),
+        None if context.workers.requires_complete_census() => {
+            Err(WorktreeError::IncompleteCensus {
+                detail: context.workers.incomplete_census_detail(),
+            })
+        }
+        None => Ok(LockedWorktree { verified, writer }),
     }
 }
 
@@ -392,18 +396,20 @@ pub(super) fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), Work
     Ok(())
 }
 
-pub(crate) fn combine_occupancy(path: &Path, state: Occupancy, native: WorkerState) -> Occupancy {
+pub(crate) fn combine_occupancy(path: &Path, state: Occupancy, native: Occupancy) -> Occupancy {
     match (state, native) {
         (Occupancy::Held, _) => Occupancy::Held,
         (unknown @ Occupancy::Unknown { .. }, _) => unknown,
         (observed @ Occupancy::Observed { .. }, _) => observed,
-        (Occupancy::Available, WorkerState::Live) => Occupancy::Observed { process: None },
-        (Occupancy::Available, WorkerState::Busy | WorkerState::Unknown) => Occupancy::Unknown {
-            scope: path.to_path_buf(),
-            evidence: "process census could not establish occupancy".into(),
-            source: OccupancyUnknownSource::Census,
-        },
-        (Occupancy::Available, WorkerState::Free) => Occupancy::Available,
+        (Occupancy::Available, Occupancy::Observed { process }) => Occupancy::Observed { process },
+        (Occupancy::Available, Occupancy::Held) => Occupancy::census_unknown(
+            path.to_path_buf(),
+            "census reported contention without a held writer lease",
+        ),
+        (Occupancy::Available, Occupancy::Unknown { evidence, .. }) => {
+            Occupancy::census_unknown(path.to_path_buf(), evidence)
+        }
+        (Occupancy::Available, Occupancy::Available) => Occupancy::Available,
     }
 }
 

@@ -164,8 +164,10 @@ fn list_impl(
         let observed = worker_evidence
             .states
             .get(&path)
-            .copied()
-            .unwrap_or(WorkerState::Unknown);
+            .cloned()
+            .unwrap_or_else(|| {
+                Occupancy::census_unknown(path.clone(), context.workers.incomplete_census_detail())
+            });
         let mut owner = Err("worktree registration could not be verified".to_owned());
         let mut owner_evidence = None;
         let mut registration_evidence = None;
@@ -260,28 +262,24 @@ fn list_impl(
             }
         } else {
             match observed {
-                WorkerState::Free => Occupancy::Available,
-                WorkerState::Busy => Occupancy::Unknown {
-                    scope: path.clone(),
-                    evidence: "census reported contention without a held writer lease".into(),
-                    source: OccupancyUnknownSource::Census,
-                },
-                WorkerState::Live => Occupancy::Observed {
-                    process: worker_evidence
-                        .holders
-                        .get(&path)
-                        .cloned()
+                Occupancy::Available => Occupancy::Available,
+                Occupancy::Held => Occupancy::census_unknown(
+                    path.clone(),
+                    "census reported contention without a held writer lease",
+                ),
+                Occupancy::Observed { process } => Occupancy::Observed {
+                    process: process
+                        .or_else(|| worker_evidence.holders.get(&path).cloned())
                         .or_else(|| context.workers.live_process(&path)),
                 },
-                WorkerState::Unknown => Occupancy::Unknown {
-                    scope: path.clone(),
-                    evidence: worker_evidence
+                Occupancy::Unknown { evidence, .. } => Occupancy::census_unknown(
+                    path.clone(),
+                    worker_evidence
                         .details
                         .get(&path)
                         .cloned()
-                        .unwrap_or_else(|| context.workers.incomplete_census_detail()),
-                    source: OccupancyUnknownSource::Census,
-                },
+                        .unwrap_or(evidence),
+                ),
             }
         };
         let info = WorktreeInfo {
@@ -492,7 +490,9 @@ pub fn create(
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
     let worker = context.workers.observe_roots(std::slice::from_ref(&target));
-    let writer = worker.get(&target).copied().unwrap_or(WorkerState::Unknown);
+    let writer = worker.get(&target).cloned().unwrap_or_else(|| {
+        Occupancy::census_unknown(target.clone(), context.workers.incomplete_census_detail())
+    });
     Ok(WorktreeInfo {
         path: target.clone(),
         branch: Some(branch.as_str().to_owned()),
@@ -950,17 +950,21 @@ pub(super) fn refresh_census_under_custody(
     let (states, details) = context
         .workers
         .observe_roots_with_details(std::slice::from_ref(&root.to_path_buf()));
-    match states.get(root).copied().unwrap_or(WorkerState::Unknown) {
-        WorkerState::Free => Ok(()),
-        WorkerState::Unknown if !context.workers.requires_complete_census() => Ok(()),
-        WorkerState::Unknown => Err(WorktreeError::IncompleteCensus {
+    match states.get(root) {
+        Some(Occupancy::Available) => Ok(()),
+        Some(Occupancy::Unknown { .. }) if !context.workers.requires_complete_census() => Ok(()),
+        Some(Occupancy::Unknown { evidence, .. }) => Err(WorktreeError::IncompleteCensus {
             detail: details
                 .get(root)
                 .cloned()
-                .unwrap_or_else(|| context.workers.incomplete_census_detail()),
+                .unwrap_or_else(|| evidence.clone()),
         }),
-        WorkerState::Live => Err(live_refusal(context.workers, root)),
-        WorkerState::Busy => Err(WorktreeError::LockBusy),
+        Some(Occupancy::Observed { .. }) => Err(live_refusal(context.workers, root)),
+        Some(Occupancy::Held) => Err(WorktreeError::LockBusy),
+        None if !context.workers.requires_complete_census() => Ok(()),
+        None => Err(WorktreeError::IncompleteCensus {
+            detail: context.workers.incomplete_census_detail(),
+        }),
     }
 }
 
