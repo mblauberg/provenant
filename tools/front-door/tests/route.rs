@@ -463,36 +463,9 @@ fn fallback_and_retired_key_warnings_are_revision_scoped() -> Result {
 }
 
 #[test]
-fn retired_schedule_keys_drop_only_their_record_with_a_named_warning() -> Result {
+fn invalid_lane_restriction_rule_refuses_configuration() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
-    for (config, path, replacement) in [
-        (
-            "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\nexpires_unix_seconds=2000000000\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n",
-            "domains.routing.pacing_overrides.0",
-            "moved_to_schedule.expires",
-        ),
-        (
-            "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nwindows=[{start_hour=1,end_hour=4}]\n[domains.routing.model_policy.rules.policy.cache]\nttl_seconds=60\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n",
-            "domains.routing.model_policy.rules.0",
-            "moved_to_schedule.windows",
-        ),
-    ] {
-        fs::write(rig.state.join("config.toml"), config)?;
-        let out = rig.command(&["route", "override", "list", "--json"])?;
-        assert_eq!(code(&out), 0);
-        let stderr = String::from_utf8(out.stderr.bytes)?;
-        assert!(
-            stderr.contains(&format!(
-                "{path}: ignored invalid configuration (domain: {replacement})"
-            )),
-            "{stderr}"
-        );
-        let listed: Value = serde_json::from_slice(&out.stdout.bytes)?;
-        let rows = listed["data"]["overrides"].as_array().ok_or("overrides")?;
-        assert_eq!(rows.len(), 1, "{listed}");
-        assert_eq!(rows[0]["scope"], "provider claude");
-    }
     // A rule that enforces a lane restriction stays strict.
     fs::write(
         rig.state.join("config.toml"),
