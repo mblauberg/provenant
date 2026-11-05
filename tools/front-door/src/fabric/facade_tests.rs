@@ -63,6 +63,24 @@ fn memory_pressure_refusal_keeps_source_and_resource_action() {
 }
 
 #[test]
+fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
+    use provenant_records::diagnostic::{LaneLimit, SettingSource};
+    let failure = || provenant_run::RunError::Admission(provenant_run::AdmissionError::LaneCap {
+        active: 3,
+        limit: 3,
+        kind: LaneLimit::ProjectWriters,
+        origin: SettingSource::Configuration,
+    });
+    for error in [run_error(failure()), dispatch_refused(failure().into())] {
+        let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+        let projection = decoded.diagnostic();
+        assert!(projection.detail.as_deref().unwrap().contains("max_project_writer_lanes"));
+        assert!(projection.detail.as_deref().unwrap().contains("host configuration"));
+        assert!(projection.next.as_deref().unwrap().contains("writer lane"));
+    }
+}
+
+#[test]
 fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =

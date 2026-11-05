@@ -701,7 +701,8 @@ fn each_refusal_has_its_own_stable_code() {
             RunError::Admission(AdmissionError::LaneCap {
                 active: 3,
                 limit: 3,
-                scope: "host",
+                kind: provenant_records::diagnostic::LaneLimit::HostWriters,
+                origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
             }),
             "LANE_CAP",
         ),

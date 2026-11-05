@@ -143,6 +143,51 @@ fn memory_pressure_projects_configured_source_and_action() {
     assert!(!value.to_string().contains("/private/host"));
 }
 
+#[test]
+fn lane_cap_projects_its_actual_limit_and_source() {
+    use provenant_records::diagnostic::{LaneLimit, ResourceFact, SettingSource};
+    for (kind, key, origin) in [
+        (
+            LaneLimit::HostWriters,
+            "max_writer_lanes",
+            SettingSource::Configuration,
+        ),
+        (
+            LaneLimit::ProjectWriters,
+            "max_project_writer_lanes",
+            SettingSource::ShippedDefault,
+        ),
+        (
+            LaneLimit::ProjectTotal,
+            "fixed host safety ceiling",
+            SettingSource::ShippedDefault,
+        ),
+    ] {
+        let error = FacadeError::ConfinementRefused {
+            resource: Some(ResourceFact::LaneCap {
+                active: 3,
+                limit: 3,
+                lane_limit: kind,
+                origin,
+            }),
+        };
+        let wire = serde_json::to_vec(&error).unwrap();
+        let decoded: FacadeError = serde_json::from_slice(&wire).unwrap();
+        let value = ServiceError::Facade(decoded).structured_error();
+        assert_eq!(value["code"], "confinement_refused");
+        assert!(value["detail"].as_str().unwrap().contains(key));
+        assert!(value["next"].as_str().unwrap().contains("lane"));
+        if kind.setting().is_some() {
+            assert!(
+                value["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains(origin.description())
+            );
+        }
+    }
+}
+
 use super::*;
 use provenant_core::OperationId;
 use serde_json::json;

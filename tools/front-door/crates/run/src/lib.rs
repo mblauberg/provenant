@@ -712,16 +712,18 @@ impl RunError {
             Self::Admission(AdmissionError::LaneCap {
                 active,
                 limit,
-                scope,
+                kind,
+                origin,
             }) => {
-                let setting = if *scope == "project" {
-                    "max_project_writer_lanes"
-                } else {
-                    "max_writer_lanes"
+                let fact = provenant_records::diagnostic::ResourceFact::LaneCap {
+                    active: *active,
+                    limit: *limit,
+                    lane_limit: *kind,
+                    origin: *origin,
                 };
-                diagnostic = diagnostic
-                    .detail(format!("{active} of {limit} writer lanes are active; domains.fabric.lanes.{setting} is the limit"))
-                    .next(format!("wait for a writer lane to finish or adjust domains.fabric.lanes.{setting}"));
+                diagnostic = fact
+                    .project(diagnostic)
+                    .fact(DiagnosticFact::Resource(fact));
             }
             Self::SetupLockTimeout { seconds } => {
                 diagnostic = diagnostic
@@ -851,7 +853,8 @@ mod diagnostic_projection_tests {
                 AdmissionError::LaneCap {
                     active: 5,
                     limit: 5,
-                    scope: "project",
+                    kind: provenant_records::diagnostic::LaneLimit::ProjectWriters,
+                    origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
                 },
                 "max_project_writer_lanes",
                 "writer",

@@ -84,13 +84,14 @@ pub enum AdmissionError {
     )]
     Processes { used: u64, limit: u64 },
     #[error(
-        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
-        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
+        "lane cap reached: {active} of {limit} {description} are active; {setting} (source: {source_label}); wait for a lane to finish",
+        description = .kind.description(), setting = .kind.setting().unwrap_or("fixed host safety ceiling"), source_label = .origin.description()
     )]
     LaneCap {
         active: u64,
         limit: u64,
-        scope: &'static str,
+        kind: provenant_records::diagnostic::LaneLimit,
+        origin: provenant_records::diagnostic::SettingSource,
     },
 }
 pub type Result<T> = std::result::Result<T, CustodyError>;

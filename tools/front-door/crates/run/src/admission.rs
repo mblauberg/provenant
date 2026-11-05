@@ -990,7 +990,8 @@ impl RunStore {
                             refusal = Some(RunError::Admission(AdmissionError::LaneCap {
                                 active: hit.active,
                                 limit: hit.limit,
-                                scope: hit.scope,
+                                kind: hit.kind,
+                                origin: hit.origin,
                             }));
                         }
                     }

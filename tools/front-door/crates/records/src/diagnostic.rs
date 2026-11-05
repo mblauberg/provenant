@@ -67,6 +67,35 @@ impl PressureThreshold {
     }
 }
 
+/// The ledger limit that actually prevented a lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneLimit {
+    HostWriters,
+    ProjectWriters,
+    HostTotal,
+    ProjectTotal,
+}
+
+impl LaneLimit {
+    pub fn setting(self) -> Option<&'static str> {
+        match self {
+            Self::HostWriters => Some("domains.fabric.lanes.max_writer_lanes"),
+            Self::ProjectWriters => Some("domains.fabric.lanes.max_project_writer_lanes"),
+            Self::HostTotal | Self::ProjectTotal => None,
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::HostWriters => "host writer lanes",
+            Self::ProjectWriters => "project writer lanes",
+            Self::HostTotal => "host lanes",
+            Self::ProjectTotal => "project lanes",
+        }
+    }
+}
+
 /// Closed resource facts safe to project across host boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -74,6 +103,12 @@ pub enum ResourceFact {
     MemoryPressure {
         level: PressureLevel,
         threshold: PressureThreshold,
+        origin: SettingSource,
+    },
+    LaneCap {
+        active: u64,
+        limit: u64,
+        lane_limit: LaneLimit,
         origin: SettingSource,
     },
 }
@@ -84,6 +119,17 @@ impl ResourceFact {
             Self::MemoryPressure { level, threshold, origin } => diagnostic
                 .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
                 .next("reduce host memory pressure before retrying"),
+            Self::LaneCap { active, limit, lane_limit, origin } => {
+                let description = lane_limit.description();
+                match lane_limit.setting() {
+                    Some(setting) => diagnostic
+                        .detail(format!("{active} of {limit} {description} are active; {setting} (source: {})", origin.description()))
+                        .next(format!("wait for a writer lane to finish or adjust {setting}")),
+                    None => diagnostic
+                        .detail(format!("{active} of {limit} {description} are active; fixed host safety ceiling"))
+                        .next("wait for an active lane to finish before retrying"),
+                }
+            }
         }
     }
 }

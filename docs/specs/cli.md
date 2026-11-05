@@ -455,8 +455,10 @@ that resolve to the same account use `DUPLICATE_PACING_PROFILE`. Identity or
 credential settings that cannot be synced use `SHARED_SETTINGS_NEVER_SYNCED`;
 the shared-settings owner supplies the corrective action. Resource
 projections name the observed limits and the relevant setting or operating-system
-limit; disk-floor and memory-pressure refusals identify the host configuration
-or shipped default that supplied the limit. Their actions name the condition to correct. A writer
+limit; disk-floor, memory-pressure and configured writer-lane refusals identify
+the host configuration or shipped default that supplied the limit. Fixed total
+lane ceilings are identified separately from configurable writer limits. Their
+actions name the condition to correct. A writer
 with unknown custody remains refused until custody is checked.
 - Why: agents and tests act on the code, and a reworded message must break
   neither.

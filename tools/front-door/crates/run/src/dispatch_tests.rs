@@ -2930,12 +2930,24 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
             Err(
                 error @ RunError::Admission(AdmissionError::LaneCap {
                     limit: 3,
-                    scope: refused,
+                    kind: refused,
+                    origin,
                     ..
                 }),
             ) => {
                 assert_eq!(error.code(), "LANE_CAP");
-                assert_eq!(refused, scope);
+                assert_eq!(
+                    refused,
+                    if scope == "host" {
+                        provenant_records::diagnostic::LaneLimit::HostWriters
+                    } else {
+                        provenant_records::diagnostic::LaneLimit::ProjectWriters
+                    }
+                );
+                assert_eq!(
+                    origin,
+                    provenant_records::diagnostic::SettingSource::Configuration
+                );
                 // The message names the configuration key to raise.
                 let key = if scope == "project" {
                     "max_project_writer_lanes"
