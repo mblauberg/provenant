@@ -5623,9 +5623,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .map_err(dispatch_refused)?;
             grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
-            let receipt = owner.submit_with_access(
-                input, self.budget, self.cancel, grants, retry_limit,
-            )?;
+            let receipt =
+                owner.submit_with_access(input, self.budget, self.cancel, grants, retry_limit)?;
             if let Some(reason) = blocked(&owner)? {
                 return Err(FacadeError::DispatchRefused {
                     fact: None,
