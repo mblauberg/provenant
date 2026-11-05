@@ -830,6 +830,37 @@ mod lineage_tests {
                 &store.attempt_dir(record.run_id, prior, false)?,
                 RunStore::scope(&record),
             )?;
+            if origin == Some(WorktreeOrigin::Lane) {
+                let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+                assert!(matches!(
+                    store.check_writer_lineage(&record, &launch.worktree, &call),
+                    Err(RunError::NotFound)
+                ));
+                let mut owner_context = execution.clone();
+                owner_context.project_id = provenant_core::ProjectId::from_bytes([121; 16]);
+                let owner_store = RunStore::open(&owner_context, &call)?;
+                let mut owner = crate::tests::input();
+                owner.run_id = RunId::from_bytes([122; 16]);
+                owner.operation_id = "previous-owner".parse()?;
+                owner.attempts[0].attempt_id = AttemptId::from_bytes([120; 16]);
+                owner_store.create(&owner, &call)?;
+                assert!(matches!(
+                    store.check_writer_lineage(&record, &launch.worktree, &call),
+                    Err(RunError::Nonterminal)
+                ));
+                let owner_id = AttemptId::from_bytes([120; 16]);
+                owner_store.withdraw(
+                    owner_id,
+                    AttemptState::Queued {
+                        extra: Default::default(),
+                    },
+                    Outcome::Cancelled,
+                    "fixture",
+                    clock.wall_now()?,
+                    &call,
+                )?;
+                assert!(store.writer_owner_terminal(owner_id, &call)?);
+            }
             if origin.is_none() {
                 let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
                 worktrees::save_owner(
@@ -1969,12 +2000,7 @@ impl RunStore {
                 let owner_id = lane
                     .and_then(|owner| owner.attempt_id)
                     .ok_or(RunError::Validation("continuation owner attempt missing"))?;
-                if owner_id != record.attempt_id
-                    && !matches!(
-                        self.record(owner_id, call)?.state,
-                        AttemptState::Terminal { .. }
-                    )
-                {
+                if owner_id != record.attempt_id && !self.writer_owner_terminal(owner_id, call)? {
                     return Err(RunError::Nonterminal);
                 }
                 return Ok(owner);
@@ -1994,10 +2020,7 @@ impl RunStore {
                     let owner_id = lane
                         .and_then(|owner| owner.attempt_id)
                         .ok_or(RunError::Validation("continuation owner attempt missing"))?;
-                    if !matches!(
-                        self.record(owner_id, call)?.state,
-                        AttemptState::Terminal { .. }
-                    ) {
+                    if !self.writer_owner_terminal(owner_id, call)? {
                         return Err(RunError::Nonterminal);
                     }
                     return Ok(owner);
@@ -2006,7 +2029,6 @@ impl RunStore {
                 was_owned |= snapshot.lane_owned;
                 if current.retry_of.is_none() {
                     initial_owner = snapshot.owner;
-
                 }
             }
             let Some(parent) = current.retry_of else {

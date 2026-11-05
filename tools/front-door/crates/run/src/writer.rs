@@ -38,9 +38,14 @@ fn queued_setup_lock(
     use provenant_os::fs::LockMode;
 
     let now = clock.mono_now();
-    let configured = WaitBudget::cli(now, wait_seconds)
-        .map_err(error("set writer setup lock budget", None))?;
-    let budget = WaitBudget::up_to(now, limit.map_or(configured.remaining(now), |limit| limit.remaining(now).min(configured.remaining(now))));
+    let configured =
+        WaitBudget::cli(now, wait_seconds).map_err(error("set writer setup lock budget", None))?;
+    let budget = WaitBudget::up_to(
+        now,
+        limit.map_or(configured.remaining(now), |limit| {
+            limit.remaining(now).min(configured.remaining(now))
+        }),
+    );
     let timeout = || RunError::SetupLockTimeout {
         seconds: wait_seconds,
     };
@@ -537,7 +542,7 @@ impl LaunchConfinement {
         &mut self,
         attempt: &Directory,
         cancel: &CancelToken,
-        setup_budget: provenant_core::WaitBudget,
+        setup_budget: Option<provenant_core::WaitBudget>,
     ) -> Result<Option<provenant_os::fs::LockGuard>> {
         let Some(writer) = self.writer.as_mut() else {
             return Ok(None);
@@ -561,7 +566,7 @@ impl LaunchConfinement {
             Some(authority),
             Some(attempt),
             cancel,
-            Some(setup_budget),
+            setup_budget,
         )
         .map(Some)
     }
@@ -712,7 +717,6 @@ fn prepare_writer_git(
     let common_identity = writer.worktree.repo().common_identity();
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-    let cancel = CancelToken::new();
     // Independent worktrees share config. Keep both writes and all subsequent
     // verification under one project-wide lock; a later launch repairs either
     // key if a process stopped between the two writes.
@@ -746,12 +750,20 @@ fn prepare_writer_git(
                     clock.mono_now(),
                     provenant_core::DurationMicros::from_micros(1_000_000),
                 ),
-                &cancel,
+                cancel,
                 &clock,
             )
             .ok()
     });
-    let config_lock = queued_setup_lock(setup_dir, wait_seconds, cancel, &clock, limit).map_err(|error| match error { RunError::SetupLockTimeout { .. } if limit.is_some() => RunError::LaneSetupLockTimeout, other => other })?;
+    let config_lock =
+        queued_setup_lock(setup_dir, wait_seconds, cancel, &clock, limit).map_err(|error| {
+            match error {
+                RunError::SetupLockTimeout { .. } if limit.is_some() => {
+                    RunError::LaneSetupLockTimeout
+                }
+                other => other,
+            }
+        })?;
     drop(waiting);
     let old_repo = writer.worktree.repo();
     let project = old_repo
@@ -763,7 +775,7 @@ fn prepare_writer_git(
         .to_path_buf();
     let path = writer.worktree.path().to_path_buf();
     let repo = utility
-        .open_repo(&executor, &project, budget()?, &cancel)
+        .open_repo(&executor, &project, budget()?, cancel)
         .map_err(error("reopen writer repository", Some(&project)))?;
     let refreshed = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
@@ -839,7 +851,7 @@ fn prepare_writer_git(
             repo,
             &utility,
             budget()?,
-            &cancel,
+            cancel,
         )
         .map_err(error("resolve writer branch under lock", Some(&parent)))?;
         if resolved.termination != provenant_os::exec::Termination::Exit(0)
@@ -863,7 +875,7 @@ fn prepare_writer_git(
     result?;
     for merge in [false, true] {
         let repo = utility
-            .open_repo(&executor, &project, budget()?, &cancel)
+            .open_repo(&executor, &project, budget()?, cancel)
             .map_err(error("reopen writer repository", Some(&project)))?;
         let worktree = provenant_confinement::verify_worktree(&repo, &path)
             .map_err(worktrees::WorktreeError::from)?;
@@ -882,12 +894,12 @@ fn prepare_writer_git(
             &writer.branch,
             merge,
             budget()?,
-            &cancel,
+            cancel,
         )
         .map_err(error("set writer upstream", Some(&path)))?;
     }
     let repo = utility
-        .open_repo(&executor, &project, budget()?, &cancel)
+        .open_repo(&executor, &project, budget()?, cancel)
         .map_err(error("reopen writer repository", Some(&project)))?;
     let refreshed = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
@@ -1452,14 +1464,30 @@ mod cargo_setup_tests {
         };
         std::thread::scope(|scope| {
             let first = scope.spawn(|| {
-                prepare_writer_git(&mut writer, &state, &root, None, None, &CancelToken::new(), None)
-                    .map(drop)
-                    .map_err(|e| e.to_string())
+                prepare_writer_git(
+                    &mut writer,
+                    &state,
+                    &root,
+                    None,
+                    None,
+                    &CancelToken::new(),
+                    None,
+                )
+                .map(drop)
+                .map_err(|e| e.to_string())
             });
             let second = scope.spawn(|| {
-                prepare_writer_git(&mut second, &state, &root, None, None, &CancelToken::new(), None)
-                    .map(drop)
-                    .map_err(|e| e.to_string())
+                prepare_writer_git(
+                    &mut second,
+                    &state,
+                    &root,
+                    None,
+                    None,
+                    &CancelToken::new(),
+                    None,
+                )
+                .map(drop)
+                .map_err(|e| e.to_string())
             });
             first
                 .join()
@@ -1484,8 +1512,17 @@ mod cargo_setup_tests {
         std::fs::create_dir(&attempt_path)?;
         let attempt = Directory::open_anchor(&attempt_path)?;
         let refused = std::thread::scope(|scope| {
-            let launch = scope
-                .spawn(|| prepare_writer_git(&mut writer, &state, &root, None, Some(&attempt), &CancelToken::new(), None));
+            let launch = scope.spawn(|| {
+                prepare_writer_git(
+                    &mut writer,
+                    &state,
+                    &root,
+                    None,
+                    Some(&attempt),
+                    &CancelToken::new(),
+                    None,
+                )
+            });
             loop {
                 if matches!(
                     attempt.try_lock_existing(OsStr::new(SETUP_WAIT_LOCK), LockMode::Exclusive),
@@ -1561,18 +1598,34 @@ mod cargo_setup_tests {
         let reflog = git_dir.join("logs/refs/remotes/origin/feature/nested");
         std::fs::create_dir_all(reflog.parent().ok_or("reflog parent")?)?;
         std::os::unix::fs::symlink(&target, &reflog)?;
-        let failure = prepare_writer_git(&mut writer, &state, &root, None, None, &CancelToken::new(), None)
-            .err()
-            .ok_or("symlinked tracking reflog must refuse")?;
+        let failure = prepare_writer_git(
+            &mut writer,
+            &state,
+            &root,
+            None,
+            None,
+            &CancelToken::new(),
+            None,
+        )
+        .err()
+        .ok_or("symlinked tracking reflog must refuse")?;
         assert!(failure.to_string().contains(&reflog.display().to_string()));
         assert_eq!(std::fs::read(&target)?, b"untouched");
         std::fs::remove_file(&reflog)?;
         let parent = reflog.parent().ok_or("reflog parent")?;
         std::fs::remove_dir(parent)?;
         std::os::unix::fs::symlink(&root, parent)?;
-        let failure = prepare_writer_git(&mut writer, &state, &root, None, None, &CancelToken::new(), None)
-            .err()
-            .ok_or("symlinked tracking reflog parent must refuse")?;
+        let failure = prepare_writer_git(
+            &mut writer,
+            &state,
+            &root,
+            None,
+            None,
+            &CancelToken::new(),
+            None,
+        )
+        .err()
+        .ok_or("symlinked tracking reflog parent must refuse")?;
         assert!(failure.to_string().contains(&parent.display().to_string()));
         assert_eq!(std::fs::read(&target)?, b"untouched");
         std::fs::remove_file(parent)?;
@@ -1580,9 +1633,17 @@ mod cargo_setup_tests {
         let tracking_lock = git_dir.join("refs/remotes/origin/feature/nested.lock");
         std::fs::create_dir_all(tracking_lock.parent().ok_or("tracking lock parent")?)?;
         std::fs::write(&tracking_lock, b"held")?;
-        let failure = prepare_writer_git(&mut writer, &state, &root, None, None, &CancelToken::new(), None)
-            .err()
-            .ok_or("stale tracking lock must refuse")?;
+        let failure = prepare_writer_git(
+            &mut writer,
+            &state,
+            &root,
+            None,
+            None,
+            &CancelToken::new(),
+            None,
+        )
+        .err()
+        .ok_or("stale tracking lock must refuse")?;
         assert!(
             matches!(&failure, RunError::WriterRefLocked(path) if *path == tracking_lock),
             "{failure:?}"
@@ -1593,9 +1654,17 @@ mod cargo_setup_tests {
         run(&["remote", "remove", "origin"])?;
         let stale = git_dir.join("refs/heads/feature/nested.lock");
         std::fs::write(&stale, b"held")?;
-        let failure = prepare_writer_git(&mut writer, &state, &root, None, None, &CancelToken::new(), None)
-            .err()
-            .ok_or("stale lock must refuse")?;
+        let failure = prepare_writer_git(
+            &mut writer,
+            &state,
+            &root,
+            None,
+            None,
+            &CancelToken::new(),
+            None,
+        )
+        .err()
+        .ok_or("stale lock must refuse")?;
         assert_eq!(failure.code(), "WRITER_REF_LOCKED", "{failure}");
         assert_eq!(std::fs::read(&stale)?, b"held");
         Ok(())
