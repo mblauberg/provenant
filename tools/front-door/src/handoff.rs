@@ -275,6 +275,7 @@ fn with_wip_custody(
         GIT_TIMEOUT,
         workers,
         |context, cancel| {
+            let context = &worktrees::WorktreeContext { facts, ..*context };
             let verified = provenant_confinement::verify_worktree(context.repo, &tree.path)
                 .map_err(worktrees::WorktreeError::from)?;
             let _writer = worktrees::cache_writer_guard(context.project_state, verified.path())
