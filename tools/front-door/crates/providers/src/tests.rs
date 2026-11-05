@@ -1878,6 +1878,9 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
             .collect()
     );
     for entry in REGISTRY {
+        let opencode = entry.adapter.id() == "opencode";
+        assert_eq!(entry.stdout_decoder.is_some(), opencode);
+        assert_eq!(entry.stderr_decoder.is_some(), opencode);
         if let Some(source) = entry.quota_source {
             assert_eq!(source.adapter_id(), entry.adapter.id());
         } else {

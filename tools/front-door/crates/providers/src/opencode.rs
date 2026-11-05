@@ -38,15 +38,28 @@ impl provenant_os::capture::FrameDecoder for StderrQuota {
         frame: &[u8],
     ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
         use provenant_os::capture::FrameEvent;
-        let refusal = std::str::from_utf8(frame).is_ok_and(|line| {
-            line.trim_start().starts_with("AI.Error.QuotaExceeded:")
-                && stderr_quota(frame).is_some()
-        });
-        Ok(if refusal {
+        Ok(if self.partial_terminal(frame) {
             FrameEvent::Terminal
         } else {
             FrameEvent::Progress
         })
+    }
+
+    fn partial_terminal(&self, frame: &[u8]) -> bool {
+        let Ok(mut line) = std::str::from_utf8(frame) else {
+            return false;
+        };
+        loop {
+            line = line.trim_start();
+            let Some(rest) = line.strip_prefix("\x1b[") else {
+                break;
+            };
+            let Some(end) = rest.find(|c: char| ('@'..='~').contains(&c)) else {
+                return false;
+            };
+            line = &rest[end + 1..];
+        }
+        line.starts_with("AI.Error.QuotaExceeded:")
     }
 }
 
@@ -767,6 +780,12 @@ mod tests {
         assert_eq!(
             decoder
                 .decode(b"AI.Error.QuotaExceeded: Go usage limit exceeded")
+                .unwrap(),
+            FrameEvent::Terminal
+        );
+        assert_eq!(
+            decoder
+                .decode(b"\x1b[31mAI.Error.QuotaExceeded: limit")
                 .unwrap(),
             FrameEvent::Terminal
         );

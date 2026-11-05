@@ -23,6 +23,13 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
             None => Ok(provenant_os::capture::FrameEvent::Progress),
         }
     }
+    fn partial_terminal(&self, frame: &[u8]) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|decoder| *decoder)
+            .is_some_and(|decoder| decoder.partial_terminal(frame))
+    }
 }
 
 type Stop = Arc<Mutex<Option<StopReason>>>;

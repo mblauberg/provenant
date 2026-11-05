@@ -243,15 +243,20 @@ fn fixture() -> Result {
             std::thread::sleep(std::time::Duration::from_secs(60));
             return Ok(());
         }
-        if prompt.contains("stderr refusal then hang") {
-            writeln!(
+        if prompt.contains("stderr refusal then hang")
+            || prompt.contains("stderr refusal then success")
+        {
+            write!(
                 io::stderr(),
-                "AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000"
+                "\x1b[31mAI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000"
             )?;
             io::stderr().flush()?;
-            loop {
-                std::thread::park();
+            if prompt.contains("stderr refusal then hang") {
+                loop {
+                    std::thread::park();
+                }
             }
+            std::thread::sleep(std::time::Duration::from_secs(4));
         }
         if prompt.contains("stderr quota mention") {
             writeln!(
@@ -259,7 +264,6 @@ fn fixture() -> Result {
                 "The documentation mentions quota and usage limit exceeded"
             )?;
             io::stderr().flush()?;
-            std::thread::sleep(std::time::Duration::from_secs(3));
         }
         let frames = if prompt.contains("free limit") {
             include_str!("fixtures/providers/opencode/v2.2.0-free-limit.jsonl")
@@ -1587,10 +1591,23 @@ fn opencode_stderr_live_quota() -> Result {
             "quota_limited",
             Some("post_terminal_cleanup"),
         ),
+        (
+            "stderr refusal then success",
+            "quota_limited",
+            Some("post_terminal_cleanup"),
+        ),
         ("stderr quota mention", "succeeded", None),
     ] {
         let mut rig = TestRig::new()?;
         let cleanup = rig.process_cleanup();
+        let data = rig.home.join(".local/share/opencode");
+        fs::create_dir_all(&data)?;
+        let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+        db.execute_batch(
+            r#"CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
+            INSERT INTO session_message VALUES ('ses_x', 'assistant',
+            '{"model":{"providerID":"opencode-go","id":"beam-free"},"finish":"stop"}');"#,
+        )?;
         let bin = rig.root.join("provider/bin");
         fs::create_dir_all(&bin)?;
         rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
