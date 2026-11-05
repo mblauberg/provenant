@@ -3,7 +3,7 @@
     "pattern": "generator-evaluator",
     "preset": "generator-evaluator"
   },
-  "graph_id": "preset-4ae32026c20e3f4745fa4d1d9eff01e0",
+  "graph_id": "preset-9cbc3f80ece35cd30fbdf6c8a807b48e",
   "nodes": [
     {
       "acceptance_checks": [
@@ -147,7 +147,6 @@
         {
           "node": "lens",
           "outputs": [
-            "result",
             "findings"
           ]
         },

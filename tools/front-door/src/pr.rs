@@ -1,6 +1,6 @@
 //! Thin GitHub CLI edge, with CI evidence bound to the merge head.
 use crate::{emit, fail, roots};
-use provenant_cli::{Globals, Pr};
+use provenant_cli::{Globals, Pr, domains::MergeMethod};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::GitOid;
 use provenant_os::exec::{
@@ -13,6 +13,7 @@ use std::{ffi::OsString, path::Path, time::Duration};
 pub(super) mod contributions;
 mod git;
 pub(crate) mod land;
+pub(crate) mod landing;
 mod open;
 pub(crate) mod status;
 mod wait;
@@ -154,6 +155,12 @@ struct RestPull {
     closed_at: Option<String>,
     merge_commit_sha: Option<String>,
     title: String,
+    #[serde(default)]
+    user: Option<RestUser>,
+}
+#[derive(Deserialize)]
+struct RestUser {
+    login: String,
 }
 fn pull_endpoint(number: &str) -> String {
     format!("repos/{{owner}}/{{repo}}/pulls/{number}")
@@ -260,19 +267,26 @@ fn checks(project: &Path, number: &str, head: GitOid, watch: bool) -> Result<()>
     Ok(())
 }
 fn merge(reader: &wait::Reader<'_>, number: &str, head: GitOid) -> Result<()> {
+    merge_with(reader, number, head, MergeMethod::Merge).map(|_| ())
+}
+/// Merge a pull request pinned to `head` with `method`, returning the commit
+/// GitHub created. A moved head (409) and a refused merge (405) are named.
+fn merge_with(
+    reader: &wait::Reader<'_>,
+    number: &str,
+    head: GitOid,
+    method: MergeMethod,
+) -> Result<Option<String>> {
+    let method = match method {
+        MergeMethod::Merge => "merge_method=merge",
+        MergeMethod::Squash => "merge_method=squash",
+        MergeMethod::Rebase => "merge_method=rebase",
+    };
     let endpoint = format!("{}/merge", pull_endpoint(number));
     let sha = format!("sha={head}");
     let output = reader.request(
         &[
-            "gh",
-            "api",
-            "--method",
-            "PUT",
-            &endpoint,
-            "-f",
-            &sha,
-            "-f",
-            "merge_method=merge",
+            "gh", "api", "--method", "PUT", &endpoint, "-f", &sha, "-f", method,
         ],
         true,
     )?;
@@ -318,7 +332,10 @@ fn merge(reader: &wait::Reader<'_>, number: &str, head: GitOid) -> Result<()> {
     {
         return Err("GitHub did not return a merge result".into());
     }
-    Ok(())
+    Ok(response
+        .get("sha")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned))
 }
 pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 {
     let (leaf, number) = match command {

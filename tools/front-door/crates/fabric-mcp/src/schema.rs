@@ -1,5 +1,6 @@
 //! Explicit field catalogue, shared schema pieces and a cached MCP catalogue.
 //! Runtime validates inputs; exported bounds are shared and schema probes detect drift.
+use provenant_core::edit_distance;
 use provenant_fabric_runtime::coordination::input::{
     MAX_ARTIFACT_PATH_BYTES, MAX_FETCH_BYTES, MAX_REFERENCE_BYTES, MAX_ROUTE_BYTES, MAX_TEXT_BYTES,
 };
@@ -666,21 +667,6 @@ fn fold(name: &str) -> String {
         .filter(|c| !matches!(c, '_' | '-'))
         .flat_map(char::to_lowercase)
         .collect()
-}
-
-fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let substitution = diagonal + usize::from(ca != *cb);
-            diagonal = row[j + 1];
-            row[j + 1] = substitution.min(row[j + 1] + 1).min(row[j] + 1);
-        }
-    }
-    row[b.len()]
 }
 
 /// Diagnose only a rejected serde value. Runtime is the validation owner;

@@ -11,6 +11,8 @@ pub struct Cursor;
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &Cursor,
     quota_source: Some(&Cursor),
+    stdout_decoder: None,
+    stderr_decoder: None,
     display_name: "Cursor",
     quota: provenant_quota::QuotaPolicy {
         adapter: "cursor",
