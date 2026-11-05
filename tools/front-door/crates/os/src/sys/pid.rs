@@ -852,20 +852,6 @@ fn parses_linux_stat_states_with_complex_names() {
     assert!(linux_stat_state("123 (name) ? 1").is_err());
 }
 
-/// No credentials-only fallback exists on other platforms.
-pub(crate) fn sealed_platform_uids(pid: i32) -> Option<crate::pid::ProcessUids> {
-    ignored_unreadable_uids(pid, &[])
-}
-
-pub(crate) fn ignored_unreadable_uids(
-    pid: i32,
-    entries: &[crate::pid::CensusIgnoreEntry],
-) -> Option<crate::pid::ProcessUids> {
-    unreadable_policy_uids(pid, entries)
-        .ok()
-        .map(|result| result.uids)
-}
-
 pub(crate) fn unreadable_policy_uids(
     pid: i32,
     entries: &[crate::pid::CensusIgnoreEntry],
@@ -1996,7 +1982,7 @@ mod tests {
         let pid = std::process::id() as i32;
         let uids = darwin_uids(pid).ok_or("complete kernel credential record unavailable")?;
         assert_eq!(uids.effective, crate::fs::effective_uid());
-        assert_eq!(sealed_platform_uids(pid), None);
+        assert!(unreadable_policy_uids(pid, &[]).is_err());
         Ok(())
     }
 
@@ -2013,7 +1999,7 @@ mod tests {
         }
         let mut child = Child(std::process::Command::new("/bin/sleep").arg("30").spawn()?);
         assert!(child.0.try_wait()?.is_none());
-        assert_eq!(sealed_platform_uids(child.0.id() as i32), None);
+        assert!(unreadable_policy_uids(child.0.id() as i32, &[]).is_err());
         Ok(())
     }
 
@@ -2054,11 +2040,7 @@ mod tests {
             if darwin_on_sealed_system_volume(&file) != Some(false) {
                 continue;
             }
-            assert_eq!(
-                sealed_platform_uids(pid),
-                None,
-                "off-sealed platform process {pid}: {path:?}"
-            );
+            assert!(unreadable_policy_uids(pid, &[]).is_err(), "off-sealed platform process {pid}: {path:?}");
             eprintln!(
                 "ASSERTED: off-sealed platform process {pid} {path:?} refused by native daemon policy"
             );
