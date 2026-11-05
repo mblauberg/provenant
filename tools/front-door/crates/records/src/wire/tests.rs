@@ -425,7 +425,7 @@ fn edge_error_codes_are_unique_and_described() {
             entry.code
         );
         assert_eq!(
-            entry.kind == CodeKind::LegacySpelling,
+            false,
             entry.code.chars().any(|c| c.is_ascii_lowercase()),
             "{}",
             entry.code

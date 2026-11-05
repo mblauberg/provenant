@@ -479,7 +479,7 @@ impl FacadeError {
             Self::StaleFence => "stale_fence",
             Self::HomeUnavailable => "home_unavailable",
             Self::PeerVersion | Self::PeerProtocolMismatch { .. } => "peer_version",
-            Self::LaunchUnknown { .. } => "launch_unknown",
+            Self::LaunchUnknown { .. } => "LAUNCH_UNKNOWN",
             Self::ContinuationUnsupported => "continuation_unsupported",
             Self::ProviderStateExpired => "provider_state_expired",
             Self::LaneDepth => "lane_depth",

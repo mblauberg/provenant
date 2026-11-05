@@ -205,7 +205,7 @@ pub fn edge_error_codes() -> Value {
     Value::Array(
         EDGE_ERROR_CODES
             .iter()
-            .map(|entry| json!({"code": entry.code, "summary": entry.summary, "kind": match entry.kind { CodeKind::Specific => "specific", CodeKind::Umbrella => "umbrella", CodeKind::LegacySpelling => "legacy_spelling" }}))
+            .map(|entry| json!({"code": entry.code, "summary": entry.summary, "kind": match entry.kind { CodeKind::Specific => "specific", CodeKind::Umbrella => "umbrella" }}))
             .collect(),
     )
 }
