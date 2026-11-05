@@ -385,3 +385,119 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
         Err(JournalError::BadDigest)
     ));
 }
+
+#[test]
+fn bound_attempt_manifest_survives_file_journal_reopen_and_reattachment() {
+    type Observation = (AttemptKey, Option<String>, Option<String>, Option<String>);
+    #[derive(Default)]
+    struct RecordingOwner {
+        observed: Vec<Observation>,
+    }
+    impl AttemptOwner for RecordingOwner {
+        type Error = Infallible;
+        fn actor(&self) -> String {
+            "fixture-actor".into()
+        }
+        fn observe_or_start(
+            &mut self,
+            key: &AttemptKey,
+            node: NodeInput<'_>,
+            _: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            replay: Replay<'_>,
+        ) -> Result<AttemptObservation, Infallible> {
+            self.observed.push((
+                key.clone(),
+                node.source_commit.map(str::to_owned),
+                node.review_base.map(str::to_owned),
+                replay.stored_ref.map(str::to_owned),
+            ));
+            Ok(AttemptObservation::Pending {
+                attempt_ref: Some("fixture-attempt".into()),
+            })
+        }
+    }
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base_dir = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs =
+        provenant_core::RootInputs::new(base_dir.join("home"), base_dir.join("checkout"));
+    inputs.state_dir = Some(base_dir.join("state"));
+    std::fs::create_dir(base_dir.join("state")).unwrap();
+    std::fs::set_permissions(
+        base_dir.join("state"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let source = "1".repeat(40);
+    let review = "2".repeat(40);
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2,"graph_id":"pinned-replay","nodes":[{
+            "id":"review","prompt":"review","access":"read_only",
+            "source":{"type":"commit","commit":source}, "review_base":review,
+            "route":{"adapter":"fixture","model":"fixture/model"}
+        }]
+    }))
+    .unwrap();
+    let execution = GraphExecution {
+        extra: Default::default(),
+        directory: base_dir.clone(),
+        document: document.clone(),
+        review_base: None,
+        integration_base: None,
+    };
+    let mut owner = RecordingOwner::default();
+    let first = {
+        let mut journal =
+            FileJournal::open(&root, project, "pinned-replay", budget, &cancel, &clock).unwrap();
+        journal.bind(execution.clone()).unwrap();
+        let mut checkpoint = advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint;
+        checkpoint.nodes[0].attempts[0]
+            .input_manifest
+            .as_mut()
+            .unwrap()
+            .extra
+            .insert("future".into(), serde_json::json!({"preserved":true}));
+        journal.save(&checkpoint).unwrap();
+        checkpoint
+    };
+    let replay = {
+        let mut journal =
+            FileJournal::open(&root, project, "pinned-replay", budget, &cancel, &clock).unwrap();
+        let mut rebound = execution;
+        rebound.directory = base_dir.join("state");
+        journal.bind(rebound).unwrap();
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint
+    };
+    assert_eq!(first, replay);
+    assert_eq!(owner.observed.len(), 2);
+    assert_eq!(owner.observed[0].0, owner.observed[1].0);
+    assert_eq!(owner.observed[1].1.as_deref(), Some(source.as_str()));
+    assert_eq!(owner.observed[1].2.as_deref(), Some(review.as_str()));
+    assert_eq!(owner.observed[1].3.as_deref(), Some("fixture-attempt"));
+    assert_eq!(
+        replay.nodes[0].attempts[0]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .extra["future"]["preserved"],
+        true
+    );
+    assert_eq!(
+        FileJournal::execution(&root, project, "pinned-replay")
+            .unwrap()
+            .unwrap()
+            .directory,
+        base_dir
+    );
+}
