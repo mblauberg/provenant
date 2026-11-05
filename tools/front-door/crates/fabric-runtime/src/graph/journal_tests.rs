@@ -21,7 +21,7 @@ fn interrupted_marker_and_sentinel_publications_converge() {
     let mut fixture: StoredCheckpoint =
         serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
-    journal.bind(fixture.execution).unwrap();
+    journal.bind(fixture.execution.clone()).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
     assert!(
         FileJournal::pending_graph_ids(&root, project)
@@ -155,7 +155,7 @@ fn checkpoint_collection_keeps_pending_and_recent_graphs() {
     let mut fixture: StoredCheckpoint =
         serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
-    journal.bind(fixture.execution).unwrap();
+    journal.bind(fixture.execution.clone()).unwrap();
     fixture.checkpoint.nodes[0].state = NodeState::Running;
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
@@ -185,6 +185,17 @@ fn checkpoint_collection_keeps_pending_and_recent_graphs() {
     );
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     fixture.checkpoint.asks.clear();
+    let mut delivery = fixture.execution.clone();
+    delivery.document.delivery = Some(provenant_records::run::DeliveryMode::Pr);
+    journal.bind(delivery).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        0
+    );
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
