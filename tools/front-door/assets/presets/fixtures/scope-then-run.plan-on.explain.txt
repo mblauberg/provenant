@@ -2,7 +2,7 @@ Graph <id>
 Admission: {"status":"admitted"}
 Inspection: {"dependency_depth":8,"edges":15,"limit_reason":null,"max_attempts":9,"nodes":9,"prompt_bytes":7407}
 Preset selection: scope-then-run (override)
-Review shape: standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
+Review shape: standard (default; floors=pending; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: on -> on (planning requested)
 Planner route: principal
 Pending "planner_authority": "Planner authority is checked when the plan runs."

@@ -28,6 +28,12 @@ mod panel;
 #[cfg(test)]
 #[allow(unused_imports, reason = "preset tests construct a selector result")]
 pub use panel::ShapeHint;
+#[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "used by library tests; integration targets also include this module"
+)]
+pub(crate) use panel::fixture_protected_selector;
 pub(crate) use panel::format_family_group;
 pub use panel::{ShapeSelector, review_selector};
 
@@ -2203,21 +2209,7 @@ fn build_stages(
     let verifier_override = explicit_verifiers
         .then(|| builder.parameters.get("verifiers").and_then(Value::as_u64))
         .flatten();
-    let deferred_shape = builder.layers.review.is_some()
-        && ["size", "review_shape"].iter().all(|key| {
-            builder
-                .parameters
-                .get(*key)
-                .and_then(Value::as_str)
-                .is_none_or(str::is_empty)
-        })
-        && matches!(
-            builder
-                .parameters
-                .pointer("/subject/type")
-                .and_then(Value::as_str),
-            Some("head" | "node")
-        );
+    let deferred_shape = builder.defers_review_size();
     if deferred_shape
         && let Some(verifier) = config
             .pointer("/shape_stages/verifier")
@@ -2375,26 +2367,15 @@ fn apply_shape_stages(
         .get("subject")
         .cloned()
         .ok_or("shape_stages needs a subject")?;
-    if subject.get("type").and_then(Value::as_str) != Some("commit") {
-        let unresolved = ["size", "review_shape"].iter().all(|key| {
-            parameters
-                .get(*key)
-                .and_then(Value::as_str)
-                .is_none_or(str::is_empty)
-        });
-        if layers.review.is_some()
-            && unresolved
-            && matches!(
-                subject.get("type").and_then(Value::as_str),
-                Some("head" | "node")
-            )
-        {
-            config["exports"] =
-                json!([{ "node": panel, "outputs": ["result", "findings", "verdict", "commit"] }]);
-        }
-        if unresolved {
-            return Ok(());
-        }
+    if layers.review.is_some()
+        && matches!(
+            subject.get("type").and_then(Value::as_str),
+            Some("head" | "node")
+        )
+    {
+        config["exports"] =
+            json!([{ "node": panel, "outputs": ["result", "findings", "verdict", "commit"] }]);
+        return Ok(());
     }
     let declared_verifiers = parameters
         .get("verifiers")

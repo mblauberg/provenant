@@ -2,7 +2,7 @@ Graph <id>
 Admission: {"status":"admitted"}
 Inspection: {"dependency_depth":13,"edges":25,"limit_reason":null,"max_attempts":4,"nodes":14,"prompt_bytes":5650}
 Preset selection: deliver (override)
-Review shape: standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
+Review shape: standard (default; floors=pending; size=pending (measured at review launch); kind=unknown; risk=unknown)
 Pending "delivery_target": "Delivery target is checked before delivery."
 Pending "planner_authority": "Planner authority is checked when the plan runs."
 Pending "route_readiness": "Route readiness and quota are checked before launch."

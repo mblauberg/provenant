@@ -2,7 +2,7 @@ Graph <id>
 Admission: {"reason":"writer worktree","status":"refused"}
 Inspection: null
 Preset selection: big-batch (override)
-Review shape: deep (by_kind; size=unknown; kind=integration; risk=unknown), standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
+Review shape: deep (by_kind; floors=none; size=unknown; kind=integration; risk=unknown), standard (default; floors=pending; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: off -> off (planning turned off)
 Pending "delivery_target": "Delivery target is checked before delivery."
 Pending "planner_authority": "Planner authority is checked when the plan runs."

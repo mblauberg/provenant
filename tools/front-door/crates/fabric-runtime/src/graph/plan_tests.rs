@@ -1491,6 +1491,46 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
 }
 
 #[test]
+fn planner_adds_lenses_omitted_by_a_path_floor() {
+    let mut doc = planner(4);
+    let spec = doc.nodes[0].plan.as_mut().unwrap();
+    spec.patterns_only = true;
+    for name in ["lens-tests", "lens-security-privacy"] {
+        spec.patterns.push(serde_json::from_value(json!({
+            "name": name,
+            "nodes": [{"id":"lens", "access":"read_only", "prompt":"Review", "route":{"alias":"senior"}, "acceptance_checks":["Review"]}],
+            "exports":[{"node":"lens", "outputs":["result"]}]
+        })).unwrap());
+    }
+    spec.extra.insert("required_floor_patterns".into(), json!(["lens-security-privacy"]));
+    spec.extra.insert("floor_classes".into(), json!(["security"]));
+    spec.extra.insert("floor_candidate_patterns".into(), json!(["lens-tests", "lens-security-privacy"]));
+    spec.extra.insert("floor_min_reviewers".into(), json!(2));
+    spec.extra.insert("model_max_nodes".into(), json!(3));
+    let output = pattern_result(json!({"id":"tests", "pattern":"lens-tests"}));
+    let mut owner = fixture_owner(&[&output, "reviewed", "reviewed", "checked"]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let expansion = &run.checkpoint.expansions[0];
+    assert!(expansion.patterns.iter().any(|item| item.name == "lens-security-privacy"));
+    assert!(expansion.extra["floor_warnings"].to_string().contains("security"));
+    let mut tampered = serde_json::to_value(journal.0.as_ref().unwrap()).unwrap();
+    tampered["expansions"][0]["patterns"].as_array_mut().unwrap().retain(|pattern| pattern["name"] != "lens-security-privacy");
+    let mut bad_journal = MemoryJournal(Some(serde_json::from_value(tampered).unwrap()));
+    let error = advance(&doc, &mut fixture_owner(&[]), &mut bad_journal).unwrap_err();
+    assert_eq!(error.code(), "bad_checkpoint");
+    let mut replay = fixture_owner(&[]);
+    let restored = advance(&doc, &mut replay, &mut journal).unwrap();
+    assert_eq!(restored.status, GraphStatus::Complete);
+    assert!(replay.calls.is_empty());
+    let output = pattern_result(json!({"id":"security", "pattern":"lens-security-privacy"}));
+    let mut owner = fixture_owner(&[&output, "reviewed", "reviewed", "checked"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.expansions[0].patterns.iter().any(|item| item.name == "lens-tests"));
+}
+
+#[test]
 fn patterns_only_plans_refuse_raw_fragment_nodes() {
     let mut doc = pattern_planner(8);
     doc.nodes[0].plan.as_mut().unwrap().patterns_only = true;

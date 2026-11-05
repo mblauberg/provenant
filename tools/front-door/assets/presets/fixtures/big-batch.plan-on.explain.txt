@@ -2,7 +2,7 @@ Graph <id>
 Admission: {"status":"admitted"}
 Inspection: {"dependency_depth":20,"edges":51,"limit_reason":null,"max_attempts":39,"nodes":32,"prompt_bytes":51448}
 Preset selection: big-batch (override)
-Review shape: deep (by_kind; size=unknown; kind=integration; risk=unknown), standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
+Review shape: deep (by_kind; floors=none; size=unknown; kind=integration; risk=unknown), standard (default; floors=pending; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: on -> on (planning requested)
 Planner route: principal
 Pending "delivery_target": "Delivery target is checked before delivery."

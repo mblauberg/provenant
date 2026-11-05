@@ -4251,6 +4251,19 @@ pub(crate) fn fixture_review_expansion(
     provenant_fabric_runtime::graph::Expansion,
     provenant_fabric_runtime::graph::ReviewResolveError,
 > {
+    fixture_review_expansion_with_paths(node, subject, shape, &[])
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_review_expansion_with_paths(
+    node: &provenant_fabric_runtime::graph::GraphNode,
+    subject: &str,
+    shape: &str,
+    paths: &[String],
+) -> Result<
+    provenant_fabric_runtime::graph::Expansion,
+    provenant_fabric_runtime::graph::ReviewResolveError,
+> {
     use provenant_fabric_runtime::graph::ReviewResolveError;
     let routing = provenant_routing::RoutingConfig::default();
     let panel = routing
@@ -4261,7 +4274,7 @@ pub(crate) fn fixture_review_expansion(
                 ..Default::default()
             },
             None,
-            &[],
+            paths,
             false,
         )
         .map_err(ReviewResolveError::Failed)?;
@@ -4763,6 +4776,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .map_err(|error| {
                         ReviewResolveError::Failed(format!("invalid deferred synthesis: {error}"))
                     })?;
+        }
+        let floors = measure.routing.review.path_floors(&paths);
+        if !floors.classes.is_empty() {
+            warnings.push(format!(
+                "review path floors applied: {}; required lenses: {}",
+                floors.classes.join(", "),
+                floors.lenses.join(", ")
+            ));
         }
         let mut source = format!(
             "{}; size={}; kind={}; risk={}",

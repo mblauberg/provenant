@@ -18,6 +18,32 @@ min_monthly_allowance_usd = 60
 [pools]
 [pacing]
 [pacing_reserve]
+# Path classes are owner-configurable. Unknown paths use the unknown class.
+[review.floors.routine]
+paths = ["docs/**", "**/*.md"]
+tier = "routine"
+lenses = []
+[review.floors.unknown]
+paths = []
+tier = "substantial"
+lenses = ["correctness-spec"]
+[review.floors.security]
+paths = ["**/*credential*", "**/*secret*", "**/*auth*", "**/*security*", "**/credentials/**", "**/auth/**", "**/security/**"]
+tier = "crucial"
+lenses = ["correctness-spec", "security-privacy"]
+[review.floors.boundary]
+paths = ["**/*authority*", "**/*integrity*", "**/*worktree*", "**/*object*", "**/*publish*", "**/*handoff*", "**/*chair*", "**/*landing*", "**/git/**"]
+tier = "crucial"
+lenses = ["correctness-spec", "adversarial"]
+[review.floors.operations]
+paths = ["**/.github/**", "**/ci/**", "**/build/**", "**/release/**", "**/*build*", "**/*release*", "**/*review*policy*", "**/Cargo.toml", "**/Cargo.lock", "**/Makefile"]
+tier = "crucial"
+lenses = ["correctness-spec", "reliability"]
+[review.floors.contract]
+paths = ["**/cli/**", "**/config/**", "**/schema/**", "**/*config*", "**/*schema*"]
+tier = "substantial"
+lenses = ["correctness-spec", "design-fit-reuse"]
+
 [review.shapes.quick]
 reviewers = [{ pool = "junior", count = 1 }]
 frame = false

@@ -61,6 +61,10 @@ pub struct ShapeHint {
     pub warnings: Vec<String>,
     /// Lenses that any changed-path rule or test marker may add at launch.
     pub possible_additions: Vec<String>,
+    /// Lenses required by the path floors for this pinned subject.
+    pub required_floor_lenses: Vec<String>,
+    pub floor_classes: Vec<String>,
+    pub floor_min_reviewers: usize,
     /// Candidates used when a review supplies no explicit lens list.
     pub default_lenses: Vec<String>,
 }
@@ -102,6 +106,26 @@ pub fn review_selector(
     task_kind: Option<String>,
 ) -> ShapeSelector {
     review_selector_with_git(review, directory, task_kind, Box::new(git))
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "used by library tests; integration targets also include this module"
+)]
+pub(crate) fn fixture_protected_selector() -> ShapeSelector {
+    review_selector_with_git(
+        ReviewConfig::default(),
+        PathBuf::from("/repo"),
+        None,
+        Box::new(|_, args| {
+            Ok(match args[0] {
+                "symbolic-ref" | "rev-parse" => "main\n".into(),
+                "diff" if args.contains(&"--name-only") => "src/credentials.rs\0".into(),
+                _ => String::new(),
+            })
+        }),
+    )
 }
 
 fn review_selector_with_git(
@@ -186,7 +210,23 @@ fn review_selector_with_git(
             _ => None,
         };
         let selected = review.select_shape(query.shape, query.risk, kind, &paths, size)?;
-        let plan = review.lens_plan(kind, &paths, test_marker);
+        let mut plan = review.lens_plan(kind, &paths, test_marker);
+        let floors = review.path_floors(&paths);
+        for lens in &floors.lenses {
+            if !plan.add.contains(lens) {
+                plan.add.push(lens.clone());
+            }
+            if !plan.change_add.contains(lens) {
+                plan.change_add.push(lens.clone());
+            }
+        }
+        if !floors.classes.is_empty() {
+            warnings.push(format!(
+                "review path floors applied: {}; required lenses: {}",
+                floors.classes.join(", "),
+                floors.lenses.join(", ")
+            ));
+        }
         let lens_reason = plan
             .matched_paths
             .iter()
@@ -213,17 +253,21 @@ fn review_selector_with_git(
                 "frame": shape.frame, "verifiers": shape.verifiers, "synthesis": shape.synthesis,
             }))).collect(),
             source: format!(
-                "{}{}; size={}; kind={}; risk={}",
+                "{}{}; floors={}; size={}; kind={}; risk={}",
                 selected.source,
                 if lens_reason.is_empty() {
                     String::new()
                 } else {
                     format!("; lenses={}", lens_reason.join(","))
                 },
+                if query.defer { "pending".to_owned() } else if floors.classes.is_empty() { "none".to_owned() } else { floors.classes.join(",") },
                 size_text(size, query.defer),
                 kind.unwrap_or("unknown"),
                 query.risk.unwrap_or("unknown")
             ),
+            floor_min_reviewers: if floors.tier.is_some() { selected.shape.reviewers.iter().map(|row| row.count).sum() } else { 0 },
+            required_floor_lenses: floors.lenses,
+            floor_classes: floors.classes,
             plan,
             size: size.map(str::to_owned),
             warnings,
@@ -245,6 +289,7 @@ fn review_selector_with_git(
                 .values()
                 .flat_map(|rule| rule.add.iter().cloned())
                 .chain(review.shapes.values().flat_map(|shape| shape.reviewers.iter().flat_map(|group| group.lenses.iter().cloned())))
+                .chain(review.floors.values().flat_map(|floor| floor.lenses.iter().cloned()))
                 .chain(std::iter::once("tests".to_owned()))
                 .collect(),
             ..Default::default()
@@ -415,6 +460,20 @@ impl StageBuilder<'_> {
                 },
             );
         }
+        if caller_supplied && let Some(shape) = shape.filter(|shape| shape.floor_min_reviewers > 0)
+        {
+            let base_lenses: Vec<_> = shape
+                .default_lenses
+                .iter()
+                .filter(|name| {
+                    !provenant_routing::RISK_TAG_LENSES
+                        .iter()
+                        .any(|(_, lens)| *lens == name.as_str())
+                })
+                .cloned()
+                .collect();
+            append_plan_additions(&mut list, &base_lenses);
+        }
         let in_list =
             |names: &[String], item: &Value| names.iter().any(|name| item["name"] == *name);
         if let Some(plan) = plan.filter(|plan| !caller_supplied && !plan.order.is_empty()) {
@@ -520,18 +579,7 @@ impl StageBuilder<'_> {
             .get("subject")
             .and_then(|subject| subject.get("type"))
             .and_then(Value::as_str);
-        matches!(subject_type, Some("head" | "node")) && self.size_unpinned()
-    }
-
-    /// A review whose size and shape the stage leaves to the host.
-    fn size_unpinned(&self) -> bool {
-        let text = |key: &str| {
-            self.parameters
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-        };
-        self.layers.review.is_some() && text("size").is_none() && text("review_shape").is_none()
+        self.layers.review.is_some() && matches!(subject_type, Some("head" | "node"))
     }
 
     fn review_is_deferred(
@@ -555,7 +603,7 @@ impl StageBuilder<'_> {
                     node["id"] == id && node["access"].as_str() == Some("worktree_write")
                 })
             });
-        self.size_unpinned() && (writes || self.defers_review_size())
+        self.layers.review.is_some() && (writes || self.defers_review_size())
     }
 
     /// The deferred node that replaces a lens stage: a read-only plan node that

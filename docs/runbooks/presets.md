@@ -416,10 +416,11 @@ generator-evaluator, deliver, scope-then-run and review.
 
 ## Review and source subjects
 
-The policy default is `review --plan on`; the chair checks the plan
-against the [review ladder](../../HARNESS.md#review-ladder) and supplies any
-missing required reviewers and lenses. Runtime selection and partial-success
-thresholds below do not yet enforce those floors or every triggered lens.
+The policy default is `review --plan on`. The configured path floors enforce
+minimum review shapes, reviewer counts and required lenses for static, planned
+and deferred reviews. A caller's list or planner fragment is expanded to meet
+that count; omitted required lenses are added with a warning. See
+the [review ladder](../../HARNESS.md#review-ladder).
 
 `review` runs one `lens.NAME` role per entry of the `lenses` list: correctness
 against the spec, design fit and reuse, simplicity, conventions and
@@ -460,13 +461,14 @@ evaluator receives bounded, severity-ranked findings and paths to the full
 lens results; it must consult those results for findings omitted from the
 bounded export.
 
-A review of a `head` or `node` subject with no `size` or `review_shape`
+A review of a `head` or `node` subject
 (`deliver`, `generator-evaluator`, `big-batch`) cannot be measured when the
 graph expands, because the commit does not exist yet. The graph (schema 2,
 with `review_base`) carries one deferred `review` node with the panel stage
 templates. When the subject is pinned the host measures it, picks the shape
-and lenses, and builds the whole panel against that commit. Pass `size` or
-`review_shape` to keep a static panel. `--explain` shows the size as pending.
+and lenses, and builds the whole panel against that commit. Explicit `size` and
+`review_shape` remain requests subject to the path floor. `--explain` shows
+unmeasured paths and floors as pending.
 `provenant review` uses content identity: repeating the same request attaches to
 its graph, while `--fresh` starts a new graph. `--range` selects paths and size
 from that Git range; the target remains the reviewed commit.
@@ -503,7 +505,12 @@ cannot produce approval.
 A lens that ran and found blocking issues still blocks through its verdict.
 Councils where every lens succeeds are unchanged.
 
-The routing review shapes describe the runtime selection, not the policy floor.
+Routing `review.floors` maps named path classes to a minimum risk tier and
+required lenses. Project configuration can add classes or override the bundled
+classes; configuration schema and explain show the source and applied floors.
+Unmatched paths use the `unknown` class (substantial by default). Paths in the
+routine documentation class retain their ordinary selection. Deferred subjects
+show floors as pending until the commit is pinned.
 A lens whose `tier` is empty takes its pool from the review selection for `risk_tier` or the
 `review_shape` override. See [review shapes](model-routing.md#review-shapes)
 for the shape rules and reviewer counts. Conditional lenses add to that count.

@@ -1787,7 +1787,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     let customized = provenant_config::load_with_domains(
         &roots,
         Some(
-            "schema_version=1\n[domains.routing.review.shapes.quick]\nsynthesis='model'\n"
+            "schema_version=1\n[domains.routing.review.shapes.quick]\nsynthesis='model'\n[domains.routing.review.floors.security]\ntier='substantial'\n"
                 .as_bytes(),
         ),
         &sections,
@@ -1802,6 +1802,14 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     assert_eq!(synthesis.value, "model");
     assert_eq!(synthesis.source, provenant_config::Layer::User);
     assert_eq!(synthesis.values, ["model", "reduce"]);
+    let floor = schema
+        .fields
+        .iter()
+        .find(|field| field.path == "domains.routing.review.floors.security.tier")
+        .unwrap();
+    assert_eq!(floor.default, "crucial");
+    assert_eq!(floor.value, "substantial");
+    assert_eq!(floor.source, provenant_config::Layer::User);
     let layered = provenant_config::load_with_domains(
         &roots,
         Some("schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='senior',count=1}]\n[domains.routing.review.select]\nby_risk={medium='custom'}\n".as_bytes()),
@@ -5034,6 +5042,20 @@ fn review_path_lens_rules_load_replace_or_clear_the_bundled_table_through_the_lo
         assert_eq!(plan.matched_paths, expected, "{text}");
         assert_eq!(plan.add.is_empty(), expected.is_empty(), "{text}");
     }
+    Ok(())
+}
+
+#[test]
+fn review_floor_policy_can_be_overridden_and_extended() -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_routing(
+        "schema_version=1\n[domains.routing.review.floors.security]\ntier='routine'\nlenses=[]\n[domains.routing.review.floors.custom]\npaths=['**/special/**']\ntier='crucial'\nlenses=['reliability']\n",
+    )??;
+    let review = &config.domains.routing.review;
+    let security = review.path_floors(&["src/credentials.rs".into()]);
+    assert_eq!(security.tier, None);
+    let custom = review.path_floors(&["src/special/a.rs".into()]);
+    assert_eq!(custom.tier.as_deref(), Some("crucial"));
+    assert!(custom.lenses.contains(&"reliability".to_owned()));
     Ok(())
 }
 

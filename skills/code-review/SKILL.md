@@ -22,8 +22,9 @@ provenant run --preset review --prompt-file BRIEF.md \
 
 Lens coverage comes first: cover every question the change needs, and record
 family separation as a bonus when available. The default is a planner-led panel
-under the HARNESS review floors. The chair checks its recorded plan and supplies missing reviewers or lenses; today's
-planner can only narrow the runtime-selected catalogue. The base lenses are
+under the HARNESS review floors. Configured path floors raise the shape and add
+required lenses when a plan omits them; the chair checks the recorded plan for
+additional coverage the change needs. The base lenses are
 `correctness-spec`,
 `design-fit-reuse`, `simplicity`, `conventions-readability`, `tests`,
 `refactor-cleanup`, `reliability`, and `flexibility`; risk tags add

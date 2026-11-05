@@ -2,7 +2,7 @@ Graph <id>
 Admission: {"status":"admitted"}
 Inspection: {"dependency_depth":3,"edges":5,"limit_reason":null,"max_attempts":3,"nodes":4,"prompt_bytes":2568}
 Preset selection: generator-evaluator (override)
-Review shape: standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
+Review shape: standard (default; floors=pending; size=pending (measured at review launch); kind=unknown; risk=unknown)
 Pending "planner_authority": "Planner authority is checked when the plan runs."
 Pending "route_readiness": "Route readiness and quota are checked before launch."
 Pending "source": "Source binding must be resolved and verified at execution."

@@ -266,11 +266,17 @@ pub fn prompt(node: &GraphNode) -> String {
         );
     }
     if let Some(spec) = &node.plan {
+        let planner_limit = spec
+            .extra
+            .get("model_max_nodes")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(spec.max_nodes);
         let kinds = serde_json::to_string(&spec.kinds).unwrap_or_default();
         if spec.patterns.is_empty() {
-            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", spec.max_nodes));
+            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", planner_limit));
         } else {
-            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...],\"patterns\":[...]}}. Emit 1..{} nodes or pattern instances, using only {kinds}. Allowed patterns: {}. Instantiate them in a `patterns` array with id, pattern, parameters, depends_on and inputs; pattern parameters are validated against their schemas and pattern nodes are fixed. Do not emit other presets or review shapes. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs using `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes.", spec.max_nodes, pattern_summary(spec)));
+            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...],\"patterns\":[...]}}. Emit 1..{} nodes or pattern instances, using only {kinds}. Allowed patterns: {}. Instantiate them in a `patterns` array with id, pattern, parameters, depends_on and inputs; pattern parameters are validated against their schemas and pattern nodes are fixed. Do not emit other presets or review shapes. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs using `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes.", planner_limit, pattern_summary(spec)));
         }
     }
     prompt
@@ -489,6 +495,55 @@ fn derive_topology(
                     "composite topology requires a planner specification",
                 )
             })?;
+        if !fallback
+            && let Some(required) = spec
+                .extra
+                .get("required_floor_patterns")
+                .and_then(serde_json::Value::as_array)
+            && required
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|name| {
+                    !addition
+                        .patterns
+                        .iter()
+                        .any(|instance| instance.name == name)
+                })
+        {
+            return Err((
+                addition.source.clone(),
+                "expanded plan must include required path-floor patterns",
+            ));
+        }
+        if !fallback {
+            let candidates: Vec<&str> = spec
+                .extra
+                .get("floor_candidate_patterns")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            let minimum = spec
+                .extra
+                .get("floor_min_reviewers")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(0);
+            let count = addition
+                .patterns
+                .iter()
+                .filter(|instance| candidates.contains(&instance.name.as_str()))
+                .map(|instance| &instance.name)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            if count < minimum {
+                return Err((
+                    addition.source.clone(),
+                    "expanded plan must meet the path-floor reviewer count",
+                ));
+            }
+        }
         if fallback {
             let derived = fallback_expansion(&addition.source, spec, document).map_err(|_| {
                 (
@@ -1269,10 +1324,111 @@ fn fragment(
     if spec.patterns_only && !fragment.nodes.is_empty() {
         return Err("this plan accepts pattern instances only; raw nodes are refused".into());
     }
-    if fragment.schema_version != 1
-        || (fragment.nodes.is_empty() && fragment.patterns.is_empty())
-        || fragment.nodes.len() > spec.max_nodes
+    if fragment.schema_version != 1 || fragment.nodes.len() > spec.max_nodes {
+        return Err(format!(
+            "fragment requires 1..{} nodes and schema_version 1",
+            spec.max_nodes
+        ));
+    }
+    let model_limit = spec
+        .extra
+        .get("model_max_nodes")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(spec.max_nodes);
+    if fragment.nodes.len() + fragment.patterns.len() > model_limit {
+        return Err(format!(
+            "fragment requires 1..{model_limit} nodes and schema_version 1"
+        ));
+    }
+    let mut floor_warnings = Vec::new();
+    let mut required: Vec<String> = spec
+        .extra
+        .get("required_floor_patterns")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    let candidates: Vec<&str> = spec
+        .extra
+        .get("floor_candidate_patterns")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    let minimum = spec
+        .extra
+        .get("floor_min_reviewers")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(0);
+    let mut selected: std::collections::BTreeSet<String> = fragment
+        .patterns
+        .iter()
+        .filter(|instance| candidates.contains(&instance.pattern.as_str()))
+        .map(|instance| instance.pattern.clone())
+        .chain(required.iter().cloned())
+        .collect();
+    for candidate in &candidates {
+        if selected.len() >= minimum {
+            break;
+        }
+        if selected.insert((*candidate).to_owned()) {
+            required.push((*candidate).to_owned());
+        }
+    }
+    if selected.len() < minimum {
+        return Err(
+            "path floor requires more distinct review lenses than the catalogue offers".into(),
+        );
+    }
     {
+        for (index, pattern) in required.iter().map(String::as_str).enumerate() {
+            if fragment
+                .patterns
+                .iter()
+                .any(|instance| instance.pattern == pattern)
+            {
+                continue;
+            }
+            if !spec.patterns.iter().any(|entry| entry.name == pattern) {
+                return Err(format!("required floor pattern {pattern} is not available"));
+            }
+            let mut id = format!("floor-{index}");
+            while fragment.patterns.iter().any(|instance| instance.id == id)
+                || fragment.nodes.iter().any(|child| child.id == id)
+            {
+                id.push('x');
+            }
+            fragment.patterns.push(pattern_plan::PatternInstance {
+                id,
+                pattern: pattern.to_owned(),
+                parameters: serde_json::json!({}),
+                depends_on: Vec::new(),
+                inputs: Vec::new(),
+                title: None,
+            });
+            let classes = spec
+                .extra
+                .get("floor_classes")
+                .and_then(serde_json::Value::as_array)
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            floor_warnings.push(format!(
+                "path floor {classes} added required review lens {pattern}"
+            ));
+        }
+    }
+    if fragment.nodes.is_empty() && fragment.patterns.is_empty() {
         return Err(format!(
             "fragment requires 1..{} nodes and schema_version 1",
             spec.max_nodes
@@ -1428,7 +1584,11 @@ fn fragment(
     coordinate(&mut nodes, document, checkpoint)?;
     Ok(Expansion {
         review: None,
-        extra: Default::default(),
+        extra: if floor_warnings.is_empty() {
+            Default::default()
+        } else {
+            BTreeMap::from([("floor_warnings".into(), serde_json::json!(floor_warnings))])
+        },
         source: node.id.clone(),
         continuation: false,
         nodes,
@@ -1805,6 +1965,19 @@ pub(super) fn settle(
         return None;
     };
     let result = addition.and_then(|addition| {
+        if let Some(warnings) = addition
+            .extra
+            .get("floor_warnings")
+            .and_then(serde_json::Value::as_array)
+            && let Some(outputs) = &mut checkpoint.nodes[index].outputs
+        {
+            outputs.warnings.extend(
+                warnings
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(|warning| bounded(warning, WARNING_BYTES)),
+            );
+        }
         let mut preview = document.clone();
         append(&mut preview, &addition);
         let mut loop_writers = std::collections::BTreeMap::new();

@@ -508,6 +508,29 @@ pub fn apply(
         .get("read_roots")
         .filter(|roots| roots.as_array().is_some_and(|roots| !roots.is_empty()))
         .cloned();
+    let (floor_lenses, floor_classes, floor_min_reviewers) = if catalogue
+        .get("patterns")
+        .and_then(Value::as_array)
+        .is_some_and(|patterns| {
+            patterns
+                .iter()
+                .any(|p| p.get("for_each").and_then(Value::as_str) == Some("lenses"))
+        }) {
+        with_builder(layers, name, config, origins, brief, |builder| {
+            Ok(builder
+                .shape_hint(false)?
+                .map(|hint| {
+                    (
+                        hint.required_floor_lenses,
+                        hint.floor_classes,
+                        hint.floor_min_reviewers,
+                    )
+                })
+                .unwrap_or_default())
+        })?
+    } else {
+        (Vec::new(), Vec::new(), 0)
+    };
     let stages = config
         .get_mut("stages")
         .and_then(Value::as_array_mut)
@@ -633,14 +656,37 @@ pub fn apply(
         .iter()
         .map(|pattern| lower_pattern(layers, config.get("roles"), &plan_values, brief, pattern))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(json!({
+    let required_patterns: Vec<String> = floor_lenses
+        .iter()
+        .map(|lens| format!("lens-{lens}"))
+        .collect();
+    let mut plan = json!({
         "kinds": ["task", "synthesise"],
         "max_nodes": ctx.max_nodes,
         "patterns": lowered,
         "patterns_only": true,
         "disjoint_waves": true,
         "wire_exports": true,
-    }))
+    });
+    if !required_patterns.is_empty() || floor_min_reviewers > 0 {
+        let candidates: Vec<String> = plan["patterns"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|pattern| pattern["name"].as_str())
+            .filter(|name| name.starts_with("lens-"))
+            .map(str::to_owned)
+            .collect();
+        let reserve = required_patterns.len().max(floor_min_reviewers);
+        let model_limit = ctx.max_nodes.min(512_usize.saturating_sub(reserve)).max(1);
+        plan["max_nodes"] = json!(model_limit.saturating_add(reserve));
+        plan["floor_candidate_patterns"] = json!(candidates);
+        plan["floor_min_reviewers"] = json!(floor_min_reviewers);
+        plan["model_max_nodes"] = json!(model_limit);
+        plan["required_floor_patterns"] = json!(required_patterns);
+        plan["floor_classes"] = json!(floor_classes);
+    }
+    Ok(plan)
 }
 
 /// Run `f` with a stage builder over the preset's final parameters, for the

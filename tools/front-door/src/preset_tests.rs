@@ -493,6 +493,51 @@ fn quick_review_without_planning_runs_one_reduced_lens() {
 }
 
 #[test]
+fn quick_review_of_protected_path_runs_the_raised_panel() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let mut layers = Layers::empty();
+    layers.review = Some(super::preset::fixture_protected_selector());
+    let expansion = expand(
+        &layers,
+        "review",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.review_shape='quick'".into(),
+            "parameters.subject.commit='0123456789abcdef0123456789abcdef01234567'".into(),
+        ],
+    )
+    .unwrap();
+    assert!(
+        expansion
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("security"))
+    );
+    let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner::default();
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
+    assert!(owner.launched.len() > 8, "{:?}", owner.launched);
+    assert!(
+        owner
+            .launched
+            .iter()
+            .any(|id| id.contains("security-privacy"))
+    );
+    assert!(owner.launched.iter().any(|id| id == "verify"));
+    assert!(owner.launched.iter().any(|id| id == "synthesis"));
+}
+
+#[test]
 fn quick_review_reduces_all_explicit_lenses() {
     use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
     let mut layers = Layers::empty();
@@ -1101,6 +1146,7 @@ struct PresetOwner {
     launched: Vec<String>,
     planner_fragment: Option<String>,
     deferred_shape: Option<String>,
+    deferred_paths: Vec<String>,
     allow_land: bool,
     lands: usize,
     ci_head: Option<String>,
@@ -1187,7 +1233,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             .deferred_shape
             .as_deref()
             .ok_or(provenant_fabric_runtime::graph::ReviewResolveError::Unsupported)?;
-        crate::fabric::fixture_review_expansion(node, subject, shape)
+        crate::fabric::fixture_review_expansion_with_paths(
+            node,
+            subject,
+            shape,
+            &self.deferred_paths,
+        )
     }
 
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
@@ -4618,6 +4669,42 @@ mod planner_front_end {
     }
 
     #[test]
+    fn review_planner_receives_required_floor_lenses() {
+        let mut on = layers(PlanMode::On, None);
+        let base = shapes();
+        on.review = Some(Box::new(move |query| {
+            let mut hint = base(query)?;
+            hint.required_floor_lenses = vec!["security-privacy".into()];
+            hint.floor_classes = vec!["security".into()];
+            hint.floor_min_reviewers = 3;
+            hint.plan.add.push("security-privacy".into());
+            hint.plan.change_add.push("security-privacy".into());
+            Ok(hint)
+        }));
+        let planned = run(
+            &on,
+            "review",
+            "brief",
+            vec![("worktree".into(), json!("/repo/lane"))],
+        );
+        let plan = &planned.document["nodes"][1]["plan"];
+        assert!(
+            plan["required_floor_patterns"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("lens-security-privacy"))
+        );
+        assert_eq!(plan["floor_min_reviewers"], 3);
+        assert!(
+            plan["floor_classes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("security"))
+        );
+        assert!(lens_names(&planned).contains(&"security-privacy".to_owned()));
+    }
+
+    #[test]
     fn review_plans_only_lenses_the_panel_allows() {
         let on = layers(PlanMode::On, None);
         let base = vec![("worktree".to_owned(), json!("/repo/lane"))];
@@ -5559,39 +5646,27 @@ fn real_selector(directory: &str) -> Layers {
     layers
 }
 
-fn review_lens_count(document: &serde_json::Value) -> usize {
-    node(document, "lenses")["composite"]["nodes"]
-        .as_array()
-        .unwrap()
-        .len()
-}
-
 #[test]
-fn deliver_forwards_size_and_kind_into_the_review_panel() {
+fn deliver_carries_size_kind_and_shape_to_the_deferred_panel() {
     let layers = real_selector("/nonexistent");
-    let panel = |extra: &[&str]| {
-        let mut overrides = vec!["parameters.worktree='/repo/w'".to_owned()];
-        overrides.extend(extra.iter().map(|s| (*s).to_owned()));
-        expand(&layers, "deliver", "brief", &overrides).unwrap()
-    };
-    assert_eq!(
-        review_lens_count(&panel(&["parameters.size='small'"]).document),
-        1
-    );
-    assert_eq!(
-        review_lens_count(&panel(&["parameters.size='medium'"]).document),
-        5
-    );
-    assert_eq!(
-        review_lens_count(
-            &panel(&["parameters.size='medium'", "parameters.kind='refactor'"]).document
-        ),
-        6
-    );
-    assert_eq!(
-        review_lens_count(&panel(&["parameters.size='large'"]).document),
-        8
-    );
+    let document = expand(
+        &layers,
+        "deliver",
+        "brief",
+        &[
+            "parameters.worktree='/repo/w'".into(),
+            "parameters.size='medium'".into(),
+            "parameters.kind='refactor'".into(),
+            "parameters.review_shape='quick'".into(),
+        ],
+    )
+    .unwrap()
+    .document;
+    let panel = &document["nodes"][2]["composite"]["nodes"][0];
+    assert_eq!(panel["kind"], "plan");
+    assert_eq!(panel["review"]["size"], "medium");
+    assert_eq!(panel["review"]["kind"], "refactor");
+    assert_eq!(panel["review"]["shape"], "quick");
 }
 
 /// A review of a head or node subject with no size or shape cannot be measured
@@ -5655,7 +5730,7 @@ fn a_head_subject_review_defers_its_size_to_the_pinned_commit() {
 }
 
 #[test]
-fn explicit_size_shape_and_commit_subjects_keep_the_static_v1_panel() {
+fn explicit_size_and_shape_still_defer_unpinned_subjects() {
     let layers = real_selector("/nonexistent");
     let deliver = |extra: &str| {
         expand(
@@ -5669,9 +5744,11 @@ fn explicit_size_shape_and_commit_subjects_keep_the_static_v1_panel() {
     };
     for extra in ["parameters.size='small'", "parameters.review_shape='quick'"] {
         let document = deliver(extra);
-        assert_eq!(document["schema_version"], 1, "{extra}");
-        assert!(document.get("review_base").is_none(), "{extra}");
-        assert!(node(&document, "lenses")["composite"].is_object());
+        assert_eq!(document["schema_version"], 2, "{extra}");
+        assert_eq!(
+            document["nodes"][2]["composite"]["nodes"][0]["kind"],
+            "plan"
+        );
     }
     // The default council reviews a commit, which is already pinned.
     let document = expand(
@@ -6073,7 +6150,7 @@ fn a_generator_review_defers_its_size_until_the_writer_has_run() {
     )
     .unwrap()
     .document;
-    assert_eq!(sized["schema_version"], 1);
+    assert_eq!(sized["schema_version"], 2);
     let group = sized["nodes"]
         .as_array()
         .unwrap()
@@ -6081,14 +6158,18 @@ fn a_generator_review_defers_its_size_until_the_writer_has_run() {
         .find(|node| node["id"] == "lens")
         .unwrap();
     let nodes = group["composite"]["nodes"].as_array().unwrap();
-    assert!(nodes.iter().any(|node| node["id"] == "lenses"));
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node["kind"] == "plan" && node["review"]["size"] == "small")
+    );
 }
 
 #[test]
 fn deliver_deferred_review_runs_the_resolved_shape_on_the_writer_commit() {
     use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
     let layers = real_selector("/nonexistent");
-    for shape in ["quick", "standard"] {
+    for shape in ["quick", "standard", "protected"] {
         let mut expansion = expand(
             &layers,
             "deliver",
@@ -6105,7 +6186,12 @@ fn deliver_deferred_review_runs_the_resolved_shape_on_the_writer_commit() {
         let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
         let config = provenant_fabric_runtime::config::GraphConfig::default();
         let mut owner = PresetOwner {
-            deferred_shape: Some(shape.into()),
+            deferred_shape: Some(if shape == "protected" { "quick" } else { shape }.into()),
+            deferred_paths: if shape == "protected" {
+                vec!["src/credentials.rs".into()]
+            } else {
+                vec![]
+            },
             allow_land: shape == "quick",
             ..Default::default()
         };
@@ -6127,7 +6213,11 @@ fn deliver_deferred_review_runs_the_resolved_shape_on_the_writer_commit() {
             assert_eq!(attempts.len(), 1, "{attempts:?}");
             assert_eq!(owner.lands, 1);
         } else {
-            assert_eq!(attempts.len(), 8, "{attempts:?}");
+            if shape == "standard" {
+                assert_eq!(attempts.len(), 8, "{attempts:?}");
+            } else {
+                assert!(attempts.len() > 8, "{attempts:?}");
+            }
             assert!(attempts[0].ends_with("--f"));
             assert!(attempts[attempts.len() - 2].ends_with("--v-1"));
             assert!(attempts[attempts.len() - 1].ends_with("--s"));
@@ -6173,7 +6263,10 @@ fn crucial_generator_reaches_evaluator_after_review() {
     pin_fixture_sources(&mut expansion.document);
     let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
     let config = provenant_fabric_runtime::config::GraphConfig::default();
-    let mut owner = PresetOwner::default();
+    let mut owner = PresetOwner {
+        deferred_shape: Some("deep".into()),
+        ..Default::default()
+    };
     let run = advance_with_budget(
         &document,
         &mut owner,

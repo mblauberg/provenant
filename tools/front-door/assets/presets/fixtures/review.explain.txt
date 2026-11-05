@@ -2,7 +2,7 @@ Graph <id>
 Admission: {"status":"admitted"}
 Inspection: {"dependency_depth":4,"edges":22,"limit_reason":null,"max_attempts":22,"nodes":12,"prompt_bytes":39738}
 Preset selection: review (override)
-Review shape: deep (by_risk; size=unknown; kind=unknown; risk=crucial)
+Review shape: deep (by_risk; floors=none; size=unknown; kind=unknown; risk=crucial)
 plan: auto -> off (review subject is not large (size=unknown))
 Planner route: principal
 Pending "route_readiness": "Route readiness and quota are checked before launch."

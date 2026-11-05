@@ -10,7 +10,25 @@ pub struct ReviewConfig {
     pub select: ReviewSelect,
     pub size: ReviewSize,
     pub lenses: ReviewLenses,
+    /// Configurable path classes and their minimum review coverage.
+    pub floors: BTreeMap<String, ReviewFloor>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReviewFloor {
+    pub paths: Vec<String>,
+    pub tier: String,
+    pub lenses: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppliedFloors {
+    pub classes: Vec<String>,
+    pub tier: Option<String>,
+    pub lenses: Vec<String>,
+}
+
 /// Which lenses fill a panel. `order` ranks the base lenses that fill the
 /// shape's slots; a kind may replace that order (`docs`) or add lenses outside
 /// the slot cap (`refactor`).
@@ -383,6 +401,8 @@ fn parse_bundled() -> ReviewConfig {
         select: SelectAsset,
         size: ReviewSize,
         lenses: LensesAsset,
+        #[serde(default)]
+        floors: BTreeMap<String, ReviewFloor>,
     }
     #[derive(Deserialize)]
     struct LensesAsset {
@@ -404,6 +424,7 @@ fn parse_bundled() -> ReviewConfig {
     let select = asset.review.select;
     ReviewConfig {
         shapes: asset.review.shapes,
+        floors: asset.review.floors,
         size: asset.review.size,
         lenses: ReviewLenses {
             order: asset.review.lenses.order,
@@ -484,6 +505,77 @@ impl<T: Clone> Select<T> {
     }
 }
 impl ReviewConfig {
+    /// The configured minimum coverage for each changed path. A path matching
+    /// the routine class stays routine; unmatched paths use the unknown class.
+    pub fn path_floors(&self, paths: &[String]) -> AppliedFloors {
+        fn rank(tier: &str) -> usize {
+            match tier {
+                "routine" => 0,
+                "substantial" => 1,
+                "crucial" => 2,
+                "terminal" => 3,
+                _ => 0,
+            }
+        }
+        let mut result = AppliedFloors::default();
+        for path in paths {
+            let routine = self.floors.get("routine").is_some_and(|floor| {
+                floor
+                    .paths
+                    .iter()
+                    .any(|pattern| path_matches(pattern, path))
+            });
+            let mut matched = false;
+            for (name, floor) in &self.floors {
+                if name == "unknown"
+                    || !floor
+                        .paths
+                        .iter()
+                        .any(|pattern| path_matches(pattern, path))
+                    || (routine && name != "routine")
+                {
+                    continue;
+                }
+                matched = true;
+                if !result.classes.contains(name) {
+                    result.classes.push(name.clone());
+                }
+                if rank(&floor.tier) > 0
+                    && result
+                        .tier
+                        .as_deref()
+                        .is_none_or(|tier| rank(&floor.tier) > rank(tier))
+                {
+                    result.tier = Some(floor.tier.clone());
+                }
+                for lens in &floor.lenses {
+                    if !result.lenses.contains(lens) {
+                        result.lenses.push(lens.clone());
+                    }
+                }
+            }
+            if !matched && let Some(floor) = self.floors.get("unknown") {
+                if !result.classes.iter().any(|name| name == "unknown") {
+                    result.classes.push("unknown".into());
+                }
+                if rank(&floor.tier) > 0
+                    && result
+                        .tier
+                        .as_deref()
+                        .is_none_or(|tier| rank(&floor.tier) > rank(tier))
+                {
+                    result.tier = Some(floor.tier.clone());
+                }
+                for lens in &floor.lenses {
+                    if !result.lenses.contains(lens) {
+                        result.lenses.push(lens.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
+
     /// The lens order and additions for one change kind.
     pub fn lens_plan(&self, kind: Option<&str>, paths: &[String], test_marker: bool) -> LensPlan {
         let entry = kind.and_then(|kind| self.lenses.by_kind.get(kind));
@@ -535,6 +627,21 @@ impl ReviewConfig {
         {
             return Err(format!("unknown review shape '{name}'"));
         }
+        let floor = self.path_floors(paths);
+        let tier_rank = |tier: &str| match tier {
+            "routine" => 0,
+            "substantial" => 1,
+            "crucial" => 2,
+            "terminal" => 3,
+            _ => 0,
+        };
+        let risk = match (risk, floor.tier.as_deref()) {
+            (Some(requested), Some(minimum)) if tier_rank(minimum) > tier_rank(requested) => {
+                Some(minimum)
+            }
+            (None, Some(minimum)) => Some(minimum),
+            (other, _) => other,
+        };
         let integration = (kind == Some("integration"))
             .then(|| self.select.by_kind.get("integration"))
             .flatten();
@@ -571,12 +678,17 @@ impl ReviewConfig {
                     }),
             ];
             for candidate in candidates.into_iter().flatten() {
-                let slots = |name: &str| {
-                    self.shapes.get(name).map_or(0, |shape| {
-                        shape.reviewers.iter().map(|r| r.count).sum::<usize>()
+                let coverage = |name: &str| {
+                    self.shapes.get(name).map_or((0, false, 0, false), |shape| {
+                        (
+                            shape.reviewers.iter().map(|r| r.count).sum::<usize>(),
+                            shape.frame,
+                            shape.verifiers,
+                            shape.synthesis == ReviewSynthesis::Model,
+                        )
                     })
                 };
-                if slots(&candidate.value) > slots(&selected.value) {
+                if coverage(&candidate.value) > coverage(&selected.value) {
                     selected = candidate;
                 }
             }
@@ -645,7 +757,16 @@ impl ReviewConfig {
         if risk == Some("terminal") {
             tags.push("terminal");
         }
-        let plan = self.lens_plan(kind, paths, marker);
+        let mut plan = self.lens_plan(kind, paths, marker);
+        let floors = self.path_floors(paths);
+        for lens in &floors.lenses {
+            if !plan.add.contains(lens) {
+                plan.add.push(lens.clone());
+            }
+            if !plan.change_add.contains(lens) {
+                plan.change_add.push(lens.clone());
+            }
+        }
         let caller_supplied = !request.lenses.is_empty();
         let lens = |name: &str, when: &str| ReviewLens {
             name: name.to_owned(),
@@ -678,6 +799,13 @@ impl ReviewConfig {
         for name in additions {
             if !list.iter().any(|item| &item.name == name) {
                 list.push(lens(name, ""));
+            }
+        }
+        if caller_supplied && floors.tier.is_some() {
+            for name in &self.lenses.order {
+                if !list.iter().any(|item| &item.name == name) {
+                    list.push(lens(name, ""));
+                }
             }
         }
         if !caller_supplied && !plan.order.is_empty() {
@@ -834,6 +962,29 @@ impl ReviewConfig {
                 {
                     error(format!("{prefix}.lenses"), "invalid_lenses");
                 }
+            }
+        }
+        if self.floors.len() > 128 {
+            error("review.floors".into(), "limit");
+        }
+        for (name, floor) in &self.floors {
+            let prefix = format!("review.floors.{name}");
+            if !identifier(name) {
+                error(prefix.clone(), "selector");
+            }
+            if !["routine", "substantial", "crucial", "terminal"].contains(&floor.tier.as_str()) {
+                error(format!("{prefix}.tier"), "selector");
+            }
+            if floor.paths.len() > 128
+                || floor
+                    .paths
+                    .iter()
+                    .any(|path| path.is_empty() || path.len() > 512)
+            {
+                error(format!("{prefix}.paths"), "selector");
+            }
+            if floor.lenses.len() > 64 || floor.lenses.iter().any(|lens| !identifier(lens)) {
+                error(format!("{prefix}.lenses"), "invalid_lenses");
             }
         }
         let size = &self.size;
@@ -1102,7 +1253,8 @@ mod tests {
         // Capture both selection paths before unifying them. Refactor additions
         // arrive in configured addition order in panel(), but in catalogue order
         // in resolve_panel(); preserve or explicitly decide that difference.
-        let review = ReviewConfig::default();
+        let mut review = ReviewConfig::default();
+        review.floors.clear();
         for (shape, kind, paths, tags, old, resolved) in [
             (
                 "quick",
@@ -1260,8 +1412,70 @@ mod tests {
     }
 
     #[test]
-    fn selected_panels_keep_change_driven_lenses() {
+    fn protected_floors_raise_shapes_and_extend_caller_lists() {
         let review = ReviewConfig::default();
+        let lens = |name: &str| ReviewLens {
+            name: name.into(),
+            when: None,
+            tier: serde_json::Value::Null,
+        };
+        let request = ReviewRequest {
+            shape: Some("quick".into()),
+            lenses: vec![lens("tests")],
+            ..Default::default()
+        };
+        for (path, class) in [
+            ("src/auth/session.rs", "security"),
+            ("src/git/refs.rs", "boundary"),
+            ("src/object_receive.rs", "boundary"),
+            (".github/workflows/test.yml", "operations"),
+            ("src/config/parser.rs", "contract"),
+            ("src/cli/run.rs", "contract"),
+        ] {
+            assert!(
+                review
+                    .path_floors(&[path.into()])
+                    .classes
+                    .contains(&class.to_owned()),
+                "{path}"
+            );
+        }
+        let paths = vec!["src/credential_store.rs".into()];
+        let panel = review.resolve_panel(&request, None, &paths, false).unwrap();
+        assert_eq!(panel.shape, "deep");
+        let names: Vec<_> = panel.slots.iter().map(|slot| slot.lens.as_str()).collect();
+        assert!(names.contains(&"tests"));
+        assert!(names.contains(&"security-privacy"));
+        assert!(names.contains(&"correctness-spec"));
+        assert!(names.len() >= 8);
+        assert!(
+            review
+                .path_floors(&paths)
+                .classes
+                .contains(&"security".to_owned())
+        );
+        let unknown = review
+            .resolve_panel(&request, None, &["src/widget.rs".into()], false)
+            .unwrap();
+        assert_eq!(unknown.shape, "standard");
+        let docs = review
+            .resolve_panel(&request, None, &["docs/guide.md".into()], false)
+            .unwrap();
+        assert_eq!(docs.shape, "quick");
+        assert_eq!(docs.slots.len(), 1);
+        let mut equal_count = review.clone();
+        equal_count.shapes.get_mut("standard").unwrap().reviewers[0].count = 1;
+        let panel = equal_count
+            .resolve_panel(&request, None, &["src/widget.rs".into()], false)
+            .unwrap();
+        assert_eq!(panel.shape, "standard");
+        assert!(panel.frame && panel.verifiers > 0);
+    }
+
+    #[test]
+    fn selected_panels_keep_change_driven_lenses() {
+        let mut review = ReviewConfig::default();
+        review.floors.clear();
         assert_eq!(
             resolved_names(&review, "standard", None, &[], false, &[]),
             [
@@ -1519,6 +1733,7 @@ mod tests {
     #[test]
     fn selection_precedence_and_path_globs() {
         let mut review = ReviewConfig::default();
+        review.floors.clear();
         review
             .select
             .by_paths
