@@ -2097,7 +2097,7 @@ fn graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes()
     let wrapper = fixture.root.join("git-wrapper");
     fixture.executable(&wrapper, &format!("#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n", git.display()))?;
     let gh = fixture.root.join("gh");
-    fixture.executable(&gh, "#!/bin/sh\nif [ \"$2\" = view ]; then exit 1; fi\ncd \"$(dirname \"$0\")\" || exit 1\ncat > graph-body\nprintf 'https://github.com/fixture/repo/pull/1\\n'\n")?;
+    fixture.executable(&gh, "#!/bin/sh\nif [ \"$1\" = repo ]; then printf '{\"defaultBranchRef\":{\"name\":\"main\"}}\\n'; exit 0; fi\nif [ \"$2\" = list ]; then printf '[]\\n'; exit 0; fi\ncd \"$(dirname \"$0\")\" || exit 1\ncat > graph-body\nprintf 'https://github.com/fixture/repo/pull/1\\n'\n")?;
     fixture
         .environment
         .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
@@ -2151,7 +2151,7 @@ fn graph_pr_refreshes_forged_target_and_refuses_failed_fetch()
     let wrapper = fixture.root.join("git-wrapper");
     fixture.executable(&wrapper, &format!("#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n", git.display()))?;
     let gh = fixture.root.join("gh");
-    fixture.executable(&gh, "#!/bin/sh\nif [ \"$2\" = view ]; then exit 1; fi\ncd \"$(dirname \"$0\")\" || exit 1\ncat > graph-body\nprintf 'https://github.com/fixture/repo/pull/1\\n'\n")?;
+    fixture.executable(&gh, "#!/bin/sh\nif [ \"$1\" = repo ]; then printf '{\"defaultBranchRef\":{\"name\":\"main\"}}\\n'; exit 0; fi\nif [ \"$2\" = list ]; then printf '[]\\n'; exit 0; fi\ncd \"$(dirname \"$0\")\" || exit 1\ncat > graph-body\nprintf 'https://github.com/fixture/repo/pull/1\\n'\n")?;
     fixture
         .environment
         .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
@@ -4814,5 +4814,97 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
         git(&lane, &["ls-remote", "origin", "refs/heads/published/lane"])?
             .starts_with(elsewhere.as_str())
     );
+    Ok(())
+}
+
+#[test]
+fn existing_pr_delivery_only_creates_after_positive_absence()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let base = fixture.prepare()?.head(&fixture.writer)?;
+    fixture.commit(&fixture.writer.worktree, "Graph work")?;
+    let head = fixture.prepare()?.head(&fixture.writer)?;
+    fixture.git(&["branch", "integration", "lane"])?;
+    fixture.git(&[
+        "config",
+        &format!(
+            "url.{}.insteadOf",
+            fixture.root.join("remote.git").display()
+        ),
+        "https://github.com/fixture/repo.git",
+    ])?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(&wrapper, &format!("#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n", git.display()))?;
+    let gh = fixture.root.join("gh");
+    fixture.executable(&gh, "#!/bin/sh\ncd \"$(dirname \"$0\")\" || exit 1\nif [ \"$1\" = repo ]; then printf '{\"defaultBranchRef\":{\"name\":\"main\"}}\\n'; exit 0; fi\nif [ \"$2\" = list ]; then [ ! -f lookup-fails ] || exit 1; cat lookup; exit 0; fi\nif [ \"$2\" = create ]; then echo create >> creates; printf 'https://github.com/fixture/repo/pull/2\\n'; exit 0; fi\nexit 1\n")?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture.environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+    let url = "https://github.com/fixture/repo/pull/1";
+    let other = "1111111111111111111111111111111111111111";
+    fixture.request.open_pr = true;
+    for graph in [true, false] {
+        for (state, item_head, item_base, expected, creates) in [
+            ("FAIL", head.to_string(), "main", "blocked", 0),
+            ("NONE", head.to_string(), "main", "created", 1),
+            ("OPEN", head.to_string(), "main", "reused", 0),
+            ("OPEN", head.to_string(), "other", "blocked", 0),
+            ("MERGED", head.to_string(), "main", "reused", 0),
+            ("CLOSED", head.to_string(), "main", "blocked", 0),
+            ("OPEN", other.to_string(), "main", "moved", 0),
+        ] {
+            let _ = std::fs::remove_file(fixture.root.join("creates"));
+            let _ = std::fs::remove_file(fixture.root.join("lookup-fails"));
+            if state == "FAIL" {
+                std::fs::write(fixture.root.join("lookup-fails"), "")?;
+            }
+            let value = if state == "NONE" {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([{ "url": url, "state": state, "headRefOid": item_head, "baseRefName": item_base }])
+            };
+            std::fs::write(fixture.root.join("lookup"), serde_json::to_vec(&value)?)?;
+            let result = if graph {
+                HostDeliveryContext::new(fixture.environment.clone()).deliver_graph_pr(
+                    &fixture.writer.project,
+                    "integration",
+                    base,
+                    "Graph fixture",
+                )
+            } else {
+                fixture
+                    .prepare()?
+                    .push(&fixture.writer, &fixture.request, head, "Lane fixture")
+                    .map(|url| url.expect("PR delivery returns a URL"))
+            };
+            if expected == "blocked" {
+                let Err(RunError::DeliveryReconciliation { reason, next }) = &result else {
+                    panic!("{state}: expected reconciliation evidence: {result:?}");
+                };
+                assert!(!reason.is_empty());
+                assert!(!next.is_empty());
+                if state == "CLOSED" {
+                    assert!(next.contains(url), "{next}");
+                }
+            }
+            match expected {
+                "created" => assert_eq!(result?, "https://github.com/fixture/repo/pull/2"),
+                "reused" => assert_eq!(result?, url),
+                "moved" => assert!(matches!(
+                    result,
+                    Err(RunError::Delivery(WriterDeliveryStage::Verify))
+                )),
+                _ => assert!(result.is_err(), "{state} must block"),
+            }
+            let calls = std::fs::read_to_string(fixture.root.join("creates")).unwrap_or_default();
+            assert_eq!(calls.lines().count(), creates, "{state}");
+        }
+    }
     Ok(())
 }

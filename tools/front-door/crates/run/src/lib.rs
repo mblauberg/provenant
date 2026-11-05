@@ -301,6 +301,8 @@ pub enum RunError {
     Input { kind: ErrorKind, message: String },
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
+    #[error("host writer delivery could not reconcile the pull request: {reason}; next: {next}")]
+    DeliveryReconciliation { reason: String, next: String },
     #[error(
         "host writer delivery failed at Integrate (integration_head_moved): the integration target moved after the round began and a loop round only fast-forwards it; rerun the graph to review the new head"
     )]
@@ -571,6 +573,11 @@ impl RunError {
                 diagnostic = diagnostic
                     .detail(format!("host writer delivery failed at {stage:?}"))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
+            }
+            Self::DeliveryReconciliation { reason, next } => {
+                diagnostic = diagnostic.detail(reason.clone()).next(next.clone()).fact(
+                    DiagnosticFact::DeliveryStage(WriterDeliveryStage::PullRequest),
+                );
             }
             Self::DeliveryLimit {
                 stage,

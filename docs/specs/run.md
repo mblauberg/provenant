@@ -1308,13 +1308,19 @@ external effects, while failures remain explicitly retryable. A worktree
 already pruned by its own lifecycle may replay its successful receipt.
 PR bodies use commit subjects and bodies with run and attempt IDs, capped at
 60,000 bytes with an explicit truncation note and supplied to `gh` through stdin;
-existing PR reuse requires an open PR at the exact delivered head.
+PR delivery queries the repository's default base and lists the branch's PRs
+before creation. A successful empty list permits creation with that base. An
+open or merged PR is reused only at the delivered head and expected base. A
+failed lookup, ambiguous list, base mismatch or unmerged closed PR stops
+delivery; a moved head refuses verification. The failure gives an inspection
+action where the host has an identifiable PR.
 - Why: delivery is host authority attached to a verified result, and a later
   pickup must not silently deliver unrelated edits.
 - Test: `crates/run/src/delivery_tests.rs::local_integration_fast_forwards_merges_and_replays`;
   `::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`;
   `::remote_integration_refreshes_the_leased_destination`;
   `::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
+  `::existing_pr_delivery_only_creates_after_positive_absence`;
   `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.
 - Owner: `crates/run/src/delivery.rs`, `crates/records/src/run.rs`, `crates/cli/src/run.rs`
 
