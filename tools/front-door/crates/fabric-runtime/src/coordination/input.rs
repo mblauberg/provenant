@@ -122,6 +122,19 @@ macro_rules! bounded_input {
             }
         }
 
+        impl $name {
+            /// Decode and validate for a transport while retaining the typed
+            /// validation cause separately from structural decoding errors.
+            pub fn decode_for_transport(
+                value: serde_json::Value,
+                transport: provenant_core::WaitTransport,
+            ) -> Result<Result<Self, crate::coordination::input::InputError>, serde_json::Error> {
+                let input = Self::from(serde_json::from_value::<$wire>(value)?);
+                Ok(crate::coordination::input::ValidateInput::validate_input(&input, transport)
+                    .map(|()| input))
+            }
+        }
+
         impl<'de> serde::Deserialize<'de> for $name {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where

@@ -198,6 +198,8 @@ pub enum InvalidInput {
     UnknownTool,
     #[error("invalid tool argument at {path}")]
     Arguments { path: String },
+    #[error("{0}")]
+    Validated(InputError),
 }
 
 impl ToolCall {
@@ -634,22 +636,14 @@ impl ToolCall {
             };
         macro_rules! parse {
             ($ty:ty, $variant:ident $(, $metadata:expr)*) => {
-                serde_json::from_value::<$ty>(arguments.clone())
-                    .and_then(|input| {
-                        input
-                            .validate_input(WaitTransport::Mcp)
-                            .map_err(serde::de::Error::custom)?;
-                        Ok(Self::$variant(input $(, $metadata)*))
+                <$ty>::decode_for_transport(arguments.clone(), WaitTransport::Mcp)
+                    .map_err(|_| InvalidInput::Arguments {
+                        path: schema::invalid_path(name, &arguments)
+                            .unwrap_or_else(|| "arguments".to_owned()),
                     })
-                    .map_err(|error| InvalidInput::Arguments {
-                        path: schema::invalid_path(name, &arguments).unwrap_or_else(|| {
-                            let message = error.to_string();
-                            message
-                                .strip_prefix("invalid input field `")
-                                .and_then(|path| path.split_once('`').map(|(path, _)| path))
-                                .map(|path| format!("arguments.{path}"))
-                                .unwrap_or_else(|| "arguments".to_owned())
-                        }),
+                    .and_then(|input| {
+                        let input = input.map_err(InvalidInput::Validated)?;
+                        Ok(Self::$variant(input $(, $metadata)*))
                     })
             };
         }
@@ -669,7 +663,18 @@ impl ToolCall {
                 }
             }
             Some(schema::ToolKind::Identity) if operation == "hosts" => parse!(HostsInput, Hosts),
-            Some(schema::ToolKind::Inbox) => parse!(InboxInput, Inbox, host),
+            Some(schema::ToolKind::Inbox) => {
+                serde_json::from_value::<InboxInput>(arguments.clone())
+                    .map_err(|_| InvalidInput::Arguments {
+                        path: "arguments".into(),
+                    })
+                    .and_then(|input| {
+                        input
+                            .validate_input(WaitTransport::Mcp)
+                            .map_err(InvalidInput::Validated)?;
+                        Ok(Self::Inbox(input, host))
+                    })
+            }
             Some(schema::ToolKind::Console | schema::ToolKind::Chair) => {
                 if let Some(path) = schema::invalid_path(name, &arguments) {
                     return Err(InvalidInput::Arguments { path });

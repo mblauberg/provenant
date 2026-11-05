@@ -90,6 +90,20 @@ fn oversized_input_projects_field_reason_and_action() {
 }
 
 #[test]
+fn typed_validation_selects_safe_field_without_parsing_error_text() {
+    let arguments = json!({"op":"submit","tasks":[{
+        "title":"TOKEN_SENTINEL\u{1b}", "prompt":"work",
+        "route":{"kind":"named","name":"utility"}, "timeout_seconds":1
+    }]});
+    let Err(error) = ToolCall::parse("fabric_run", arguments) else {
+        panic!("control characters in title must be refused");
+    };
+    assert!(
+        matches!(error, InvalidInput::Validated(error) if error.safe_path() == Some("tasks[0].title"))
+    );
+}
+
+#[test]
 fn memory_pressure_projects_configured_source_and_action() {
     use provenant_records::diagnostic::{
         PressureLevel, PressureThreshold, ResourceFact, SettingSource,

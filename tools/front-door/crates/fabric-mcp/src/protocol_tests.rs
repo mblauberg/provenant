@@ -405,6 +405,36 @@ fn oversized_run_prompt_reports_field_and_byte_limit_without_source() {
 }
 
 #[test]
+fn typed_run_validation_projects_field_and_reason() {
+    let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "_meta":{VERSION:MODERN,CAPABILITIES:{}},"name":"fabric_run",
+        "arguments":{"op":"submit","tasks":[{
+            "title":"TOKEN_SENTINEL\u{1b}", "prompt":"work",
+            "route":{"kind":"named","name":"utility"}, "timeout_seconds":1
+        }]}
+    }});
+    let Action::Reply(reply) = Protocol::default().receive(&serde_json::to_vec(&request).unwrap())
+    else {
+        panic!()
+    };
+    let detail = &reply["result"]["structuredContent"];
+    assert_eq!(detail["code"], "invalid_input");
+    assert_eq!(detail["path"], "arguments.tasks[0].title");
+    assert!(
+        detail["detail"]
+            .as_str()
+            .unwrap()
+            .contains("control characters")
+    );
+    assert!(detail["next"].is_string());
+    assert!(
+        !serde_json::to_string(detail)
+            .unwrap()
+            .contains("TOKEN_SENTINEL")
+    );
+}
+
+#[test]
 fn invalid_arguments_explain_the_expected_value_and_recovery() {
     let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
         "_meta":{VERSION:MODERN,CAPABILITIES:{}},"name":"fabric_output",

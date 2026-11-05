@@ -300,6 +300,20 @@ impl Protocol {
                 let call = match ToolCall::parse(&call.name, call.arguments.clone()) {
                     Ok(call) => call,
                     Err(InvalidInput::UnknownTool) => return refuse(-32602, "Unknown tool name"),
+                    Err(InvalidInput::Validated(error)) => {
+                        let path = error.safe_path().map_or_else(
+                            || "arguments".to_owned(),
+                            |path| format!("arguments.{path}"),
+                        );
+                        let mut detail =
+                            crate::tools::ServiceError::Invalid(error).structured_error();
+                        detail["path"] = json!(path);
+                        return Action::Reply(result(
+                            &id,
+                            tool_error(Some(&call.name), "invalid_input", detail),
+                            modern,
+                        ));
+                    }
                     Err(InvalidInput::Arguments { path }) => {
                         let safe_path =
                             crate::schema::safe_argument_path(&call.name, &call.arguments, &path);
