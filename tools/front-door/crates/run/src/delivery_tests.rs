@@ -2027,6 +2027,45 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
 }
 
 #[test]
+fn pr_reconciliation_pickup_write_failure_keeps_prior_receipt()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let path = fixture.root.join("attempt");
+    std::fs::create_dir(&path)?;
+    let attempt = Directory::open_anchor(&path)?;
+    let receipt = WriterDeliveryReceipt {
+        extra: Default::default(),
+        schema_version: 1,
+        remote: "origin".into(),
+        branch: "published/lane".into(),
+        head: None,
+        review_acceptance: None,
+        state: WriterDeliveryState::Delivered {
+            extra: Default::default(),
+            pull_request: None,
+        },
+    };
+    publish_pickup(&attempt, &fixture.request, &receipt)?;
+    let before = attempt.read_stable(std::ffi::OsStr::new("delivery-pickup.json"), RECORD_LIMIT)?;
+    let mut blocked = receipt.clone();
+    blocked.state = failed_state(&RunError::PullRequestReconciliation {
+        reason: "pull request was closed without merging",
+        number: Some(7),
+    });
+    FAIL_PICKUP_WRITE.with(|fault| fault.set(true));
+    let result = publish_pickup(&attempt, &fixture.request, &blocked);
+    FAIL_PICKUP_WRITE.with(|fault| fault.set(false));
+    assert!(matches!(result, Err(RunError::Io(_))));
+    assert_eq!(
+        attempt.read_stable(std::ffi::OsStr::new("delivery-pickup.json"), RECORD_LIMIT)?,
+        before
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&before)?;
+    assert_eq!(saved["receipt"]["state"]["state"], "delivered");
+    Ok(())
+}
+
+#[test]
 fn existing_pr_requires_positive_absence_and_reconciles_identity()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;

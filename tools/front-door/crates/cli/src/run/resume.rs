@@ -70,6 +70,7 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
                     .worktree_settlement(id, &call)?
                     .is_some_and(|receipt| worktree_was_pruned(&receipt, &writer.worktree))
                 && let Some((request, receipt)) = session.store.delivered(id, &call)?
+                && matches!(receipt.state, run::WriterDeliveryState::Delivered { .. })
                 && deliver.as_ref().is_none_or(|mode| {
                     mode == &request.mode
                         || matches!(mode, run::DeliveryMode::Pr) && request.open_pr

@@ -94,11 +94,20 @@ struct PickupReceipt {
     receipt: WriterDeliveryReceipt,
 }
 
-fn publish_pickup(
+#[cfg(test)]
+thread_local! {
+    pub(super) static FAIL_PICKUP_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn publish_pickup(
     attempt: &Directory,
     request: &WriterDeliveryRequest,
     receipt: &WriterDeliveryReceipt,
 ) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_PICKUP_WRITE.with(|fault| fault.get()) {
+        return Err(std::io::Error::other("injected delivery pickup write failure").into());
+    }
     attempt
         .atomic_write(
             OsStr::new("delivery-pickup.json"),
@@ -2027,6 +2036,7 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
         extra.insert("reason".into(), reason.into());
     }
     if let RunError::PullRequestReconciliation { .. } = error {
+        extra.insert("disposition".into(), "blocked".into());
         let diagnostic = error.diagnostic(provenant_records::diagnostic::Destination::Local);
         if let Some(next) = diagnostic.next {
             extra.insert("next".into(), next.into());
@@ -2401,6 +2411,8 @@ impl crate::RunStore {
                 &format!("Run {}\nAttempt {id}", record.run_id),
             )
             .and_then(|body| host.push(&writer, &request, head, &body));
+        let reconciliation_blocked =
+            matches!(&result, Err(RunError::PullRequestReconciliation { .. }));
         let state = match result {
             Ok(pull_request) => WriterDeliveryState::Delivered {
                 extra: Default::default(),
@@ -2417,6 +2429,11 @@ impl crate::RunStore {
             review_acceptance,
             state,
         };
+        // Record a blocked reconciliation before reporting it; the prior
+        // pickup pointer stays authoritative if this durable write fails.
+        if reconciliation_blocked {
+            publish_pickup(&attempt, &request, &receipt)?;
+        }
         // Failed effects may be explicitly retried; successful effects replay.
         if matches!(receipt.state, WriterDeliveryState::Delivered { .. }) {
             crate::artifacts::seal(
