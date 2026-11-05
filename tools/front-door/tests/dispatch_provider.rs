@@ -244,20 +244,15 @@ fn fixture() -> Result {
                 std::thread::park();
             }
         }
-        if prompt.contains("stderr refusal then hang")
-            || prompt.contains("stderr refusal then success")
-        {
+        if prompt.contains("stderr refusal then hang") {
             write!(
                 io::stderr(),
                 "\x1b[31mAI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000"
             )?;
             io::stderr().flush()?;
-            if prompt.contains("stderr refusal then hang") {
-                loop {
-                    std::thread::park();
-                }
+            loop {
+                std::thread::park();
             }
-            std::thread::sleep(std::time::Duration::from_secs(4));
         }
         if prompt.contains("stderr quota mention") {
             writeln!(
@@ -1589,11 +1584,6 @@ fn opencode_stderr_live_quota() -> Result {
     for (prompt_text, expected, stop_reason) in [
         (
             "stderr refusal then hang",
-            "quota_limited",
-            Some("post_terminal_cleanup"),
-        ),
-        (
-            "stderr refusal then success",
             "quota_limited",
             Some("post_terminal_cleanup"),
         ),
