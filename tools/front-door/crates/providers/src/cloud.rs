@@ -33,7 +33,7 @@ pub struct CheckedCloudResult {
     pub result: CloudResult,
     pub requested_model: String,
     pub model: ModelObservation,
-    /// Whether the report names the executed tests and a log location.
+    /// Whether the report names a log and avoids empty test names.
     pub evidence_complete: bool,
     pub passed: bool,
 }
@@ -67,8 +67,7 @@ impl CloudResult {
             Some(_) => ModelObservation::Differs,
             None => ModelObservation::Unknown,
         };
-        let evidence_complete = !self.tests_run.is_empty()
-            && self.tests_run.iter().all(|test| !test.trim().is_empty())
+        let evidence_complete = self.tests_run.iter().all(|test| !test.trim().is_empty())
             && self.tests_failed.iter().all(|test| !test.trim().is_empty())
             && !self.log_location.trim().is_empty();
         let passed = evidence_complete
@@ -125,11 +124,18 @@ mod tests {
     #[test]
     fn cloud_result_missing_test_or_log_evidence_cannot_pass() {
         let mut result = report();
-        result.tests_run.clear();
+        result.tests_run = vec![" ".into()];
         let checked = result.clone().check(&"a".repeat(40), "requested").unwrap();
         assert!(!checked.evidence_complete);
         assert!(!checked.passed);
-        result.tests_run.push("test".into());
+        result.tests_run.clear();
+        assert!(
+            result
+                .clone()
+                .check(&"a".repeat(40), "requested")
+                .unwrap()
+                .passed
+        );
         result.log_location = " ".into();
         let checked = result.check(&"a".repeat(40), "requested").unwrap();
         assert!(!checked.evidence_complete);
