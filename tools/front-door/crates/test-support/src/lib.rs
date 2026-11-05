@@ -139,28 +139,6 @@ mod tests {
     }
 
     #[test]
-    fn optional_sandbox_failure_is_a_visible_skip() {
-        let mut output = Vec::new();
-        let count = AtomicUsize::new(0);
-        assert_eq!(
-            report_missing_prerequisite(false, "sandbox backend".into(), &mut output, &count),
-            Ok(())
-        );
-        assert_eq!(output, b"SKIP #1: sandbox backend\n");
-    }
-
-    #[test]
-    fn required_sandbox_failure_fails_closed() {
-        let mut output = Vec::new();
-        let count = AtomicUsize::new(0);
-        assert_eq!(
-            report_missing_prerequisite(true, "sandbox backend".into(), &mut output, &count),
-            Err("sandbox backend".into())
-        );
-        assert!(output.is_empty());
-    }
-
-    #[test]
     fn native_prerequisites_fail_when_required_and_name_optional_skips() {
         for capability in ["sandbox backend", "rg", "PostgreSQL 18", "node/pnpm"] {
             let count = AtomicUsize::new(0);

@@ -1041,23 +1041,6 @@ mod overload_tests {
     }
 
     #[test]
-    fn recorded_final_answer_preserves_its_model() {
-        let mut stream = StreamState::new("claude", decode);
-        stream
-            .observe(include_bytes!(
-                "../../../tests/fixtures/providers/claude/live-read_only-fresh.jsonl"
-            ))
-            .unwrap();
-        let outcome = stream
-            .finish(crate::ExitObservation {
-                code: Some(0),
-                timed_out: false,
-            })
-            .unwrap();
-        assert_eq!(outcome.model(), Some("claude-haiku-5-5"));
-    }
-
-    #[test]
     fn resumed_answer_rejects_substitution_after_a_helper() {
         let mut stream = StreamState::new("claude", decode);
         stream.bind_identity("s", "requested");

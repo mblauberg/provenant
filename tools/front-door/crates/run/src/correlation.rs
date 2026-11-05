@@ -104,14 +104,7 @@ pub struct WorkIndex(Connection);
 impl WorkIndex {
     pub(crate) fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
         let (_, db, _lock) = open_database(host, WORK_INDEX_FILE, call)?;
-        let version = match provenant_sqlite::read_version(&db, 1) {
-            Ok(version) => Ok(version),
-            Err(provenant_sqlite::VersionError::Unsupported(version)) => {
-                Err(RunError::Version(version))
-            }
-            Err(provenant_sqlite::VersionError::Unversioned) => Err(RunError::Version(0)),
-            Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
-        }?;
+        let version = provenant_sqlite::read_version(&db, 1)?;
         match version {
             0 => immediate(&db, call, |tx| {
                 tx.execute_batch(

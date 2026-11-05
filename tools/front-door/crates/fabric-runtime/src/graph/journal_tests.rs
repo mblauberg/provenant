@@ -529,6 +529,32 @@ impl AttemptOwner for Owner {
         })
     }
 }
+
+#[test]
+fn launched_route_fallback_history_is_unreadable() {
+    let mut stored: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    let node = &mut stored.checkpoint.nodes[0];
+    node.attempts[0].launched = true;
+    node.attempts[0].outcome = Some(AttemptOutcome::UsageLimited);
+    let mut next = node.attempts[0].clone();
+    next.key.route_index = 1;
+    node.attempts.push(next);
+    stored.digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&stored.checkpoint, &stored.execution),
+    )
+    .unwrap()
+    .to_string();
+    let error = match decode_checkpoint(&serde_json::to_vec(&stored).unwrap(), "g-test") {
+        Err(error) => error,
+        Ok(_) => panic!("old launched-route fallback must be unreadable"),
+    };
+    assert!(matches!(error, JournalError::RetiredFallbackCheckpoint));
+    assert!(error.is_unreadable());
+    assert!(error.to_string().contains("previous release"));
+}
 #[test]
 fn delivery_retry_reopens_only_the_matching_failed_attempt() {
     for outcome in [AttemptOutcome::OtherFailure, AttemptOutcome::ReviewRequired] {
@@ -871,4 +897,76 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
         FileJournal::open(&root, project, "reopen", budget, &cancel, &clock),
         Err(JournalError::BadDigest)
     ));
+}
+
+#[test]
+fn retired_checkpoint_cleanup_is_verified_and_failure_keeps_record() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    drop(FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap());
+    let path = base
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+    let mut stored: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    stored.checkpoint.nodes[0]
+        .extra
+        .insert("loop_asks".into(), serde_json::json!([]));
+    stored.digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&stored.checkpoint, &stored.execution),
+    )
+    .unwrap()
+    .to_string();
+    {
+        let mut journal =
+            FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+        journal.bind(stored.execution.clone()).unwrap();
+        assert!(matches!(
+            journal.save(&stored.checkpoint),
+            Err(JournalError::RetiredLoopCheckpoint)
+        ));
+        assert!(!path.exists());
+    }
+    std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let failed = FileJournal::retire_unreadable(
+        &root,
+        project,
+        "g-test",
+        budget,
+        &cancel,
+        &clock,
+        |checkpoint| {
+            assert_eq!(checkpoint.unwrap().graph_id, "g-test");
+            Err("cleanup failed".into())
+        },
+    );
+    assert!(failed.is_err());
+    assert!(path.exists());
+    assert!(
+        FileJournal::retire_unreadable(
+            &root,
+            project,
+            "g-test",
+            budget,
+            &cancel,
+            &clock,
+            |checkpoint| {
+                assert_eq!(checkpoint.unwrap().nodes[0].attempts.len(), 1);
+                Ok(())
+            }
+        )
+        .unwrap()
+    );
+    assert!(!path.exists());
 }

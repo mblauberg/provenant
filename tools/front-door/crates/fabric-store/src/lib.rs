@@ -112,6 +112,17 @@ impl From<rusqlite::Error> for Error {
     }
 }
 
+impl From<provenant_sqlite::SnapshotError> for Error {
+    fn from(error: provenant_sqlite::SnapshotError) -> Self {
+        match error {
+            provenant_sqlite::SnapshotError::Filesystem(error) => error.into(),
+            provenant_sqlite::SnapshotError::Sqlite(error) => error.into(),
+            provenant_sqlite::SnapshotError::PathEncoding => Self::PathEncoding,
+            provenant_sqlite::SnapshotError::ExhaustedNames => Self::Conflict,
+        }
+    }
+}
+
 // SQLite's detailed message can contain SQL values, paths, or other private
 // data. The result code is bounded and provides a safe, useful diagnosis.
 fn sqlite_diagnostic(error: &rusqlite::Error) -> String {
