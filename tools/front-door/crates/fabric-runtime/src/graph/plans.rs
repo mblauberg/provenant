@@ -522,7 +522,7 @@ fn derive_topology(
         })?;
         if spec
             .extra
-            .get("review_panel")
+            .get("planned_review")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
             && addition
@@ -708,7 +708,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
         .and_then(|node| node.plan.as_ref())
         .filter(|plan| {
             plan.extra
-                .get("review_panel")
+                .get("planned_review")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
         })
@@ -1065,7 +1065,7 @@ pub(super) fn validate_review_addition(
             node.id == format!("{}--plan", lens_root.id)
                 && node.plan.as_ref().is_some_and(|plan| {
                     review_fallback_pinned(plan, subject.as_deref())
-                        && plan.extra.get("review_panel").and_then(serde_json::Value::as_bool) == Some(true)
+                        && plan.extra.get("planned_review").and_then(serde_json::Value::as_bool) == Some(true)
                         && review_catalogue_matches(source, plan, subject.as_deref(), node.extra.get("review_base"))
                 })
         }))
@@ -1241,7 +1241,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
         .collect();
     if spec
         .extra
-        .get("review_panel")
+        .get("planned_review")
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {

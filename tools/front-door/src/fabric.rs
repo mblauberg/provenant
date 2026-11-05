@@ -4689,7 +4689,7 @@ impl BoundGraphOwner<'_> {
                 "patterns":patterns, "floor_candidate_patterns":candidates,
                 "required_floor_patterns":required, "floor_min_reviewers":floor_count,
                 "floor_classes":floors.classes,
-                "review_panel":true, "review_min_successful":minimum,
+                "planned_review":true, "review_min_successful":minimum,
                 "fallback": {"nodes":[{"id":"static", "kind":"composite", "access":"read_only",
                     "composite":{"nodes":fallback_members,"exports":fallback_exports,"min_successful":minimum,
                         "reduce_verdict": true}}],
