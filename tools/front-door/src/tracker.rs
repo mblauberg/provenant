@@ -6,13 +6,17 @@ use provenant_cli::{
 };
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    time::{Duration, Instant},
+};
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct IssueType {
     name: String,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Issue {
     body: Option<String>,
     state: String,
@@ -25,7 +29,7 @@ struct Report {
     skipped: Vec<String>,
 }
 
-fn issue(root: &Path, number: u64) -> Result<Issue, String> {
+fn issue(root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
     let number = number.to_string();
     let args = [
         "gh",
@@ -35,7 +39,7 @@ fn issue(root: &Path, number: u64) -> Result<Issue, String> {
         "--json",
         "body,state,issueType",
     ];
-    let output = pr::execute_for(root, &args, Duration::from_secs(15), false)
+    let output = pr::execute_for(root, &args, timeout, false)
         .and_then(pr::successful)
         .map_err(|e| e.to_string())?;
     serde_json::from_slice(&output).map_err(|e| e.to_string())
@@ -45,7 +49,16 @@ fn config(root: &Path, skipped: &mut Vec<String>) -> Config {
     let path = root.join(".provenant/tracker-lint.toml");
     match std::fs::read_to_string(&path) {
         Ok(text) => match toml_edit::de::from_str(&text) {
-            Ok(config) => config,
+            Ok(config) => {
+                if let Ok(doc) = text.parse::<toml_edit::DocumentMut>() {
+                    for (key, _) in doc.iter() {
+                        if !["citation", "closed_owner", "acceptance", "verify"].contains(&key) {
+                            skipped.push(format!("unknown tracker lint config key: {key}"));
+                        }
+                    }
+                }
+                config
+            }
             Err(error) => {
                 skipped.push(format!(
                     "invalid tracker lint config; defaults used: {error}"
@@ -80,16 +93,17 @@ fn inspect(
                 }
                 match fetch(number) {
                     Ok(issue) => {
-                        states.insert(number, issue.state.eq_ignore_ascii_case("closed"));
+                        if issue.state.eq_ignore_ascii_case("closed") {
+                            states.insert(number, true);
+                        } else if issue.state.eq_ignore_ascii_case("open") {
+                            states.insert(number, false);
+                        }
                     }
-                    Err(_) => skipped.push(format!(
-                        "closed-issue check skipped for #{number}: forge unavailable"
-                    )),
+                    Err(error) => {
+                        skipped.push(format!("closed-issue check skipped for #{number}: {error}"))
+                    }
                 }
             }
-        }
-        if states.is_empty() && skipped.is_empty() {
-            skipped.push("closed-issue check skipped: no live issue references".into());
         }
     }
     for (label, body, kind) in sources {
@@ -111,6 +125,8 @@ fn collect(
     let mut skipped = Vec::new();
     let cfg = config(root, &mut skipped);
     let mut sources = Vec::new();
+    let mut cache = BTreeMap::new();
+    let mut cached_fetch = |number| cache.entry(number).or_insert_with(|| fetch(number)).clone();
     if let Some(path) = file {
         match std::fs::read_to_string(path) {
             Ok(body) => sources.push((path.display().to_string(), body, kind.to_owned())),
@@ -118,13 +134,11 @@ fn collect(
         }
     }
     for &number in numbers {
-        match fetch(number) {
+        match cached_fetch(number) {
             Ok(issue) => sources.push((
                 format!("#{number}"),
                 issue.body.unwrap_or_default(),
-                issue
-                    .issue_type
-                    .map_or_else(|| "unknown".into(), |t| t.name),
+                issue.issue_type.map_or_else(|| kind.to_owned(), |t| t.name),
             )),
             Err(_) => skipped.push(format!("issue #{number} skipped: forge unavailable")),
         }
@@ -132,7 +146,7 @@ fn collect(
     if sources.is_empty() && numbers.is_empty() && file.is_none() {
         skipped.push("no issues selected; pass issue numbers or --file".into());
     }
-    let mut report = inspect(root, &sources, &cfg, fetch);
+    let mut report = inspect(root, &sources, &cfg, &mut cached_fetch);
     skipped.append(&mut report.skipped);
     report.skipped = skipped;
     report
@@ -169,7 +183,7 @@ pub fn run(command: Tracker, globals: &Globals) -> u8 {
     };
     let root = project_root(&root);
     let report = collect(&root, &numbers, file.as_deref(), &kind, &mut |n| {
-        issue(&root, n)
+        issue(&root, n, Duration::from_secs(15))
     });
     let human = human(&report);
     emit(
@@ -185,10 +199,32 @@ fn project_root(directory: &Path) -> std::path::PathBuf {
         .unwrap_or_else(|_| directory.to_path_buf())
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "real-time deadline bounds forge advice"
+)]
+fn advice_fetch(
+    fetches: &mut usize,
+    deadline: Instant,
+    fetch: impl FnOnce(Duration) -> Result<Issue, String>,
+) -> Result<Issue, String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if *fetches >= 5 || remaining.is_zero() {
+        return Err("advice fetch limit reached".into());
+    }
+    *fetches += 1;
+    fetch(remaining)
+}
+
 /// Report advice immediately before work starts, regardless of lint availability.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "entry advice has a real-time budget"
+)]
 pub(crate) fn advise_then<T>(
     root: &Path,
     spec: &str,
+    path: Option<&Path>,
     out: &mut impl std::io::Write,
     proceed: impl FnOnce() -> T,
 ) -> T {
@@ -203,19 +239,34 @@ pub(crate) fn advise_then<T>(
         .ok()
         .filter(|n| *n > 0);
     let numbers: Vec<_> = number.into_iter().collect();
-    let path = number.is_none().then(|| root.join(spec));
-    let report = collect(&root, &numbers, path.as_deref(), "task", &mut |n| {
-        issue(&root, n)
-    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut fetches = 0;
+    let report = collect(
+        &root,
+        &numbers,
+        if number.is_some() { None } else { path },
+        "task",
+        &mut |n| {
+            advice_fetch(&mut fetches, deadline, |remaining| {
+                issue(&root, n, remaining)
+            })
+        },
+    );
     let _ = out.write_all(human(&report).as_bytes());
     proceed()
 }
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)] // Included by the worktree driver without libtest.
+    #[allow(
+        unused_imports,
+        reason = "the worktree driver includes this module without libtest"
+    )]
     use super::*;
-    #[allow(unused_imports)]
+    #[allow(
+        unused_imports,
+        reason = "the worktree driver includes this module without libtest"
+    )]
     use std::error::Error;
 
     #[test]
@@ -254,6 +305,52 @@ mod tests {
     }
 
     #[test]
+    fn tracker_null_type_uses_kind_and_reuses_fetch() {
+        let mut calls = 0;
+        let report = collect(Path::new("."), &[12], None, "task", &mut |_| {
+            calls += 1;
+            serde_json::from_str(r#"{"body":"Owner: #12","state":"mystery","issueType":null}"#)
+                .map_err(|error| error.to_string())
+        });
+        assert_eq!(calls, 1);
+        assert!(report.findings.iter().any(|f| f.check == "acceptance"));
+        assert!(report.findings.iter().any(|f| f.check == "verify"));
+        assert!(!report.findings.iter().any(|f| f.check == "closed_owner"));
+    }
+
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test exercises the real-time deadline"
+    )]
+    fn tracker_advice_bounds_fetches_and_deadline() {
+        let mut count = 0;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        for _ in 0..5 {
+            assert!(advice_fetch(&mut count, deadline, |_| Err("offline".into())).is_err());
+        }
+        assert!(advice_fetch(&mut count, deadline, |_| panic!("over limit")).is_err());
+        let mut count = 0;
+        assert!(advice_fetch(&mut count, Instant::now(), |_| panic!("expired")).is_err());
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn tracker_unknown_config_key_preserves_settings() -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join(".provenant"))?;
+        std::fs::write(
+            dir.path().join(".provenant/tracker-lint.toml"),
+            "acceptance = 'off'\nextra = 'value'\n",
+        )?;
+        let mut warnings = Vec::new();
+        let config = config(dir.path(), &mut warnings);
+        assert_eq!(config.acceptance, tracker::Severity::Off);
+        assert!(warnings.iter().any(|s| s.contains("extra")));
+        Ok(())
+    }
+
+    #[test]
     fn tracker_advice_shows_warnings_and_returns_to_caller() -> Result<(), Box<dyn Error>> {
         let dir = tempfile::tempdir()?;
         std::fs::write(
@@ -262,10 +359,16 @@ mod tests {
         )?;
         let mut output = Vec::new();
         let mut proceeded = false;
-        let result = advise_then(dir.path(), "issue.md", &mut output, || {
-            proceeded = true;
-            42
-        });
+        let result = advise_then(
+            dir.path(),
+            "issue.md",
+            Some(&dir.path().join("issue.md")),
+            &mut output,
+            || {
+                proceeded = true;
+                42
+            },
+        );
         assert!(String::from_utf8(output)?.contains("gone.rs#Gone"));
         assert!(proceeded);
         assert_eq!(result, 42);

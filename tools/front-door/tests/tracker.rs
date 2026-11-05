@@ -18,6 +18,6 @@ fn tracker_lint_warns_and_exits_successfully() -> Result {
     );
     let stdout = String::from_utf8(output.stdout.bytes)?;
     assert!(stdout.contains("missing.rs#Gone"), "{stdout}");
-    assert!(stdout.contains("skipped"), "{stdout}");
+    assert!(!stdout.contains("skipped"), "{stdout}");
     Ok(())
 }

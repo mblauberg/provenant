@@ -13,7 +13,7 @@ pub enum Severity {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Config {
     pub citation: Severity,
     pub closed_owner: Severity,
@@ -52,11 +52,11 @@ pub fn live_references(body: &str) -> Vec<u64> {
     let refs = pattern(&RE, r"#([1-9][0-9]*)\b");
     let live = pattern(
         &LIVE,
-        r"(?i)\b(owner|owns|owned by|blocked by|blocker|blocks|depends on|dependency)\b",
+        r"(?i)\b(owner|owns|owned by|blocked by|blocker|depends on|dependency)\b",
     );
     let history = pattern(
         &HISTORY,
-        r"(?i)\b(absorbed|copied|migrated|derived|superseded|closed|completed|resolved)\s+from\s*$",
+        r"(?i)\b(absorbed|copied|migrated|derived|superseded|closed|completed|resolved)\s+from\s+(?:#[1-9][0-9]*\s*,\s*)*$",
     );
     let mut result = Vec::new();
     for line in body.lines() {
@@ -101,15 +101,22 @@ pub fn lint(
     );
     let acceptance = pattern(
         &ACCEPTANCE,
-        r"(?i)\b(acceptance|accept|done when|criteria|criterion|expected|when)\b",
+        r"(?i)\b(acceptance|accept|done when|criteria|criterion|expected)\b",
     );
     let verify = pattern(
         &VERIFY,
-        r"(?i)\b(verify|verification|verified|test|tests|command|capture|review)\b",
+        r"(?i)\b(verify|verification|verified|test|tests|check|run|command|capture|review)\b",
     );
     let mut findings = Vec::new();
     if config.citation != Severity::Off {
         for hit in citation.find_iter(body) {
+            // Ignore matches within URL tokens, including the path and fragment.
+            let token_start = body[..hit.start()]
+                .rfind(char::is_whitespace)
+                .map_or(0, |index| index + 1);
+            if body[token_start..hit.start()].contains("://") {
+                continue;
+            }
             let Some((path, symbol)) = hit.as_str().split_once('#') else {
                 continue;
             };
@@ -209,6 +216,45 @@ mod tests {
             2
         );
         assert!(findings.iter().all(|f| !f.message.contains("#14")));
+    }
+
+    #[test]
+    fn tracker_ignores_urls_history_and_unknown_states() {
+        let body = "Owner: #12 (absorbed from #14, #15)\nBlocks #16\nSee https://example.com/docs/file.rs#Symbol";
+        assert_eq!(live_references(body), vec![12]);
+        assert!(
+            lint(
+                Path::new("."),
+                body,
+                "bug",
+                &Config::default(),
+                &BTreeMap::new()
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn tracker_shape_keywords_are_specific() {
+        let findings = lint(
+            Path::new("."),
+            "When ready, check output",
+            "task",
+            &Config::default(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "acceptance");
+        assert!(
+            lint(
+                Path::new("."),
+                "Acceptance: works; run it",
+                "task",
+                &Config::default(),
+                &BTreeMap::new()
+            )
+            .is_empty()
+        );
     }
 
     #[test]

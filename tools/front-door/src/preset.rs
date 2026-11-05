@@ -1349,18 +1349,7 @@ fn spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
     context
 }
 
-fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
-    use sha2::{Digest, Sha256};
-    let spec = parameters.get("spec")?.as_str()?.trim();
-    if spec.is_empty()
-        || spec
-            .trim_start_matches('#')
-            .bytes()
-            .all(|b| b.is_ascii_digit())
-    {
-        return None;
-    }
-    let cap = parameters.get("spec_max_bytes")?.as_u64()? as usize;
+fn spec_candidates(layers: &Layers, parameters: &Value, spec: &str) -> Option<Vec<PathBuf>> {
     let project = layers
         .project_dir
         .clone()
@@ -1384,6 +1373,31 @@ fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
             candidates.push(candidate);
         }
     }
+    Some(candidates)
+}
+
+fn advice_spec_path(layers: &Layers, parameters: &Value, spec: &str) -> Option<PathBuf> {
+    let candidates = spec_candidates(layers, parameters, spec.trim())?;
+    candidates
+        .iter()
+        .find(|path| std::fs::read_to_string(path).is_ok())
+        .or_else(|| candidates.first())
+        .cloned()
+}
+
+fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let spec = parameters.get("spec")?.as_str()?.trim();
+    if spec.is_empty()
+        || spec
+            .trim_start_matches('#')
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let cap = parameters.get("spec_max_bytes")?.as_u64()? as usize;
+    let candidates = spec_candidates(layers, parameters, spec)?;
     let mut errors = Vec::new();
     for candidate in candidates {
         let error = match std::fs::File::open(&candidate) {
@@ -3823,6 +3837,10 @@ pub fn run(
                 }
             }
         }
+        let advice_parameters = json!({"worktree": expansion.worktree});
+        let advice_path = spec
+            .as_deref()
+            .and_then(|spec| advice_spec_path(&layers, &advice_parameters, spec));
         let mut bind = || {
             bind_default_subject_to_worktree(
                 &mut expansion,
@@ -3832,7 +3850,13 @@ pub fn run(
             )
         };
         if let Some(spec) = spec {
-            crate::tracker::advise_then(&directory, &spec, &mut std::io::stderr().lock(), bind)?;
+            crate::tracker::advise_then(
+                &directory,
+                &spec,
+                advice_path.as_deref(),
+                &mut std::io::stderr().lock(),
+                bind,
+            )?;
         } else {
             bind()?;
         }
@@ -3958,6 +3982,42 @@ pub fn run(
                 workers,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tracker_spec_tests {
+    #[allow(
+        unused_imports,
+        reason = "the worktree driver includes this module without libtest"
+    )]
+    use super::*;
+
+    #[test]
+    fn tracker_spec_uses_context_candidate_order() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let project = dir.path().join("project");
+        let writer = dir.path().join("writer");
+        std::fs::create_dir(&project)?;
+        std::fs::create_dir(&writer)?;
+        std::fs::write(project.join("issue.md"), "project")?;
+        std::fs::write(writer.join("issue.md"), "writer")?;
+        let layers = Layers {
+            project_dir: Some(project.clone()),
+            launch_dir: Some(dir.path().into()),
+            ..Layers::default()
+        };
+        let params = json!({"worktree": "writer"});
+        assert_eq!(
+            advice_spec_path(&layers, &params, "issue.md"),
+            Some(writer.join("issue.md"))
+        );
+        std::fs::remove_file(writer.join("issue.md"))?;
+        assert_eq!(
+            advice_spec_path(&layers, &params, "issue.md"),
+            Some(project.join("issue.md"))
+        );
+        Ok(())
     }
 }
 
