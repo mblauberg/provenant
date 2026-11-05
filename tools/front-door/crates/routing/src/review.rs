@@ -1102,12 +1102,18 @@ mod tests {
     }
 
     #[test]
-    fn standard_panel_is_two_base_lenses_and_one_kind_slot() {
+    fn standard_panel_covers_five_default_lenses() {
         let review = ReviewConfig::default();
         let shape = &review.shapes["standard"];
         assert_eq!(
             lens_names(&review.panel(shape, None, &[], false, &[])),
-            ["correctness-spec", "tests", "design-fit-reuse"]
+            [
+                "correctness-spec",
+                "tests",
+                "design-fit-reuse",
+                "simplicity",
+                "reliability"
+            ]
         );
     }
 
@@ -1122,6 +1128,8 @@ mod tests {
                 "correctness-spec",
                 "tests",
                 "design-fit-reuse",
+                "simplicity",
+                "reliability",
                 "refactor-cleanup"
             ]
         );
@@ -1166,7 +1174,13 @@ mod tests {
         );
         assert_eq!(
             lens_names(&review.panel(&review.shapes["standard"], None, &paths, false, &[])),
-            ["correctness-spec", "tests", "design-fit-reuse"]
+            [
+                "correctness-spec",
+                "tests",
+                "design-fit-reuse",
+                "simplicity",
+                "reliability"
+            ]
         );
     }
 
@@ -1615,7 +1629,7 @@ mod tests {
             standard
                 .omitted
                 .iter()
-                .any(|o| o.reason == "review shape has 3 slots")
+                .any(|o| o.reason == "review shape has 5 slots")
         );
 
         let unknown = ReviewRequest {
@@ -1660,7 +1674,7 @@ mod tests {
             shape: Some("standard".into()),
             ..Default::default()
         });
-        assert_eq!(standard.slots.len(), 3);
+        assert_eq!(standard.slots.len(), 5);
         for slot in &standard.slots {
             assert_eq!(slot.group_index, 0);
             assert!(slot.distinct_families);
