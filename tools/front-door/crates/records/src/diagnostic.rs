@@ -56,6 +56,10 @@ pub enum DiagnosticFact {
         reclaimed: u64,
     },
     DiskUnobserved,
+    PromptLimit {
+        task_index: Option<usize>,
+        limit: u64,
+    },
 }
 impl DeliveryLimit {
     pub fn new(

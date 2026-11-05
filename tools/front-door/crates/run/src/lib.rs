@@ -440,6 +440,11 @@ pub enum RunError {
     GenerationConflict { current_generation: u64 },
     #[error("read or record exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
+    #[error("read or record exceeds byte limit {limit}")]
+    PromptTooLarge {
+        task_index: Option<usize>,
+        limit: u64,
+    },
     #[error("artifact digest or length does not match its record: {0}")]
     ArtifactMismatch(ArtifactProvenance),
     #[error("terminal publication is already sealed; recover its original facts and result")]
@@ -525,6 +530,21 @@ impl RunError {
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
+            Self::PromptTooLarge { task_index, limit } => {
+                let field = task_index.map_or_else(
+                    || "tasks".to_owned(),
+                    |index| format!("tasks[{index}].prompt"),
+                );
+                diagnostic = diagnostic
+                    .detail(format!(
+                        "invalid input field `{field}`: exceeds {limit} bytes"
+                    ))
+                    .next("reduce the prompt input before retrying")
+                    .fact(DiagnosticFact::PromptLimit {
+                        task_index: *task_index,
+                        limit: *limit,
+                    });
+            }
             Self::Confinement(PermissionError::CredentialGrant { path, access }) => {
                 let access = match *access {
                     "read" => "read",

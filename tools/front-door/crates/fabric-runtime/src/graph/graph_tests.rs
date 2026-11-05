@@ -9391,6 +9391,43 @@ fn admitted_invalid_launch_reports_input_failure_reason() {
 }
 
 #[test]
+fn admitted_launch_projects_typed_prompt_field_and_limit() {
+    use crate::coordination::input::ValidateInput;
+    use crate::coordination::{
+        CoordinationError,
+        facade::{FacadeError, SubmitInput},
+    };
+    let mut input: SubmitInput = serde_json::from_value(serde_json::json!({
+        "op":"submit", "operation_id":"field-limit",
+        "tasks":[{"prompt":"valid", "route":{"kind":"named", "name":"utility"}, "timeout_seconds":1}]
+    })).unwrap();
+    let SubmitInput::Submit { tasks, .. } = &mut input;
+    tasks[0].prompt = format!("TOKEN_SENTINEL{}", "é".repeat(524_289));
+    let cause = input
+        .validate_input(provenant_core::WaitTransport::Cli)
+        .unwrap_err();
+    let error = FacadeError::from(&CoordinationError::Input(cause));
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, error)].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(
+        &graph(vec![node("one", route("first"))]),
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("tasks[0].prompt"));
+    assert!(reason.contains("1048576"));
+    assert!(reason.contains("retry"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+}
+
+#[test]
 fn launch_projection_omits_untrusted_error_sources() {
     let document = graph(vec![node("one", route("first"))]);
     for operation in [

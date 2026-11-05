@@ -101,7 +101,7 @@ pub enum ChairInput {
 
 impl ConsoleInput {
     fn validate(&self) -> Result<(), InputError> {
-        let bad = |path: &str| InputError { path: path.into() };
+        let bad = |path: &str| InputError::new(path);
         match self {
             Self::Sessions { limit, .. } | Self::Board { limit, .. }
                 if !(1..=100).contains(limit) =>
@@ -126,7 +126,7 @@ impl ConsoleInput {
 
 impl ChairInput {
     fn validate(&self) -> Result<(), InputError> {
-        let bad = |path: &str| InputError { path: path.into() };
+        let bad = |path: &str| InputError::new(path);
         match self {
             Self::SummaryDiff { from, .. } if *from == 0 => Err(bad("from")),
             Self::SummaryDiff { to: Some(0), .. } => Err(bad("to")),
@@ -234,36 +234,28 @@ impl ToolCall {
     fn validate_limits(&self, limits: &Limits) -> Result<(), InputError> {
         let body = |value: &str, path: &str| {
             if u64::try_from(value.len()).unwrap_or(u64::MAX) > limits.body_bytes {
-                Err(InputError {
-                    path: path.to_owned(),
-                })
+                Err(InputError::new(path))
             } else {
                 Ok(())
             }
         };
         let page = |value: u64| {
             if value > limits.page_rows {
-                Err(InputError {
-                    path: "limit".to_owned(),
-                })
+                Err(InputError::new("limit"))
             } else {
                 Ok(())
             }
         };
         let lease = |value: u64| {
             if value > limits.lease_seconds {
-                Err(InputError {
-                    path: "lease_seconds".to_owned(),
-                })
+                Err(InputError::new("lease_seconds"))
             } else {
                 Ok(())
             }
         };
         let output = |value: u64| {
             if value > limits.output_bytes {
-                Err(InputError {
-                    path: "max_bytes".to_owned(),
-                })
+                Err(InputError::new("max_bytes"))
             } else {
                 Ok(())
             }
@@ -654,7 +646,7 @@ impl ToolCall {
                             let message = error.to_string();
                             message
                                 .strip_prefix("invalid input field `")
-                                .and_then(|path| path.strip_suffix('`'))
+                                .and_then(|path| path.split_once('`').map(|(path, _)| path))
                                 .map(|path| format!("arguments.{path}"))
                                 .unwrap_or_else(|| "arguments".to_owned())
                         }),
@@ -1379,6 +1371,21 @@ impl ServiceError {
     /// Stable structured error data. Uncertain mutations carry their
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
+        if let Self::Invalid(error) = self {
+            let projection = error.diagnostic();
+            let mut value = serde_json::to_value(&projection)
+                .unwrap_or_else(|_| serde_json::json!({"code": error.code()}));
+            value["path"] = serde_json::json!(error.safe_path());
+            value["message"] =
+                serde_json::json!(projection.detail.as_deref().unwrap_or(error.code()));
+            value["hint"] = serde_json::json!(
+                projection
+                    .next
+                    .as_deref()
+                    .unwrap_or("check the input and retry")
+            );
+            return value;
+        }
         if let Self::Facade(error) = self {
             let projection = error.diagnostic();
             let mut value = serde_json::to_value(&projection)
@@ -1479,9 +1486,6 @@ impl ServiceError {
                     value["operation_id"] = serde_json::json!(receipt.operation_id);
                 }
                 value
-            }
-            Self::Invalid(error) => {
-                serde_json::json!({"code":self.code(),"path":error.safe_path()})
             }
             Self::Inbox(InboxError::Invalid(field)) => {
                 serde_json::json!({"code":self.code(),"field":field})

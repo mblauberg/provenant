@@ -315,7 +315,8 @@ keep their error code over the wire. MCP errors include a message and recovery
 hint, and validation identifies the expected value. Uncertain mutations carry
 their `operation_id`.
 Graph launch diagnostics and MCP projections select safe details and actions
-from the typed refusal before persisting or transporting them. An unanchored
+from the typed refusal before persisting or transporting them. A bounded input
+refusal includes the approved field and byte limit, without its contents. An unanchored
 host path or an arbitrary source error is omitted; uncertain handoffs name the
 operation to inspect instead of directing a new launch. Protocol mismatch
 transport identifies a peer by its host ID rather than its SSH destination.

@@ -192,6 +192,8 @@ pub enum InvalidInputDetail {
     Schema,
     LandingLock,
     Field(String),
+    FieldTooLarge { field: String, limit: usize },
+    FieldTitle(String),
     InputUnreadable,
     InputTooLarge,
     InputInvalidUtf8,
@@ -210,6 +212,9 @@ impl InvalidInputDetail {
             Self::Field(path) => {
                 safe_input_field(path).map(|path| format!("invalid input field `{path}`"))
             }
+            Self::FieldTooLarge { field, limit } => safe_input_field(field)
+                .map(|path| format!("invalid input field `{path}`: exceeds {limit} bytes")),
+            Self::FieldTitle(field) => safe_input_field(field).map(|path| format!("invalid input field `{path}`: task title must be 1 to 256 bytes and contain no control characters")),
         }
     }
 }
@@ -722,9 +727,21 @@ fn deserialise_invalid_detail<'de, D: serde::Deserializer<'de>>(
         "input is not UTF-8" => Some(InvalidInputDetail::InputInvalidUtf8),
         _ => detail
             .strip_prefix("invalid input field `")
-            .and_then(|field| field.strip_suffix('`'))
-            .and_then(safe_input_field)
-            .map(|field| InvalidInputDetail::Field(field.to_owned())),
+            .and_then(|rest| {
+                let (field, reason) = rest.split_once('`')?;
+                let field = safe_input_field(field)?.to_owned();
+                match reason {
+                    "" => Some(InvalidInputDetail::Field(field)),
+                    ": task title must be 1 to 256 bytes and contain no control characters" => {
+                        Some(InvalidInputDetail::FieldTitle(field))
+                    }
+                    _ => reason
+                        .strip_prefix(": exceeds ")
+                        .and_then(|value| value.strip_suffix(" bytes"))
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .map(|limit| InvalidInputDetail::FieldTooLarge { field, limit }),
+                }
+            }),
     }))
 }
 
@@ -819,9 +836,7 @@ impl From<&super::CoordinationError> for FacadeError {
                 Self::invalid(InvalidInputDetail::LandingLock)
             }
             CoordinationError::Input(error) => Self::InvalidInput {
-                detail: error
-                    .safe_path()
-                    .map(|path| InvalidInputDetail::Field(path.to_owned())),
+                detail: error.diagnostic_detail(),
             },
             CoordinationError::Time(_) | CoordinationError::ResponseEncoding(_) => {
                 Self::StateCorrupt

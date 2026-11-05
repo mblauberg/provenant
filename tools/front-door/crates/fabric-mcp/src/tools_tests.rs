@@ -51,8 +51,8 @@ fn invalid_input_paths_omit_untrusted_data() {
         format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
     ] {
         for error in [
-            ServiceError::Invalid(InputError { path: path.clone() }),
-            ServiceError::Coordination(CoordinationError::Input(InputError { path: path.clone() })),
+            ServiceError::Invalid(InputError::new(path.clone())),
+            ServiceError::Coordination(CoordinationError::Input(InputError::new(path.clone()))),
         ] {
             let detail = error.structured_error();
             let wire = detail.to_string();
@@ -65,11 +65,28 @@ fn invalid_input_paths_omit_untrusted_data() {
             assert!(detail["hint"].is_string());
         }
     }
-    let detail = ServiceError::Invalid(InputError {
-        path: "tasks[1].title".into(),
-    })
-    .structured_error();
+    let detail = ServiceError::Invalid(InputError::new("tasks[1].title")).structured_error();
     assert_eq!(detail["path"], "tasks[1].title");
+}
+
+#[test]
+fn oversized_input_projects_field_reason_and_action() {
+    use provenant_fabric_runtime::coordination::input::ValidateInput;
+    let input: SubmitInput = serde_json::from_value(json!({
+        "op":"submit", "operation_id":"large-prompt",
+        "tasks":[{"prompt":format!("TOKEN_SENTINEL{}", "é".repeat(40000)), "route":{"kind":"named", "name":"utility"}, "timeout_seconds":1}]
+    })).unwrap();
+    let error = input
+        .validate_input(provenant_core::WaitTransport::Mcp)
+        .unwrap_err();
+    let wire = ServiceError::Invalid(error).structured_error();
+    assert_eq!(wire["code"], "invalid_input");
+    assert_eq!(wire["path"], "tasks[0].prompt");
+    let detail = wire["detail"].as_str().unwrap();
+    assert!(detail.contains("tasks[0].prompt"));
+    assert!(detail.contains("65536"));
+    assert!(wire["hint"].is_string());
+    assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
 }
 
 use super::*;

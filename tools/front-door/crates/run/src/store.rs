@@ -1610,7 +1610,15 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
         prompt_bytes += new.prompt.len() as u64;
     }
     if prompt_bytes > RECORD_LIMIT {
-        return Err(RunError::TooLarge {
+        let task_index = input.request.tasks.iter().position(|task| {
+            input
+                .attempts
+                .iter()
+                .find(|attempt| attempt.task_id == task.task_id)
+                .is_some_and(|attempt| attempt.prompt.len() as u64 > RECORD_LIMIT)
+        });
+        return Err(RunError::PromptTooLarge {
+            task_index,
             limit: RECORD_LIMIT,
         });
     }

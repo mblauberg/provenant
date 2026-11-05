@@ -782,6 +782,7 @@ impl From<&RunError> for ErrorKind {
             | RunError::WriterSourceMismatch { .. }
             | RunError::ReviewAcceptanceRequired
             | RunError::InvalidBase(_)
+            | RunError::PromptTooLarge { .. }
             | RunError::TooLarge { .. } => Self::Invalid,
             RunError::OperationConflict => Self::OperationConflict,
             RunError::NotFound => Self::NotFound,

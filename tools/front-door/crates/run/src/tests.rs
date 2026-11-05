@@ -1581,6 +1581,54 @@ fn oversize_is_refused_before_publication_or_read() -> TestResult {
     ));
     Ok(())
 }
+
+#[test]
+fn oversized_prompt_retains_code_and_projects_field_limit() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut request = input();
+    request.attempts[0].prompt = format!(
+        "TOKEN_SENTINEL{}",
+        "é".repeat((RECORD_LIMIT / 2 + 1) as usize)
+    );
+    request.request.tasks[0].prompt_digest =
+        CanonicalV1::file_digest(request.attempts[0].prompt.as_bytes());
+    let Err(error) = store.create(&request, &call) else {
+        return Err("oversized prompt accepted".into());
+    };
+    assert_eq!(
+        error.to_string(),
+        format!("read or record exceeds byte limit {RECORD_LIMIT}")
+    );
+    let projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+    assert_eq!(projection.code, "INVALID");
+    assert!(
+        projection
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("tasks[0].prompt")
+    );
+    assert!(
+        projection
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains(&RECORD_LIMIT.to_string())
+    );
+    assert!(!serde_json::to_string(&projection)?.contains("TOKEN_SENTINEL"));
+    assert!(
+        RunError::TooLarge {
+            limit: RECORD_LIMIT
+        }
+        .diagnostic(provenant_records::diagnostic::Destination::Local)
+        .detail
+        .is_none()
+    );
+    Ok(())
+}
 #[test]
 fn contained_artifact_refuses_symlink_escape_for_reads_and_writes() -> TestResult {
     use std::os::unix::fs::symlink;
