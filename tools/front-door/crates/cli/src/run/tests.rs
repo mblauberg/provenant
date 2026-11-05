@@ -6254,6 +6254,7 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
         .expect("handoff parses")
         .expect("handoff found");
     assert_eq!(declared.note, "n");
+    assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"));
     assert!(
         decoded
             .result
