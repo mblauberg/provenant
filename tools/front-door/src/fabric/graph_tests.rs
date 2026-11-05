@@ -659,133 +659,7 @@ mod graph_ask_inbox_tests {
         Ok(())
     }
 
-    #[test]
-    fn cancel_closes_a_legacy_loop_request_by_its_original_operation()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
-        use provenant_records::inbox::{RequestDraft, RequestKind, RequestOption};
-        let temp = tempfile::tempdir()?;
-        let base = temp.path().canonicalize()?;
-        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
-        inputs.state_dir = Some(base.join("state"));
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let host = provenant_core::HostId::from_bytes([1; 16]);
-        let identity = Identity {
-            project: provenant_core::ProjectId::from_bytes([2; 16]),
-            host,
-            inbox: provenant_fabric_runtime::identity::Address::new(host, "chair")?,
-            client: "test".into(),
-            cwd: provenant_records::AbsolutePath::new(&base)?,
-            common_dir: provenant_records::AbsolutePath::new(&base)?,
-            federation: None,
-        };
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
-        let mut owner = InboxOwner {
-            service: &service,
-            clock: &clock,
-            cancel: &cancel,
-            actor: identity.inbox.actor.to_string(),
-        };
-        // Any saved checkpoint with an instance ID stands in for the legacy one.
-        let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "legacy-loop", "decision_session": "chair-session",
-            "nodes": [{"id": "revise", "kind": "decide", "access": "read_only", "decide": {
-                "question": "Ship the change?",
-                "options": [{"id": "ship", "label": "Ship"}, {"id": "hold", "label": "Hold"}]}}]
-        }))?;
-        let mut journal = MemoryJournal::default();
-        advance_with_budget(
-            &document,
-            &mut owner,
-            &mut journal,
-            &Default::default(),
-            &Default::default(),
-        )?;
-        let mut checkpoint = journal.0.take().ok_or("missing checkpoint")?;
-        let instance = checkpoint.instance_id.clone().ok_or("missing instance")?;
-        checkpoint.asks.clear();
-        checkpoint.ask_actor = None;
-        let node = &mut checkpoint.nodes[0];
-        node.extra.insert(
-            "loop_decision_actor".into(),
-            serde_json::json!(identity.inbox.actor.to_string()),
-        );
-        node.extra.insert(
-            "loop_asks".into(),
-            serde_json::json!([
-                {"rounds": 2, "session": "legacy-session", "resolved": false, "closed": false}
-            ]),
-        );
 
-        // The request as a pre-ask loop raised it, under its original operation.
-        let digest = provenant_records::CanonicalV1::record_digest(
-            "graph-loop-inbox",
-            1,
-            &(
-                "legacy-loop",
-                instance.as_str(),
-                "revise",
-                2usize,
-                "legacy-session",
-            ),
-        )?;
-        let operation = provenant_core::OperationId::parse(&format!(
-            "loop-{}",
-            provenant_core::hex(digest.as_bytes())
-        ))?;
-        let option = |id: &str| RequestOption {
-            extra: Default::default(),
-            id: id.into(),
-            label: id.into(),
-            description: id.into(),
-        };
-        service.execute(
-            InboxInput::Ask {
-                extra: Default::default(),
-                session: "legacy-session".into(),
-                request: Box::new(RequestDraft {
-                    extra: Default::default(),
-                    supersedes: None,
-                    deadline: None,
-                    work: None,
-                    kind: RequestKind::Decision,
-                    title: "Graph loop revise exhausted".into(),
-                    body: "Graph legacy-loop, loop revise exhausted after 2 rounds.".into(),
-                    blocking: true,
-                    options: vec![option("stop"), option("extend"), option("accept")],
-                    recommended_option_id: None,
-                    proceeding_with: None,
-                }),
-                operation_id: Some(operation),
-            },
-            &cancel,
-        )?;
-        let states = || -> Result<Vec<RequestState>, Box<dyn std::error::Error>> {
-            let InboxResult::Listed { items, .. } = service.execute(
-                InboxInput::List {
-                    extra: Default::default(),
-                    id: None,
-                    session: Some("legacy-session".into()),
-                    state: InboxFilter::All,
-                    limit: 50,
-                    cursor: None,
-                },
-                &cancel,
-            )?
-            else {
-                return Err("missing inbox listing".into());
-            };
-            Ok(items.into_iter().map(|item| item.state).collect())
-        };
-        assert_eq!(states()?, [RequestState::Open]);
-        for _ in 0..2 {
-            graph_legacy_loop_close(&service, &checkpoint, identity.inbox.actor, &cancel)?;
-            assert_eq!(states()?, [RequestState::Superseded]);
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -821,6 +695,19 @@ mod result_tests {
         assert!(super::graph_human::graph_human_full(&run).contains("error=blocked by ordinary (Failed)"));
         let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
         assert!(format!("{summary:?}").contains("blocked by ordinary (Failed)"));
+    }
+
+    #[test]
+    fn graph_status_shows_review_substitution_for_a_completed_member() {
+        let mut run = graph_status_fixture();
+        let member = &mut run.checkpoint.nodes[2];
+        member.state = provenant_fabric_runtime::graph::NodeState::Succeeded;
+        member.ci = None;
+        let mut attempt = run.checkpoint.nodes[0].attempts[1].clone();
+        attempt.review_substitution = true;
+        run.checkpoint.nodes[2].attempts.push(attempt);
+        assert!(super::graph_human(&run).contains("member: Succeeded (review substitute)"));
+        assert!(serde_json::to_value(&run).unwrap()["checkpoint"]["nodes"][2]["attempts"][0]["review_substitution"] == true);
     }
 
     #[test]
@@ -1026,6 +913,8 @@ mod result_tests {
                 {"id":"ordinary","role":"plan","access":"read_only","prompt":"test"}]
         }))?;
         let mut checkpoint = graph_status_fixture().checkpoint;
+        checkpoint.nodes[0].attempts.remove(0);
+        checkpoint.nodes[0].attempts[0].key.route_index = 0;
         let display = "node ordinary expansion paused: planner fragment invalid: invalid fragment: missing nodes; fallback expansion paused: source requires a full commit ID";
         checkpoint.pause_reason = Some(display.into());
         checkpoint.nodes[0].expansion_pause = Some(format!("{display}\n[planner-fragment-retry-context:{}", provenant_core::hex(b"invalid fragment: missing nodes")));

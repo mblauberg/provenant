@@ -13,6 +13,46 @@ enum Candidates {
     Offered,
 }
 
+fn candidates_sql(candidates: Candidates, tolerate_invalid: bool) -> String {
+    let (index, states) = match candidates {
+        Candidates::Queued => ("human_queued_delivery", "='queued'"),
+        Candidates::Pending => ("human_local_delivery", "IN ('queued','offered')"),
+        Candidates::Offered => (
+            "human_local_delivery",
+            "IN ('queued','offered') AND json_extract(CAST(o.record AS TEXT),'$.state')='offered'",
+        ),
+    };
+    let (index, hook_filter) = if tolerate_invalid {
+        (
+            match candidates {
+                Candidates::Queued => "human_hook_queued",
+                Candidates::Offered => "human_hook_pending",
+                Candidates::Pending => unreachable!(),
+            },
+            format!(
+                "AND coalesce(json_extract(CAST(o.record AS TEXT),'$.error'),'') != '{HOOK_ENVELOPE_TOO_LARGE}'"
+            ),
+        )
+    } else {
+        (index, String::new())
+    };
+    // An absent index is an error, never a fallback scan.
+    format!(
+            "SELECT o.answer,substr(o.record,1,?5),
+             (SELECT substr(a.record,1,?5) FROM human_answers a WHERE a.project=o.project AND a.id=o.answer)
+             FROM human_answer_outbox o INDEXED BY {index}
+             WHERE o.project=?4 AND json_extract(CAST(o.record AS TEXT),'$.target_host')=?1
+             AND json_extract(CAST(o.record AS TEXT),'$.target_session')=?2
+             AND json_extract(CAST(o.record AS TEXT),'$.target_actor')=?3
+             AND json_extract(CAST(o.record AS TEXT),'$.state') {states}
+             {hook_filter} AND (?7 IS NULL OR o.answer>?7) ORDER BY o.answer LIMIT ?6")
+}
+
+#[cfg(test)]
+pub(crate) fn pending_candidates_sql() -> String {
+    candidates_sql(Candidates::Pending, false)
+}
+
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn before(deadline: Instant) -> Result<()> {
     if Instant::now() >= deadline {
@@ -125,38 +165,10 @@ impl Store {
             return Err(Error::Invalid("offer byte limit"));
         }
         before(deadline)?;
-        let (index, states) = match candidates {
-            Candidates::Queued => ("human_queued_delivery", "='queued'"),
-            Candidates::Pending => ("human_local_delivery", "IN ('queued','offered')"),
-            Candidates::Offered => (
-                "human_local_delivery",
-                "IN ('queued','offered') AND json_extract(CAST(o.record AS TEXT),'$.state')='offered'",
-            ),
-        };
-        let (index, hook_filter) = if tolerate_invalid {
-            (
-                match candidates {
-                    Candidates::Queued => "human_hook_queued",
-                    Candidates::Offered => "human_hook_pending",
-                    Candidates::Pending => unreachable!(),
-                },
-                format!(
-                    "AND coalesce(json_extract(CAST(o.record AS TEXT),'$.error'),'') != '{HOOK_ENVELOPE_TOO_LARGE}'"
-                ),
-            )
-        } else {
-            (index, String::new())
-        };
         // An absent index is an error, never a fallback scan.
-        let mut statement = self.db.prepare(&format!(
-            "SELECT o.answer,substr(o.record,1,?5),
-             (SELECT substr(a.record,1,?5) FROM human_answers a WHERE a.project=o.project AND a.id=o.answer)
-             FROM human_answer_outbox o INDEXED BY {index}
-             WHERE o.project=?4 AND json_extract(CAST(o.record AS TEXT),'$.target_host')=?1
-             AND json_extract(CAST(o.record AS TEXT),'$.target_session')=?2
-             AND json_extract(CAST(o.record AS TEXT),'$.target_actor')=?3
-             AND json_extract(CAST(o.record AS TEXT),'$.state') {states}
-             {hook_filter} AND (?7 IS NULL OR o.answer>?7) ORDER BY o.answer LIMIT ?6"))?;
+        let mut statement = self
+            .db
+            .prepare(&candidates_sql(candidates, tolerate_invalid))?;
         let mut rows = statement.query(params![
             target.host.to_string(),
             target.session,

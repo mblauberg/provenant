@@ -5,6 +5,18 @@ use super::{
     postmerge, publish, receipt,
 };
 use std::collections::BTreeMap;
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "age of a durable pending publication"
+)]
+pub(crate) fn now_seconds() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|age| age.as_secs())
+}
+
 // A closed PR must never be published by a retry. A merged REST prefix may
 // remain part of the attempt, but a fast-forward retry requires all PRs open.
 fn valid_for_retry(forge: &mut dyn Forge, attempt: &PendingAttempt) -> bool {
@@ -356,8 +368,35 @@ pub(crate) fn recover_pending_with(
             continue;
         }
         let marker = receipt::pending_path(state, repository, &attempt.candidate)?;
-        let unknown = || LandingError::PublicationUnknownAt {
-            marker: marker.clone(),
+        let started_at = attempt.started_at.or_else(|| {
+            std::fs::metadata(&marker)
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|time| time.as_secs())
+        });
+        let warn_after = attempt
+            .policy
+            .settings()
+            .ok()
+            .map(|s| s.publish_unknown_warn_seconds);
+        let number = attempt.candidate.steps.first().map(|step| step.pr.number);
+        let unknown = || {
+            if let (Some(start), Some(now), Some(bound), Some(number)) =
+                (started_at, now_seconds(), warn_after, number)
+                && now.saturating_sub(start) >= bound
+            {
+                LandingError::PublicationStale {
+                    marker: marker.clone(),
+                    number,
+                }
+            } else {
+                LandingError::PublicationUnknownAt {
+                    marker: marker.clone(),
+                }
+            }
         };
         let mut tip = if shadow {
             repo.fetch_target_untracked(target)
@@ -403,6 +442,7 @@ pub(crate) fn recover_pending_with(
                     attempt.cost.clone(),
                     false,
                 );
+                record.head_moves = attempt.head_moves.clone();
                 record.pull_requests.clear();
                 record.candidate_steps.clear();
                 for step in &attempt.candidate.steps {
@@ -446,6 +486,12 @@ pub(crate) fn recover_pending_with(
                     outcomes.insert(step.pr.number, Outcome::PendingUnknown);
                     continue;
                 }
+            } else if attempt
+                .dispatched
+                .as_ref()
+                .is_some_and(|sent| !sent.contains(&step.pr.number))
+            {
+                None
             } else {
                 let pr = match forge.pull_request(step.pr.number) {
                     Ok(pr) => pr,
@@ -462,13 +508,18 @@ pub(crate) fn recover_pending_with(
                         Some(commit)
                     }
                     (PullRequestState::Closed, _) => None,
-                    (_, _) if pr.head != step.pr.head => None,
                     (PullRequestState::Open, _) => {
                         let expected = landed_prs
                             .last()
                             .and_then(|pr: &EligiblePr| mapping.get(&pr.head))
                             .unwrap_or(&attempt.candidate.base);
-                        if can_retry && !unproven && landed_prs.len() == index && &tip == expected {
+                        if can_retry
+                            && pr.stack.is_none()
+                            && pr.head == step.pr.head
+                            && !unproven
+                            && landed_prs.len() == index
+                            && &tip == expected
+                        {
                             // A previous recovered merge may have advanced the target; read it
                             // again before each ordered retry to detect intervening movement.
                             tip = repo.fetch_target(target).map_err(|_| unknown())?;
@@ -481,10 +532,7 @@ pub(crate) fn recover_pending_with(
                                     settings.publish_settle_seconds,
                                 ));
                                 match forge.pull_request(step.pr.number) {
-                                    Ok(pr)
-                                        if pr.state == PullRequestState::Open
-                                            || pr.state == PullRequestState::Closed =>
-                                    {
+                                    Ok(pr) if pr.state == PullRequestState::Closed => {
                                         outcomes.insert(step.pr.number, Outcome::Excluded);
                                     }
                                     _ => {
@@ -495,7 +543,12 @@ pub(crate) fn recover_pending_with(
                                 continue;
                             }
                             let retry = if valid_for_retry(forge, &attempt) {
-                                forge.merge(step.pr.number, &step.pr.head, settings.method)
+                                publish::merge_member(
+                                    forge,
+                                    step.pr.number,
+                                    &step.pr.head,
+                                    settings.method,
+                                )
                             } else {
                                 Err(LandingError::PublicationUnknown)
                             };
@@ -521,29 +574,11 @@ pub(crate) fn recover_pending_with(
                                     continue;
                                 }
                             }
-                        } else if settled {
-                            None
                         } else {
-                            #[allow(
-                                clippy::disallowed_methods,
-                                reason = "allow the original publication to settle"
-                            )]
-                            sleep(std::time::Duration::from_secs(
-                                settings.publish_settle_seconds,
-                            ));
-                            match forge.pull_request(step.pr.number) {
-                                Ok(pr)
-                                    if pr.state == PullRequestState::Open
-                                        || pr.state == PullRequestState::Closed =>
-                                {
-                                    None
-                                }
-                                _ => {
-                                    unproven = true;
-                                    outcomes.insert(step.pr.number, Outcome::PendingUnknown);
-                                    continue;
-                                }
-                            }
+                            // An open PR may still have an asynchronous merge in flight.
+                            unproven = true;
+                            outcomes.insert(step.pr.number, Outcome::PendingUnknown);
+                            continue;
                         }
                     }
                     _ => {
@@ -576,6 +611,7 @@ pub(crate) fn recover_pending_with(
             attempt.cost.clone(),
             false,
         );
+        record.head_moves = attempt.head_moves.clone();
         record
             .candidate_steps
             .retain(|step| outcomes.get(&step.pr.number) == Some(&Outcome::Landed));

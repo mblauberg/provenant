@@ -24,6 +24,7 @@ pub struct Report {
     pub outcomes: BTreeMap<u64, Outcome>,
     pub warnings: Vec<String>,
     pub local_steps: BTreeMap<u64, serde_json::Value>,
+    pub head_moves: BTreeMap<u64, super::head_move::HeadMove>,
 }
 
 fn fetch_target(repo: &mut dyn Repo, target: &str, shadow: bool) -> Result<String, LandingError> {
@@ -60,6 +61,20 @@ fn add_recovered(report: &mut Report, recovered: Vec<LandingReceipt>) {
         }
         report.receipts.push(record);
     }
+}
+
+fn attach_head_moves(record: &mut LandingReceipt, report: &Report) {
+    record.head_moves = record
+        .candidate_steps
+        .iter()
+        .filter_map(|step| {
+            report
+                .head_moves
+                .get(&step.pr.number)
+                .cloned()
+                .map(|class| (step.pr.number, class))
+        })
+        .collect();
 }
 
 #[allow(
@@ -121,6 +136,7 @@ pub fn run(
             error,
             LandingError::PublicationUnknown
                 | LandingError::PublicationUnknownAt { .. }
+                | LandingError::PublicationStale { .. }
                 | LandingError::RecoveryRequired { .. }
         );
         for number in numbers {
@@ -198,6 +214,29 @@ fn run_inner(
     let mut open = Vec::new();
     for number in unique {
         let info = forge.pull_request(number)?;
+        match forge.latest_review(number, &info.author) {
+            Ok(Some(review)) if review.head != info.head => {
+                match fetch_target(repo, request.target, request.shadow) {
+                    Ok(target) => {
+                        if let Some(class) =
+                            super::head_move::classify(repo, &review, &info.head, &target)
+                        {
+                            report.warnings.push(format!(
+                                "pull request #{number}: shadow head-move classification {class:?}"
+                            ));
+                            report.head_moves.insert(number, class);
+                        }
+                    }
+                    Err(error) => report.warnings.push(format!(
+                        "pull request #{number}: shadow head-move target unavailable: {error}"
+                    )),
+                }
+            }
+            Err(error) => report.warnings.push(format!(
+                "pull request #{number}: shadow review history unavailable: {error}"
+            )),
+            _ => {}
+        }
         if info.state == super::ports::PullRequestState::Merged && !request.shadow {
             let pr = EligiblePr {
                 number,
@@ -213,10 +252,12 @@ fn run_inner(
             open.push(number);
         }
     }
+    let mut deferred = Vec::new();
     for numbers in open.chunks(limit) {
-        let selected = candidate::select_batch(
+        let selected = candidate::select_batch_with_dependencies(
             forge,
             numbers,
+            &open,
             request.target,
             limit,
             request.settings.batch_wait_seconds,
@@ -224,6 +265,18 @@ fn run_inner(
         for number in numbers {
             if !selected.iter().any(|pr| pr.number == *number) {
                 report.outcomes.entry(*number).or_insert(Outcome::Excluded);
+                if let Some(stack) = forge.pull_request(*number)?.stack {
+                    let members = forge.stack_members(stack.number)?;
+                    if let Some(position) =
+                        members.iter().position(|member| member.number == *number)
+                        && members[..position].iter().any(|member| {
+                            member.state != super::ports::PullRequestState::Merged
+                                && open.contains(&member.number)
+                        })
+                    {
+                        deferred.push(*number);
+                    }
+                }
             }
         }
         queue.push_back(selected);
@@ -328,11 +381,12 @@ fn run_inner(
                     }
                 }
                 let decision = cleanup_unpublished(
-                    publish::decide(
+                    publish::decide_candidate(
                         forge,
                         request.target,
                         request.settings.publish,
                         request.settings.method,
+                        &candidate,
                     ),
                     repo,
                     &candidate,
@@ -346,6 +400,7 @@ fn run_inner(
                     cost.clone(),
                     request.shadow,
                 );
+                attach_head_moves(&mut record, report);
                 record.outcomes = outcomes;
                 record.split = parts
                     .iter()
@@ -368,11 +423,12 @@ fn run_inner(
                 return cleanup_unpublished(Err(LandingError::UnmetGate(checks)), repo, &candidate);
             }
             let decision = cleanup_unpublished(
-                publish::decide(
+                publish::decide_candidate(
                     forge,
                     request.target,
                     request.settings.publish,
                     request.settings.method,
+                    &candidate,
                 ),
                 repo,
                 &candidate,
@@ -414,7 +470,20 @@ fn run_inner(
                     gate_evidence: evidence.clone(),
                     publish: decision.clone(),
                     cost: cost.clone(),
+                    head_moves: candidate
+                        .steps
+                        .iter()
+                        .filter_map(|step| {
+                            report
+                                .head_moves
+                                .get(&step.pr.number)
+                                .cloned()
+                                .map(|class| (step.pr.number, class))
+                        })
+                        .collect(),
                     settled: None,
+                    dispatched: Some(Vec::new()),
+                    started_at: super::reconcile::now_seconds(),
                 };
                 receipt::record_pending(request.state, &attempt)?;
                 let mut progress = Vec::new();
@@ -429,6 +498,10 @@ fn run_inner(
                         &candidate,
                         request.settings.method,
                         &mut progress,
+                        &mut |number| {
+                            attempt.dispatched.get_or_insert_default().push(number);
+                            receipt::record_pending(request.state, &attempt)
+                        },
                     ),
                 };
                 match published {
@@ -459,6 +532,7 @@ fn run_inner(
                             cost.clone(),
                             false,
                         );
+                        attach_head_moves(&mut record, report);
                         record.candidate_steps.truncate(progress.len());
                         record.pull_requests.truncate(progress.len());
                         for (index, step) in candidate.steps.iter().enumerate() {
@@ -548,6 +622,7 @@ fn run_inner(
                 cost,
                 request.shadow,
             );
+            attach_head_moves(&mut record, report);
             record.outcomes = outcomes;
             record.approved_to_landed = mapping;
             record.alarms = publication.alarms;
@@ -565,7 +640,10 @@ fn run_inner(
                     gate_evidence: record.gate_evidence.clone(),
                     publish: record.publish.clone(),
                     cost: record.cost.clone(),
+                    head_moves: record.head_moves.clone(),
                     settled: None,
+                    dispatched: None,
+                    started_at: None,
                 };
                 reconcile::settle(request.state, &mut attempt, record, None)?;
                 let record = reconcile::finish_settled(
@@ -579,6 +657,35 @@ fn run_inner(
                 report.receipts.push(record);
             }
             break;
+        }
+        if !request.shadow && !deferred.is_empty() {
+            let mut still_deferred = Vec::new();
+            for number in deferred.drain(..) {
+                let info = forge.pull_request(number)?;
+                let ready = if let Some(stack) = info.stack {
+                    let members = forge.stack_members(stack.number)?;
+                    members
+                        .iter()
+                        .position(|member| member.number == number)
+                        .is_some_and(|position| {
+                            members[..position].iter().all(|member| {
+                                member.state == super::ports::PullRequestState::Merged
+                            })
+                        })
+                } else {
+                    true
+                };
+                if ready {
+                    let selected = candidate::select_batch(forge, &[number], request.target, 1, 0)?;
+                    if !selected.is_empty() {
+                        report.outcomes.remove(&number);
+                        queue.push_back(selected);
+                    }
+                } else {
+                    still_deferred.push(number);
+                }
+            }
+            deferred = still_deferred;
         }
     }
     Ok(())
@@ -659,6 +766,7 @@ mod tests {
                     author: "author".into(),
                     state: PullRequestState::Open,
                     merged_commit: None,
+                    stack: None,
                 },
             );
             forge.heads.insert(n, head.clone());
@@ -734,6 +842,174 @@ mod tests {
             LandingError::RunFailed { cause, .. } => *cause,
             error => error,
         })
+    }
+
+    #[test]
+    fn stack_lost_response_recovers_without_remerging() -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::ports::{PullRequestState, StackMember, StackMembership};
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
+        let target = std::rc::Rc::new(std::cell::RefCell::new(repo.target.clone()));
+        forge.shared_target = Some(target.clone());
+        repo.shared_target = Some(target);
+        forge.valid_merge_ids = true;
+        forge.lose_merge_response_at = Some(1);
+        repo.trees.insert(format!("{:040x}", 2001), "tree-1".into());
+        for (number, position) in [(1, 1), (2, 2)] {
+            forge.pull_requests.get_mut(&number).unwrap().stack = Some(StackMembership {
+                number: 42,
+                size: 2,
+                position,
+                base_branch: "main".into(),
+            });
+        }
+        forge.pull_requests.get_mut(&2).unwrap().base_branch = "lower".into();
+        forge.stacks.insert(
+            42,
+            vec![
+                StackMember {
+                    number: 1,
+                    state: PullRequestState::Open,
+                },
+                StackMember {
+                    number: 2,
+                    state: PullRequestState::Open,
+                },
+            ],
+        );
+        let state = tempfile::tempdir()?;
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(forge.stack_merge_attempts, vec![1]);
+        assert_eq!(forge.pull_requests[&2].base_branch, "main");
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn stack_requested_out_of_order_gates_each_retargeted_member()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::ports::{PullRequestState, StackMember, StackMembership};
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        settings.batch_size = 1;
+        let target = std::rc::Rc::new(std::cell::RefCell::new(repo.target.clone()));
+        forge.shared_target = Some(target.clone());
+        repo.shared_target = Some(target);
+        forge.valid_merge_ids = true;
+        for number in 1..=2 {
+            repo.trees
+                .insert(format!("{:040x}", 2000 + number), format!("tree-{number}"));
+        }
+        forge.lose_merge_response_at = Some(1);
+        for (number, position) in [(1, 1), (2, 2)] {
+            forge.pull_requests.get_mut(&number).unwrap().stack = Some(StackMembership {
+                number: 42,
+                size: 2,
+                position,
+                base_branch: "main".into(),
+            });
+        }
+        forge.pull_requests.get_mut(&2).unwrap().base_branch = "lower".into();
+        forge.stacks.insert(
+            42,
+            vec![
+                StackMember {
+                    number: 1,
+                    state: PullRequestState::Open,
+                },
+                StackMember {
+                    number: 2,
+                    state: PullRequestState::Open,
+                },
+            ],
+        );
+        let state = tempfile::tempdir()?;
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[2, 1],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(report.outcomes[&2], Outcome::Landed);
+        assert_eq!(forge.stack_merge_attempts, vec![1, 2]);
+        assert_eq!(report.receipts.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn shadow_head_move_reporting_does_not_change_landing_decision()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::{
+            head_move::{HeadMove, ReviewedHead},
+            ports::{DeltaFile, DeltaStats},
+        };
+        let mut outcomes = Vec::new();
+        for classify in [false, true] {
+            let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+            let head = forge.pull_requests[&1].head.clone();
+            if classify {
+                forge.latest_reviews.insert(
+                    1,
+                    ReviewedHead {
+                        head: "reviewed".into(),
+                        base: None,
+                        valid: true,
+                    },
+                );
+                repo.parents.insert(head.clone(), vec!["reviewed".into()]);
+                repo.review_deltas.insert(
+                    ("reviewed".into(), head),
+                    DeltaStats {
+                        complete: true,
+                        files: vec![DeltaFile {
+                            path: "src/lib.rs".into(),
+                            added: 2,
+                            deleted: 1,
+                            eligible: true,
+                        }],
+                    },
+                );
+            }
+            let state = tempfile::tempdir()?;
+            let report = exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1],
+                false,
+                state.path(),
+            )?;
+            outcomes.push(report.outcomes.clone());
+            if classify {
+                assert!(matches!(
+                    report.head_moves.get(&1),
+                    Some(HeadMove::B { .. })
+                ));
+                assert!(matches!(
+                    report.receipts[0].head_moves.get(&1),
+                    Some(HeadMove::B { .. })
+                ));
+            } else {
+                assert!(report.head_moves.is_empty());
+            }
+        }
+        assert_eq!(outcomes[0], outcomes[1]);
+        Ok(())
     }
 
     #[test]
@@ -1459,7 +1735,10 @@ mod tests {
                     cost: CostEstimate::Unknown {
                         reason: "test".into(),
                     },
+                    head_moves: Default::default(),
                     settled: None,
+                    dispatched: None,
+                    started_at: None,
                 },
             )?;
             let result = reconcile::recover_pending(
@@ -1530,7 +1809,10 @@ mod tests {
                     cost: CostEstimate::Unknown {
                         reason: "test".into(),
                     },
+                    head_moves: Default::default(),
                     settled: None,
+                    dispatched: None,
+                    started_at: None,
                 },
             )?;
             let result = reconcile::recover_pending(
@@ -1621,7 +1903,10 @@ mod tests {
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
                 },
+                head_moves: Default::default(),
                 settled: None,
+                dispatched: None,
+                started_at: None,
             },
         )?;
         let result = reconcile::recover_pending(
@@ -1637,8 +1922,19 @@ mod tests {
         );
         assert!(forge.merges.is_empty());
         assert!(repo.pushes.is_empty());
-        result?;
-        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        if mode == PublishMode::RestOrdered && change != "closed" {
+            assert!(matches!(
+                result,
+                Err(LandingError::PublicationUnknownAt { .. })
+            ));
+            assert_eq!(
+                receipt::pending(state.path(), "fake-repository", "main")?.len(),
+                1
+            );
+        } else {
+            result?;
+            assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        }
         Ok(())
     }
     #[test]
@@ -1672,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_settles_open_prs_after_target_or_sibling_moves()
+    fn recovery_retains_open_prs_after_target_or_sibling_moves()
     -> Result<(), Box<dyn std::error::Error>> {
         for changed_sibling in [false, true] {
             let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
@@ -1728,11 +2024,14 @@ mod tests {
                     cost: CostEstimate::Unknown {
                         reason: "fixture".into(),
                     },
+                    head_moves: Default::default(),
                     settled: None,
+                    dispatched: None,
+                    started_at: None,
                 },
             )?;
             let mut recovered = Vec::new();
-            reconcile::recover_pending(
+            let result = reconcile::recover_pending(
                 &mut forge,
                 &mut repo,
                 &mut gate,
@@ -1742,11 +2041,16 @@ mod tests {
                 "main",
                 false,
                 &mut recovered,
-            )?;
-            assert_eq!(recovered[0].outcomes[&1], Outcome::Excluded);
-            assert_eq!(recovered[0].outcomes[&2], Outcome::Excluded);
+            );
+            assert!(matches!(
+                result,
+                Err(LandingError::PublicationUnknownAt { .. })
+            ));
             assert!(forge.merge_attempts.is_empty());
-            assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+            assert_eq!(
+                receipt::pending(state.path(), "fake-repository", "main")?.len(),
+                1
+            );
         }
         Ok(())
     }
@@ -1802,7 +2106,10 @@ mod tests {
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
                 },
+                head_moves: Default::default(),
                 settled: None,
+                dispatched: None,
+                started_at: None,
             },
         )?;
         let mut recovered = Vec::new();
@@ -1824,7 +2131,8 @@ mod tests {
     }
 
     #[test]
-    fn recovery_observes_open_pr_after_settle_window() -> Result<(), Box<dyn std::error::Error>> {
+    fn recovery_retains_ambiguous_stack_merge_until_it_is_observed()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(1);
         settings.publish_settle_seconds = 7;
         let mut attempt = super::super::receipt::tests::attempt("main", "candidate");
@@ -1847,13 +2155,25 @@ mod tests {
             commit: "candidate".into(),
             tree: "tree".into(),
         }];
+        use super::super::ports::{Forge, PullRequestState, StackMembership};
+        forge.pull_requests.get_mut(&1).unwrap().stack = Some(StackMembership {
+            number: 42,
+            size: 1,
+            position: 1,
+            base_branch: "main".into(),
+        });
+        let head = forge.pull_requests[&1].head.clone();
+        attempt.candidate.steps[0].pr.approval = "approval-1".into();
         let state = tempfile::tempdir()?;
         receipt::record_pending(state.path(), &attempt)?;
+        forge.fail_merge = Some(1);
+        assert!(forge.merge_stack(1, &head, settings.method).is_err());
+        forge.approvals_at_head.clear();
         let waited = std::rc::Rc::new(std::cell::Cell::new(false));
         let reads = std::rc::Rc::new(std::cell::Cell::new(0));
         forge.after_wait_reads = Some((waited.clone(), reads.clone()));
         let mut recovered = Vec::new();
-        reconcile::recover_pending_with(
+        let result = reconcile::recover_pending_with(
             &mut forge,
             &mut repo,
             &mut gate,
@@ -1867,11 +2187,38 @@ mod tests {
                 assert_eq!(duration, std::time::Duration::from_secs(7));
                 waited.set(true);
             },
-        )?;
+        );
+        assert!(matches!(
+            result,
+            Err(LandingError::PublicationUnknownAt { .. })
+        ));
         assert!(waited.get());
         assert!(reads.get() > 0);
-        assert_eq!(recovered[0].outcomes[&1], Outcome::Excluded);
-        assert!(forge.merge_attempts.is_empty());
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
+        assert_eq!(forge.merge_attempts, vec![1]);
+        let pr = forge.pull_requests.get_mut(&1).unwrap();
+        pr.state = PullRequestState::Merged;
+        pr.merged_commit = Some("landed-1".into());
+        repo.trees.insert("landed-1".into(), "tree".into());
+        reconcile::recover_pending_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut recovered,
+            &|_| {},
+        )?;
+        assert_eq!(recovered[0].outcomes[&1], Outcome::Landed);
+        assert_eq!(recovered[0].approved_to_landed[&head], "landed-1");
+        assert!(repo.local_followed.contains(&1));
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
         Ok(())
     }
 
@@ -1912,6 +2259,87 @@ mod tests {
             receipt::pending(state.path(), "fake-repository", "main")?,
             vec![attempt]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_excludes_members_never_dispatched() -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::ports::{PullRequestState, StackMembership};
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        settings.publish_unknown_warn_seconds = 0;
+        forge.pull_requests.get_mut(&1).unwrap().stack = Some(StackMembership {
+            number: 42,
+            size: 2,
+            position: 1,
+            base_branch: "main".into(),
+        });
+        let state = tempfile::tempdir()?;
+        let mut attempt = super::super::receipt::tests::attempt("main", "step-2");
+        attempt.policy = LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )?;
+        attempt.gate_definition = definition;
+        attempt.candidate.base = repo.target.clone();
+        attempt.candidate.steps = (1..=2)
+            .map(|n| CandidateStep {
+                pr: EligiblePr {
+                    number: n,
+                    head: forge.pull_requests[&n].head.clone(),
+                    approval: format!("approval-{n}"),
+                    base_branch: "main".into(),
+                },
+                commit: format!("step-{n}"),
+                tree: format!("tree-{n}"),
+            })
+            .collect();
+        attempt.dispatched = Some(vec![1]);
+        repo.refs.insert(
+            attempt.candidate.ref_name.clone(),
+            attempt.candidate.commit.clone(),
+        );
+        receipt::record_pending(state.path(), &attempt)?;
+        let mut recovered = Vec::new();
+        let unknown = reconcile::recover_pending_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut recovered,
+            &|_| {},
+        );
+        let error = unknown.unwrap_err();
+        assert!(matches!(error, LandingError::PublicationStale { .. }));
+        assert!(error.to_string().contains("provenant land 1"));
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
+        forge.pull_requests.get_mut(&1).unwrap().state = PullRequestState::Merged;
+        forge.pull_requests.get_mut(&1).unwrap().merged_commit = Some("landed-1".into());
+        reconcile::recover_pending_with(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut recovered,
+            &|_| {},
+        )?;
+        assert_eq!(recovered[0].outcomes[&1], Outcome::Landed);
+        assert_eq!(recovered[0].outcomes[&2], Outcome::Excluded);
+        assert!(forge.merge_attempts.is_empty());
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
         Ok(())
     }
 
@@ -1970,11 +2398,14 @@ mod tests {
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
                 },
+                head_moves: Default::default(),
                 settled: None,
+                dispatched: None,
+                started_at: None,
             },
         )?;
         let mut recovered = Vec::new();
-        reconcile::recover_pending(
+        let result = reconcile::recover_pending(
             &mut forge,
             &mut repo,
             &mut gate,
@@ -1984,14 +2415,21 @@ mod tests {
             "main",
             false,
             &mut recovered,
-        )?;
+        );
+        assert!(matches!(
+            result,
+            Err(LandingError::PublicationUnknownAt { .. })
+        ));
         assert_eq!(
             forge.merges.iter().map(|merge| merge.0).collect::<Vec<_>>(),
             [1]
         );
         assert_eq!(recovered[0].pull_requests.len(), 1);
-        assert_eq!(recovered[0].outcomes[&2], Outcome::Excluded);
-        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        assert_eq!(recovered[0].outcomes[&2], Outcome::PendingUnknown);
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
         Ok(())
     }
 
@@ -2049,7 +2487,10 @@ mod tests {
                 cost: CostEstimate::Unknown {
                     reason: "fixture".into(),
                 },
+                head_moves: Default::default(),
                 settled: None,
+                dispatched: None,
+                started_at: None,
             },
         )?;
         let mut recovered = Vec::new();
@@ -2139,7 +2580,10 @@ mod tests {
                     cost: CostEstimate::Unknown {
                         reason: "fixture".into(),
                     },
+                    head_moves: Default::default(),
                     settled: None,
+                    dispatched: None,
+                    started_at: None,
                 },
             )?;
         }

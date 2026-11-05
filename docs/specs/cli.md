@@ -21,6 +21,16 @@ retain their four-hour runtime limit; since filters also accept dates and
 RFC3339 timestamps. Git-revision and console-cursor `--since` options keep
 their own types.
 
+## Lane projections
+
+`lanes`, `status`, `output`, `cancel` and `land` use the shared lane row for
+attempt identity, state, typed settlement cause and retry lineage. A missing
+historical fact remains unavailable. A host path is the tagged structured path
+used by `worktree list --json`, including its native-byte encoding when needed.
+Land reports retained local contributors when that evidence is available.
+Generated schemas describe the machine envelopes and are checked against the
+current lane field declarations.
+
 ## Agent output
 
 Ordinary human results default to a compact summary. The command's owner
@@ -273,7 +283,7 @@ The console may list, show and answer requests on a configured owner host
 using the inbox CLI's `--host` or a `host:request` ID. Answers are human acts
 recorded by the owner with source host and peer actor provenance. Operation IDs
 bind retries and changed content conflicts. Close and acknowledgement remain
-owner-local operations and remote attempts return `owner_local_only`; run them
+owner-local operations and remote attempts return `OWNER_LOCAL_ONLY`; run them
 on the owner or in the owning chair session. No delegation is implied.
 
 `console overview` combines local pending request titles and recent lane

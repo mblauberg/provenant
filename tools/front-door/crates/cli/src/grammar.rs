@@ -600,12 +600,6 @@ pub enum Config {
 
 pub use crate::install::{Install, Uninstall, Upgrade};
 pub use crate::route::{Model, RouteRequest};
-#[derive(Debug, Args)]
-pub struct Adapter {
-    /// Restrict to this adapter
-    #[arg(long)]
-    pub adapter: Option<String>,
-}
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum Mode {
     ReadOnly,
@@ -708,17 +702,8 @@ pub struct Dispatch {
     #[arg(long)]
     pub delivery_id: Option<DeliveryId>,
     /// Host delivery: none, push, integrate:<branch> (local), or pr (origin)
-    #[arg(long, conflicts_with_all = ["deliver_remote", "deliver_branch", "open_pr"])]
+    #[arg(long)]
     pub deliver: Option<provenant_records::run::DeliveryMode>,
-    /// Fetch and deliver this writer's final head on the host.
-    #[arg(long, catalog_requires_all = ["deliver_branch", "writer_target"])]
-    pub deliver_remote: Option<String>,
-    /// Branch to push the writer's head to
-    #[arg(long, catalog_requires = "deliver_remote")]
-    pub deliver_branch: Option<String>,
-    /// Create a pull request after the host verifies the pushed head.
-    #[arg(long, catalog_requires = "deliver_remote")]
-    pub open_pr: bool,
     #[command(flatten)]
     pub route: RouteRequest,
     /// Pin a registered account (key or label) instead of resolving one

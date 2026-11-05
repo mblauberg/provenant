@@ -692,9 +692,6 @@ impl CwdObserver for PolicyCwdObserver<'_> {
     fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
         SystemCwdObserver.cwd(pid)
     }
-    fn ignored_unreadable_uids(&self, pid: i64, _: &[CensusIgnoreEntry]) -> Option<ProcessUids> {
-        SystemCwdObserver.ignored_unreadable_uids(pid, self.0)
-    }
     fn process_details(&self, pid: i64) -> Option<String> {
         SystemCwdObserver.process_details(pid)
     }

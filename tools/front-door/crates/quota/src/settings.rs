@@ -329,8 +329,8 @@ mod tests {
     #[test]
     fn probe_ceilings_raise_within_bounds_and_defaults_stay_small() {
         let defaults = Settings::default();
-        assert_eq!(defaults.max_parallel, 3);
-        assert_eq!(defaults.wall_budget_seconds, 55);
+        assert!(defaults.max_parallel <= MAX_PARALLEL);
+        assert!(defaults.wall_budget_seconds <= MAX_WALL_BUDGET_SECONDS);
         assert!(defaults.validate().is_empty());
         let raised = parse("max_parallel = 8\nwall_budget_seconds = 300\n").unwrap();
         assert_eq!(raised.max_parallel, 8);

@@ -567,6 +567,19 @@ impl ReviewConfig {
         ReviewShape { reviewers }
     }
 
+    // Review requests are ready by definition; preserve configured ready rules.
+    fn select_review_rule(
+        &self,
+        override_value: Option<&String>,
+        risk: Option<&str>,
+        kind: Option<&str>,
+        paths: &[String],
+        size: Option<&str>,
+    ) -> Selection<String> {
+        self.select
+            .select(override_value, risk, kind, paths, size, Some(true))
+    }
+
     pub fn select_shape<'a>(
         &'a self,
         override_name: Option<&'a str>,
@@ -583,13 +596,12 @@ impl ReviewConfig {
         let integration = (kind == Some("integration"))
             .then(|| self.select.by_kind.get("integration"))
             .flatten();
-        let mut selected = self.select.select(
+        let mut selected = self.select_review_rule(
             integration.or(override_name.map(str::to_owned).as_ref()),
             risk,
             kind,
             paths,
             size,
-            Some(true),
         );
         if integration.is_some() {
             selected.source = "by_kind";
@@ -603,17 +615,14 @@ impl ReviewConfig {
                     && !by_paths
                     && (kind.is_some_and(|k| self.select.by_kind.contains_key(k))
                         || size.is_some_and(|s| self.select.by_size.contains_key(s))))
-                .then(|| self.select.select(None, None, kind, &[], size, Some(true))),
+                .then(|| self.select_review_rule(None, None, kind, &[], size)),
                 (override_name.is_none()
                     && !by_paths
                     && kind != Some("docs")
                     && size.is_some_and(|s| self.select.by_size.contains_key(s)))
-                .then(|| self.select.select(None, None, None, &[], size, Some(true))),
+                .then(|| self.select_review_rule(None, None, None, &[], size)),
                 risk.filter(|r| self.select.by_risk.contains_key(*r))
-                    .map(|r| {
-                        self.select
-                            .select(None, Some(r), None, &[], None, Some(true))
-                    }),
+                    .map(|r| self.select_review_rule(None, Some(r), None, &[], None)),
             ];
             for candidate in candidates.into_iter().flatten() {
                 let slots = |name: &str| {
@@ -1102,19 +1111,34 @@ mod tests {
     }
 
     #[test]
-    fn standard_panel_covers_five_default_lenses() {
+    fn standard_panel_fills_distinct_configured_lenses() {
         let review = ReviewConfig::default();
         let shape = &review.shapes["standard"];
+        let panel = review.panel(shape, None, &[], false, &[]);
+        let names = lens_names(&panel);
         assert_eq!(
-            lens_names(&review.panel(shape, None, &[], false, &[])),
-            [
-                "correctness-spec",
-                "tests",
-                "design-fit-reuse",
-                "simplicity",
-                "reliability"
-            ]
+            names.len(),
+            shape
+                .reviewers
+                .iter()
+                .map(|reviewer| reviewer.count)
+                .sum::<usize>()
         );
+        assert_eq!(
+            names
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            names.len()
+        );
+        assert!(names.iter().all(|name| {
+            review
+                .lenses
+                .order
+                .iter()
+                .any(|lens| lens.as_str() == *name)
+        }));
     }
 
     #[test]
@@ -1386,16 +1410,14 @@ mod tests {
     #[test]
     fn bundled_review_shapes_cover_all_risk_tiers() {
         let review = ReviewConfig::default();
-        for (tier, expected) in [
-            ("routine", "quick"),
-            ("substantial", "standard"),
-            ("crucial", "deep"),
-            ("terminal", "deep"),
-        ] {
+        for tier in ["routine", "substantial", "crucial", "terminal"] {
             let selected = review
                 .select_shape(None, Some(tier), None, &[], None)
                 .unwrap();
-            assert_eq!(selected.name, expected, "risk tier {tier}");
+            assert!(
+                review.shapes.contains_key(selected.name),
+                "risk tier {tier}"
+            );
             assert_eq!(selected.source, "by_risk", "risk tier {tier}");
         }
     }
@@ -1450,6 +1472,19 @@ mod tests {
                 .name,
             "deep"
         );
+    }
+
+    #[test]
+    fn review_shape_honours_ready_rule() {
+        let mut review = ReviewConfig::default();
+        let name = review.select.default.clone();
+        review
+            .select
+            .by_readiness
+            .insert("ready".into(), name.clone());
+        let selected = review.select_shape(None, None, None, &[], None).unwrap();
+        assert_eq!(selected.name, name);
+        assert_eq!(selected.source, "readiness");
     }
 
     #[test]

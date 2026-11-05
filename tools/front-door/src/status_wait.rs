@@ -102,11 +102,11 @@ impl Snapshot {
                 let mut lanes: Vec<_> = rows
                     .iter()
                     .map(|row| {
-                        let (state, reason) = provenant_cli::run::state_and_reason(&row.state);
-                        json!({"id": row.attempt_id, "state": state, "reason": reason})
+                        let lane = provenant_cli::run::project_lane(row, &[], edge.roots.state.as_path(), &Default::default(), None, false);
+                        json!({"run_id": lane.run_id, "task_id": lane.task_id, "attempt_id": lane.attempt_id, "state": lane.state, "reason": lane.reason, "cause": lane.cause, "retry_of": lane.retry_of, "superseded_by": lane.superseded_by})
                     })
                     .collect();
-                lanes.sort_by_key(|v| v["id"].to_string());
+                lanes.sort_by_key(|v| v["attempt_id"].to_string());
                 Ok(Self {
                     terminal,
                     notable,

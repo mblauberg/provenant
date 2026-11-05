@@ -1312,8 +1312,9 @@ fn dry_run_and_broken_preview_create_nothing() {
         false,
     )
     .unwrap_err();
-    assert_eq!(error.to_string(), "preview output failed");
+    assert!(matches!(error, InstallError::Preview(_)));
     assert!(!f.targets.roots.state.as_path().exists());
+    assert!(!f.targets.bin_dir.exists());
 }
 #[test]
 fn occupied_skill_is_refused_without_touching_unmanaged_bytes() {

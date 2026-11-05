@@ -66,6 +66,7 @@ continuations = 2
 nodes = 512
 edges = 4096
 routes_per_node = 16
+review_substitutions = 1 # 0 disables review member substitutions
 node_prompt_bytes = 262144
 graph_prompt_bytes = 4194304
 expansion_depth = 64

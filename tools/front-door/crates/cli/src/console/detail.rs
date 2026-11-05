@@ -1,5 +1,5 @@
 use super::Error;
-use provenant_core::{ActorId, AttemptId, CancelToken, Roots};
+use provenant_core::{ActorId, AttemptId, CancelToken, ProjectId, RootInputs, Roots};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, RunStore};
 use serde_json::{Value, json};
@@ -73,10 +73,23 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
             .find_map(|node| {
                 (node["lane_id"]["attempt_id"] == json!(attempt_id))
                     .then(|| {
-                        if let Some(path) = node["store_path"].as_str() {
-                            state_path = path.into();
-                        }
-                        serde_json::from_value(node["metadata"]["attempt"].clone()).ok()
+                        let path = node["store_path"].as_str()?;
+                        let project_id: ProjectId =
+                            node["lane_id"]["project_id"].as_str()?.parse().ok()?;
+                        let mut inputs =
+                            RootInputs::new("/".into(), "/__provenant_tree_excluded__".into());
+                        inputs.state_dir = Some(path.into());
+                        let child = inputs.resolve(&provenant_os::fs::SystemPathResolver).ok()?;
+                        let context = ExecutionContext {
+                            state_root: child.state,
+                            project_id,
+                            actor_id: ActorId::from_bytes([0; 16]),
+                            read_prompts: false,
+                        };
+                        let store = RunStore::open_read_only(&context, &call).ok()??;
+                        let record = store.record(attempt_id, &call).ok()?;
+                        state_path = path.into();
+                        Some(record)
                     })
                     .flatten()
             });

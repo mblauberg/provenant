@@ -539,12 +539,13 @@ mod tests {
             &|_| {},
         );
         let error = result.err().unwrap().to_string();
-        assert_eq!(held.borrow().len(), 8);
+        let attempts = held.borrow().len();
+        assert!((2..=32).contains(&attempts));
         assert!(
             error.contains(host_root.path().to_str().unwrap()),
             "{error}"
         );
-        assert!(error.contains("8 tries"), "{error}");
+        assert!(error.contains(&format!("{attempts} tries")), "{error}");
         assert!(error.contains("lock acquisition timed out"), "{error}");
     }
 

@@ -4,10 +4,7 @@
 //! host keeps only a placement record under `fabric/remote-runs/`, never a
 //! copy of the peer's run state.
 use super::watch::{self, Scope};
-use super::{
-    Condition, Edge, Fail, Reply, Status, condition_met, render_lanes_with_lineage, reply,
-    state_name,
-};
+use super::{Condition, Edge, Fail, Reply, Status, condition_met, reply, state_and_reason};
 use crate::{
     Cancel, Dispatch, Lanes, Output, Part,
     fabric::{Context, PeerFailure},
@@ -169,8 +166,10 @@ fn peer_failure_fail(failure: PeerFailure) -> Fail {
         );
     }
     let (status, kind) = crate::fabric::facade_outcome(&error);
+    let projection = error.diagnostic();
     Fail {
         detail: Some(Box::new(error)),
+        projection: Some(Box::new(projection)),
         ..Fail::new(status, kind, format!("peer: {message}"))
     }
 }
@@ -728,7 +727,7 @@ fn render_peer_lanes(
         .iter()
         .filter_map(|lane| lane.superseded_by.map(|id| (lane.attempt_id, id)))
         .collect();
-    render_lanes_with_lineage(lanes, waits, next, state, None, &successors)
+    super::render_lanes_with_view(lanes, waits, next, state, None, &successors, false)
 }
 
 /// Local lane rendering plus each row's owning host. Result paths are the
@@ -758,6 +757,10 @@ fn render_with_waits(
                 .or(lane.trace.host);
             row["host"] = json!(host);
             row["result_path"] = Value::Null;
+            row["stale"] = Value::Null;
+            if row["transcript"].is_object() {
+                row["transcript"]["path"] = Value::Null;
+            }
         }
     }
     let mut hosts: Vec<_> = selected.iter().map(|(host, _)| host.to_string()).collect();
@@ -1094,7 +1097,7 @@ pub(super) fn lanes(
                 || command
                     .states
                     .iter()
-                    .any(|state| state.as_str() == state_name(&lane.state))
+                    .any(|state| state.as_str() == state_and_reason(&lane.state).0)
         })
         .filter(|lane| since.is_none_or(|since| lane.queued_at >= since))
         .take(usize::try_from(command.limit).unwrap_or(usize::MAX))
@@ -1256,7 +1259,7 @@ pub(super) fn host_lanes(
                 || command
                     .states
                     .iter()
-                    .any(|state| state.as_str() == state_name(&lane.state))
+                    .any(|state| state.as_str() == state_and_reason(&lane.state).0)
         })
         .filter(|lane| since.is_none_or(|since| lane.queued_at >= since))
         .collect();
@@ -1537,6 +1540,7 @@ fn chunk_response(
     chunk: OutputResult,
 ) -> Result<(Value, String), Fail> {
     let OutputResult::Chunk {
+        extra,
         state,
         reason,
         offset,
@@ -1549,25 +1553,22 @@ fn chunk_response(
     else {
         return Err(corrupt());
     };
+    if extra.get("attempt_id").and_then(Value::as_str) != Some(attempt.to_string().as_str()) {
+        return Err(corrupt());
+    }
     let text = match &bytes {
         OutputBytes::Utf8(text) => text.clone(),
         OutputBytes::Base64(data) => data.clone(),
     };
-    Ok((
-        json!({
-            "attempt_id": attempt,
-            "host": host,
-            "state": state,
-            "reason": reason,
-            "part": format!("{part:?}").to_lowercase(),
-            "offset": offset,
-            "next_offset": next_offset,
-            "eof": eof,
-            "digest": digest,
-            "bytes": bytes,
-        }),
-        text,
-    ))
+    let mut data = json!({
+        "attempt_id": attempt, "host": host, "state": state, "reason": reason,
+        "part": format!("{part:?}").to_lowercase(), "offset": offset,
+        "next_offset": next_offset, "length": null, "eof": eof, "clipped": null, "complete": null, "digest": digest, "bytes": bytes,
+    });
+    if let Some(object) = data.as_object_mut() {
+        object.extend(extra);
+    }
+    Ok((data, text))
 }
 
 /// Ask the owning peer to cancel each named attempt. The peer records its own
@@ -1588,6 +1589,7 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
             }
             let peer = Peer::open_for(edge, [placement])?;
             let mut receipts = Vec::new();
+            let mut observed = Vec::new();
             let mut human = String::new();
             for (index, (host, attempt)) in selected.iter().enumerate() {
                 let operation_id = if selected.len() == 1 {
@@ -1626,7 +1628,8 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                         RunResult::Cancel {
                             attempt: record, ..
                         } if record.attempt_id == *attempt => {
-                            let state = state_name(&record.state);
+                            let state = state_and_reason(&record.state).0;
+                            observed.push(record.clone());
                             // A live attempt has a stop request, not an exit.
                             let tag = if super::settled(&record.state).0 {
                                 state.as_str()
@@ -1642,7 +1645,7 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                     Err(fail) => {
                         status = Status::Failed;
                         human.push_str(&format!("{attempt} error: {}\n", fail.message));
-                        json!({ "attempt_id": attempt, "host": host, "error": { "code": fail.kind.code(), "message": fail.message } })
+                        json!({ "attempt_id": attempt, "host": host, "error": super::command_error(&fail) })
                     }
                 };
                 receipts.push(row);
@@ -1671,6 +1674,10 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                     data["reason"] = json!(format!("provider silent; lane {id} is still running"));
                 }
                 human.push_str(&text);
+            } else {
+                let (rendered, _) =
+                    render_with_waits(&observed, &[], &selected, edge.roots.state.as_path());
+                data["lanes"] = rendered["lanes"].clone();
             }
             Ok((data, human))
         })(),
@@ -1814,7 +1821,7 @@ mod tests {
             host: None,
         };
         let chunk = |text: &str, offset, eof, byte| OutputResult::Chunk {
-            extra: Default::default(),
+            extra: [("attempt_id".into(), json!(target.attempt))].into(),
             target: target.clone(),
             part: OutputPart::Result,
             state: "succeeded".into(),
@@ -1858,7 +1865,7 @@ mod tests {
             host: None,
         };
         let chunk = |sequence, eof| OutputResult::Chunk {
-            extra: Default::default(),
+            extra: [("attempt_id".into(), json!(target.attempt))].into(),
             target: target.clone(),
             part: OutputPart::Events,
             state: "succeeded".into(),
@@ -2173,7 +2180,7 @@ mod tests {
         let attempt = AttemptId::from_bytes([3; 16]);
         let host = HostId::from_bytes([7; 16]);
         let chunk = OutputResult::Chunk {
-            extra: Default::default(),
+            extra: [("attempt_id".into(), json!(attempt))].into(),
             target: AttemptTarget {
                 extra: Default::default(),
                 attempt,
@@ -2360,6 +2367,23 @@ mod tests {
             "{}",
             fail.message
         );
+    }
+
+    #[test]
+    fn peer_refusal_keeps_owner_code_and_safe_facts() {
+        use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+        let fail = peer_failure_fail(
+            FacadeError::DispatchRefused {
+                fact: Some(DispatchRefusalFact::DetachedWriter),
+                disk: None,
+                reason: "writer refused".into(),
+            }
+            .into(),
+        );
+        let error = json!(super::super::command_error(&fail));
+        assert_eq!(error["code"], "REFUSED");
+        assert_eq!(error["detail"], "writer needs a branch");
+        assert!(error["next"].as_str().is_some_and(|next| !next.is_empty()));
     }
 
     #[test]

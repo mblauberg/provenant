@@ -135,6 +135,21 @@ impl From<run::RunError> for Fail {
         }
     }
 }
+fn command_error(fail: &Fail) -> CommandError {
+    CommandError {
+        diagnostic: fail.projection.as_deref().map(Into::into),
+        code: fail.kind.code().into(),
+        message: fail.message.clone(),
+        cause: fail
+            .projection
+            .as_ref()
+            .and_then(|projection| projection.detail.clone()),
+        repair: fail
+            .projection
+            .as_ref()
+            .and_then(|projection| projection.next.clone()),
+    }
+}
 /// A reply whose reader deadline expired still reports what it saw.
 fn reply_waited(command: &str, outcome: Result<(Value, String, bool), Fail>) -> Reply {
     let mut expired = false;
@@ -164,16 +179,7 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
         },
         Err(fail) => {
             let mut result = CommandResult::new(command, fail.status, Value::Null);
-            result.error = Some(CommandError {
-                diagnostic: fail.projection.as_deref().map(Into::into),
-                code: fail.kind.code().into(),
-                message: fail.message,
-                cause: fail
-                    .projection
-                    .as_ref()
-                    .and_then(|projection| projection.detail.clone()),
-                repair: fail.projection.and_then(|projection| projection.next),
-            });
+            result.error = Some(command_error(&fail));
             Reply {
                 result,
                 human: String::new(),
@@ -657,6 +663,11 @@ impl Registry<'_> {
         for event in &events {
             match event {
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
+                ProviderEvent::MessageStart => {
+                    if !decoded.result.is_empty() && !decoded.result.ends_with('\n') {
+                        decoded.result.push('\n');
+                    }
+                }
                 ProviderEvent::EarlyStop { reason } => {
                     decoded
                         .partial_signals

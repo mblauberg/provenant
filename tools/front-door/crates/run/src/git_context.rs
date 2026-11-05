@@ -157,6 +157,26 @@ fn read_git_with_env(
     limit: usize,
     env: &[(OsString, OsString)],
 ) -> Result<(CapturedStream, bool)> {
+    read_git_within(
+        executor,
+        git,
+        cwd,
+        args,
+        limit,
+        env,
+        Duration::from_secs(10),
+    )
+}
+
+fn read_git_within(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    args: &[&str],
+    limit: usize,
+    env: &[(OsString, OsString)],
+    timeout: Duration,
+) -> Result<(CapturedStream, bool)> {
     let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
         .chain(
             ["--no-pager", "-c", "core.fsmonitor=false"]
@@ -165,7 +185,7 @@ fn read_git_with_env(
                 .map(OsString::from),
         )
         .collect();
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(10));
+    let mut options = ExecOptions::new(&argv, cwd, timeout);
     options.env = Some(env);
     options.stdout = StreamPolicy::Capture { limit };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
@@ -413,7 +433,101 @@ pub fn resolve_git_base(git: &Path, cwd: &Path, base: &str) -> Result<String> {
     let executor = SystemExecutor::new(1).map_err(execution_error)?;
     let env = repository_environment(&executor, git, cwd)
         .map_err(|_| RunError::InvalidBase(base.to_owned()))?;
-    resolve(&executor, git, cwd, base, &env)
+    resolve_fetching(&executor, git, cwd, base, &env)
+}
+
+/// A fetch moves objects, so it gets longer than the metadata reads.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Resolve a base, fetching its tracking ref once if that is what it lacks.
+/// Any merge moves a remote past what this host last fetched, and the
+/// advertised commit then has no local object.
+fn resolve_fetching(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    base: &str,
+    env: &[(OsString, OsString)],
+) -> Result<String> {
+    match resolve(executor, git, cwd, base, env) {
+        Err(RunError::InvalidBase(_)) if fetch_tracking_ref(executor, git, cwd, base, env) => {
+            resolve(executor, git, cwd, base, env)
+        }
+        result => result,
+    }
+}
+
+/// Fetch the configured remote's branch behind a tracking-ref base. Returns
+/// whether a fetch succeeded; a base that is not a tracking ref never fetches.
+fn fetch_tracking_ref(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    base: &str,
+    env: &[(OsString, OsString)],
+) -> bool {
+    let (root, _) = provenant_core::split_revision_root(base);
+    let args = [
+        "rev-parse",
+        "--symbolic-full-name",
+        "--verify",
+        "--end-of-options",
+        root,
+    ];
+    let Ok((symbolic, false)) = read_git_with_env(executor, git, cwd, &args, 4096, env) else {
+        return false;
+    };
+    let Ok(symbolic) = std::str::from_utf8(&symbolic.bytes) else {
+        return false;
+    };
+    let Some((remote, branch)) = symbolic
+        .trim()
+        .strip_prefix("refs/remotes/")
+        .and_then(|name| name.split_once('/'))
+    else {
+        return false;
+    };
+    let Ok((remotes, false)) = read_git_with_env(executor, git, cwd, &["remote"], 16384, env)
+    else {
+        return false;
+    };
+    if !remotes
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .any(|name| name == remote.as_bytes())
+    {
+        return false;
+    }
+    let transport_env = transport_environment(env);
+    if check_transport(executor, git, cwd, env, &transport_env).is_err() {
+        return false;
+    }
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
+    let hardening = transport_args();
+    let args: Vec<&str> = hardening
+        .iter()
+        .map(String::as_str)
+        .chain([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--",
+            remote,
+            refspec.as_str(),
+        ])
+        .collect();
+    matches!(
+        read_git_within(
+            executor,
+            git,
+            cwd,
+            &args,
+            CONTEXT_LIMIT,
+            &transport_env,
+            FETCH_TIMEOUT,
+        ),
+        Ok((_, false))
+    )
 }
 
 /// Resolve the merge base against the locally recorded default origin branch.
@@ -1191,29 +1305,86 @@ mod tests {
         })
     }
 
+    struct TestHome<'a> {
+        executor: &'a SystemExecutor,
+        home: &'a Path,
+    }
+    impl Executor for TestHome<'_> {
+        fn execute(
+            &self,
+            options: ExecOptions<'_>,
+        ) -> std::result::Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError>
+        {
+            let mut env = options.env.unwrap_or_default().to_vec();
+            env.retain(|(key, _)| key != "HOME");
+            env.push(("HOME".into(), self.home.as_os_str().to_owned()));
+            let mut isolated = ExecOptions::new(options.argv, options.cwd, options.timeout);
+            isolated.env = Some(&env);
+            isolated.stdout = options.stdout;
+            isolated.stderr = options.stderr;
+            isolated.stop_on_output_limit = options.stop_on_output_limit;
+            self.executor.execute(isolated)
+        }
+    }
+
+    #[test]
+    fn a_remote_that_moved_past_the_last_fetch_is_fetched_once() -> TestResult {
+        let upstream = small_history()?;
+        let local = small_history()?;
+        let executor = TestHome {
+            executor: &upstream.executor,
+            home: &local.root,
+        };
+        git(
+            &upstream.executor,
+            &upstream.binary,
+            &upstream.root,
+            &["branch", "-M", "main"],
+        )?;
+        let run = |args: &[&str]| git(&local.executor, &local.binary, &local.root, args);
+        run(&[
+            "remote",
+            "add",
+            "origin",
+            upstream.root.to_str().ok_or("non-UTF8 root")?,
+        ])?;
+        // Its tracking ref exists, but the commit the remote now advertises
+        // has never been fetched here.
+        run(&["update-ref", "refs/remotes/origin/main", &local.base])?;
+        git(
+            &upstream.executor,
+            &upstream.binary,
+            &upstream.root,
+            &[
+                "-c",
+                "user.name=Moved",
+                "-c",
+                "user.email=moved@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "moved",
+            ],
+        )?;
+        let moved = resolve_git_base(&upstream.binary, &upstream.root, "HEAD")?;
+        assert!(run(&["cat-file", "-e", &moved]).is_err());
+        let env = repository_environment(&executor, &local.binary, &local.root)?;
+        let resolve_base =
+            |base: &str| resolve_fetching(&executor, &local.binary, &local.root, base, &env);
+
+        assert_eq!(resolve_base("origin/main")?, moved);
+        assert!(matches!(
+            resolve_base("absent-base"),
+            Err(RunError::InvalidBase(named)) if named == "absent-base"
+        ));
+        Ok(())
+    }
+
     #[test]
     fn remote_base_requires_exact_advertised_oid() -> TestResult {
-        struct TestHome<'a> {
-            executor: &'a SystemExecutor,
-            home: &'a Path,
-        }
-        impl Executor for TestHome<'_> {
-            fn execute(
-                &self,
-                options: ExecOptions<'_>,
-            ) -> std::result::Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError>
-            {
-                let mut env = options.env.unwrap_or_default().to_vec();
-                env.retain(|(key, _)| key != "HOME");
-                env.push(("HOME".into(), self.home.as_os_str().to_owned()));
-                let mut isolated = ExecOptions::new(options.argv, options.cwd, options.timeout);
-                isolated.env = Some(&env);
-                isolated.stdout = options.stdout;
-                isolated.stderr = options.stderr;
-                isolated.stop_on_output_limit = options.stop_on_output_limit;
-                self.executor.execute(isolated)
-            }
-        }
         let fixture = small_history()?;
         let executor = TestHome {
             executor: &fixture.executor,
