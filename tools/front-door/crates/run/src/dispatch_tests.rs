@@ -14,6 +14,50 @@ use std::{
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn cloud_attempt_never_enters_local_supervisor() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = two_tasks(2);
+    input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
+        target: "target".into(),
+        provider: "fake".into(),
+        environment: "env".into(),
+        repository: "owner/repo".into(),
+        branch: "main".into(),
+        model: "model".into(),
+        effort: None,
+        deadline_seconds: 3600,
+    });
+    store.create(&input, &call)?;
+    let fake = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    let started = store.start_checked(
+        input.run_id,
+        &input.request,
+        &fake,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
+    assert!(
+        matches!(started.as_slice(), [Started::Refused { attempt, .. }] if *attempt == input.attempts[1].attempt_id)
+    );
+    assert_eq!(fake.prepared.get(), 1);
+    assert!(matches!(
+        store.cancel(input.attempts[0].attempt_id, "stop", &call)?,
+        CancelReceipt::Unobservable { .. }
+    ));
+    assert!(matches!(
+        store.record(input.attempts[0].attempt_id, &call)?.state,
+        AttemptState::Queued { .. }
+    ));
+    Ok(())
+}
+
+#[test]
 fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -417,8 +461,12 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         network,
         database_ipc: false,
         read_roots: reads.iter().map(|path| base.join(path)).collect(),
+        attachments: Vec::new(),
         write_roots: writes.iter().map(|path| base.join(path)).collect(),
         inputs_root: None,
+        source_root: None,
+        source_live: false,
+        source_identity: None,
     };
     let task = |writer: bool, access: LaneAccess| {
         let mut task = input().request.tasks[0].clone();
@@ -523,6 +571,18 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
             task(false, access(None, &["reads/alias"], &[])),
             false,
             "symlinked read root escaping the parent root",
+        ),
+        (
+            &read_only,
+            task(
+                false,
+                LaneAccess {
+                    source_root: Some(base.join("reads")),
+                    ..Default::default()
+                },
+            ),
+            false,
+            "graph source the parent was not given",
         ),
         (
             &read_only,

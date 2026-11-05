@@ -11,9 +11,6 @@ pub enum CodeKind {
     /// apart without `message`, so owners split it into specific codes
     /// (#2345) while this code stays valid for existing consumers.
     Umbrella,
-    /// A spelling older than the upper-case convention. Kept as emitted: renaming
-    /// would break consumers that match on it.
-    LegacySpelling,
 }
 
 /// One stable `error.code` an edge (not the run owner) emits today.
@@ -104,33 +101,33 @@ pub const EDGE_ERROR_CODES: &[EdgeErrorCode] = &[
         "The workflow session is registered under a different project.",
     ),
     code(
-        "launch_unknown",
-        CodeKind::LegacySpelling,
-        "The launch handoff was not confirmed (same meaning as LAUNCH_UNKNOWN).",
+        "LAUNCH_UNKNOWN",
+        CodeKind::Specific,
+        "The launch handoff was not confirmed.",
     ),
     code(
-        "owner_local_only",
-        CodeKind::LegacySpelling,
+        "OWNER_LOCAL_ONLY",
+        CodeKind::Specific,
         "The inbox owner must run this operation on the owner host or from the owning chair session.",
     ),
     code(
-        "unsupported_owner",
-        CodeKind::LegacySpelling,
+        "UNSUPPORTED_OWNER",
+        CodeKind::Specific,
         "The peer does not support inbox operations.",
     ),
     code(
-        "console_app_unavailable",
-        CodeKind::LegacySpelling,
+        "CONSOLE_APP_UNAVAILABLE",
+        CodeKind::Specific,
         "The console app cannot be opened.",
     ),
     code(
-        "reconcile_incomplete",
-        CodeKind::LegacySpelling,
+        "RECONCILE_INCOMPLETE",
+        CodeKind::Specific,
         "Reconcile could not settle everything it found.",
     ),
     code(
-        "cli_failed",
-        CodeKind::LegacySpelling,
+        "CLI_FAILED",
+        CodeKind::Specific,
         "A delegated Provenant command failed without a code of its own.",
     ),
 ];

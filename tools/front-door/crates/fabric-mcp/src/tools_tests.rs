@@ -1,256 +1,3 @@
-#[test]
-fn graph_admission_error_has_safe_field_and_action() {
-    let error = FacadeError::graph_admission(
-        provenant_fabric_runtime::graph::AdmissionError::Schema("TOKEN_SENTINEL\u{1b}".into()),
-    );
-    let value = ServiceError::Facade(error).structured_error();
-    assert_eq!(value["code"], "dispatch_refused");
-    assert!(value["detail"].as_str().unwrap().contains("schema_version"));
-    assert!(value["hint"].is_string());
-    assert!(!value.to_string().contains("TOKEN_SENTINEL"));
-    let error = FacadeError::graph_admission(
-        provenant_fabric_runtime::graph::AdmissionError::OutputKind {
-            field: provenant_fabric_runtime::graph::GraphOutputField::Input,
-            reason: "TOKEN_SENTINEL".into(),
-        },
-    );
-    let value = ServiceError::Facade(error).structured_error();
-    assert!(
-        value["detail"]
-            .as_str()
-            .unwrap()
-            .contains("inputs[].outputs")
-    );
-    assert!(value["next"].is_string());
-    assert!(!value.to_string().contains("TOKEN_SENTINEL"));
-}
-
-#[test]
-fn graph_limit_refusal_keeps_typed_field_and_values() {
-    use provenant_fabric_runtime::graph::{AdmissionError, GraphLimitKey, GraphStructuralLimit};
-    let error =
-        FacadeError::graph_admission(AdmissionError::StructuralLimit(GraphStructuralLimit {
-            key: GraphLimitKey::Nodes,
-            actual: 4,
-            max: 1,
-        }));
-    let value = ServiceError::Facade(error).structured_error();
-    assert_eq!(value["code"], "dispatch_refused");
-    let detail = value["detail"].as_str().unwrap();
-    assert!(detail.contains("limits.nodes=1"));
-    assert!(detail.contains("(4)"));
-    assert!(value["next"].as_str().unwrap().contains("limit"));
-}
-
-#[test]
-fn invalid_input_paths_omit_untrusted_data() {
-    use provenant_fabric_runtime::coordination::{CoordinationError, InputError};
-    for path in [
-        "/private/TOKEN_SENTINEL\u{1b}".to_owned(),
-        format!("tasks[{}].title", "1".repeat(200)),
-        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
-    ] {
-        for error in [
-            ServiceError::Invalid(InputError::new(path.clone())),
-            ServiceError::Coordination(CoordinationError::Input(InputError::new(path.clone()))),
-        ] {
-            let detail = error.structured_error();
-            let wire = detail.to_string();
-            assert_eq!(detail["code"], "invalid_input");
-            assert!(detail["path"].is_null());
-            assert!(!wire.contains("TOKEN_SENTINEL"));
-            assert!(!wire.contains("/private"));
-            assert!(wire.len() < 4096);
-            assert!(!wire.chars().any(char::is_control));
-            assert!(detail["hint"].is_string());
-        }
-    }
-    let detail = ServiceError::Invalid(InputError::new("tasks[1].title")).structured_error();
-    assert_eq!(detail["path"], "tasks[1].title");
-}
-
-#[test]
-fn oversized_input_projects_field_reason_and_action() {
-    use provenant_fabric_runtime::coordination::input::ValidateInput;
-    let input: SubmitInput = serde_json::from_value(json!({
-        "op":"submit", "operation_id":"large-prompt",
-        "tasks":[{"prompt":format!("TOKEN_SENTINEL{}", "é".repeat(40000)), "route":{"kind":"named", "name":"utility"}, "timeout_seconds":1}]
-    })).unwrap();
-    let error = input
-        .validate_input(provenant_core::WaitTransport::Mcp)
-        .unwrap_err();
-    let wire = ServiceError::Invalid(error).structured_error();
-    assert_eq!(wire["code"], "invalid_input");
-    assert_eq!(wire["path"], "tasks[0].prompt");
-    let detail = wire["detail"].as_str().unwrap();
-    assert!(detail.contains("tasks[0].prompt"));
-    assert!(detail.contains("65536"));
-    assert!(wire["hint"].is_string());
-    assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
-}
-
-#[test]
-fn typed_validation_selects_safe_field_without_parsing_error_text() {
-    let arguments = json!({"op":"submit","tasks":[{
-        "title":"TOKEN_SENTINEL\u{1b}", "prompt":"work",
-        "route":{"kind":"named","name":"utility"}, "timeout_seconds":1
-    }]});
-    let Err(error) = ToolCall::parse("fabric_run", arguments) else {
-        panic!("control characters in title must be refused");
-    };
-    assert!(
-        matches!(error, InvalidInput::Validated(error) if error.safe_path() == Some("tasks[0].title"))
-    );
-}
-
-#[test]
-fn memory_pressure_projects_configured_source_and_action() {
-    use provenant_records::diagnostic::{
-        PressureLevel, PressureThreshold, ResourceFact, SettingSource,
-    };
-    let error = FacadeError::ConfinementRefused {
-        resource: Some(ResourceFact::MemoryPressure {
-            level: PressureLevel::Critical,
-            threshold: PressureThreshold::Warning,
-            origin: SettingSource::Configuration,
-        }),
-    };
-    let value = ServiceError::Facade(error).structured_error();
-    assert_eq!(value["code"], "confinement_refused");
-    assert!(
-        value["detail"]
-            .as_str()
-            .unwrap()
-            .contains("memory_pressure_threshold")
-    );
-    assert!(
-        value["detail"]
-            .as_str()
-            .unwrap()
-            .contains("host configuration")
-    );
-    assert!(value["next"].as_str().unwrap().contains("memory"));
-
-    let error = FacadeError::DispatchRefused {
-        reason: "TOKEN_SENTINEL /private/host".into(),
-        disk: None,
-        fact: Some(
-            provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource(
-                ResourceFact::MemoryPressure {
-                    level: PressureLevel::Critical,
-                    threshold: PressureThreshold::Warning,
-                    origin: SettingSource::Configuration,
-                },
-            ),
-        ),
-    };
-    let value = ServiceError::Facade(error).structured_error();
-    assert_eq!(value["code"], "dispatch_refused");
-    assert!(
-        value["detail"]
-            .as_str()
-            .unwrap()
-            .contains("host configuration")
-    );
-    assert!(value["next"].as_str().unwrap().contains("memory"));
-    assert!(!value.to_string().contains("TOKEN_SENTINEL"));
-    assert!(!value.to_string().contains("/private/host"));
-}
-
-#[test]
-fn lane_cap_projects_its_actual_limit_and_source() {
-    use provenant_records::diagnostic::{LaneLimit, ResourceFact, SettingSource};
-    for (kind, key, origin) in [
-        (
-            LaneLimit::HostWriters,
-            "max_writer_lanes",
-            SettingSource::Configuration,
-        ),
-        (
-            LaneLimit::ProjectWriters,
-            "max_project_writer_lanes",
-            SettingSource::ShippedDefault,
-        ),
-        (
-            LaneLimit::ProjectTotal,
-            "max_project_lanes",
-            SettingSource::ShippedDefault,
-        ),
-    ] {
-        let error = FacadeError::ConfinementRefused {
-            resource: Some(ResourceFact::LaneCap {
-                active: 3,
-                limit: 3,
-                lane_limit: kind,
-                origin,
-            }),
-        };
-        let wire = serde_json::to_vec(&error).unwrap();
-        let decoded: FacadeError = serde_json::from_slice(&wire).unwrap();
-        let value = ServiceError::Facade(decoded).structured_error();
-        assert_eq!(value["code"], "confinement_refused");
-        assert!(value["detail"].as_str().unwrap().contains(key));
-        assert!(value["next"].as_str().unwrap().contains("lane"));
-        assert!(
-            value["detail"]
-                .as_str()
-                .unwrap()
-                .contains(origin.description())
-        );
-    }
-}
-
-#[test]
-fn process_limit_keeps_io_code_and_omits_source_text() {
-    let error = FacadeError::Io {
-        operation: "TOKEN_SENTINEL".into(),
-        path: Some("/private/host".into()),
-        delivery_limit: None,
-        delivery_stage: None,
-        resource: Some(Box::new(
-            provenant_records::diagnostic::ResourceFact::Processes {
-                used: 950,
-                limit: 1000,
-                reserved: 100,
-            },
-        )),
-        input_failure: None,
-    };
-    let decoded: FacadeError =
-        serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
-    let value = ServiceError::Facade(decoded).structured_error();
-    assert_eq!(value["code"], "io");
-    assert!(value["detail"].as_str().unwrap().contains("RLIMIT_NPROC"));
-    assert!(value["next"].as_str().unwrap().contains("process"));
-    assert!(!value.to_string().contains("TOKEN_SENTINEL"));
-    assert!(!value.to_string().contains("/private/host"));
-}
-
-#[test]
-fn unreadable_input_io_projects_safe_reason() {
-    let error = FacadeError::Io {
-        operation: "TOKEN_SENTINEL".into(),
-        path: Some("/private/host".into()),
-        delivery_limit: None,
-        delivery_stage: None,
-        resource: None,
-        input_failure: Some(provenant_records::diagnostic::IoFact::InputUnreadable),
-    };
-    let decoded: FacadeError =
-        serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
-    let value = ServiceError::Facade(decoded).structured_error();
-    assert_eq!(value["code"], "io");
-    assert!(
-        value["detail"]
-            .as_str()
-            .unwrap()
-            .contains("input could not be read")
-    );
-    assert!(value["next"].is_string());
-    assert!(!value.to_string().contains("TOKEN_SENTINEL"));
-    assert!(!value.to_string().contains("/private/host"));
-}
-
 use super::*;
 use provenant_core::OperationId;
 use serde_json::json;
@@ -337,9 +84,9 @@ fn uncertain_mutation_errors_include_operation_id_and_recovery() {
         return;
     };
     let error = ServiceError::Facade(FacadeError::LaunchUnknown { operation_id });
-    assert_eq!(error.code(), "launch_unknown");
+    assert_eq!(error.code(), "LAUNCH_UNKNOWN");
     let detail = error.structured_error();
-    assert_eq!(detail["code"], "launch_unknown");
+    assert_eq!(detail["code"], "LAUNCH_UNKNOWN");
     assert_eq!(detail["operation_id"], "dispatch-17");
     assert!(detail["message"].is_string() && detail["hint"].is_string());
 }
@@ -738,12 +485,12 @@ fn cli_error_detail_keeps_safe_revision_without_raw_data() {
     assert_eq!(detail["revision"], 4);
     assert!(detail.get("data").is_none());
     let error = ServiceError::Cli {
-        code: "cli_failed".into(),
+        code: "CLI_FAILED".into(),
         message: "failed".into(),
         data: json!("text"),
     };
     let detail = error.structured_error();
-    assert_eq!(detail["code"], "cli_failed");
+    assert_eq!(detail["code"], "CLI_FAILED");
     assert!(detail.get("data").is_none());
 }
 
@@ -793,10 +540,7 @@ fn control_ops_are_strict_local_mutations_with_bounded_text() {
 fn coordination_store_errors_include_safe_context() {
     use provenant_fabric_store::Error;
     let invalid = ServiceError::Coordination(CoordinationError::Store(Error::Invalid("through")));
-    let invalid = invalid.structured_error();
-    assert_eq!(invalid["field"], "through");
-    assert!(invalid["message"].as_str().unwrap().contains("through"));
-    assert!(invalid["hint"].is_string());
+    assert_eq!(invalid.structured_error()["field"], "through");
     let io = ServiceError::Coordination(CoordinationError::Store(Error::Io {
         path: "/state/inbox.db".into(),
         source: std::io::Error::other("private"),
@@ -823,8 +567,6 @@ fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
     let unsafe_error = ServiceError::Facade(FacadeError::Io {
         delivery_limit: None,
         delivery_stage: None,
-        resource: None,
-        input_failure: None,
         operation: "TOKEN_SENTINEL\u{1b}".into(),
         path: Some("/private/host".into()),
     })
@@ -833,7 +575,7 @@ fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
     assert!(!encoded.contains("TOKEN_SENTINEL"));
     assert!(!encoded.contains("/private/host"));
     let error = ServiceError::Facade(FacadeError::InvalidInput {
-        detail: Some(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema),
+        detail: Some(format!("schema version\u{1b}{}", "é".repeat(2000))),
     })
     .structured_error();
     let detail = error["detail"].as_str().unwrap();

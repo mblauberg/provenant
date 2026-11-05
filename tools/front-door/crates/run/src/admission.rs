@@ -477,6 +477,18 @@ impl RunStore {
                             ),
                             _ => "launch: not yet handed to a guardian".to_owned(),
                         })
+                } else if matches!(lane.state, AttemptState::Starting { .. })
+                    && self.attempt_dir(lane.run_id, lane.attempt_id, false).is_ok_and(|attempt| {
+                        matches!(
+                            attempt.try_lock_existing(
+                                std::ffi::OsStr::new(crate::writer::SEED_WAIT_LOCK),
+                                provenant_os::fs::LockMode::Exclusive,
+                            ),
+                            Err(provenant_os::fs::FsError::LockTimeout { .. })
+                        )
+                    })
+                {
+                    "launch preparation: seeding the Cargo cache".to_owned()
                 } else {
                     let active: i64 = self
                         .db

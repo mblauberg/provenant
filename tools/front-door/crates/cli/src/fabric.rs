@@ -569,12 +569,12 @@ pub fn edge_diagnostic(error: &EdgeError) -> Option<provenant_records::diagnosti
                 provenant_records::diagnostic::Destination::Local,
             ))
         }
-        EdgeError::Coordination(error) => Some(error.diagnostic()),
+        EdgeError::Coordination(error) => Some(FacadeError::from(error).diagnostic()),
         EdgeError::Relay(provenant_fabric_mcp::tools::ServiceError::Facade(error)) => {
             Some(error.diagnostic())
         }
         EdgeError::Relay(provenant_fabric_mcp::tools::ServiceError::Coordination(error)) => {
-            Some(error.diagnostic())
+            Some(FacadeError::from(error).diagnostic())
         }
         _ => None,
     }

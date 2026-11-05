@@ -455,6 +455,8 @@ enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
     Busy,
+    /// No guardian was contacted, but custody remains protected.
+    Protected(String),
     SetupLockTimeout(u64),
     RetainedImport {
         run: RunId,
@@ -464,7 +466,7 @@ enum HandOff {
     /// The guardian may have received the launch.
     Uncertain(String),
 }
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Started {
     Launched(AttemptId),
     /// Held child custody is full, or a policy retry's launch time has not
@@ -480,8 +482,13 @@ pub enum Started {
         attempt: AttemptId,
         error: String,
     },
+    /// Preparation failed and custody must be recovered before retrying.
+    Blocked {
+        attempt: AttemptId,
+        error: String,
+    },
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefusalKind {
     Policy,
     Preparation,
@@ -544,6 +551,18 @@ fn child_access_within_impl(
     if child.access.database_ipc && !parent.access.database_ipc {
         return Err(RunError::Validation(
             "child database IPC exceeds parent access",
+        ));
+    }
+    // A child cannot select a different host-bound graph source.
+    if (child.access.source_root.is_some()
+        || child.access.source_identity.is_some()
+        || child.access.source_live)
+        && (child.access.source_root != parent.access.source_root
+            || child.access.source_identity != parent.access.source_identity
+            || child.access.source_live != parent.access.source_live)
+    {
+        return Err(RunError::Validation(
+            "child graph source exceeds parent access",
         ));
     }
     // Materialised graph inputs belong to the node that was given them.
@@ -616,6 +635,22 @@ fn child_access_within_impl(
                 .is_some_and(|root| granted.iter().any(|parent| root.starts_with(parent)))
         })
     };
+    // A parent file grant authorises only that file; directory grants cover descendants.
+    for attachment in &child.access.attachments {
+        let canonical = provenant_os::fs::canonicalize(attachment)
+            .ok()
+            .filter(|path| path == attachment && path.is_file())
+            .filter(|path| access_root_allowed(path, &state, true))
+            .filter(|path| !provenant_confinement::refuses_lane_root(path, true, home));
+        if !canonical.is_some_and(|path| {
+            parent.access.attachments.contains(&path)
+                || reads.iter().any(|root| path.starts_with(root))
+        }) {
+            return Err(RunError::Validation(
+                "child attachment exceeds parent access",
+            ));
+        }
+    }
     if !within(&child.access.write_roots, &writes, false)
         || !within(&child.access.read_roots, &reads, true)
     {
@@ -628,6 +663,28 @@ fn child_access_within_impl(
 mod release_root_tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn child_attachment_must_be_covered_by_parent()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let state = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(state.path())?.join("state");
+        let first = root.join("first.png");
+        let second = root.join("second.png");
+        std::fs::write(&first, b"first")?;
+        std::fs::write(&second, b"second")?;
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.attachments = vec![first.clone()];
+        let mut child = parent.clone();
+        assert!(child_access_within(&parent, &child, &state, None).is_ok());
+        child.access.attachments = vec![second.clone()];
+        assert!(child_access_within(&parent, &child, &state, None).is_err());
+        parent.access.read_roots.push(root.clone());
+        assert!(child_access_within(&parent, &child, &state, None).is_ok());
+        Ok(())
+    }
 
     /// A read root in a Codex standalone release passes the shared entry
     /// exception; a write root there stays refused.
@@ -1362,6 +1419,15 @@ impl RunStore {
             if !matches!(record.state, AttemptState::Queued { .. }) {
                 continue;
             }
+            // Never hand a cloud attempt to the local supervisor, including
+            // during recovery after the submitting process exits.
+            if request
+                .tasks
+                .iter()
+                .any(|task| task.task_id == record.task_id && task.cloud.is_some())
+            {
+                continue;
+            }
             let now = || {
                 call.clock
                     .wall_now()
@@ -1780,6 +1846,10 @@ impl RunStore {
                         self.launch_unknown(run, call)?;
                         Started::Unknown { attempt: id, error }
                     }
+                    Err(HandOff::Protected(error)) => {
+                        self.launch_blocked(run, &error, call)?;
+                        Started::Blocked { attempt: id, error }
+                    }
                 },
             );
         }
@@ -1797,6 +1867,26 @@ impl RunStore {
                 return Ok(());
             }
             op.state = OperationState::LaunchUnknown;
+            tx.execute(
+                "UPDATE operations SET record=?1 WHERE run=?2",
+                params![crate::db::bytes(&op)?, run.to_string()],
+            )?;
+            Ok(())
+        })
+    }
+    fn launch_blocked(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
+        self.write(call, |tx| {
+            let raw: Vec<u8> = tx.query_row(
+                "SELECT record FROM operations WHERE run=?1 AND project=?2",
+                params![run.to_string(), self.context.project_id.to_string()],
+                |r| r.get(0),
+            )?;
+            let mut op: OperationRecord = decode(&raw)?;
+            if op.state == OperationState::Terminal {
+                return Err(RunError::Conflict);
+            }
+            op.state = OperationState::Blocked;
+            op.blocked_reason = Some(reason.to_owned());
             tx.execute(
                 "UPDATE operations SET record=?1 WHERE run=?2",
                 params![crate::db::bytes(&op)?, run.to_string()],
@@ -1929,4 +2019,4 @@ mod retry_pin_tests {
     }
 }
 
-mod hand_off;
+pub(crate) mod hand_off;

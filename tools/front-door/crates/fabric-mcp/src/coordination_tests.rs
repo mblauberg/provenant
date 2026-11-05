@@ -115,8 +115,6 @@ impl F3Facade for SubmitFacade {
             return Err(FacadeError::Io {
                 delivery_limit: None,
                 delivery_stage: None,
-                resource: None,
-                input_failure: None,
                 operation: "read".into(),
                 path: Some("/private/host/wait".into()),
             });
@@ -154,8 +152,6 @@ impl F3Facade for SubmitFacade {
             return Err(FacadeError::Io {
                 delivery_limit: None,
                 delivery_stage: None,
-                resource: None,
-                input_failure: None,
                 operation: "read".into(),
                 path: Some("/private/host/output".into()),
             });

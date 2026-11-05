@@ -19,9 +19,9 @@ family when the HARNESS review ladder requires it or when a weak oracle
 justifies an additional independent view. Different model names alone do not
 prove different answering families.
 
-Use `review-council --plan on` for review; the chair validates the planned
+Use `review --plan on` for review; the chair validates the planned
 panel against the HARNESS floors and records routes and substitutions.
-`review-council` frames a `subject`, runs `lenses`, then `verify` and
+`review` frames a `subject`, runs `lenses`, then `verify` and
 `synthesis`. The verifier tries to falsify findings; the synthesis settles
 them against evidence. `code-review` owns findings, severities and dispositions.
 For a design question without a code subject, use independent branches in

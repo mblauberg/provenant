@@ -315,17 +315,9 @@ keep their error code over the wire. MCP errors include a message and recovery
 hint, and validation identifies the expected value. Uncertain mutations carry
 their `operation_id`.
 Graph launch diagnostics and MCP projections select safe details and actions
-from the typed refusal before persisting or transporting them. MCP decodes and
-validates input for its transport without flattening the validation cause to
-text; the projection includes approved fields and reasons. A bounded input
-refusal includes the approved field and byte limit, without its contents. Planner
-expansion refusals retain only approved typed failure facts, not captured fragment
-text or a failed planner's result excerpt. An unanchored
+from the typed refusal before persisting or transporting them. An unanchored
 host path or an arbitrary source error is omitted; uncertain handoffs name the
-operation to inspect instead of directing a new launch. A denied fallback may
-include a unanimous typed readiness cause from the identity-checked local attempt;
-free-form skipped-route details do not enter graph diagnostics. Protocol mismatch
-transport identifies a peer by its host ID rather than its SSH destination.
+operation to inspect instead of directing a new launch.
 - Why: people and agents act on the code.
 - Test: `crates/cli/src/fabric.rs::upgrade_and_peer_version_refusals_match_on_both_edges`;
   `src/fabric.rs::peer_run_errors_stay_typed_through_cli_rendering`
@@ -336,30 +328,55 @@ transport identifies a peer by its host ID rather than its SSH destination.
 The graph runtime owns static admission for presets, raw documents and planner
 fragments. It validates schema capability, the configured structural limits,
 the expanded plan, the worst-case checkpoint envelope and selected output
-kinds before submission. `GraphDocument::admit` returns a typed admission
-stage with the original reason; callers can distinguish schema, composite, plan,
-structural-limit, envelope and output-kind failures. Recovery uses the same
-schema-capability predicate. For composites, the declared exports are the static public capability; admission
+kinds before submission. Recovery uses the same schema-capability predicate.
+For composites, the declared exports and any reduced verdict are the static public capability; admission
 checks consumers against that contract and validates export references and
 selector shapes. Whether a selected member actually made an output available is
 runtime evidence and remains visible in the composite settlement.
+Schema 2 selectors may list selected `commit`, `verdict` and `findings` in
+`required_outputs`; the consumer fails before its next attempt if any is
+unavailable or invalid. Required findings may also come from a composite when
+all selected member evidence is complete. Required commit or verdict from a
+composite, required selections from loop and planner sources, and the
+unimplemented `required` selector field are refused at admission rather than
+silently treated as optional.
 Schema 2 is the minimum version when the complete typed document carries a
 deferred-review field; presets choose that version after building the document,
 while raw documents retain their authored version. Version 2 carries deferred
-review configuration (`review` and `family_group` on nodes, and `review_base`
-on the document); a version 1 document must not carry these fields. The host
-pins `review_base` in the execution and can record review resolution in an
-expansion. Checkpoint and envelope versions remain 1. A review specification
+review configuration (`review`, `family_group` and `review_base` on nodes, and
+`review_base` on the document); a version 1 document must not carry these fields. The host
+pins the document `review_base` in the execution and can record review resolution in an
+expansion. A read-only node's own `review_base` is resolved in the graph's
+bound execution directory and saved on the node before its first attempt.
+Read-only nodes cannot name a separate `worktree`; that field is reserved for
+writers. Replay uses that OID and refuses an existing
+attempt if its required binding is missing. Status includes the saved pin.
+Rebinding an existing journal retains its original execution
+directory and its persisted execution fields. A nonempty document review-base
+reference without its saved execution pin is rejected on bind or journal read;
+it is never resolved again from the current checkout. Checkpoint and envelope versions remain 1. A review specification
 requires a read-only plan node with a source and no ordinary plan specification.
 Older hosts reject version 2 and require an upgrade.
 
-A deferred review resolves after its subject is pinned. The host returns a
-read-only composite expansion; the runtime validates and journals it before
+A deferred review resolves after its subject is pinned. The host builds the
+whole selected panel as a read-only composite expansion: any frame, lenses,
+verifiers and synthesis or reduction use that same commit. The runtime checks
+its shape and read roots against the admitted node and journals it before
 running its members. Resume replays the journal without resolving again. The
 host supplies the models of previous attempts and the families of accepted
 attempts so alias retries can avoid a refused model and grouped lenses can
 prefer different families. Family separation is best effort: every lens runs
 when a suitable route exists, and a shared family is recorded as a substitution.
+
+Graph launch errors use the core transient classifier. Unknown writer custody
+is retryable; an active writer remains a refusal. The launch retry limit and
+backoff are fixed with the attempt from the configured knobs. A launch retry
+requires a wall clock to record its wake: if that clock or the computed deadline
+is unavailable, advancement returns a refusal and leaves the prior checkpoint.
+- Test: `crates/fabric-runtime/src/graph/graph_tests.rs::launch_retry_without_a_wall_clock_keeps_the_prior_checkpoint`;
+  `::launch_retry_kinds_are_decided_from_the_typed_error_only`;
+  `::launch_retry_policy_limits_failures_and_persists_the_source`
+- Owner: `crates/fabric-runtime/src/graph.rs`
 
 
 ### Pipeline presets
@@ -434,6 +451,9 @@ inside text insert scalar values. Unknown parameters and unresolved bindings
 are rejected. Stage IDs form local dependency and export names; expansion
 namespaces nested children. Child presets have their own parameters and roles;
 an entry's `parameters` and `roles` tables override that child's defaults.
+Typed parameters may declare `bind = "risk_tier"` or `bind = "kind"` to
+receive the corresponding request flag. An unbound request flag warns and is
+dropped; parameter files and dispatch overrides retain their precedence.
 
 Composite nodes retain their children, expose declared outputs and report
 one grouped status. Their internal attempts and evidence remain available in
@@ -446,15 +466,19 @@ output kinds. Composites use no provider attempt of their own. An entry can
 declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
 roles and presets inside bounded repair. Existing `loop.body` configuration
 also remains available. Planner fragments do not resolve named presets.
+Parallel groups may declare `min_successful`, `zero_minimum`, `reduce_verdict`
+and `export_first` on the group; the [preset runbook](../runbooks/presets.md#composition-rules)
+describes their accepted values.
+Preset compilation uses the runtime's composite expansion and loop count when
+it checks the host depth and node bounds, so admission checks the same graph.
 
-Bundled `scout-swarm`, `generator-evaluator`, `review-council`, `big-batch`,
+Bundled `scout-swarm`, `generator-evaluator`, `review`, `big-batch`,
 `scope-then-run` and `deliver` express scouting, implementation with
 evaluating lenses, combined review, a full batch, scouting and scoping before
 a run, and delivery through CI to land respectively. Scouts use junior tiers and remain read-only;
 implementation uses senior tiers; the end-of-batch refactor uses principal.
-The `generator-evaluator` default lenses are correctness-spec and simplicity;
-add `tests` or `design-fit-reuse` through its `lenses` list to challenge test
-quality and reuse. Junior reviews on senior or principal work are
+The `generator-evaluator` uses the `review` shape and lens defaults; an
+explicit `lenses` list replaces the default selection. Junior reviews on senior or principal work are
 advisory. Counted acceptance reviews must meet the author's tier under
 `HARNESS.md`; add principal coverage for high-risk areas and principal-authored
 refactors. Synthesis reconciles evidence rather than taking a majority vote.
@@ -467,7 +491,7 @@ gate's findings (check names with log excerpts), the writer's `result` and
 `remaining` handoff items in every round and the previous repair's, never a
 transcript,
 followed by the CI gate again. The composite
-succeeds on either path. A `review-council` then reviews a `head` source
+succeeds on either path. A `review` then reviews a `head` source
 binding to the writer, so it judges the newest repaired head; a verdict gate
 and a `land` node merge that head under the host's tier policy. No model runs
 while a gate is pending. `max_iterations` bounds the rounds; exhaustion raises
@@ -584,6 +608,12 @@ the host's `[domains.fabric.graph] allowed_read_roots` list. A planner
 fragment may not add `read_roots`, change `source` or change `role` relative
 to its planner node.
 
+Agent nodes may also declare `attachments`, a list of image file paths. Paths
+are canonicalised and granted read-only as individual files. Claude receives
+paths in its prompt and Codex receives image arguments. Other adapters warn
+about `image_input` and retain the read grant. A planner fragment cannot add
+attachments beyond its planner node's list.
+
 A graph document may set a top-level `network` of `"on"` or `"off"`. Every
 node lane the graph launches receives that network reach; without it, lanes
 default to open network. `run --network` binds it into a preset graph, with an
@@ -608,6 +638,27 @@ the node becomes ready. The checkpoint retains the pinned source for replay
 and route fallback. A read-only review receives this exact subject as its
 attempt head; its own lane launch head is not a combined integration commit.
 Missing subjects fail closed rather than falling back to the current checkout.
+For a read-only node bound to an upstream writer, the host verifies the
+writer's registered checkout and its recorded directory identity. Other pinned
+readers use the graph execution's verified checkout. Before launch, the host
+materialises the pinned commit into an attempt-owned source tree and gives the
+provider that tree as its working directory. Its detached Git HEAD and index
+name the pinned commit; the live checkout and its mutable refs are not granted.
+A later commit or uncommitted edit in the source checkout cannot change the
+provider's view, and an available historical commit can be reviewed after the
+checkout advances. A removed or replaced source checkout is refused; accepted
+operations reattach to their original authority. Unpinned read-only scouts keep
+the ordinary live-checkout and explicit read-root behavior. Graph status
+redacts the host checkout path and directory identity while retaining the
+pinned head.
+
+Source trees are bounded to 100,000 entries, 512 MiB total and 64 MiB per
+object; Git submodules and symlinks with absolute or parent-traversing targets are refused. A read
+root inside the source checkout is covered by the pinned view instead. A host
+read-only write exception or a broader grant overlapping the live source
+refuses this isolated launch. These refusals name the issue before the
+provider starts; reduce the source or use an explicitly scoped unpinned task
+when its access is appropriate.
 The checkpoint also pins the first resolved integration head. A synthesise
 node, or a writer whose source is that pinned commit, that has not yet
 attempted fails if the integration branch has moved, and a rerun starts a new
@@ -647,6 +698,12 @@ retain their usual failure semantics. Disposition validation still applies.
 A partial composite waits for its members to settle, exports the successful
 members and names unavailable members in its result. A blocked node reports
 its blocking upstream node and state in status.
+
+A composite may declare `reduce_verdict = true`. It computes a verdict without
+an attempt from its successful exporting members: request changes is worse than
+inconclusive, then approve with nits, then approve. A missing or invalid verdict
+is inconclusive. The composite fails its coverage minimum when no member succeeds,
+even if its configured minimum is zero.
 
 A node may declare `dispositions`, a list of allowed values. At settlement its
 findings block must parse and every finding must carry a `disposition` from
@@ -1054,7 +1111,9 @@ outside the writer's chain, never a gate, loop, decision or land output such
 as CI's `PASS`, and judged the head
 through its pinned `source` commit or, without one, as the newest head of the
 writer's chain upstream of it. A composite input has no subject of its own, so
-it resolves to the member that exported its verdict, recursively: a council
+it resolves to the member that exported its verdict, recursively. A reduced
+verdict instead requires every successful exporting member to be a read-only
+reviewer of the pinned head. A council
 pinned to an earlier head never vouches for a later one that merely precedes
 its boundary. Otherwise the node fails without calling the
 host and names the heads that were reviewed, so a failed gate whose `on_fail`
@@ -1075,7 +1134,10 @@ fails the node. A tier that asks with no session fails the node and names
 `provenant land` for a manual land. The host finds the PR by head branch,
 never by `gh pr view BRANCH`, which reads a numeric branch as a PR number: it
 needs exactly one same-repository PR that is open or already at the pinned
-head. A merged PR succeeds the node with verdict `LANDED`, the branch and head
+head. The node saves that PR number before the host can request a merge; replay
+observes the saved number even if the branch name is reused. A failed save
+prevents the merge, and an observation for another PR cannot settle the node.
+A merged PR succeeds the node with verdict `LANDED`, the branch and head
 as outputs and an excerpt that names who or what authorised it. Pending checks, an unknown merge
 state or an unavailable PR keep the node running and save a retry deadline,
 spaced by the node's CI poll backoff, that host tick wake discovery includes; a
@@ -1096,6 +1158,8 @@ land.
   `::an_ask_tier_without_a_session_fails_with_guidance`;
   `::a_pending_land_is_observed_again_and_a_refusal_fails_the_node`;
   `::a_pending_land_persists_a_retry_deadline_that_survives_restart`;
+  `::merged_land_is_reobserved_after_its_checkpoint_save_fails`;
+  `::pending_land_without_a_wall_clock_keeps_the_prior_checkpoint`;
   `::a_failed_review_routed_to_land_never_calls_the_host`;
   `::a_review_of_an_earlier_head_never_lands_a_continuation`;
   `::a_composite_verdict_binds_to_the_head_its_producer_reviewed`;
@@ -1188,7 +1252,13 @@ Human `graph status GRAPH --full` lists every saved checkpoint node in order,
 including composite and loop members, with its state and latest recorded route
 and attempt reference (or `none` when absent). It also shows node errors and
 pending CI details. Status reads the checkpoint without advancing the graph;
-JSON retains the complete checkpoint representation.
+JSON retains the complete checkpoint representation. JSON and MCP status also
+expose a read-only `waits` projection for running and blocked nodes and terminal
+quota stops. Human status shows the same recorded disposition, wait, attempt,
+route, retry count and policy, wake time, code and next action on the node row.
+Fields that the checkpoint does not retain are marked `unavailable`; a quota
+stop has no scheduled wake. Reading this view does not advance the graph or
+change its checkpoint.
 
 Settled nodes record version 2 outputs in the checkpoint, exposed by graph
 status JSON. A result's `digest` is `sha256:` followed by the lowercase
@@ -1252,7 +1322,7 @@ member node id at each composite boundary. An overlong qualified id fails the
 composite. If the combined export exceeds the count or byte limit, the composite
 keeps a severity-ranked subset, reserving each member's strongest finding when
 all such reservations fit. Severity ranks critical/blocking/P0, high/P1,
-medium/P2, low/P3, then informational/P4; unrecognised labels rank last.
+medium/P2, low/P3, then informational/P4; unreadable labels are treated as blocking.
 A warning gives the dropped count, members and available attempt references; the composite result also carries the
 notice. Downstream input listings identify the staged paths for those member results. When materialisation is capped or its listing is too long, an input index
 names the graph and every source, status, path, attempt reference and finding ID prefix. A member with findings
@@ -1303,9 +1373,12 @@ limited to 1024 bytes each; a block with an overlong field is invalid. Missing
 or invalid findings produce an empty list and, when a result exists, a warning,
 not a node failure. The final findings block in the tail window takes
 precedence; if it is absent, the final block in the head window is used. An
-invalid final block yields an empty list and a bounded warning naming the first
-failing entry (index and id when available) and field. Nodes requiring findings
-or dispositions include that diagnostic in their settlement failure.
+invalid final block yields an empty list and a bounded warning. Malformed entries
+are reported with their index and field: entries without a usable identity are
+dropped, while malformed fields on identifiable entries are cleared. An unknown
+severity is treated as blocking, and an unreadable status as open. These warnings reach composite outputs and
+consumers of findings. Nodes requiring findings or dispositions include a block
+failure in their settlement diagnostic.
 The separate `required_verdict` contract checks for its exact line across the
 complete redacted stream. Writers can also provide a branch or commit.
 
@@ -1318,12 +1391,20 @@ unfinished work across a clipped `result` excerpt. Decision (#2279): the
 earlier closing-window selector is removed rather than kept as a fallback,
 because handoff v2 is bounded, structured and parsed from the complete stream;
 a provider that emits no handoff gets the head excerpt and digest only. Each dependency and output selector
-may occur only once. The selected data is rendered into its brief, which is
+may occur only once. The output record retains whether findings were observed
+and parsed completely. Unknown or unavailable findings are labelled as such;
+they render as `null` when no partial composite findings are retained, while a
+valid empty block renders as `[]`. Replay does not infer missing evidence.
+Composite findings are complete only when every selected member's findings are
+available and the aggregate was not truncated; partial findings remain usable
+with their availability and truncation notices.
+The selected data is rendered into its brief, which is
 bounded by the effective per-node prompt byte limit. If the node prompt leaves
 no room for the block, or the selected outputs do not fit, the node fails
 before its next attempt is admitted with a per-node advance error. A failure
 before a fallback preserves the earlier attempt's outcome and creates no
-fallback attempt. An admitted attempt retains its admission cap on replay; a
+fallback attempt. An admitted attempt retains its admission cap and its default or configured
+origin on replay; older records may report only effective graph limits. A
 node without selected inputs replays its full admitted prompt even if the
 limit is lowered. Increase `node_prompt_bytes` within the host ceiling, cancel
 the graph, and rerun the document under a new `graph_id` to retry a failed
@@ -1428,6 +1509,11 @@ The `settlement_retries` allowance (default 2), overridden by preset then node
 value and origin on first admission; replay does not replenish it. Verified
 pre-launch preparation fallbacks and same-key observation spend no settlement
 retries; switching a launched reader spends one.
+
+A graph PR delivery records its intact bounded PR identity in the checkpoint
+before reporting delivery. A missing or invalid identity leaves delivery
+unsettled. If the checkpoint write fails, retry reconciles the existing PR
+before any creation rather than assuming the first result was not published.
 - Why: a launched writer may have effects; read-only classified refusals can be retried within budget.
 - Test: `crates/fabric-runtime/src/graph/graph_tests.rs::preparation_fallback_does_not_consume_settlement_allowance`;
   `crates/fabric-runtime/src/graph/graph_tests.rs::fallback_outcomes_are_named_by_access_and_launch_state`
@@ -1447,7 +1533,7 @@ worktree is missing, tick reports the graph once and continues with other
 work; restoring the worktree or cancelling the graph resolves the condition.
 Pending graphs remain protected from checkpoint retention.
 - Why: dependants progress without scanning unrelated terminal graphs.
-- Test: `crates/fabric-runtime/src/graph.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory`;
+- Test: `crates/fabric-runtime/src/graph.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory`;
   `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`;
   `src/fabric/facade_tests.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
 - Owner: `crates/fabric-runtime/src/graph.rs`
@@ -1641,7 +1727,7 @@ publication ref at that same head. A different marker, a different ref head or
 a symbolic ref refuses. Alternatively,
 the graph uses its existing remote integration branch, and opens one PR. Its body
 contains bounded commit messages, run and attempt IDs, gate decisions and skipped nodes.
-Graph review-council attempts render as the same `Independent review` rows used
+Graph review attempts render as the same `Independent review` rows used
 by `pr open`, with each review role, model family and recorded verdict. The rows
 include lens, verification and synthesis attempts, including retries, while
 subject-framing tasks remain ordinary node evidence. The checkpoint

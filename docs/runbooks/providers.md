@@ -33,7 +33,7 @@ not credential contents or provider output; `provenant quota` supplies recovery.
 
 One declared table per adapter (`AdapterSpec::launch` in
 `tools/front-door/crates/records/src/adapters.rs`) is the source for dispatch,
-`run`, resume and graph validation. A request outside it is refused with the
+`run`, resume and graph validation. Unsupported enforced controls are refused with the
 adapter and field named (`cursor does not support effort`) before admission,
 worktree preparation, reservation or receipt creation. A named route is checked
 once routing resolves its adapter; a model's recorded effort controls in the
@@ -41,8 +41,8 @@ catalogue still apply on top.
 
 | Adapter  | Effort | Resume | Steering | Network modes          | Image input | Write |
 | -------- | ------ | ------ | -------- | ---------------------- | ----------- | ----- |
-| claude   | yes    | yes    | no       | provider, local, open  | no          | yes   |
-| codex    | yes    | yes    | no       | provider, local, open  | no          | yes   |
+| claude   | yes    | yes    | no       | provider, local, open  | yes         | yes   |
+| codex    | yes    | yes    | no       | provider, local, open  | yes         | yes   |
 | cursor   | no     | yes    | no       | provider, local, open  | no          | yes   |
 | agy      | yes    | yes    | no       | provider, local, open  | no          | yes   |
 | opencode | yes    | yes    | no       | provider, local, open  | no          | yes   |
@@ -50,8 +50,12 @@ catalogue still apply on top.
 | host-native | configured | no | no | provider, local, open | no | yes |
 
 Command routes have no model and refuse model, effort, resume and write
-requests. Steering (input into a live session) and image input have no request
-surface yet. Cursor has no effort control on its command line, so its
+requests. Steering (input into a live session) has no request surface yet.
+Repeat `run --attach PATH` to grant a lane read access to image files. Claude
+receives their paths in the prompt; Codex receives image arguments. Other
+adapters warn that `image_input` is unavailable while retaining the read grant.
+Remote dispatch cannot transfer these files and warns when attachments are omitted.
+Cursor has no effort control on its command line, so its
 catalogue models record none.
 
 ## Host-native
@@ -545,3 +549,76 @@ Errors kept only in an unreported provider transcript are not visible there.
 
 Use the Rust provider source for launch behaviour. Dispatch still requires an
 installed executable, local login and the applicable routing and confinement grants.
+
+## Cloud environment preparation
+
+`scripts/cloud-environment [REPOSITORY]` prints a starting checklist for a
+provider environment, including detected tracked Cargo manifests. Run it from
+any repository or pass its path; adapt the toolchain, native dependencies,
+nextest installation and optional build warm-up to the selected tests. Provider
+setup time limits may make a warm build impractical. Create and select the
+environment in the provider's interface. Do not put credentials in setup
+scripts, prompts or result artifacts.
+
+## Cloud placement
+
+Configure a named target in Provenant's config. The provider environment and
+the local Git `origin` must refer to the intended repository. Install and log
+in to the selected provider CLI separately; do not put credentials in target
+settings, prompts, setup scripts, log URLs or result artifacts.
+
+```toml
+[domains.lanes.cloud_targets.verify]
+provider = "codex" # or "claude"
+environment = "environment-id"
+repository = "owner/repository"
+branch = "main"
+model = "requested-model"
+effort = "medium"
+deadline_seconds = 3600
+
+[domains.lanes.projects."PROJECT_ID"]
+cloud_target = "verify"
+```
+
+The project setting is optional. Without it, choose the target explicitly:
+
+```sh
+provenant run --placement cloud:verify --prompt-file task.txt
+provenant reconcile --id ATTEMPT_ID
+provenant lanes --id ATTEMPT_ID
+provenant status ATTEMPT_ID
+provenant output ATTEMPT_ID
+provenant cancel ATTEMPT_ID
+```
+
+`--placement local` overrides a project's cloud default. The target's branch
+defaults to `main` and its deadline to 3600 seconds. Use `--cloud-provider`,
+`--cloud-environment`, `--cloud-repository`, `--cloud-branch`, `--cloud-model`,
+`--cloud-effort` and `--cloud-deadline` for per-run overrides. `--head` selects
+the full commit; otherwise the current HEAD is used. `--wait` observes the job
+before returning. Cloud jobs are read-only verification work and cannot take a
+writer or delivery target.
+
+The owner saves the intent before submission and the remote ID before waiting.
+After a restart, `reconcile` observes saved jobs; `lanes`, `status` and `output`
+show the saved observation and its result. Cloud lane states are prefixed
+`cloud_`. In JSON status, `cloud_state` and `cloud_jobs` describe the remote
+job; the underlying local attempt has no process exit. A changed tracked file
+makes the result fail. The views report the requested model separately from an
+unknown or different observed model. Unknown cost produces a warning.
+
+Claude has no status CLI: an unfinished job stays running until its deadline,
+then becomes unknown. It publishes a result-only commit on a `claude/*`
+branch, which the owner removes on a best-effort basis after saving the result.
+Codex returns the result in its cloud diff and cannot request model or effort.
+Cancellation is unconfirmed for both providers. CLI output formats have not
+yet been captured on real hosts; a parsing failure reports what was seen.
+
+The job can use `scripts/cloud-verify` to run its named verification command.
+It requires the job ID, nonce and full commit from the request, a test name,
+a local log file and a credential-free log location. It writes
+`.provenant-cloud-result.json` with the exit status and tracked-file status;
+`--observed-model` may record a model visible to the VM. The owner checks the
+job ID, nonce and commit. The nonce is advisory, not a credential or proof of
+origin. Cloud results do not replace exact-head required CI.

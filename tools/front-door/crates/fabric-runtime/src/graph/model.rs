@@ -4,6 +4,29 @@ pub(super) fn is_false(value: &bool) -> bool {
     !value
 }
 
+/// Host retry policy sealed with the attempt before a launch can fail.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchRetryPolicy {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub limit: u8,
+    pub limit_source: String,
+    pub first_seconds: u64,
+    pub max_seconds: u64,
+}
+
+impl Default for LaunchRetryPolicy {
+    fn default() -> Self {
+        Self {
+            extra: Default::default(),
+            limit: 3,
+            limit_source: "default".into(),
+            first_seconds: 5,
+            max_seconds: 600,
+        }
+    }
+}
+
 /// Persisted retry wait on a node whose launch failed with a transient kind.
 /// The wait belongs to the node's current attempt: it is recorded under the
 /// attempt key, so a later retry observes or relaunches exactly that attempt,
@@ -12,6 +35,8 @@ pub(super) fn is_false(value: &bool) -> bool {
 pub struct LaunchRetry {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    /// Retry limit and timing fixed for this attempt.
+    pub policy: LaunchRetryPolicy,
     /// Failed launches so far, counting the initial launch.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub failures: u8,
@@ -152,6 +177,10 @@ pub struct ReviewSpec {
     #[serde(default)]
     pub lenses: Vec<ReviewLens>,
     pub min_successful: Option<usize>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reduce_verdict: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub export_first: Vec<OutputKind>,
     pub max_nodes: usize,
 }
 
@@ -191,7 +220,7 @@ impl PartialEq for TopologyPresence {
 }
 impl Eq for TopologyPresence {}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewSpec>,
@@ -221,6 +250,8 @@ pub struct GraphNode {
     pub dispositions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
     /// Explicit node capability set; absent inherits the writer project default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
@@ -293,6 +324,18 @@ pub struct GraphNode {
 }
 
 impl GraphNode {
+    /// Construct a composite boundary with the same defaults as a decoded node.
+    pub fn composite(id: String, depends_on: Vec<String>, spec: CompositeSpec) -> Self {
+        Self {
+            id,
+            kind: Some(NodeKind::Composite),
+            access: AccessMode::ReadOnly,
+            depends_on,
+            composite: Some(spec),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn dependencies(&self) -> impl Iterator<Item = &String> {
         self.depends_on.iter().chain(
             self.after_expansion
@@ -311,102 +354,43 @@ impl GraphNode {
     }
 }
 
-/// A host graph limit whose value can be safely reported.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GraphLimitKey {
-    Nodes,
-    Edges,
-    RoutesPerNode,
-    NodePromptBytes,
-    GraphPromptBytes,
-    FanOutWidth,
-    ExpansionDepth,
-}
-impl GraphLimitKey {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Nodes => "nodes",
-            Self::Edges => "edges",
-            Self::RoutesPerNode => "routes_per_node",
-            Self::NodePromptBytes => "node_prompt_bytes",
-            Self::GraphPromptBytes => "graph_prompt_bytes",
-            Self::FanOutWidth => "fan_out_width",
-            Self::ExpansionDepth => "expansion_depth",
-        }
+pub(super) fn expansion_safety_limits(
+    limits: &crate::config::GraphLimits,
+) -> crate::config::GraphLimits {
+    crate::config::GraphLimits {
+        nodes: limits.composite_expansion_safety_nodes(),
+        // Composite nesting is itself governed by the host's configured
+        // expansion depth. Only the construction guard uses a safety floor.
+        expansion_depth: limits.expansion_depth,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        ..limits.clone()
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GraphStructuralLimit {
-    pub key: GraphLimitKey,
-    pub actual: usize,
-    pub max: usize,
-}
-impl std::fmt::Display for GraphStructuralLimit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "limits.{}={} reached ({}); set by domains.fabric.graph.limits",
-            self.key.name(),
-            self.max,
-            self.actual
-        )
-    }
-}
-
-/// Worst-case checkpoint size that exceeded the fixed graph envelope.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GraphEnvelopeLimit {
-    pub bound: usize,
-}
-
-impl std::fmt::Display for GraphEnvelopeLimit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "graph checkpoint could reach {} bytes, over its {}-byte limit; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts",
-            self.bound, MAX_CHECKPOINT_BYTES
-        )
-    }
-}
-
-/// The static admission check that refused a graph. The contained text is the
-/// existing operator-facing reason; callers branch on the variant, not text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GraphOutputField {
-    Input,
-    CompositeExport,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum AdmissionError {
-    #[error("{0}")]
-    Schema(String),
-    #[error("{0}")]
-    Composite(String),
-    #[error("{0}")]
-    Plan(String),
-    #[error("{0}")]
-    StructuralLimit(GraphStructuralLimit),
-    #[error("{0}")]
-    Envelope(GraphEnvelopeLimit),
-    #[error("{reason}")]
-    OutputKind {
-        field: GraphOutputField,
-        reason: String,
-    },
 }
 
 impl GraphDocument {
+    /// Check nested composite structure with the same expansion safety bounds
+    /// used by graph admission, without starting a graph.
+    pub fn check_composites(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
+        let expansion_limits = expansion_safety_limits(limits);
+        let expanded = composites::expand(self, &expansion_limits)?;
+        loops::check_expanded_ids(&expanded, &[])?;
+        let count = loops::expanded_node_count(&expanded, &[])?;
+        if let Some(reason) = limits.nodes_bound().refusal(count) {
+            return Err(reason);
+        }
+        Ok(())
+    }
+
     /// Host preflight sees the same bounded static composite/loop expansion as
     /// the scheduler. Planner additions are checked separately before admission.
     /// A plan whose worst-case checkpoint would not fit is refused here, naming
     /// the size, rather than stopping mid-run on an oversized checkpoint.
     pub fn expanded(&self, limits: &crate::config::GraphLimits) -> Result<Self, String> {
-        self.admit(limits).map_err(|error| error.to_string())?;
-        loops::expand(self, &[], limits).map_err(|error| error.to_string())
+        self.admit(limits)?;
+        loops::expand(self, &[], limits)
     }
 
     /// The checks admission applies to a submitted document, without running
@@ -414,44 +398,29 @@ impl GraphDocument {
     /// expanded plan against `limits`. A document that passes here is not
     /// refused as invalid when it is submitted.
     pub fn validate(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
-        self.admit(limits).map_err(|error| error.to_string())
+        self.admit(limits)
     }
 
     /// The single static admission decision for a submitted graph. The reason
     /// is suitable for bounded display and typed projection by the front door.
-    pub fn admit(&self, limits: &crate::config::GraphLimits) -> Result<(), AdmissionError> {
-        validate_schema(self)?;
-        let expansion_limits = crate::config::GraphLimits {
-            nodes: limits.nodes.max(16_384),
-            expansion_depth: limits.expansion_depth.max(64),
-            edges: usize::MAX,
-            routes_per_node: u16::MAX as usize,
-            node_prompt_bytes: usize::MAX,
-            graph_prompt_bytes: usize::MAX,
-            ..limits.clone()
-        };
+    pub fn admit(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
+        validate_schema(self).map_err(String::from)?;
+        let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
-        let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)?;
-        if let Some(reason) = structural_limit(&expanded, &plan, limits) {
-            return Err(AdmissionError::StructuralLimit(reason));
+        let (plan, _) = validate_flat_plan(&expanded, &expansion_limits).map_err(String::from)?;
+        if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
+            return Err(reason);
         }
-        envelope::admit(self, &[], &[], &plan)?;
+        if let Some(reason) = graph_envelope_reason(self, &[], &[], &plan) {
+            return Err(reason);
+        }
         validate_output_kinds(&expanded)
     }
 
     pub fn inspect(&self, limits: &crate::config::GraphLimits) -> Result<GraphInspection, String> {
-        validate_schema(self).map_err(|error| error.to_string())?;
-        let inspect_limits = crate::config::GraphLimits {
-            nodes: limits.nodes.max(16_384),
-            expansion_depth: limits.expansion_depth.max(64),
-            edges: usize::MAX,
-            routes_per_node: u16::MAX as usize,
-            node_prompt_bytes: usize::MAX,
-            graph_prompt_bytes: usize::MAX,
-            ..limits.clone()
-        };
-        let expanded =
-            loops::expand(self, &[], &inspect_limits).map_err(|error| error.to_string())?;
+        validate_schema(self).map_err(String::from)?;
+        let inspect_limits = expansion_safety_limits(limits);
+        let expanded = loops::expand(self, &[], &inspect_limits)?;
         let generous = crate::config::GraphLimits {
             nodes: usize::MAX,
             edges: usize::MAX,
@@ -460,8 +429,7 @@ impl GraphDocument {
             graph_prompt_bytes: usize::MAX,
             ..limits.clone()
         };
-        let (plan, _) =
-            validate_flat_plan(&expanded, &generous).map_err(|error| error.to_string())?;
+        let (plan, _) = validate_flat_plan(&expanded, &generous)?;
         let mut depths = std::collections::BTreeMap::<&str, usize>::new();
         let mut dependency_depth = 0;
         for node in &plan.nodes {
@@ -669,6 +637,9 @@ pub struct GraphInput {
     pub extra: provenant_records::ExtraFields,
     pub node: String,
     pub outputs: Vec<OutputKind>,
+    /// Selected machine-readable outputs that must be available before launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_outputs: Vec<OutputKind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -694,6 +665,10 @@ pub struct NodeOutputs {
     pub result: Option<ResultOutput>,
     pub verdict: Option<String>,
     pub findings: Vec<Finding>,
+    /// Whether the full findings selection was observed and parsed. Missing
+    /// evidence in older checkpoints remains unknown on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings_available: Option<bool>,
     pub branch: Option<String>,
     pub commit: Option<String>,
     pub warnings: Vec<String>,
@@ -767,6 +742,11 @@ pub struct GraphCheckpoint {
     pub delivered: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<String>,
+    /// Graph-wide review and integration bases fixed at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_review_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_integration_base: Option<String>,
     /// Integration head pinned when the first integration source was resolved.
     /// Synthesis and writers that start from that commit stop if it moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -825,76 +805,6 @@ pub(super) fn not_delivered(delivered: &bool) -> bool {
     !delivered
 }
 
-/// Approved planner failure facts, without captured fragment text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "limit", rename_all = "snake_case")]
-pub enum PlanFailureFact {
-    MissingBlock,
-    MissingResult,
-    InvalidBlock,
-    InvalidFragment,
-    InvalidContinuation,
-    Schema,
-    InvalidGraph,
-    OutputKind,
-    Structural(GraphStructuralLimit),
-    Envelope(GraphEnvelopeLimit),
-}
-
-impl std::fmt::Display for PlanFailureFact {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingBlock => f.write_str("fragment block missing"),
-            Self::MissingResult => f.write_str("planner result missing"),
-            Self::InvalidBlock => f.write_str("invalid fragment block; check its format and size"),
-            Self::InvalidFragment => {
-                f.write_str("invalid fragment; check the declared graph constraints")
-            }
-            Self::InvalidContinuation => {
-                f.write_str("invalid writer continuation; inspect the handoff")
-            }
-            Self::Schema => f.write_str("schema version"),
-            Self::InvalidGraph => {
-                f.write_str("expanded graph is invalid; check the declared graph constraints")
-            }
-            Self::OutputKind => f.write_str("expanded graph selects an unavailable output kind"),
-            Self::Structural(limit) => write!(f, "{limit}"),
-            Self::Envelope(limit) => write!(f, "{limit}"),
-        }
-    }
-}
-
-/// Scheduler-owned causes whose decisions must not depend on rendered prose.
-/// Paused or truncated checkpoints require a finish-first drain before this
-/// checkpoint meaning is installed; no legacy cause reader is provided.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NodeDecisionCause {
-    LoopPaused,
-    LoopAskClosed,
-    InvalidLoopDecision,
-    PlanExpansionPaused {
-        active: bool,
-        fallback: bool,
-        fragment_error: Option<PlanFailureFact>,
-    },
-    CompositeFindingsTruncated {
-        warning_indices: Vec<usize>,
-        notice_lines: usize,
-    },
-}
-
-impl NodeDecisionCause {
-    pub(super) fn from_loop_code(code: &str) -> Option<Self> {
-        match code {
-            "loop_paused" => Some(Self::LoopPaused),
-            "loop_ask_closed" => Some(Self::LoopAskClosed),
-            "invalid_loop_decision" => Some(Self::InvalidLoopDecision),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeProgress {
     #[serde(flatten)]
@@ -902,12 +812,27 @@ pub struct NodeProgress {
     /// Direct children of a composite, whose individual evidence stays available.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<String>,
+    /// Declared source selection, including upstream sources still pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_binding: Option<SourceBinding>,
     /// Minimum declared by this composite, retained for outcome reporting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_successful: Option<usize>,
     /// Resolved once before launch and retained across retries and replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
+    /// Canonical verified writer worktree and its head at binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_binding: Option<WriterWorktreeBinding>,
+    /// An expanded writer whose worktree has not yet become available to bind.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub writer_binding_pending: bool,
+    /// Node-specific review base resolved before the first attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_base: Option<String>,
+    /// Review base awaiting a source location that has not yet been bound.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub review_base_pending: bool,
     /// Bounded planner JSON retained until admission succeeds, including across resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
@@ -916,15 +841,9 @@ pub struct NodeProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expansion_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expansion_cause: Option<NodeDecisionCause>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_pause_code: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub loop_cause: Option<NodeDecisionCause>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub truncation_cause: Option<NodeDecisionCause>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<LoopRound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -958,10 +877,21 @@ pub struct NodeProgress {
     /// error. Cleared when the attempt is observed again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_retry: Option<LaunchRetry>,
+    /// Final retry budget and cause retained when launch retries are exhausted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_launch_retry: Option<LaunchRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
     /// One durable row per route actually tried, in route order.
     pub attempts: Vec<GraphAttempt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriterWorktreeBinding {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub worktree: String,
+    pub head: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -983,11 +913,81 @@ pub struct GraphAttempt {
     /// Byte cap fixed at admission so operation replay renders the same input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_cap: Option<usize>,
+    /// The effective graph limits supplied to admission own this cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_cap_source: Option<InputCapSource>,
+    /// Bounded identifiers describing what was selected and delivered before launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_manifest: Option<AttemptInputManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<AttemptUsage>,
     /// When the attempt settled, as a graph-wide order from 1; zero while it runs.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub settled: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputCapSource {
+    EffectiveGraphLimits,
+    #[serde(rename = "default")]
+    Default,
+    Configured,
+}
+
+/// Evidence contains identifiers and digests only, never input text or host paths.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptInputManifest {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub schema_version: u64,
+    pub source_commit: Option<String>,
+    /// Producer of an upstream source, absent when it cannot be identified.
+    #[serde(default)]
+    pub source_producer: Option<AttemptKey>,
+    /// Writer worktree head observed when its location was bound.
+    #[serde(default)]
+    pub writer_head: Option<String>,
+    pub review_base: Option<String>,
+    /// Graph-wide bases are distinct from a node's review base and source.
+    #[serde(default)]
+    pub graph_review_base: Option<String>,
+    pub integration_base: Option<String>,
+    /// The integration head selected as an upstream source, if any.
+    #[serde(default)]
+    pub integration_source: Option<String>,
+    pub applied_route: Option<GraphRoute>,
+    /// Ordering edges, separate from the outputs selected as context.
+    #[serde(default)]
+    pub dependencies: Option<Vec<String>>,
+    #[serde(default)]
+    pub dependencies_omitted: usize,
+    pub inputs: Vec<AttemptInputEvidence>,
+    pub omitted: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptInputEvidence {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub producer_node: String,
+    pub producer_attempt: Option<AttemptKey>,
+    pub kind: OutputKind,
+    pub required: bool,
+    pub producer_result_digest: Option<String>,
+    pub commit: Option<String>,
+    pub delivery: InputDelivery,
+    pub file_delivery: InputDelivery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputDelivery {
+    Delivered,
+    Capped,
+    Omitted,
+    Unavailable,
+    Pending,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1044,28 +1044,6 @@ impl NodeState {
 }
 
 impl GraphCheckpoint {
-    pub(super) fn deactivate_expansion_pauses(&mut self) {
-        for node in &mut self.nodes {
-            if let Some(NodeDecisionCause::PlanExpansionPaused { active, .. }) =
-                &mut node.expansion_cause
-            {
-                *active = false;
-                if node.expansion_pause.is_none() {
-                    node.expansion_cause = None;
-                }
-            }
-        }
-    }
-
-    pub(super) fn activate_expansion_pause(&mut self, index: usize) {
-        self.deactivate_expansion_pauses();
-        if let Some(NodeDecisionCause::PlanExpansionPaused { active, .. }) =
-            &mut self.nodes[index].expansion_cause
-        {
-            *active = true;
-        }
-    }
-
     /// Classify settled work without relaxing the strict delivery gate.
     pub fn outcome(&self) -> GraphOutcome {
         if self.successful() {
@@ -1140,41 +1118,6 @@ impl GraphCheckpoint {
 }
 
 impl NodeProgress {
-    pub(super) fn truncation(&self) -> Option<(&[usize], usize)> {
-        match self.truncation_cause.as_ref()? {
-            NodeDecisionCause::CompositeFindingsTruncated {
-                warning_indices,
-                notice_lines,
-            } => Some((warning_indices, *notice_lines)),
-            _ => None,
-        }
-    }
-
-    pub(super) fn truncation_warnings(&self) -> Vec<&String> {
-        let Some((indices, _)) = self.truncation() else {
-            return Vec::new();
-        };
-        let Some(outputs) = &self.outputs else {
-            return Vec::new();
-        };
-        indices
-            .iter()
-            .filter_map(|index| outputs.warnings.get(*index))
-            .collect()
-    }
-
-    pub(super) fn truncation_notices(&self) -> Vec<&str> {
-        let Some((_, lines)) = self.truncation() else {
-            return Vec::new();
-        };
-        self.outputs
-            .as_ref()
-            .and_then(|outputs| outputs.result.as_ref())
-            .map_or_else(Vec::new, |result| {
-                result.excerpt.lines().take(lines).collect()
-            })
-    }
-
     /// Attempt-less evidence for final graph delivery.
     pub fn deterministic_summary(&self) -> Option<String> {
         if let Some(reason) = self
@@ -1239,15 +1182,32 @@ pub enum GraphStatus {
     Paused,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphRun {
     pub status: GraphStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<GraphOutcome>,
     pub checkpoint: GraphCheckpoint,
     /// Why the last automatic advance failed, as recorded for `status`.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub advance_error: Option<String>,
+}
+
+impl Serialize for GraphRun {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let fields =
+            3 + usize::from(self.outcome.is_some()) + usize::from(self.advance_error.is_some());
+        let mut state = serializer.serialize_struct("GraphRun", fields)?;
+        state.serialize_field("status", &self.status)?;
+        if let Some(outcome) = &self.outcome {
+            state.serialize_field("outcome", outcome)?;
+        }
+        state.serialize_field("checkpoint", &self.checkpoint)?;
+        if let Some(error) = &self.advance_error {
+            state.serialize_field("advance_error", error)?;
+        }
+        state.serialize_field("waits", &super::graph_waits(&self.checkpoint))?;
+        state.end()
+    }
 }
 
 /// What the checkpoint already knows about an attempt.
@@ -1277,6 +1237,7 @@ pub struct NodeInput<'a> {
     pub family_peers: &'a [String],
     pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
+    pub attachments: &'a [String],
     pub capabilities: Option<&'a [String]>,
     pub capability_sources: Option<&'a serde_json::Value>,
     /// Attempts of the source writer whose model families must be avoided.

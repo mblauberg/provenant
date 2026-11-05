@@ -11,6 +11,9 @@ pub struct CompositeSpec {
     /// their count. Absent, a failed member blocks the composite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_successful: Option<usize>,
+    /// Reduce successful exporting members' verdicts using the worst outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reduce_verdict: bool,
     pub nodes: Vec<GraphNode>,
     pub exports: Vec<GraphInput>,
 }
@@ -19,9 +22,10 @@ pub struct CompositeSpec {
 pub(super) fn expand(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
-) -> Result<GraphDocument, AdmissionError> {
+) -> Result<GraphDocument, String> {
     let mut expanded = document.clone();
-    let (max_depth, max_nodes) = (limits.expansion_depth, limits.nodes);
+    let depth_bound = limits.expansion_depth_bound();
+    let nodes_bound = crate::config::GraphLimits::composite_nodes_bound(limits.nodes);
     expanded.nodes = children(
         &document.nodes,
         "",
@@ -30,17 +34,16 @@ pub(super) fn expand(
         &[],
         None,
         &[],
+        &[],
         false,
         0,
-        max_depth,
-        max_nodes,
+        &depth_bound,
+        &nodes_bound,
     )?;
     if expanded.nodes.iter().any(|node| node.composite.is_some())
-        && expanded.nodes.len() > max_nodes
+        && let Some(reason) = nodes_bound.refusal(expanded.nodes.len())
     {
-        return Err(AdmissionError::Composite(format!(
-            "composite expansion exceeds {max_nodes} nodes"
-        )));
+        return Err(reason);
     }
     Ok(expanded)
 }
@@ -83,23 +86,22 @@ fn children(
     inputs: &[GraphInput],
     source: Option<&SourceBinding>,
     read_roots: &[String],
+    attachments: &[String],
     require_skill_location: bool,
     depth: usize,
-    max_depth: usize,
-    max_nodes: usize,
-) -> Result<Vec<GraphNode>, AdmissionError> {
-    if depth > max_depth {
-        return Err(AdmissionError::Composite(
-            "composite expansion depth exceeds the limit".into(),
-        ));
+    depth_bound: &crate::config::GraphBound<'_>,
+    nodes_bound: &crate::config::GraphBound<'_>,
+) -> Result<Vec<GraphNode>, String> {
+    if let Some(reason) = depth_bound.refusal(depth) {
+        return Err(reason);
     }
     let mut locals = BTreeSet::new();
     for node in nodes {
         if !locals.insert(node.id.as_str()) {
-            return Err(AdmissionError::Composite(format!(
+            return Err(format!(
                 "expanded node id {:?} is duplicated; use distinct node names",
                 bounded(&scoped(prefix, &node.id), 256)
-            )));
+            ));
         }
     }
     let mut visible_names = inherited_names.clone();
@@ -115,14 +117,13 @@ fn children(
         node.require_skill_location |= require_skill_location;
         node.id = scoped(prefix, &node.id);
         if !valid_identifier(&node.id) {
-            return Err(AdmissionError::Composite(format!(
+            return Err(format!(
                 "expanded node id {:?} is invalid; use at most 64 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or node name",
                 bounded(&node.id, 256)
-            )));
+            ));
         }
         for parent in &mut node.depends_on {
-            *parent = reference(prefix, parent, &locals, incoming)
-                .ok_or_else(|| AdmissionError::Composite("dependency".into()))?;
+            *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
         }
         for input in &mut node.inputs {
             if !input.node.starts_with("previous.") {
@@ -194,6 +195,11 @@ fn children(
                             own.outputs.push(*kind);
                         }
                     }
+                    for kind in &input.required_outputs {
+                        if !own.required_outputs.contains(kind) {
+                            own.required_outputs.push(*kind);
+                        }
+                    }
                 } else {
                     node.inputs.push(input.clone());
                 }
@@ -212,12 +218,15 @@ fn children(
                 node.read_roots.push(root.clone());
             }
         }
+        for path in attachments {
+            if !node.attachments.contains(path) {
+                node.attachments.push(path.clone());
+            }
+        }
         if let Some(spec) = &mut node.loop_body {
             for child in &spec.body {
                 if child.id.starts_with("previous.") {
-                    return Err(AdmissionError::Composite(
-                        "previous. is reserved for prior round inputs".into(),
-                    ));
+                    return Err("previous. is reserved for prior round inputs".into());
                 }
                 if child.loop_body.is_some()
                     || child.kind == Some(NodeKind::Loop)
@@ -226,7 +235,7 @@ fn children(
                         !matches!(mode, provenant_records::run::DeliveryMode::Integrate(_))
                     })
                 {
-                    return Err(AdmissionError::Composite("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into()));
+                    return Err("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into());
                 }
             }
             spec.body = children(
@@ -237,16 +246,15 @@ fn children(
                 &[],
                 None,
                 &[],
+                &node.attachments,
                 node.require_skill_location,
                 depth,
-                max_depth,
-                max_nodes,
+                depth_bound,
+                nodes_bound,
             )?;
         }
         if (node.kind == Some(NodeKind::Composite)) != node.composite.is_some() {
-            return Err(AdmissionError::Composite(
-                "composite requires nodes and exports".into(),
-            ));
+            return Err("composite requires nodes and exports".into());
         }
         if let Some(spec) = node.composite.take() {
             if spec.nodes.is_empty()
@@ -264,9 +272,7 @@ fn children(
                 || !node.write_scope.is_empty()
                 || !node.acceptance_checks.is_empty()
             {
-                return Err(AdmissionError::Composite(
-                    "composite cannot carry agent configuration".into(),
-                ));
+                return Err("composite cannot carry agent configuration".into());
             }
             let member_ids: BTreeSet<_> =
                 spec.nodes.iter().map(|child| child.id.as_str()).collect();
@@ -277,16 +283,12 @@ fn children(
                     || export.outputs.is_empty()
                     || !selected.insert(&export.node)
                 {
-                    return Err(AdmissionError::Composite(
-                        "composite export must select a unique direct child".into(),
-                    ));
+                    return Err("composite export must select a unique direct child".into());
                 }
                 let mut kinds = Vec::new();
                 for kind in &export.outputs {
                     if kinds.contains(kind) {
-                        return Err(AdmissionError::Composite(
-                            "duplicate composite export output".into(),
-                        ));
+                        return Err("duplicate composite export output".into());
                     }
                     kinds.push(*kind);
                     if matches!(
@@ -297,9 +299,7 @@ fn children(
                             | OutputKind::Remaining
                     ) {
                         if scalar.contains(kind) {
-                            return Err(AdmissionError::Composite(
-                                "composite scalar output has multiple sources".into(),
-                            ));
+                            return Err("composite scalar output has multiple sources".into());
                         }
                         scalar.push(*kind);
                     }
@@ -313,10 +313,11 @@ fn children(
                 &node.inputs,
                 node.source.as_ref(),
                 &node.read_roots,
+                &node.attachments,
                 node.require_skill_location,
                 depth + 1,
-                max_depth,
-                max_nodes,
+                depth_bound,
+                nodes_bound,
             )?;
             node.composite_members = spec
                 .nodes
@@ -327,8 +328,10 @@ fn children(
             node.inputs.clear();
             node.source = None;
             node.read_roots.clear();
+            node.attachments.clear();
             node.composite = Some(CompositeSpec {
                 min_successful: spec.min_successful,
+                reduce_verdict: spec.reduce_verdict,
                 nodes: Vec::new(),
                 exports: spec
                     .exports
@@ -342,10 +345,8 @@ fn children(
             expanded.extend(body);
         }
         expanded.push(node);
-        if composite_bound && expanded.len() > max_nodes {
-            return Err(AdmissionError::Composite(format!(
-                "composite expansion exceeds {max_nodes} nodes"
-            )));
+        if composite_bound && let Some(reason) = nodes_bound.refusal(expanded.len()) {
+            return Err(reason);
         }
     }
     Ok(expanded)
@@ -357,7 +358,7 @@ fn outputs(
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
     legacy: bool,
-) -> Result<(NodeOutputs, Option<NodeDecisionCause>), String> {
+) -> Result<NodeOutputs, String> {
     let mut selected = NodeOutputs {
         extra: Default::default(),
         schema_version: 2,
@@ -365,6 +366,7 @@ fn outputs(
         verdict: None,
         verdict_error: None,
         findings: Vec::new(),
+        findings_available: None,
         branch: None,
         commit: None,
         warnings: Vec::new(),
@@ -375,13 +377,27 @@ fn outputs(
     let mut finding_members = Vec::new();
     let mut truncation_header = None;
     let mut inherited_notices = Vec::new();
-    let mut truncation_warning_indices = Vec::new();
-    let partial = spec.min_successful.is_some();
+    let mut family_notices = Vec::new();
+    let partial = spec.min_successful.is_some() || spec.reduce_verdict;
     let unavailable = unavailable_with_wording(spec, checkpoint, positions, legacy);
-    selected.warnings = unavailable
+    let finding_exports: Vec<_> = spec
+        .exports
         .iter()
-        .map(|entry| bounded(&format!("unavailable {entry}"), WARNING_BYTES))
+        .filter(|export| export.outputs.contains(&OutputKind::Findings))
         .collect();
+    if !finding_exports.is_empty() {
+        selected.findings_available = Some(finding_exports.iter().all(|export| {
+            positions.get(&export.node).is_some_and(|index| {
+                let member = &checkpoint.nodes[*index];
+                (!partial || member.state == NodeState::Succeeded)
+                    && member
+                        .outputs
+                        .as_ref()
+                        .and_then(|outputs| outputs.findings_available)
+                        == Some(true)
+            })
+        }));
+    }
     for export in &spec.exports {
         let member = &checkpoint.nodes[positions[&export.node]];
         // A partial composite exports only members that succeeded: a failed
@@ -392,6 +408,35 @@ fn outputs(
         let Some(source) = member.outputs.as_ref() else {
             continue;
         };
+        if member
+            .separation
+            .as_ref()
+            .is_some_and(|separation| separation.outcome == SeparationOutcome::Unavailable)
+        {
+            let notice = bounded(
+                &format!(
+                    "{}: no separate model family was available; this review is not cross-family evidence",
+                    export.node
+                ),
+                WARNING_BYTES,
+            );
+            if selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(notice.clone());
+            }
+            family_notices.push(notice);
+        }
+        for warning in source
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("malformed finding:"))
+        {
+            if selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(bounded(
+                    &format!("{}: {warning}", export.node),
+                    WARNING_BYTES,
+                ));
+            }
+        }
         for kind in &export.outputs {
             match kind {
                 OutputKind::Result => {
@@ -404,10 +449,18 @@ fn outputs(
                     selected.verdict_error = source.verdict_error.clone();
                 }
                 OutputKind::Findings => {
-                    if !member.truncation_warnings().is_empty()
-                        && let Some(notice) = member.truncation_notices().first()
+                    if source
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.starts_with("composite findings truncated:"))
+                        && let Some(notice) = source.result.as_ref().and_then(|result| {
+                            result
+                                .excerpt
+                                .lines()
+                                .find(|line| line.starts_with("composite findings truncated:"))
+                        })
                     {
-                        inherited_notices.push((*notice).to_owned());
+                        inherited_notices.push(notice.to_owned());
                     }
                     let findings =
                         materialised_findings(positions[&export.node], plan, checkpoint, positions);
@@ -434,6 +487,44 @@ fn outputs(
             }
         }
     }
+    for entry in &unavailable {
+        if selected.warnings.len() < MAX_WARNINGS {
+            selected
+                .warnings
+                .push(bounded(&format!("unavailable {entry}"), WARNING_BYTES));
+        }
+    }
+    if spec.reduce_verdict {
+        use provenant_records::workflow::ReviewVerdict;
+        let rank = |verdict| match verdict {
+            ReviewVerdict::Approve => 0,
+            ReviewVerdict::ApproveWithNits => 1,
+            ReviewVerdict::Inconclusive => 2,
+            ReviewVerdict::RequestChanges => 3,
+        };
+        let verdict = exporting_members(spec, positions)
+            .into_iter()
+            .map(|index| &checkpoint.nodes[index])
+            .filter(|member| member.state == NodeState::Succeeded)
+            .map(|member| {
+                member
+                    .outputs
+                    .as_ref()
+                    .and_then(|output| {
+                        if output.verdict_error.is_some() {
+                            return None;
+                        }
+                        output
+                            .verdict
+                            .as_deref()
+                            .and_then(ReviewVerdict::from_token)
+                    })
+                    .unwrap_or(ReviewVerdict::Inconclusive)
+            })
+            .max_by_key(|verdict| rank(*verdict));
+        selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
+        selected.verdict_error = None;
+    }
     if selected
         .findings
         .iter()
@@ -443,6 +534,7 @@ fn outputs(
     }
     let total = selected.findings.len();
     if total > MAX_FINDINGS || canonical_len(&selected.findings) > FINDINGS_BYTES {
+        selected.findings_available = Some(false);
         selected.findings = bounded_findings(std::mem::take(&mut selected.findings));
         let dropped = total - selected.findings.len();
         let members = finding_members
@@ -474,19 +566,16 @@ fn outputs(
                 bounded(last, WARNING_BYTES - 40)
             );
         }
-        if !notices.is_empty() {
-            truncation_warning_indices.push(0);
-        }
         notices.extend(selected.warnings);
         notices.truncate(MAX_WARNINGS);
         selected.warnings = notices;
         truncation_header = Some(warning);
     }
     if !inherited_notices.is_empty() {
+        selected.findings_available = Some(false);
         let inherited = inherited_notices.join("\n");
         for notice in &inherited_notices {
             if selected.warnings.len() < MAX_WARNINGS {
-                truncation_warning_indices.push(selected.warnings.len());
                 selected.warnings.push(bounded(notice, WARNING_BYTES));
             }
         }
@@ -517,14 +606,7 @@ fn outputs(
             })
         }
     };
-    let truncation_cause =
-        truncation_header
-            .as_ref()
-            .map(|header| NodeDecisionCause::CompositeFindingsTruncated {
-                warning_indices: truncation_warning_indices,
-                notice_lines: bounded(header, COMPOSITE_EXCERPT_BYTES).lines().count(),
-            });
-    if !unavailable.is_empty() || truncation_header.is_some() {
+    if !unavailable.is_empty() || truncation_header.is_some() || !family_notices.is_empty() {
         // The unavailable list leads and is bounded on its own, so a long
         // review body can never truncate it away.
         let mut headers = Vec::new();
@@ -535,6 +617,9 @@ fn outputs(
         };
         if let Some(notice) = truncation_header {
             headers.push(notice);
+        }
+        if !family_notices.is_empty() {
+            headers.push(family_notices.join("\n"));
         }
         if !unavailable.is_empty() {
             headers.push(format!(
@@ -568,7 +653,7 @@ fn outputs(
             path: None,
         });
     }
-    Ok((selected, truncation_cause))
+    Ok(selected)
 }
 
 /// Reserve each member's strongest finding when all such reservations fit,
@@ -679,13 +764,17 @@ fn unavailable_with_wording(
     positions: &BTreeMap<String, usize>,
     legacy: bool,
 ) -> Vec<String> {
-    if spec.min_successful.is_none() {
+    if spec.min_successful.is_none() && !spec.reduce_verdict {
         return Vec::new();
     }
     exporting_members(spec, positions)
         .into_iter()
         .map(|member| &checkpoint.nodes[member])
-        .filter(|progress| progress.state == NodeState::Failed)
+        .filter(|progress| {
+            progress.state == NodeState::Failed
+                || (spec.reduce_verdict
+                    && matches!(progress.state, NodeState::Blocked | NodeState::Skipped))
+        })
         .map(|progress| {
             let reason = progress.advance_error.as_deref().unwrap_or_else(|| {
                 match progress.attempts.last().and_then(|a| a.outcome.as_ref()) {
@@ -715,7 +804,11 @@ fn coverage_shortfall_with_wording(
     legacy: bool,
 ) -> Option<String> {
     let members = exporting_members(spec, positions);
-    let minimum = spec.min_successful?.min(members.len());
+    let minimum = if spec.reduce_verdict {
+        spec.min_successful.unwrap_or(members.len()).max(1)
+    } else {
+        spec.min_successful?.min(members.len())
+    };
     let succeeded = members
         .iter()
         .filter(|member| checkpoint.nodes[**member].state == NodeState::Succeeded)
@@ -760,16 +853,10 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
             }
         }
     }
-    let (exported, truncation_cause) =
-        exported.map_or((None, None), |(output, cause)| (Some(output), cause));
     let progress = &mut checkpoint.nodes[index];
-    if progress.state != state
-        || progress.outputs != exported
-        || progress.truncation_cause != truncation_cause
-    {
+    if progress.state != state || progress.outputs != exported {
         progress.state = state;
         progress.outputs = exported;
-        progress.truncation_cause = truncation_cause;
         if let Some(reason) = export_error {
             progress.advance_error_code = Some("composite_findings_exceed_cap".into());
             progress.advance_error = Some(reason);
@@ -791,7 +878,7 @@ fn state(
     if node
         .composite
         .as_ref()
-        .is_some_and(|spec| spec.min_successful.is_some())
+        .is_some_and(|spec| spec.min_successful.is_some() || spec.reduce_verdict)
     {
         // The group's own dependencies decide first; the rules below judge
         // its members, whose failures are the point of a partial group.
@@ -830,9 +917,13 @@ fn state(
                 NodeState::Pending
             };
         }
-        if members
-            .iter()
-            .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))
+        if !node
+            .composite
+            .as_ref()
+            .is_some_and(|spec| spec.reduce_verdict)
+            && members
+                .iter()
+                .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))
         {
             return NodeState::Blocked;
         }
@@ -879,17 +970,25 @@ pub(super) fn validate_progress(
                         .map(|reason| bounded(&reason, MAX_ADVANCE_ERROR_BYTES))
                 })
                 .is_some_and(|legacy| progress.advance_error.as_ref() == Some(&legacy)));
-    let export = node
+    let mut export = node
         .composite
         .as_ref()
         .map(|spec| outputs(spec, plan, checkpoint, positions, false));
+    if progress
+        .outputs
+        .as_ref()
+        .is_some_and(|outputs| outputs.findings_available.is_none())
+        && let Some(Ok(expected)) = &mut export
+    {
+        // An older checkpoint retains unknown availability on replay.
+        expected.findings_available = None;
+    }
     let failed_for_export = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && shortfall.is_none()
         && progress.advance_error_code.as_deref() == Some("composite_findings_exceed_cap")
         && matches!(&export, Some(Err(reason)) if progress.advance_error.as_ref() == Some(reason));
     let valid = progress.attempts.is_empty()
-        && (progress.state == NodeState::Succeeded || progress.truncation_cause.is_none())
         && progress.gate.is_none()
         && progress.ci.is_none()
         && (progress.advance_error.is_none() || failed_for_coverage || failed_for_export)
@@ -902,17 +1001,12 @@ pub(super) fn validate_progress(
             NodeState::Running => state == NodeState::Running && progress.outputs.is_none(),
             NodeState::Succeeded => {
                 state == NodeState::Succeeded && shortfall.is_none() && {
-                    export.and_then(Result::ok).is_some_and(|(output, cause)| {
-                        progress.outputs.as_ref() == Some(&output)
-                            && progress.truncation_cause == cause
-                    }) || node.composite.as_ref().is_some_and(|spec| {
-                        outputs(spec, plan, checkpoint, positions, true)
-                            .ok()
-                            .is_some_and(|(output, cause)| {
-                                progress.outputs.as_ref() == Some(&output)
-                                    && progress.truncation_cause == cause
-                            })
-                    })
+                    progress.outputs == export.and_then(Result::ok)
+                        || node.composite.as_ref().is_some_and(|spec| {
+                            outputs(spec, plan, checkpoint, positions, true)
+                                .ok()
+                                .is_some_and(|legacy| progress.outputs.as_ref() == Some(&legacy))
+                        })
                 }
             }
             NodeState::Blocked | NodeState::Skipped => {

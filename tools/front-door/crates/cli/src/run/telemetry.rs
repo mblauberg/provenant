@@ -578,8 +578,12 @@ pub(super) fn pipeline_report(
             pattern: context.and_then(|c| c.pattern.clone()),
             lens: extra("lens").or_else(|| context.and_then(|c| c.role.clone())),
             model: pipeline_node_model(&facts),
-            risk_tier: extra("risk_tier"),
-            task_kind: extra("task_kind"),
+            risk_tier: context
+                .and_then(|c| c.risk_tier.clone())
+                .or_else(|| extra("risk_tier")),
+            task_kind: context
+                .and_then(|c| c.task_kind.clone())
+                .or_else(|| extra("task_kind")),
             cost_microdollars: None,
             confirmed,
             false_positives,

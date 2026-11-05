@@ -14,7 +14,15 @@ mod graph_writer_admission_tests {
         });
         assert!(matches!(
             graph_writer_initialisation_error("head", WorktreeError::RegistryLockTimeout),
-            FacadeError::Busy
+            FacadeError::WriterLockBusy
+        ));
+        assert!(matches!(
+            graph_writer_initialisation_error("head", WorktreeError::LockBusy),
+            FacadeError::WriterLockBusy
+        ));
+        assert!(matches!(
+            graph_writer_initialisation_error("head", WorktreeError::UnknownWriter),
+            FacadeError::WriterUnknown
         ));
         for error in [
             lock("writer.lock"),
@@ -22,7 +30,6 @@ mod graph_writer_admission_tests {
             WorktreeError::WriterBusy {
                 holder: Some(provenant_core::AttemptId::from_bytes([7; 16])),
             },
-            WorktreeError::UnknownWriter,
             WorktreeError::Dirty(String::new()),
         ] {
             assert!(matches!(
@@ -139,7 +146,7 @@ mod graph_writer_admission_tests {
         }))
         .unwrap();
 
-        let lock_timeout = WorktreeError::RegistryLockTimeout;
+        let lock_timeout = WorktreeError::LockBusy;
 
         let mut owner = MockWriterOwner {
             errors: std::collections::VecDeque::from([lock_timeout]),
@@ -148,7 +155,7 @@ mod graph_writer_admission_tests {
         };
         let mut journal = MemoryJournal::default();
 
-        // First advance: launch encounters lock timeout on worktrees.lock
+        // First advance: launch encounters a held writer lock.
         let first = advance(&document, &mut owner, &mut journal).unwrap();
         // The node must be retryable Running, NOT Blocked!
         assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
@@ -686,6 +693,62 @@ mod result_tests {
     }
 
     #[test]
+    fn graph_status_waits_match_json_and_human() {
+        let run = graph_status_fixture();
+        let wire = serde_json::to_value(&run).unwrap();
+        let waits = wire["waits"].as_array().unwrap();
+        let ci = waits.iter().find(|wait| wait["node"] == "member").unwrap();
+        assert_eq!(ci["wait"], "ci");
+        assert_eq!(ci["disposition"], "running");
+        let human = super::graph_human(&run);
+        let row = human.lines().find(|line| line.starts_with("  member:")).unwrap();
+        for part in ["wait=ci", "disposition=running", "code=unavailable", "current_attempt=unavailable", "failures=\"unavailable\"", "wake_at=unavailable", "next=unavailable"] {
+            assert!(row.contains(part), "{row}: missing {part}");
+        }
+    }
+
+    #[test]
+    fn node_review_base_uses_its_worktree_not_the_invoking_checkout() -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test("fabric::result_tests::node_review_base_uses_its_worktree_not_the_invoking_checkout")? {
+            return Ok(());
+        }
+        use super::*;
+        use provenant_fabric_runtime::graph::AttemptOwner;
+        struct FreeWorkers;
+        impl WorkerObserver for FreeWorkers {
+            fn observe_roots(&self, _: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
+                Default::default()
+            }
+        }
+        let rig = crate::worktree_tests::repository()?;
+        let original = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let lane = rig.root.join("lane");
+        crate::worktree_tests::git(&rig, &["worktree", "add", "--detach", lane.to_str().ok_or("lane path")?, "HEAD"])?;
+        std::fs::write(rig.project.join("changed"), "new")?;
+        crate::worktree_tests::git(&rig, &["add", "changed"])?;
+        crate::worktree_tests::git(&rig, &["commit", "-qm", "advance invoking checkout"])?;
+        let moved = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        assert_ne!(original, moved);
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let mut owner = BoundGraphOwner {
+            capability_overrides: (Vec::new(), Vec::new()),
+            factory: &factory, integration_base: None, integration_branch: None, network: None,
+            exclude: Vec::new(), budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            cancel: &cancel, prices: None, tick: false,
+        };
+        assert_eq!(owner.resolve_review_base("HEAD", Some(lane.to_str().ok_or("lane path")?))?, Some(original));
+        assert_eq!(owner.resolve_review_base("HEAD", None)?, Some(moved));
+        Ok(())
+    }
+
+    #[test]
     fn graph_status_names_blocking_upstream() {
         let mut run = graph_status_fixture();
         let node = &mut run.checkpoint.nodes[1];
@@ -695,50 +758,6 @@ mod result_tests {
         assert!(super::graph_human::graph_human_full(&run).contains("error=blocked by ordinary (Failed)"));
         let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
         assert!(format!("{summary:?}").contains("blocked by ordinary (Failed)"));
-    }
-
-    #[test]
-    fn graph_status_renders_invalid_input_field_and_reason() {
-        let mut run = graph_status_fixture();
-        let node = &mut run.checkpoint.nodes[0];
-        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some("node ordinary: the launch failed [invalid_input]: input exceeds the 1 MiB limit; check the named input field and retry".into());
-        let human = super::graph_human(&run);
-        let machine = serde_json::to_value(&run).unwrap();
-        for text in [human, machine.to_string()] {
-            assert!(text.contains("input"));
-            assert!(text.contains("1 MiB"));
-            assert!(text.contains("retry"));
-        }
-    }
-
-    #[test]
-    fn graph_status_renders_unreadable_input_without_source_text() {
-        use provenant_fabric_runtime::coordination::facade::FacadeError;
-        use provenant_records::diagnostic::IoFact;
-        let diagnostic = FacadeError::Io {
-            operation: "TOKEN_SENTINEL".into(),
-            path: Some("/private/host".into()),
-            delivery_limit: None,
-            delivery_stage: None,
-            resource: None,
-            input_failure: Some(IoFact::InputUnreadable),
-        }.diagnostic();
-        let mut run = graph_status_fixture();
-        let node = &mut run.checkpoint.nodes[0];
-        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-        node.advance_error = Some(format!(
-            "node ordinary: the launch failed: [{}] {}; {}",
-            diagnostic.code, diagnostic.next.unwrap(), diagnostic.detail.unwrap()
-        ));
-        let human = super::graph_human(&run);
-        let machine = serde_json::to_value(&run).unwrap().to_string();
-        for text in [human, machine] {
-            assert!(text.contains("input could not be read"));
-            assert!(text.contains("retry"));
-            assert!(!text.contains("TOKEN_SENTINEL"));
-            assert!(!text.contains("/private/host"));
-        }
     }
 
     #[test]
@@ -805,11 +824,88 @@ mod result_tests {
         let mut run = graph_status_fixture();
         let first = "1".repeat(40);
         let second = "2".repeat(40);
+        run.checkpoint.bound_review_base = Some(first.clone());
+        run.checkpoint.bound_integration_base = Some(second.clone());
         run.checkpoint.nodes[1].source_commit = Some(first.clone());
+        run.checkpoint.nodes[1].review_base = Some(second.clone());
         run.checkpoint.nodes[2].source_commit = Some(second.clone());
+        run.checkpoint.nodes[3].source_binding = Some(serde_json::from_value(serde_json::json!({"type":"node", "node":"member"})).unwrap());
         let full = super::graph_human::graph_human_full(&run);
+        assert!(full.contains(&format!("Graph bases: review={first} integration={second}")));
         assert!(full.lines().any(|row| row.starts_with("  composite:") && row.contains(&format!("source={first}"))));
         assert!(full.lines().any(|row| row.starts_with("  member:") && row.contains(&format!("source={second}"))));
+        assert!(full.lines().any(|row| row.starts_with("  composite:") && row.contains(&format!("review_base={second}"))));
+        assert!(full.lines().any(|row| row.starts_with("  loop-member:") && row.contains("source=pending")));
+        let json = serde_json::to_value(&run).unwrap();
+        assert_eq!(json["checkpoint"]["bound_review_base"], first);
+        assert_eq!(json["checkpoint"]["bound_integration_base"], second);
+        assert_eq!(json["checkpoint"]["nodes"][3]["source_binding"]["node"], "member");
+        assert_eq!(json["checkpoint"]["nodes"][1]["review_base"], second);
+    }
+
+    #[test]
+    fn source_identity_must_match_the_bound_writer() {
+        let mut run = graph_status_fixture();
+        let identity = provenant_records::run::SourceIdentity { device: 7, inode: 9 };
+        let path = std::path::Path::new("/fixture/writer");
+        run.checkpoint.nodes[0].writer_binding = Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {
+            extra: [("source_directory_identity".into(), serde_json::json!({"device":7,"inode":9}))].into(),
+            worktree: path.display().to_string(), head: "1".repeat(40),
+        });
+        assert!(super::writer_source_identity_matches(&run.checkpoint, path, &identity));
+        let other = provenant_records::run::SourceIdentity { device: 7, inode: 10 };
+        assert!(!super::writer_source_identity_matches(&run.checkpoint, path, &other));
+        run.checkpoint.nodes[0].writer_binding.as_mut().unwrap().extra.clear();
+        assert!(!super::writer_source_identity_matches(&run.checkpoint, path, &identity));
+    }
+
+    #[test]
+    fn graph_status_hides_bound_host_checkout_paths() {
+        let mut run = graph_status_fixture();
+        run.checkpoint.nodes[0].writer_binding = Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {
+            extra: Default::default(),
+            worktree: "/private/host/writer".into(),
+            head: "1".repeat(40),
+        });
+        let snapshot = super::graph_snapshot(run.checkpoint);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("/private/host/writer"));
+        assert!(json.contains("[redacted]"));
+        assert!(json.contains(&"1".repeat(40)));
+        assert!(!super::graph_human::graph_human_full(&snapshot).contains("/private/host/writer"));
+    }
+
+    #[test]
+    fn graph_full_status_connects_attempts_inputs_and_settlement() {
+        let mut run = graph_status_fixture();
+        let node = &mut run.checkpoint.nodes[0];
+        node.attempts[1].input_cap = Some(262144);
+        node.attempts[1].input_cap_source = Some(provenant_fabric_runtime::graph::InputCapSource::Configured);
+        node.attempts[1].input_manifest = Some(serde_json::from_value(serde_json::json!({
+            "schema_version":1, "source_commit":"1111111111111111111111111111111111111111",
+            "review_base":"2222222222222222222222222222222222222222", "graph_review_base":"3333333333333333333333333333333333333333", "integration_base":"4444444444444444444444444444444444444444",
+            "applied_route":{"adapter":"fixture", "model":"fixture/model"}, "omitted":0,
+            "inputs":[{"producer_node":"producer", "producer_attempt":{"graph_id":"fixture", "node_id":"producer", "route_index":0},
+                "kind":"commit", "required":true, "producer_result_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "commit":"1111111111111111111111111111111111111111", "delivery":"delivered", "file_delivery":"omitted"}]
+        })).unwrap());
+        node.outputs = Some(serde_json::from_value(serde_json::json!({
+            "schema_version":2, "result":null, "verdict":"VERDICT: PASS", "findings":[],
+            "branch":null, "commit":"1111111111111111111111111111111111111111", "warnings":[]
+        })).unwrap());
+        let json = serde_json::to_value(&run).unwrap();
+        let attempt = &json["checkpoint"]["nodes"][0]["attempts"][1];
+        assert_eq!(attempt["input_manifest"]["applied_route"]["model"], "fixture/model");
+        assert_eq!(attempt["input_manifest"]["inputs"][0]["producer_attempt"]["node_id"], "producer");
+        assert_eq!(attempt["input_manifest"]["inputs"][0]["delivery"], "delivered");
+        assert_eq!(attempt["input_manifest"]["graph_review_base"], "3333333333333333333333333333333333333333");
+        assert_eq!(attempt["input_manifest"]["integration_base"], "4444444444444444444444444444444444444444");
+        assert_eq!(attempt["outcome"], "task_failed");
+        assert_eq!(attempt["input_cap_source"], "configured");
+        let text = super::graph_human::graph_human_full(&run);
+        for fact in ["fixture/model", "producer", "selected_input", "required=true", "delivery=Delivered", "file=Omitted", "source=111111", "review_base=222222", "input_limit=262144", "input_limit_source=configured", "TaskFailed", "outputs digest="] {
+            assert!(text.contains(fact), "missing {fact}: {text}");
+        }
     }
 
     #[test]
@@ -845,10 +941,10 @@ mod result_tests {
             ordinary
         );
         assert!(ordinary.contains("  ordinary: Failed outcome=TaskFailed\n"));
-        assert!(ordinary.contains("  composite: Running (1 members)\n"));
+        assert!(ordinary.contains("  composite: Running (1 members) wait=none disposition=running"));
         assert!(ordinary.contains("  member: Running CI waiting"));
         assert!(!ordinary.contains("loop-member"));
-        assert!(!ordinary.contains("attempt="));
+        assert!(!ordinary.contains(" attempt=new"));
         let result = provenant_records::CommandResult::new(
             "fabric graph status",
             provenant_records::Outcome::Ok,
@@ -915,6 +1011,9 @@ mod result_tests {
 
     #[test]
     fn graph_status_reads_without_advancing_checkpoint() -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test("fabric::result_tests::graph_status_reads_without_advancing_checkpoint")? {
+            return Ok(());
+        }
         use super::*;
         use provenant_fabric_runtime::graph::{
             FileJournal, GraphDocument, GraphExecution, GraphJournal,
@@ -1019,6 +1118,9 @@ mod result_tests {
     #[test]
     fn remote_upstream_is_materialised_and_unreachable_peer_is_named()
     -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test("fabric::result_tests::remote_upstream_is_materialised_and_unreachable_peer_is_named")? {
+            return Ok(());
+        }
         use super::*;
         use provenant_fabric_runtime::graph::{AttemptKey, InputRequest, MaterialisedInput};
         use std::os::unix::fs::PermissionsExt;
@@ -1612,7 +1714,7 @@ mod result_tests {
         }
         assert_eq!(
             super::decode_graph_document(br#"{"schema_version":0}"#).unwrap_err(),
-            super::FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema)
+            super::FacadeError::invalid("graph document schema_version must be 1 or 2")
         );
     }
 

@@ -62,6 +62,54 @@ pub struct PacingProfile {
     pub after_deadline: AfterDeadline,
 }
 
+/// An expiring preference for an exact model in a known task stratum.
+/// Selection must still pass through ordinary pool eligibility checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelChoiceOverride {
+    pub dimension: String,
+    pub risk_tier: String,
+    pub task_kind: String,
+    pub preferred: ModelId,
+    #[serde(with = "provenant_core::rfc3339::option")]
+    pub expires: Option<provenant_core::WallTime>,
+}
+
+impl<'de> Deserialize<'de> for ModelChoiceOverride {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Instant(#[serde(with = "provenant_core::rfc3339")] provenant_core::WallTime);
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            dimension: String,
+            risk_tier: String,
+            task_kind: String,
+            preferred: ModelId,
+            expires: Option<Scoped<Instant>>,
+        }
+        let input = Input::deserialize(deserializer)?;
+        let mut malformed = false;
+        let expires = Scoped::take(input.expires, &mut malformed).map(|instant| instant.0);
+        Ok(Self {
+            dimension: input.dimension,
+            risk_tier: input.risk_tier,
+            task_kind: input.task_kind,
+            preferred: input.preferred,
+            expires,
+        })
+    }
+}
+
+impl ModelChoiceOverride {
+    pub fn matches(&self, risk_tier: &str, task_kind: &str, now: provenant_core::WallTime) -> bool {
+        self.dimension == "model"
+            && self.risk_tier == risk_tier
+            && self.task_kind == task_kind
+            && self.expires.is_some_and(|expires| now < expires)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PacingOverride {
@@ -225,6 +273,7 @@ impl From<FixedDeadline> for String {
 pub struct RoutingConfig {
     /// Exact models excluded from every pool while their schedule is active.
     pub model_exclusions: ModelExclusions,
+    pub model_choices: Vec<ModelChoiceOverride>,
     pub model_policy: crate::ModelPolicies,
     /// Override the bundled writer advice; omitted fields keep the bundled values.
     pub writer_advisory: Option<WriterAdvisoryOverride>,
@@ -256,6 +305,26 @@ pub struct RoutingConfig {
     pub opencode_go: OpenCodeGoSettings,
 }
 
+impl RoutingConfig {
+    /// The last matching row wins; removing it revokes the preference.
+    pub fn preferred_model(
+        &self,
+        request: &crate::RouteRequest,
+        risk_tier: &str,
+        task_kind: &str,
+        now: provenant_core::WallTime,
+    ) -> Option<&ModelId> {
+        if matches!(request.choice, crate::RouteChoice::Model(_)) {
+            return None;
+        }
+        self.model_choices
+            .iter()
+            .rev()
+            .find(|row| row.matches(risk_tier, task_kind, now))
+            .map(|row| &row.preferred)
+    }
+}
+
 /// Settlement retries a lane may take; the run store seals at most this many
 /// policy successors in one run.
 pub const MAX_SETTLEMENT_RETRIES: u8 = 32;
@@ -268,6 +337,7 @@ pub const MAX_RETRY_WAIT_SECONDS: u64 = 7 * 24 * 3_600;
 #[serde(default, deny_unknown_fields)]
 struct BundledRoutingDefaults {
     model_exclusions: ModelExclusions,
+    model_choices: Vec<ModelChoiceOverride>,
     model_policy: crate::ModelPolicies,
     writer_advisory: Option<WriterAdvisoryOverride>,
     suppress_opus_writer_warning: bool,
@@ -296,6 +366,7 @@ impl Default for RoutingConfig {
                         .expect("bundled routing defaults are valid");
                 Self {
                     model_exclusions: asset.model_exclusions,
+                    model_choices: asset.model_choices,
                     model_policy: asset.model_policy,
                     writer_advisory: asset.writer_advisory,
                     suppress_opus_writer_warning: asset.suppress_opus_writer_warning,
@@ -562,6 +633,19 @@ impl DomainConfig for RoutingConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
         self.model_policy.validate(&mut errors);
+        for (index, row) in self.model_choices.iter().enumerate() {
+            if row.expires.is_none()
+                || row.dimension != "model"
+                || !identifier(&row.risk_tier)
+                || !identifier(&row.task_kind)
+            {
+                errors.push(SectionError {
+                    detail: None,
+                    field: format!("model_choices.{index}"),
+                    code: "selector",
+                });
+            }
+        }
         if self.model_exclusions.len() > 256 {
             errors.push(SectionError {
                 detail: None,
@@ -987,6 +1071,15 @@ fn defaults(_: Profile) -> &'static str {
 /// Enforced model policy restrictions, including a retired schedule key in a
 /// restricting rule, are a boundary; other routing input recovers.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("review.floors.{floor}.paths", "list"),
+    FieldMetadata::enumeration(
+        "review.floors.{floor}.tier",
+        &["routine", "substantial", "crucial", "terminal"],
+    ),
+    FieldMetadata::new("review.floors.{floor}.lenses", "list"),
+    FieldMetadata::new("review.shapes.{shape}.frame", "bool"),
+    FieldMetadata::int("review.shapes.{shape}.verifiers", 0, 32),
+    FieldMetadata::enumeration("review.shapes.{shape}.synthesis", &["model", "reduce"]),
     FieldMetadata::int("settlement_retries", 0, MAX_SETTLEMENT_RETRIES as i64),
     FieldMetadata::int("capacity_retry_seconds", 0, MAX_RETRY_WAIT_SECONDS as i64),
     FieldMetadata::int(
@@ -1536,6 +1629,7 @@ mod tests {
         let config = RoutingConfig::default();
         let context = RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -1618,6 +1712,7 @@ mod tests {
         let config = RoutingConfig::default();
         let context = RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -1684,6 +1779,7 @@ mod tests {
         let base = RoutingConfig::default();
         let context = RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &base,
             registry: REGISTRY,
@@ -1846,6 +1942,7 @@ mod tests {
         }];
         let context = RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,

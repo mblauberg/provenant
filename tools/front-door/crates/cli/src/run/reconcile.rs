@@ -39,7 +39,7 @@ pub(super) fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bo
         out.result.status = Status::Failed;
         out.result.error = Some(CommandError {
             diagnostic: None,
-            code: "reconcile_incomplete".into(),
+            code: "RECONCILE_INCOMPLETE".into(),
             message: out.human.trim().to_owned(),
             cause: None,
             repair: Some("Inspect the reported custody or settlement reason, then retry `provenant reconcile --id <run>`.".into()),
@@ -75,10 +75,33 @@ pub(super) fn reconcile_inner(
     }
     let (runs, truncated) = if command.id.is_empty() {
         let session = open(edge, &request(&clock, &cancel)?)?;
-        let mut runs = session
-            .store
-            .open_runs(SCAN + 1, &request(&clock, &cancel)?)?;
-        let truncated = runs.len() as u64 > SCAN;
+        let call = request(&clock, &cancel)?;
+        let initial = session.store.open_runs(SCAN + 1, &call)?;
+        let mut finished = Vec::new();
+        for run in &initial {
+            if cloud_owner::finished_run(&session.store, *run, &call).unwrap_or(false) {
+                finished.push(*run);
+            }
+        }
+        // Finished cloud jobs retain their advisory record. Scan past them so
+        // they cannot crowd live jobs out of the bounded recovery page.
+        let scan_cap = SCAN * 32;
+        let mut runs = if finished.is_empty() {
+            initial
+        } else {
+            session.store.open_runs(scan_cap + 1, &call)?
+        };
+        let exhausted = runs.len() as u64 > scan_cap;
+        if !finished.is_empty() {
+            let mut active = Vec::new();
+            for run in runs {
+                if !cloud_owner::finished_run(&session.store, run, &call).unwrap_or(false) {
+                    active.push(run);
+                }
+            }
+            runs = active;
+        }
+        let truncated = exhausted || runs.len() as u64 > SCAN;
         runs.truncate(SCAN as usize);
         (
             runs.into_iter()
@@ -104,6 +127,57 @@ pub(super) fn reconcile_inner(
             cwd: &scoped_cwd,
             ..*edge
         };
+        let mut cloud_jobs = Vec::new();
+        let mut cloud_ids = std::collections::BTreeSet::new();
+        for record in session
+            .store
+            .pending_attempts(run, &request(&clock, &cancel)?)?
+        {
+            let call = request(&clock, &cancel)?;
+            let Some(placement) = cloud_owner::placement(&session.store, &record, &call)
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
+            else {
+                continue;
+            };
+            cloud_ids.insert(record.attempt_id);
+            let job = cloud_owner::load(&session.store, record.attempt_id, &call)
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+            match job {
+                Some(job) => match cloud_owner::observe_installed(
+                    &session.store,
+                    record.attempt_id,
+                    &job,
+                    &call,
+                    &scoped_cwd,
+                    false,
+                ) {
+                    Ok(job) => {
+                        let mut view = cloud_owner::view(&job);
+                        view["attempt_id"] = json!(record.attempt_id);
+                        human.push_str(&format!(
+                            "{run}/{} cloud {}\n",
+                            record.attempt_id,
+                            state_tag(&job.state)
+                        ));
+                        cloud_jobs.push(view);
+                    }
+                    Err(error) => {
+                        *fenced = true;
+                        human.push_str(&format!(
+                            "{run}/{} cloud observation failed: {}\n",
+                            record.attempt_id,
+                            plain_text(&error, usize::MAX)
+                        ));
+                        cloud_jobs.push(json!({"attempt_id": record.attempt_id, "error": error}));
+                    }
+                },
+                None => {
+                    *fenced = true;
+                    human.push_str(&format!("{run}/{} cloud target {} has no recorded submission; retry the original run\n", record.attempt_id, plain_text(&placement.target, usize::MAX)));
+                    cloud_jobs.push(json!({"attempt_id": record.attempt_id, "state": "submission_not_recorded"}));
+                }
+            }
+        }
         let registry = Registry {
             roots: Some(edge.roots),
             home: Some(edge.home),
@@ -115,7 +189,7 @@ pub(super) fn reconcile_inner(
             cancel: Some(&cancel),
         };
         // Each step gets a fresh budget; recovery waits on custody locks.
-        let found = match request(&clock, &cancel)
+        let mut found = match request(&clock, &cancel)
             .and_then(|call| Ok(session.service().reconcile(run, &registry, &call)?))
         {
             Ok(found) => found,
@@ -126,6 +200,7 @@ pub(super) fn reconcile_inner(
                 continue;
             }
         };
+        found.retain(|(id, _)| !cloud_ids.contains(id));
         let started = if found.iter().any(|(_, r)| *r == run::Reconciled::Queued) {
             request(&clock, &cancel).and_then(|call| launch(&session, run, &scoped_edge, &call))
         } else {
@@ -167,6 +242,7 @@ pub(super) fn reconcile_inner(
             "launched": launched,
             "launch_unknown": unknown,
             "launch_error": launch_error,
+            "cloud_jobs": cloud_jobs,
         }));
     }
     if rows.is_empty() {

@@ -7,9 +7,7 @@ use crate::sys::{raw_exec::OwnedPid as RawChild, reaper::Reaper, resources::Proc
 use provenant_core::CancelToken;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-#[cfg(test)]
-use std::io::Read;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 #[cfg(any(test, feature = "fixture"))]
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -284,6 +282,82 @@ pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
     .map_err(io_error("spawn detached worker"))?;
     drop(child); // Transfer custody without waiting or signalling the worker.
     Ok(())
+}
+
+/// Start a worker in its own process group and read one bounded receipt. When
+/// the reader's deadline expires, the reaper retains the child without
+/// signalling it: its work and any custody it holds must continue. `None` means
+/// only that the deadline expired. A worker that ends or breaks its stream
+/// early gives whatever it wrote, which the caller must validate.
+#[allow(clippy::disallowed_methods)] // This is a real process deadline.
+pub fn detached_receipt(
+    argv: &[OsString],
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<Option<Vec<u8>>, ExecError> {
+    if argv
+        .first()
+        .is_some_and(|program| is_test_harness(Path::new(program)))
+    {
+        return Err(ExecError::TestHarness);
+    }
+    check_process_budget(crate::sys::resources::process_budget())?;
+    crate::sys::raw_exec::verify_child_wait_policy().map_err(ExecError::ChildWaitPolicy)?;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(ExecError::DurationOutOfRange)?;
+    let reaper = Reaper::new(1).map_err(io_error("start reaper"))?;
+    let permit = reaper.reserve().ok_or(ExecError::Busy)?;
+    let mut child = RawChild::spawn(
+        permit,
+        crate::sys::raw_exec::SpawnSpec {
+            argv,
+            env: None,
+            cwd,
+            input: false,
+            secret_input: None,
+            inherited_lease: None,
+            inherited_ports: None,
+            process_group: true,
+            capture_stdout: true,
+            capture_stderr: false,
+        },
+    )
+    .map_err(io_error("spawn detached worker"))?;
+    let mut output = child.stdout.take().ok_or(ExecError::EmptyArgv)?;
+    let mut receipt = Vec::new();
+    loop {
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        match child.ready(Some(&output), None, None) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => return Ok(Some(receipt)),
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        let mut buf = [0_u8; 4096];
+        match output.read(&mut buf) {
+            Ok(0) => return Ok(Some(receipt)),
+            Ok(n) => {
+                receipt.extend_from_slice(&buf[..n]);
+                if receipt.len() > 1024 * 1024 {
+                    return Ok(Some(receipt));
+                }
+                if receipt.last() == Some(&b'\n') {
+                    return Ok(Some(receipt));
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) => {}
+            Err(_) => return Ok(Some(receipt)),
+        }
+    }
 }
 
 /// Refuse a detached worker when the user's process table has no headroom. A

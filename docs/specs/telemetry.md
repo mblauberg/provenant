@@ -310,11 +310,12 @@ escaped-defect rates in the same stratum.
 
 A suggestion includes both sample counts, intervals, references to its full
 arm evidence and an RFC3339 expiry, default 14 days (`--expiry-days`). Reports
-never apply changes. Pattern and lens choices have no scheduled write path.
-The current model-policy CLI also cannot schedule an arbitrary model choice:
-`route override set` schedules pacing only. Suggestions therefore have
-`accept: null` and explain that they are advisory. Graph node asks and the
-#2179 whole-patch-read measurement remain outstanding under #2011; there is no
+never apply changes. A model suggestion's `accept` is a configuration line under `[domains.routing]`,
+carrying the same expiry; append its row if `model_choices` already exists. To accept it
+through the CLI, use `provenant route override set --model ADAPTER/ID
+--risk-tier TIER --task-kind KIND --until RFC3339`, using the suggestion's
+values. Pattern and lens suggestions remain advisory with `accept: null`.
+Whole-patch-read measurement remains in the backlog of #2225; there is no
 read-event source for that measurement.
 
 - Why: post-merge quality and verified value need evidence coverage, comparable

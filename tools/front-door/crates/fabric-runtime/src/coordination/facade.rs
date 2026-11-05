@@ -178,12 +178,6 @@ bounded_input! {
 #[serde(rename_all = "snake_case")]
 pub enum DispatchRefusalFact {
     DetachedWriter,
-    GraphSchema,
-    GraphComposite,
-    GraphPlan,
-    GraphStructuralLimit(crate::graph::GraphStructuralLimit),
-    GraphEnvelope,
-    GraphOutputKind(crate::graph::GraphOutputField),
     Resource(provenant_records::diagnostic::ResourceFact),
 }
 
@@ -280,6 +274,8 @@ pub enum FacadeError {
     },
     #[error("writer lock or writer is busy")]
     WriterBusy,
+    #[error("writer lock is busy")]
+    WriterLockBusy,
     #[error("writer custody is unknown")]
     WriterUnknown,
     #[error("a requested credential-root grant was refused")]
@@ -511,28 +507,6 @@ impl FacadeError {
             .next(action)
     }
 
-    /// Retain the typed admission stage while keeping its original refusal text.
-    pub fn graph_admission(error: crate::graph::AdmissionError) -> Self {
-        use crate::graph::AdmissionError;
-        let fact = match &error {
-            AdmissionError::Schema(_) => DispatchRefusalFact::GraphSchema,
-            AdmissionError::Composite(_) => DispatchRefusalFact::GraphComposite,
-            AdmissionError::Plan(_) => DispatchRefusalFact::GraphPlan,
-            AdmissionError::StructuralLimit(limit) => {
-                DispatchRefusalFact::GraphStructuralLimit(*limit)
-            }
-            AdmissionError::Envelope(_) => DispatchRefusalFact::GraphEnvelope,
-            AdmissionError::OutputKind { field, .. } => {
-                DispatchRefusalFact::GraphOutputKind(*field)
-            }
-        };
-        Self::DispatchRefused {
-            reason: error.to_string(),
-            disk: None,
-            fact: Some(fact),
-        }
-    }
-
     /// Project only facts selected by the owning refusal, never its source text.
     pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
         use provenant_records::diagnostic::Diagnostic;
@@ -555,25 +529,8 @@ impl FacadeError {
                 projected = projected.detail("writer needs a branch")
                     .next("create a branch for the worktree before retrying");
             }
-            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphStructuralLimit(limit)), .. } => {
-                projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
-            }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::Resource(fact)), .. } => {
                 projected = fact.project(projected);
-            }
-            Self::DispatchRefused { fact: Some(fact), .. } => {
-                let (detail, action) = match fact {
-                    DispatchRefusalFact::DetachedWriter => unreachable!(),
-                    DispatchRefusalFact::GraphSchema => ("graph document schema_version is invalid", "use a schema version that supports the document fields"),
-                    DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
-                    DispatchRefusalFact::GraphPlan => ("graph plan is invalid", "inspect the graph plan and node dependencies"),
-                    DispatchRefusalFact::GraphStructuralLimit(_) => unreachable!(),
-                    DispatchRefusalFact::Resource(_) => unreachable!(),
-                    DispatchRefusalFact::GraphEnvelope => ("graph checkpoint would exceed its size limit", "split the graph into smaller runs"),
-                    DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::Input) => ("graph inputs[].outputs selects an unavailable output kind", "select an output supplied by the source node"),
-                    DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::CompositeExport) => ("graph composite.exports[].outputs selects an unavailable output kind", "select an output supplied by the source node"),
-                };
-                projected = projected.detail(detail).next(action);
             }
             Self::DispatchRefused { disk: Some(disk), .. } => {
                 projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; gc.free_floor from {}; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.origin.description(), disk.reclaimed))
@@ -585,6 +542,7 @@ impl FacadeError {
             Self::Io { input_failure: Some(fact), .. } => projected = fact.project(projected),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy => projected = projected.next("wait for the current writer or lock holder to finish"),
+            Self::WriterLockBusy => projected = projected.next("wait for the writer lock holder to finish, then retry"),
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
             Self::ConfinementRefused { resource: Some(fact) } => projected = fact.project(projected),
             Self::ConfinementRefused { resource: None } => projected = projected.next("inspect the requested access and confinement policy"),
@@ -621,6 +579,7 @@ impl FacadeError {
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused { .. } => "confinement_refused",
             Self::WriterBusy => "writer_busy",
+            Self::WriterLockBusy => "writer_lock_busy",
             Self::WriterUnknown => "writer_unknown",
             Self::CredentialRoot { .. } => "credential_root",
             Self::DispatchRefused { .. } => "dispatch_refused",
@@ -975,32 +934,7 @@ mod diagnostic_tests {
         );
     }
 
-    #[test]
-    fn graph_admission_projection_does_not_echo_source() {
-        let error = FacadeError::graph_admission(crate::graph::AdmissionError::Schema(
-            "TOKEN_SENTINEL\u{1b}".into(),
-        ));
-        let projection = error.diagnostic();
-        assert_eq!(projection.code, "dispatch_refused");
-        assert!(
-            projection
-                .detail
-                .as_deref()
-                .unwrap()
-                .contains("schema_version")
-        );
-        assert!(projection.next.is_some());
-        assert!(
-            !serde_json::to_string(&error)
-                .unwrap()
-                .contains("TOKEN_SENTINEL")
-        );
-        assert!(
-            !serde_json::to_string(&projection)
-                .unwrap()
-                .contains("TOKEN_SENTINEL")
-        );
-    }
+
 
     #[test]
     fn directory_permissions_projection_respects_destination() {

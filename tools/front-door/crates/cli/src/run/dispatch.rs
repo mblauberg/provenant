@@ -6,6 +6,7 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
         return reply("run", Err(fail));
     }
     if command.host.is_none()
+        && !matches!(command.access.mode, Some(Mode::ReadOnly))
         && let Some(path) = &command.access.worktree
     {
         let absolute = if path.is_absolute() {
@@ -55,7 +56,11 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
 // dispatch so it cannot silently become a read-only lane. An explicit mode
 // (including `--mode read-only`) or a target is an intent and passes.
 pub(super) fn require_explicit_target(command: &Dispatch, cwd: &Path) -> Result<(), Fail> {
-    if command.access.mode.is_some()
+    if command
+        .placement
+        .as_deref()
+        .is_some_and(|placement| placement.starts_with("cloud:"))
+        || command.access.mode.is_some()
         || command.access.worktree.is_some()
         || command.branch.is_some()
         || command.worktree_branch.is_some()
@@ -139,6 +144,55 @@ fn local_session(edge: &Edge<'_>) -> Option<Session> {
 pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     result.result.command = "run".into();
     if result.result.error.is_some() {
+        return result;
+    }
+    if let Some(jobs) = result.result.data["cloud_jobs"].as_array() {
+        let mut human = format!(
+            "operation {}\n",
+            result.result.data["operation_id"]
+                .as_str()
+                .unwrap_or("unknown")
+        );
+        for job in jobs {
+            let id = job["attempt_id"].as_str().unwrap_or("unknown");
+            let state = job["state"]["state"].as_str().unwrap_or("unknown");
+            human.push_str(&format!(
+                "{} cloud {} {}",
+                &id[..id.len().min(8)],
+                plain_text(job["target"].as_str().unwrap_or("unknown"), usize::MAX),
+                state
+            ));
+            if let Some(passed) = job["passed"].as_bool() {
+                human.push_str(if passed {
+                    " (advisory pass)"
+                } else {
+                    " (advisory failure)"
+                });
+                if !passed {
+                    result.result.status = Status::Failed;
+                }
+            }
+            if let Some(model) = job["observed_model_status"].as_str() {
+                human.push_str(&format!(", observed model {model}"));
+            }
+            if let Some(detail) = job["state"]["detail"].as_str() {
+                human.push_str(&format!(": {}", plain_text(detail, usize::MAX)));
+            }
+            if let Some(remedy) = job["remedy"].as_str() {
+                human.push_str(&format!("; {}", plain_text(remedy, usize::MAX)));
+            }
+            if state == "setup_failed" {
+                result.result.status = Status::Failed;
+            }
+            human.push('\n');
+        }
+        if result.result.status == Status::Timeout {
+            result.result.status = Status::Waiting;
+        }
+        human.push_str(&warnings_text(&result.result.data));
+        result.summary = Some(crate::Summary::verbatim(&human, None));
+        result.human = human;
+        result.read_only = false;
         return result;
     }
     let rows = result.result.data["lanes"]
@@ -414,9 +468,8 @@ pub(crate) fn pool_effort_refusal(
         .flatten()
 }
 
-/// Refuse a model the catalogue does not record, or an effort its recorded
-/// model does not take, before any run record exists. A typo gets the nearest
-/// recorded IDs. Routing applies the same rules, but only after launch prep.
+/// Check catalogue requirements and recorded effort controls before a run
+/// record exists. A typo gets the nearest recorded IDs.
 pub(super) fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> {
     let Ok(id) = ModelId::parse(model) else {
         return Ok(());
@@ -424,9 +477,11 @@ pub(super) fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> 
     let catalogue = provenant_routing::Catalogue::bundled()
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
     let Some(entry) = catalogue.model(&id) else {
-        // A registry-only adapter has no built-in catalogue to consult.
-        // Routing checks that its identity is actually registered.
-        if provenant_records::AdapterSpec::get(id.adapter()).is_none() {
+        // Adapters can accept model names without a bundled catalogue entry.
+        // Routing still checks that the adapter is registered.
+        if provenant_records::AdapterSpec::get(id.adapter())
+            .is_none_or(|spec| !spec.require_catalogue_for_launch)
+        {
             return Ok(());
         }
         let nearest = catalogue.nearest_models(&id);
@@ -586,6 +641,10 @@ pub(super) fn check_flag_capabilities_with_writes(
     Ok(())
 }
 
+/// The shortest admission window a caller's `--wait` can impose.
+/// `--admission-timeout` and `[domains.run] admission_seconds` can set less.
+const ADMISSION_WAIT_FLOOR_SECONDS: u64 = 60;
+
 enum WorktreeAdmissionError {
     Own(worktree::OwnWorktreeError),
     Run(run::RunError),
@@ -599,10 +658,29 @@ impl WorktreeAdmissionError {
             Self::Own(worktree::OwnWorktreeError::Other(run::RunError::Writer(err)))
             | Self::Run(run::RunError::Writer(err)) => matches!(
                 err,
-                WorktreeError::RegistryLockTimeout | WorktreeError::UnknownWriter
+                WorktreeError::RegistryLockTimeout
+                    | WorktreeError::LockBusy
+                    | WorktreeError::UnknownWriter
+                    | WorktreeError::UnknownWriterAt { .. }
             ),
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod admission_retry_tests {
+    use super::*;
+    use provenant_confinement::worktrees::WorktreeError;
+
+    #[test]
+    fn lock_contention_and_unknown_writer_retry_but_live_writer_refuses() {
+        let retry =
+            |error| WorktreeAdmissionError::Run(run::RunError::Writer(error)).is_transient();
+        assert!(retry(WorktreeError::LockBusy));
+        assert!(retry(WorktreeError::UnknownWriter));
+        assert!(!retry(WorktreeError::LiveWriter));
+        assert!(!retry(WorktreeError::Dirty(String::new())));
     }
 }
 
@@ -616,6 +694,7 @@ impl From<WorktreeAdmissionError> for Fail {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
 pub(super) fn dispatch_inner(
     mut command: Dispatch,
     edge: &Edge<'_>,
@@ -755,6 +834,129 @@ pub(super) fn dispatch_inner(
                 )
             });
     }
+    let cloud = if let Some(placement) = command
+        .placement
+        .as_deref()
+        .filter(|placement| *placement != "local")
+    {
+        let name = placement
+            .strip_prefix("cloud:")
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "placement must be cloud:NAME",
+                )
+            })?;
+        if command.host.is_some() {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "cloud placement cannot be combined with --host",
+            ));
+        }
+        if crate::fabric::in_lane() {
+            return Err(Fail::new(
+                Status::Refused,
+                ErrorKind::LaneCoordinationRefused,
+                "cloud submission requires the host run owner",
+            ));
+        }
+        if matches!(command.access.mode(), Mode::WorktreeWrite)
+            || command.deliver.is_some()
+            || command.access.worktree.is_some()
+            || command.branch.is_some()
+            || command.worktree_branch.is_some()
+        {
+            return Err(Fail::new(
+                Status::Refused,
+                ErrorKind::Refused,
+                "cloud verification is advisory and cannot hold writer or delivery authority",
+            ));
+        }
+        let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+            .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+        let target = config
+            .domains
+            .lanes
+            .cloud_targets
+            .get(name)
+            .ok_or_else(|| {
+                Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Config,
+                    format!("cloud target {name} is not configured"),
+                )
+            })?;
+        let cloud = provenant_records::run::CloudPlacement {
+            target: name.into(),
+            provider: command
+                .cloud_provider
+                .clone()
+                .unwrap_or_else(|| target.provider.clone()),
+            environment: command
+                .cloud_environment
+                .clone()
+                .unwrap_or_else(|| target.environment.clone()),
+            repository: command
+                .cloud_repository
+                .clone()
+                .unwrap_or_else(|| target.repository.clone()),
+            branch: command
+                .cloud_branch
+                .clone()
+                .unwrap_or_else(|| target.branch.clone()),
+            model: command
+                .cloud_model
+                .clone()
+                .or_else(|| {
+                    command.route.model.as_ref().map(|model| {
+                        model
+                            .0
+                            .split_once('/')
+                            .map_or(model.0.as_str(), |(_, name)| name)
+                            .to_owned()
+                    })
+                })
+                .unwrap_or_else(|| target.model.clone()),
+            effort: command
+                .cloud_effort
+                .clone()
+                .or_else(|| command.route.effort.clone())
+                .or_else(|| target.effort.clone()),
+            deadline_seconds: command.cloud_deadline.unwrap_or(target.deadline_seconds),
+        };
+        if cloud.environment.trim().is_empty()
+            || cloud.repository.trim().is_empty()
+            || cloud.branch.trim().is_empty()
+            || cloud.model.trim().is_empty()
+            || cloud.deadline_seconds == 0
+        {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Config,
+                format!(
+                    "cloud target {name} environment {} needs valid repository, branch, model and deadline; create or repair the provider environment and retry",
+                    if cloud.environment.trim().is_empty() {
+                        "<missing>"
+                    } else {
+                        cloud.environment.as_str()
+                    }
+                ),
+            ));
+        }
+        if command.head.is_none() {
+            let git = provenant_os::git::git_executable().ok_or(run::RunError::GitUnavailable)?;
+            command.head = Some(run::resolve_git_base(&git, edge.cwd, "HEAD")?);
+        }
+        if command.base.is_none() {
+            command.base = command.head.clone();
+        }
+        Some(cloud)
+    } else {
+        None
+    };
     // Check explicit placement before local aliases are normalised away and
     // before writer validation or peer discovery can act on the request.
     if command.host.is_some() && crate::fabric::in_lane() {
@@ -805,6 +1007,9 @@ pub(super) fn dispatch_inner(
             &session,
             &call,
             workers,
+            command
+                .wait
+                .and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds))),
             &capability_sources,
         )? {
             return Ok(replayed);
@@ -824,6 +1029,7 @@ pub(super) fn dispatch_inner(
     } else {
         worktree_access(
             matches!(command.access.mode(), Mode::WorktreeWrite) && command.branch.is_none(),
+            matches!(command.access.mode, Some(Mode::ReadOnly)),
             command.access.worktree.as_deref(),
         )?;
         None
@@ -852,6 +1058,16 @@ pub(super) fn dispatch_inner(
             }
             new_worktree = Some(remote::new_worktree(&command)?);
         }
+    }
+    if command.host.is_some()
+        && matches!(command.access.mode, Some(Mode::ReadOnly))
+        && command.access.worktree.is_some()
+    {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::WorktreeNotApplicable,
+            "--worktree names a local checkout and cannot be used with a peer --host",
+        ));
     }
     if command.branch.is_some() && new_worktree.is_none() {
         return Err(Fail::new(
@@ -1000,11 +1216,23 @@ pub(super) fn dispatch_inner(
             task_id,
             command.title.clone(),
             prompt,
-            requested(
-                flag_route.0.as_deref(),
-                flag_route.1.as_deref(),
-                flag_route.2.clone(),
-            )?,
+            if let Some(cloud) = cloud
+                .as_ref()
+                .filter(|_| flag_route.0.is_none() && flag_route.1.is_none())
+            {
+                run::RequestedRoute::Model {
+                    extra: Default::default(),
+                    provider: cloud.provider.clone(),
+                    model: cloud.model.clone(),
+                    effort: cloud.effort.clone(),
+                }
+            } else {
+                requested(
+                    flag_route.0.as_deref(),
+                    flag_route.1.as_deref(),
+                    flag_route.2.clone(),
+                )?
+            },
             flag_route.3.clone(),
             command.delivery_id,
             command.account.clone(),
@@ -1048,6 +1276,13 @@ pub(super) fn dispatch_inner(
             }
             if !fallback.is_empty() {
                 return unsupported("route fallback with --host");
+            }
+            if !lane_access.attachments.is_empty() {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: remote transport cannot provide image_input or attachment read grants"
+                );
             }
             if lane_access.network.is_some()
                 || !lane_access.read_roots.is_empty()
@@ -1171,11 +1406,35 @@ pub(super) fn dispatch_inner(
             )
         })?;
 
+    let initial_deadline = if let Some(wait_seconds) = command.wait {
+        // Waiting to observe a lane is not a reason to give up on admitting it:
+        // creating another worktree holds the repository lock for many seconds.
+        let wait_deadline =
+            DurationMicros::from_seconds(wait_seconds.max(ADMISSION_WAIT_FLOOR_SECONDS))
+                .ok()
+                .and_then(|duration| now_wall.checked_add(duration).ok())
+                .ok_or_else(|| {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid wait timeout")
+                })?;
+        initial_deadline.min(wait_deadline)
+    } else {
+        initial_deadline
+    };
+
     let mut admission_window = match session
         .store
         .admission_window(&command.operation_id, &call)?
     {
-        Some(window) => window,
+        Some(mut window) => {
+            if initial_deadline < window.deadline {
+                window.deadline = initial_deadline;
+                session
+                    .store
+                    .save_admission_window(&command.operation_id, window, &call)?
+            } else {
+                window
+            }
+        }
         None => session.store.save_admission_window(
             &command.operation_id,
             run::AdmissionWindow {
@@ -1188,13 +1447,37 @@ pub(super) fn dispatch_inner(
 
     // Preflight is complete: create or claim the owned tree, then admit.
     let mut pinned_base = None;
-    let worktree = if owned.is_some() || command.access.worktree.is_some() {
+    let live_reader =
+        matches!(command.access.mode, Some(Mode::ReadOnly)) && command.access.worktree.is_some();
+    let worktree = if live_reader {
+        let path = command.access.worktree.as_deref().ok_or_else(|| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::WorktreeRequired,
+                "reader worktree missing",
+            )
+        })?;
+        let source = run::resolve_reader_source(edge.roots.state.as_path(), edge.cwd, path)?;
+        let directory = provenant_os::fs::Directory::open_anchor(&source)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+        let metadata = directory
+            .metadata()
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+        lane_access.source_root = Some(source.clone());
+        lane_access.source_live = true;
+        lane_access.source_identity = Some(run::SourceIdentity {
+            device: metadata.device,
+            inode: metadata.inode,
+        });
+        Some(json!({"path": source, "owned": false, "mode": "read-only"}))
+    } else if owned.is_some() || command.access.worktree.is_some() {
         let backoff = provenant_core::retry::Backoff::new(
             Duration::from_millis(100),
             2,
             Duration::from_secs(2),
         );
         let mut retries = 0_u64;
+        let mut last_admission_error = None;
         loop {
             if cancel.is_cancelled() {
                 return Err(Fail::new(
@@ -1224,10 +1507,15 @@ pub(super) fn dispatch_inner(
                 .wall_now()
                 .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
             if now >= admission_window.deadline {
-                return Err(Fail::new(
-                    Status::Refused,
-                    ErrorKind::Refused,
-                    "admission deadline exceeded",
+                return Err(last_admission_error.map_or_else(
+                    || {
+                        Fail::new(
+                            Status::Refused,
+                            ErrorKind::Refused,
+                            "admission deadline exceeded",
+                        )
+                    },
+                    Fail::from,
                 ));
             }
             let remaining =
@@ -1355,7 +1643,7 @@ pub(super) fn dispatch_inner(
                     break Some(value);
                 }
                 Err(err) => {
-                    if !err.is_transient() {
+                    if command.wait.is_none() || !err.is_transient() {
                         return Err(err.into());
                     }
                     let now = clock
@@ -1364,6 +1652,7 @@ pub(super) fn dispatch_inner(
                     if now >= admission_window.deadline {
                         return Err(err.into());
                     }
+                    last_admission_error = Some(err);
                     let delay = backoff.delay(retries);
                     let left_micros = u64::try_from(
                         admission_window
@@ -1421,7 +1710,18 @@ pub(super) fn dispatch_inner(
                 if network.is_some() {
                     access.network = network;
                 }
+                let mut context = context;
+                if command.risk_tier.is_some() || command.task_kind.is_some() {
+                    let labels = context.get_or_insert_with(Default::default);
+                    if labels.risk_tier.is_none() {
+                        labels.risk_tier = command.risk_tier.clone();
+                    }
+                    if labels.task_kind.is_none() {
+                        labels.task_kind = command.task_kind.clone();
+                    }
+                }
                 Submitted {
+                    cloud: cloud.clone(),
                     require_skill_location,
                     settlement_retry_limit: None,
                     context,
@@ -1438,7 +1738,11 @@ pub(super) fn dispatch_inner(
                     provider_timeout: command.provider_timeout,
                     delivery_id,
                     deliver,
-                    worktree: command.access.worktree.clone(),
+                    worktree: if live_reader {
+                        None
+                    } else {
+                        command.access.worktree.clone()
+                    },
                     access,
                 }
             },
@@ -1465,7 +1769,20 @@ pub(super) fn dispatch_inner(
     } else {
         Vec::new()
     };
+    let cloud_prompts: Vec<_> = tasks
+        .iter()
+        .filter_map(|task| {
+            task.cloud
+                .as_ref()
+                .map(|_| (task.task_id, task.prompt.clone()))
+        })
+        .collect();
     brief_warnings.extend(capability_warnings);
+    // Admission has its own budget. Start the launch and observation budget
+    // only once the run is ready to submit.
+    let deadline = command
+        .wait
+        .and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds)));
     let (record, started) = submit_with_host_and_wait(
         &session,
         edge,
@@ -1478,16 +1795,136 @@ pub(super) fn dispatch_inner(
         },
         &call,
         None,
-        command.wait,
+        deadline,
     )?;
-    let (mut data, mut human, timed_out) =
-        report(&session, &record, &started, command.wait, edge, &call)?;
+    let mut cloud_jobs = Vec::new();
+    if let Some(placement) = cloud.as_ref() {
+        let attempts = session.store.pending_attempts(record.run_id, &call)?;
+        let target = crate::domains::CloudTarget {
+            provider: placement.provider.clone(),
+            environment: placement.environment.clone(),
+            model: placement.model.clone(),
+            effort: placement.effort.clone(),
+            repository: placement.repository.clone(),
+            branch: placement.branch.clone(),
+            deadline_seconds: placement.deadline_seconds,
+        };
+        for (task_id, prompt) in &cloud_prompts {
+            let attempt = attempts
+                .iter()
+                .find(|attempt| attempt.task_id == *task_id)
+                .ok_or_else(|| {
+                    Fail::new(Status::Error, ErrorKind::Invalid, "cloud attempt not found")
+                })?;
+            let commit = command.head.as_deref().ok_or_else(|| {
+                Fail::new(Status::Error, ErrorKind::Invalid, "cloud commit missing")
+            })?;
+            let job = cloud_owner::prepare_job(
+                attempt.attempt_id,
+                &placement.target,
+                &target,
+                commit,
+                &clock,
+            )
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+            let job = cloud_owner::submit_installed(&session.store, attempt.attempt_id, job, prompt, &call, edge.cwd).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, format!("cloud target {} environment {}: {error}; create or repair the provider environment and retry", placement.target, placement.environment)))?;
+            cloud_jobs.push(job);
+        }
+    }
+    let mut cloud_wait_timed_out = false;
+    if let Some(seconds) = command.wait.filter(|_| !cloud_jobs.is_empty()) {
+        let duration = DurationMicros::from_seconds(seconds)
+            .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid cloud wait"))?;
+        let deadline = clock
+            .mono_now()
+            .checked_add(duration)
+            .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "cloud wait deadline"))?;
+        loop {
+            for job in &mut cloud_jobs {
+                if job.state.is_terminal()
+                    || matches!(
+                        job.state,
+                        provenant_providers::cloud::RemoteState::Unknown { .. }
+                    )
+                {
+                    continue;
+                }
+                let id = AttemptId::parse(&job.job_id).map_err(|_| {
+                    Fail::new(
+                        Status::Error,
+                        ErrorKind::Invalid,
+                        "invalid cloud job identity",
+                    )
+                })?;
+                *job =
+                    cloud_owner::observe_installed(&session.store, id, job, &call, edge.cwd, false)
+                        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+            }
+            if cloud_jobs.iter().all(|job| {
+                job.state.is_terminal()
+                    || matches!(
+                        job.state,
+                        provenant_providers::cloud::RemoteState::Unknown { .. }
+                    )
+            }) {
+                break;
+            }
+            let now = clock.mono_now();
+            if now >= deadline {
+                cloud_wait_timed_out = true;
+                break;
+            }
+            let pause = now
+                .checked_add(DurationMicros::from_micros(2_000_000))
+                .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "cloud wait"))?
+                .min(deadline);
+            clock
+                .wait_until(pause)
+                .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "cloud wait"))?;
+        }
+    }
+    let (mut data, mut human, timed_out) = report(
+        &session,
+        &record,
+        &started,
+        if cloud.is_some() {
+            None
+        } else {
+            deadline.map(|end| end.saturating_duration_since(Instant::now()))
+        },
+        edge,
+        &call,
+    )?;
+    if !cloud_jobs.is_empty() {
+        brief_warnings.push("cloud usage costs are unknown; results are advisory".into());
+        data["cloud_jobs"] = json!(
+            cloud_jobs
+                .iter()
+                .map(|job| {
+                    let mut view = cloud_owner::view(job);
+                    view["attempt_id"] = json!(job.job_id);
+                    view
+                })
+                .collect::<Vec<_>>()
+        );
+        if command.wait.is_some() {
+            data["timed_out"] = json!(cloud_wait_timed_out);
+        }
+        for job in &cloud_jobs {
+            human.push_str(&format!(
+                "cloud {}: {} ({:?})\n",
+                plain_text(&job.target, usize::MAX),
+                plain_text(&job.remote_id, usize::MAX),
+                state_tag(&job.state)
+            ));
+        }
+    }
     record_warnings(&mut data, brief_warnings);
     human.push_str(&warnings_text(&data));
     if let Some(worktree) = worktree {
         data["worktree"] = worktree;
     }
-    Ok((data, human, timed_out))
+    Ok((data, human, timed_out || cloud_wait_timed_out))
 }
 
 /// Carry submit-time warnings as `data["warnings"]`, so JSON consumers see them.
@@ -1680,12 +2117,14 @@ pub(super) fn worktree_was_pruned(receipt: &Value, path: &Path) -> bool {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
+#[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
 pub(super) fn replay_owned_dispatch(
     command: &Dispatch,
     edge: &Edge<'_>,
     session: &Session,
     call: &run::Request<'_>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    deadline: Option<Instant>,
     capability_sources: &[Value],
 ) -> Result<Option<(Value, String, bool)>, Fail> {
     let Some(operation) = session.store.operation(&command.operation_id, call)? else {
@@ -1798,8 +2237,24 @@ pub(super) fn replay_owned_dispatch(
         return Err(run::RunError::OperationConflict.into());
     }
     let run = session.store.run(operation.run_id, call)?;
-    let started = launch(session, run.run_id, edge, call)?;
-    let (mut data, human, timed_out) = report(session, &run, &started, command.wait, edge, call)?;
+    let started = match deadline {
+        Some(end) => launch_with_deadline(
+            session,
+            &run,
+            edge,
+            call,
+            end.saturating_duration_since(Instant::now()),
+        )?,
+        None => launch(session, run.run_id, edge, call)?,
+    };
+    let (mut data, human, timed_out) = report(
+        session,
+        &run,
+        &started,
+        deadline.map(|end| end.saturating_duration_since(Instant::now())),
+        edge,
+        call,
+    )?;
     data["worktree"] = json!({"path": writer.worktree, "branch": branch, "owned":true});
     if let Some(settlement) = settlement {
         data["worktree_settlement"] = settlement;
@@ -1905,6 +2360,100 @@ pub fn launch(
     call: &run::Request<'_>,
 ) -> Result<Vec<run::Started>, Fail> {
     launch_prepared(session, run, edge, call, None)
+}
+
+/// The detached launcher's entry point. It reopens the admitted run and uses
+/// the ordinary host launch path, including writer custody and guardian handoff.
+pub fn launch_worker(id: RunId, provider_lease_wait: Option<u64>, edge: &Edge<'_>) -> Reply {
+    let outcome = (|| {
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel)?;
+        let session = open(edge, &call)?;
+        let started =
+            launch_prepared_with_wait(&session, id, edge, &call, None, provider_lease_wait)?;
+        Ok((json!({"started": started}), String::new()))
+    })();
+    reply("internal launch", outcome)
+}
+
+/// A waited caller gives launch to a separately reaped process, so returning
+/// cannot drop a writer lease while preparation is still in progress.
+pub(super) fn launch_with_deadline(
+    session: &Session,
+    record: &run::RunRecord,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    wait: Duration,
+) -> Result<Vec<run::Started>, Fail> {
+    let executable = std::env::current_exe()
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    let argv = vec![
+        executable.into_os_string(),
+        "--state-dir".into(),
+        edge.roots.state.as_path().as_os_str().into(),
+        "internal".into(),
+        "launch".into(),
+        record.run_id.to_string().into(),
+        // The caller's wait also bounds a wait for an updating provider.
+        "--provider-lease-wait".into(),
+        wait.as_secs().max(1).to_string().into(),
+    ];
+    // Process startup and each admitted task need a usable receipt window
+    // even when the requested observation wait is very short.
+    let task_seconds = u64::try_from(record.task_ids.len()).unwrap_or(u64::MAX);
+    let preparation_budget =
+        Duration::from_secs(5_u64.saturating_add(task_seconds.saturating_sub(1)));
+    let result =
+        provenant_os::exec::detached_receipt(&argv, edge.cwd, wait.max(preparation_budget));
+    // Unit tests run inside a test harness, which cannot re-execute itself as
+    // the CLI. End-to-end tests exercise the actual worker process.
+    #[cfg(test)]
+    if matches!(result, Err(provenant_os::exec::ExecError::TestHarness)) {
+        return launch_prepared(session, record.run_id, edge, call, None);
+    }
+    let _ = (session, call);
+    let receipt =
+        result.map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    let unknown = || {
+        Fail::new(
+            Status::Error,
+            ErrorKind::LaunchUnknown,
+            format!(
+                "launch preparation: outcome unknown; rerun with --operation-id {} to recover the receipt",
+                record.operation_id
+            ),
+        )
+    };
+    // The worker holds custody and keeps preparing after this wait ends, so a
+    // launch that outlasts the wait is a lane still waiting, not a failure. The
+    // caller reports the lane's current phase from the store.
+    let Some(receipt) = receipt else {
+        return Ok(Vec::new());
+    };
+    let value: Value = serde_json::from_slice(&receipt).map_err(|_| unknown())?;
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        let kind = error["code"]
+            .as_str()
+            .and_then(|code| {
+                ErrorKind::ALL
+                    .iter()
+                    .copied()
+                    .find(|kind| kind.code() == code)
+            })
+            .unwrap_or(ErrorKind::Io);
+        let status = match kind.category() {
+            "invalid" => Status::Invalid,
+            "refused" => Status::Refused,
+            _ => Status::Error,
+        };
+        return Err(Fail::new(
+            status,
+            kind,
+            error["message"].as_str().unwrap_or("launch worker failed"),
+        ));
+    }
+    serde_json::from_value(value["data"]["started"].clone()).map_err(|_| unknown())
 }
 
 pub(super) fn launch_prepared(
@@ -2515,6 +3064,29 @@ pub(super) fn launch_unknown(started: &[run::Started]) -> Vec<String> {
 }
 
 pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
+    if !started.is_empty()
+        && started.iter().all(|item| {
+            matches!(
+                item,
+                run::Started::Refused { .. } | run::Started::Blocked { .. }
+            )
+        })
+        && let Some((attempt, error)) = started.iter().find_map(|item| match item {
+            run::Started::Blocked { attempt, error } => Some((attempt, error)),
+            _ => None,
+        })
+    {
+        let reason = format!("{attempt}: launch blocked: {error}");
+        let mut failure = Fail::new(Status::Refused, ErrorKind::Refused, &reason);
+        failure.detail = Some(Box::new(
+            provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason,
+            },
+        ));
+        return Err(failure);
+    }
     // Preserve the full receipt whenever a sibling can still make progress
     // or needs unknown-handoff recovery, including Fabric's operation replay.
     if started

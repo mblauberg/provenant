@@ -15,7 +15,7 @@ stages = [
   ] },
   # Reviewers pin the newest head of the writer's chain, so a repaired head is
   # the one reviewed and the one landed.
-  { id = "review", preset = "review-council", depends_on = ["write"], inputs = [{ node = "write", outputs = ["result"] }], parameters = { subject = { type = "head", node = "write" }, worktree = "${worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
+  { id = "review", preset = "review", depends_on = ["write"], inputs = [{ node = "write", outputs = ["result"] }], parameters = { subject = { type = "head", node = "write" }, worktree = "${worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
   { id = "accept", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
   { id = "land", kind = "land", count = "${land}", land = { node = "write", tier = "${land_tier}", session = "${decision_session}" } },
 ]
@@ -28,26 +28,29 @@ exports = [
 level = "recommended"
 summary = "A writer opens a pull request; a CI gate waits on its pushed head with no model running; fresh repair agents fix failing checks on the same branch until CI is green; a review council judges that head; land merges it under the host's tier policy."
 citations = ["GitHub Copilot coding agent and Cursor background agents, CI-fix on the pull request branch (vendor-reported)"]
-cost = "1 writer + up to max_iterations repairs + review-council; no model runs while CI is pending"
+cost = "1 writer + up to max_iterations repairs + review; no model runs while CI is pending"
 select_when = "An approved slice should go from implementation to a merged pull request without a chair watching CI."
 tags = ["write", "review", "deliver"]
 
+[plan]
+delegate = "review"
+
 [parameters]
-local_check_policy = { type = "string", default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
+local_check_policy = { type = "string", inherit = true, default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
 worktree = { type = "string", default = "", doc = "Registered writer worktree; repairs continue its branch." }
 scope = { type = "list", default = ["."], doc = "Literal relative paths the writer and repairers may change." }
-subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
+subject = { type = "table", inherit = true, default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
 delivery = { type = "string", default = "pr", enum = ["pr", "push"], doc = "Writer delivery. Land needs pr; push suits land = 0." }
 base = { type = "string", default = "", doc = "Diff reference the slice is measured from." }
-spec = { type = "string", default = "", doc = "Issue number or file holding the acceptance criteria." }
+spec = { type = "string", tracker_advice = true, default = "", doc = "Issue number or file holding the acceptance criteria." }
 checks = { type = "list", default = [], doc = "Check names the CI gates require; empty uses the branch's required checks." }
 ci_timeout_seconds = { type = "integer", default = 7200, min = 1, max = 604800, doc = "How long each CI gate waits for checks on one head." }
 max_iterations = { type = "integer", default = 3, min = 1, max = 32, doc = "Repair rounds before the loop pauses and asks to stop, extend or accept." }
 repair_tier = { default = "senior", doc = "Routing pool, route table or ordered route tables for each repair agent." }
 decision_session = { type = "string", default = "", doc = "Inbox session for the exhaustion and land asks. Empty pauses an exhausted loop for graph resume, and fails a land whose tier asks." }
-risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
+risk_tier = { type = "string", inherit = true, bind = "risk_tier", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
-kind = { type = "string", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
+kind = { type = "string", bind = "kind", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
 size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty defers the choice: the host measures the pinned reviewed commit against base when the review starts, so the panel fits the work actually written; pass a size to fix it now." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 land = { type = "integer", default = 1, min = 0, max = 1, doc = "1 lands the reviewed head; 0 stops after review and leaves the pull request open." }

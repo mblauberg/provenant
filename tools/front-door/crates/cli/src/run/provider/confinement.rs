@@ -214,6 +214,10 @@ pub(super) fn confinement_request(
                         .flat_map(project_scratch_reads),
                 )
                 .chain(access.read_roots.iter().map(|path| grant(path)))
+                .chain(access.attachments.iter().map(|path| PathGrant {
+                    path: path.clone(),
+                    scope: PathScope::Exact,
+                }))
                 .chain(access.inputs_root.iter().map(|path| grant(path)))
                 .chain(roots.prompt_file.map(|path| PathGrant {
                     path: path.to_owned(),
@@ -253,6 +257,69 @@ pub(super) fn host_git_home(
     provenant_providers::host::HostProbeDir::create(host_root).map_err(|error| error.to_string())
 }
 
+pub(super) fn source_identity(path: &Path) -> Result<run::SourceIdentity, String> {
+    let directory = Directory::open_anchor(path).map_err(|error| error.to_string())?;
+    let metadata = directory.metadata().map_err(|error| error.to_string())?;
+    Ok(run::SourceIdentity {
+        device: metadata.device,
+        inode: metadata.inode,
+    })
+}
+
+/// Reopen the graph-bound checkout at launch, refusing a moved or replaced
+/// worktree rather than falling back to the daemon's checkout.
+pub(super) fn source_cwd(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+) -> Result<PathBuf, String> {
+    let cwd = registry.cwd.ok_or("working directory is unavailable")?;
+    let Some(source) = &task.access.source_root else {
+        if task.access.source_identity.is_some() || task.access.source_live {
+            return Err("graph source identity has no checkout".into());
+        }
+        return canonical(cwd);
+    };
+    if task.writer.is_some() || (!task.access.source_live && task.head.is_none()) {
+        return Err("read-only source needs a pinned head and no writer".into());
+    }
+    let state = registry.state_root.ok_or("state root is unavailable")?;
+    if !run::access_root_allowed(source, state, true)
+        || provenant_confinement::refuses_lane_root(source, true, registry.home)
+    {
+        return Err("graph source checkout is not an allowed read root".into());
+    }
+    let verified = run::resolve_reader_source(state, cwd, source)
+        .map_err(|_| "graph source checkout is no longer registered with the project")?;
+    if verified != *source {
+        return Err("graph source checkout changed location".into());
+    }
+    let identity = source_identity(&verified)?;
+    if task.access.source_identity.as_ref() != Some(&identity) {
+        return Err("graph source checkout identity changed".into());
+    }
+    Ok(verified)
+}
+
+pub(super) fn require_source_head(
+    task: &run::TaskRequest,
+    observed: Option<provenant_core::GitOid>,
+) -> Result<(), String> {
+    if task.access.source_root.is_some() && !task.access.source_live {
+        let expected = task
+            .head
+            .as_deref()
+            .ok_or("graph source head missing")?
+            .parse::<provenant_core::GitOid>()
+            .map_err(|_| "invalid graph source head")?;
+        if observed != Some(expected) {
+            return Err(format!(
+                "graph source checkout moved from pinned head {expected}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Verify the selected repository on the host and match the persisted dispatch
 /// project before deriving any Git read authority from that binding.
 pub(super) type PreparedReadPlan = (
@@ -268,6 +335,8 @@ pub(super) fn read_only_plan(
     cwd: &Path,
     git: &Path,
     request: PlanRequest,
+    isolated: bool,
+    live: bool,
 ) -> Result<PreparedReadPlan, String> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
@@ -326,18 +395,25 @@ pub(super) fn read_only_plan(
             .ok()
             .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
             .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
-            run::read_only_plan(&roots.state, &repo, &binding, request)
-                .map(|plan| {
-                    (
-                        plan,
-                        head,
-                        provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
-                        Some(repo.private_git_dir().to_owned()),
-                    )
-                })
-                .map_err(|error| error.to_string())
+            let plan = if live {
+                run::live_read_only_plan(&repo, &binding, request)
+            } else if isolated {
+                run::isolated_read_only_plan(&roots.state, &repo, &binding, request)
+            } else {
+                run::read_only_plan(&roots.state, &repo, &binding, request)
+            };
+            plan.map(|plan| {
+                (
+                    plan,
+                    head,
+                    provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
+                    Some(repo.private_git_dir().to_owned()),
+                )
+            })
+            .map_err(|error| error.to_string())
         }
         // Non-Git workspaces have no Git metadata or repository exceptions.
+        None if isolated => Err("pinned source requires a Git repository".into()),
         None => ConfinedPlan::new(request)
             .map(|plan| (plan, None, None, None))
             .map_err(|error| error.to_string()),

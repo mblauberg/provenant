@@ -218,38 +218,33 @@ fn lane_release_pin(worktree: &Path, home: &Path) -> Result<String, &'static str
     }
     let dir = worktree.join("tools/front-door");
     let modern = dir.join("rust-toolchain.toml");
-    let legacy = dir.join("rust-toolchain");
-    let regular = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
-    for path in [&modern, &legacy] {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if !metadata.is_file() => return Err(codes::TOOLCHAIN_PIN_NON_REGULAR),
-            Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                return Err(codes::TOOLCHAIN_PIN_UNREADABLE);
-            }
-            _ => {}
-        }
+    // A second pin could select a different compiler, so do not seed in its presence.
+    match std::fs::symlink_metadata(dir.join("rust-toolchain")) {
+        Ok(_) => return Err(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(codes::TOOLCHAIN_PIN_UNREADABLE),
     }
-    let channel = match (regular(&modern), regular(&legacy)) {
-        (true, false) => {
-            let doc = parse(&modern, codes::TOOLCHAIN_PIN_UNREADABLE)?;
-            let toolchain = doc
-                .get("toolchain")
-                .and_then(|v| v.as_table())
-                .ok_or(codes::TOOLCHAIN_PIN_INVALID)?;
-            if toolchain.contains_key("path") {
-                return Err(codes::TOOLCHAIN_PIN_CUSTOM);
-            }
-            toolchain
-                .get("channel")
-                .and_then(|v| v.as_str())
-                .ok_or(codes::TOOLCHAIN_PIN_CHANNEL_MISSING)?
-                .to_owned()
+    match std::fs::symlink_metadata(&modern) {
+        Ok(metadata) if !metadata.is_file() => return Err(codes::TOOLCHAIN_PIN_NON_REGULAR),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS);
         }
-        (false, true) => read(&legacy, codes::TOOLCHAIN_PIN_UNREADABLE)?
-            .trim()
-            .to_owned(),
-        _ => return Err(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS),
-    };
+        Err(_) => return Err(codes::TOOLCHAIN_PIN_UNREADABLE),
+    }
+    let doc = parse(&modern, codes::TOOLCHAIN_PIN_UNREADABLE)?;
+    let toolchain = doc
+        .get("toolchain")
+        .and_then(|v| v.as_table())
+        .ok_or(codes::TOOLCHAIN_PIN_INVALID)?;
+    if toolchain.contains_key("path") {
+        return Err(codes::TOOLCHAIN_PIN_CUSTOM);
+    }
+    let channel = toolchain
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .ok_or(codes::TOOLCHAIN_PIN_CHANNEL_MISSING)?
+        .to_owned();
     let parts: Vec<_> = channel.split('.').collect();
     if parts.len() != 3
         || parts
@@ -281,7 +276,7 @@ mod lane_probe_tests {
         let plain = front.join("rust-toolchain");
         std::fs::remove_file(&modern).unwrap();
         std::fs::write(&plain, "1.99.1\n").unwrap();
-        assert_eq!(lane_release_pin(&worktree, &home).unwrap(), "1.99.1");
+        assert!(lane_release_pin(&worktree, &home).is_err());
         std::fs::write(&modern, "[toolchain]\nchannel = '1.99.1'\n").unwrap();
         assert!(lane_release_pin(&worktree, &home).is_err());
         std::fs::remove_file(&plain).unwrap();

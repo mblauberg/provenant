@@ -87,11 +87,9 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
             return Err("plan pattern parameter enum");
         }
     }
-    for node in &pattern.nodes {
-        if matches!(
-            node.get("kind").and_then(Value::as_str),
-            Some("loop" | "plan" | "composite")
-        ) {
+    fn check_node(pattern: &PatternSpec, node: &Value) -> Result<(), &'static str> {
+        let kind = node.get("kind").and_then(Value::as_str);
+        if kind == Some("loop") || (kind == Some("plan") && node.get("review").is_none()) {
             return Err("plan pattern node");
         }
         for key in [
@@ -100,6 +98,7 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
             "role",
             "source",
             "read_roots",
+            "attachments",
             "route",
             "routes",
         ] {
@@ -107,9 +106,6 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
             if let Some(value) = node.get(key) {
                 placeholders(value, &mut named)?;
             }
-            // A route, or the read root that follows a registered worktree, may
-            // pick from a closed list the pattern fixes, so every value the
-            // fragment can choose is one the catalogue already names.
             let closed = matches!(key, "route" | "routes" | "read_roots")
                 && named.iter().all(|name| {
                     pattern.parameters.get(name).is_some_and(|parameter| {
@@ -125,6 +121,22 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
                 closed_read_roots(pattern, node)?;
             }
         }
+        if let Some(children) = node.pointer("/composite/nodes").and_then(Value::as_array) {
+            for child in children {
+                check_node(pattern, child)?;
+            }
+        }
+        for key in ["panel_templates", "lens_templates"] {
+            if let Some(templates) = node.get(key).and_then(Value::as_object) {
+                for template in templates.values().filter(|template| !template.is_null()) {
+                    check_node(pattern, template)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    for node in &pattern.nodes {
+        check_node(pattern, node)?;
         let mut names = Vec::new();
         placeholders(node, &mut names)?;
         if names

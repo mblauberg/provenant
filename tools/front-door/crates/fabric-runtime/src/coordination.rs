@@ -58,16 +58,6 @@ impl CoordinationError {
     pub fn code(&self) -> &'static str {
         facade::FacadeError::from(self).code()
     }
-
-    /// Project safe facts before a transport chooses its envelope.
-    pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
-        if let Self::Store(provenant_fabric_store::Error::Invalid(field)) = self {
-            return provenant_records::diagnostic::Diagnostic::new(self.code())
-                .detail(format!("invalid field: {field}"))
-                .next("Check the field and retry.");
-        }
-        facade::FacadeError::from(self).diagnostic()
-    }
 }
 
 impl From<provenant_fabric_store::Error> for CoordinationError {
@@ -1196,7 +1186,7 @@ impl LocalCoordination<'_> {
                 value.validate_input(WaitTransport::Cli)?;
                 let guard = guard
                     .as_ref()
-                    .ok_or(CoordinationError::LandingLockRequired)?;
+                    .ok_or(CoordinationError::InvalidInput("landing lock required"))?;
                 record!(Landing, self.landing_locked(value, guard, &request))
             }
         }

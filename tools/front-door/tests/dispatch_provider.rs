@@ -87,6 +87,8 @@ fn dispatch_proceeds_when_provider_update_is_busy() -> Result {
     let prompt = rig.root.join("prompt.txt");
     use std::os::unix::fs::MetadataExt;
     let metadata = fs::metadata(rig.state.join("provider-updates/agy.lock"))?;
+    #[allow(clippy::disallowed_methods)] // The launch must honour the caller's short wait.
+    let started = std::time::Instant::now();
     fs::write(
         &prompt,
         format!("report lease status {} {}", metadata.dev(), metadata.ino()),
@@ -106,8 +108,15 @@ fn dispatch_proceeds_when_provider_update_is_busy() -> Result {
     assert_eq!(code(&result), 0, "{result:?}");
     let response: Value = serde_json::from_slice(&result.stdout.bytes)?;
     let run = response["data"]["run_id"].as_str().ok_or("run id")?;
-    let lanes = rig.command(&["lanes", "--id", run, "--wait", "5s", "--json"])?;
+    // Preparation can outlast the one-second wait on a loaded host.
+    let lanes = rig.command(&["lanes", "--id", run, "--wait", "60s", "--json"])?;
     assert_eq!(code(&lanes), 0, "{lanes:?}");
+    // The default lease wait is 30 seconds; a one-second caller must not spend it.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(25),
+        "{:?}",
+        started.elapsed()
+    );
     let output = rig.command(&["output", run, "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     assert!(
@@ -545,8 +554,10 @@ fn fixture() -> Result {
             json!([{"id":"F1","disposition":"rejected","reason":"falsified"}])
         } else if prompt.contains("Verify the lens findings for:") {
             json!([{"id":"lenses--lens-correctness-spec:F1","severity":"high","file":"a.rs","summary":"fixture finding","status":"open","verification":"falsified","propagates":"lenses:lenses--lens-correctness-spec:F1"}])
-        } else {
+        } else if prompt.contains("Lens correctness-spec.") {
             json!([{"id":"F1","severity":"high","file":"a.rs","summary":"fixture finding","status":"open"}])
+        } else {
+            json!([])
         };
         format!(
             "```findings\n{}\n```\nVERDICT: PASS{DONE_FENCE}\n",
@@ -569,6 +580,23 @@ fn fixture() -> Result {
         )
     } else if prompt.contains("fixture policy result") && policy_model == Some("gpt-6-luna") {
         String::new()
+    } else if prompt.contains("fixture slow result")
+        || prompt.contains("fixture unknown verdict")
+        || prompt.contains("check renamed path")
+    {
+        let lens = prompt
+            .lines()
+            .find(|line| line.starts_with("Lens: "))
+            .unwrap_or("Lens: unknown");
+        let denied = fs::write("review-write-sentinel", b"forbidden").is_err();
+        let verdict = if prompt.contains("fixture unknown verdict") {
+            "No recognised verdict"
+        } else {
+            "VERDICT: PASS"
+        };
+        format!(
+            "{lens}\nwrite denied: {denied}\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\n{verdict}{DONE_FENCE}"
+        )
     } else if prompt.contains("Review commit ") {
         let lens = prompt
             .lines()
@@ -1206,11 +1234,18 @@ fn capacity_settlement_resumes_the_same_session() -> Result {
     cleanup.disarm();
     Ok(())
 }
-fn review_council_resolves_identity_only_dispositions() -> Result {
+fn review_resolves_identity_only_dispositions() -> Result {
     if !graph_fixture_available().map_err(|e| format!("sandbox: {e}"))? {
         return Ok(());
     }
-    let rig = policy_codex_fixture().map_err(|e| format!("fixture: {e}"))?;
+    let mut rig = policy_codex_fixture().map_err(|e| format!("fixture: {e}"))?;
+    // A pinned reader refuses an asset grant over its source, and the rig's
+    // product root defaults to the project.
+    let assets = rig.root.join("product");
+    fs::create_dir_all(&assets).map_err(|e| format!("assets: {e}"))?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
+    rig.env
+        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
     let cleanup = rig.process_cleanup();
     writeln!(
         OpenOptions::new()
@@ -1225,24 +1260,51 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
         .execute(&git, &["commit", "--allow-empty", "-qm", "Initial"], None)
         .map_err(|e| format!("git: {e}"))?;
     assert_eq!(code(&commit), 0);
+    let head = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+    assert_eq!(code(&head), 0);
+    let head = String::from_utf8(head.stdout.bytes)?.trim().to_owned();
+    let worktree = rig.root.join("detached-worktree");
+    let detached = rig.execute(
+        &git,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            worktree.to_str().ok_or("worktree")?,
+            &head,
+        ],
+        None,
+    )?;
+    assert_eq!(code(&detached), 0);
+    rig.project = worktree;
+    assert_ne!(
+        code(&rig.execute(&git, &["symbolic-ref", "--quiet", "HEAD"], None)?),
+        0
+    );
     let brief = rig.root.join("council-brief.txt");
     fs::write(&brief, "fixture council findings").map_err(|e| format!("brief: {e}"))?;
-    let started = rig
-        .command(&[
-            "run",
-            "--preset",
-            "review-council",
-            "--prompt-file",
-            brief.to_str().ok_or("brief")?,
-            "--set",
-            "parameters.review_shape=\"quick\"",
-            "--plan",
-            "off",
-            "--wait",
-            "1s",
-            "--json",
-        ])
-        .map_err(|e| format!("start: {e}"))?;
+    let subject = format!("parameters.subject.commit=\"{head}\"");
+    let base = format!("parameters.base=\"{head}\"");
+    let run = [
+        "run",
+        "--preset",
+        "review",
+        "--prompt-file",
+        brief.to_str().ok_or("brief")?,
+        "--set",
+        "parameters.review_shape=\"standard\"",
+        "--set",
+        &subject,
+        "--set",
+        &base,
+        "--plan",
+        "off",
+        "--wait",
+        "1s",
+        "--json",
+    ];
+    let started = rig.command(&run).map_err(|e| format!("start: {e}"))?;
     let started: Value = serde_json::from_slice(&started.stdout.bytes)?;
     let id = started["data"]["graph"]["checkpoint"]["graph_id"]
         .as_str()
@@ -1257,24 +1319,90 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
             let nodes = status["data"]["checkpoint"]["nodes"]
                 .as_array()
                 .ok_or("nodes")?;
+            let lens = nodes
+                .iter()
+                .find(|node| {
+                    node["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("lenses--lens-"))
+                })
+                .ok_or("lens")?;
+            assert_eq!(lens["state"], "succeeded", "{status}");
+            assert_eq!(lens["source_commit"], head, "{status}");
+            assert_eq!(
+                lens["outputs"]["verdict"], "VERDICT: INCONCLUSIVE",
+                "{status}"
+            );
+            assert!(
+                lens["outputs"]["warnings"]
+                    .as_array()
+                    .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                        .as_str()
+                        .is_some_and(
+                            |warning| warning.contains(&format!("base {head}, head {head}"))
+                        ))),
+                "{status}"
+            );
+            assert!(lens["outputs"]["branch"].is_null(), "{status}");
+            assert!(
+                lens["attempts"]
+                    .as_array()
+                    .is_some_and(|attempts| !attempts.is_empty()),
+                "{status}"
+            );
+            let lens_findings: usize = nodes
+                .iter()
+                .filter(|node| {
+                    node["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("lenses--lens-"))
+                })
+                .map(|node| node["outputs"]["findings"].as_array().map_or(0, Vec::len))
+                .sum();
+            assert_eq!(lens_findings, 1, "{status}");
             let synthesis = nodes
                 .iter()
                 .find(|node| node["id"] == "synthesis")
                 .ok_or("synthesis")?;
             assert_eq!(synthesis["state"], "succeeded", "{status}");
-            assert_eq!(synthesis["outputs"]["verdict"], "VERDICT: PASS", "{status}");
+            assert_eq!(
+                synthesis["outputs"]["verdict"], "VERDICT: INCONCLUSIVE",
+                "{status}"
+            );
+            assert!(
+                synthesis["outputs"]["warnings"]
+                    .as_array()
+                    .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                        .as_str()
+                        .is_some_and(
+                            |warning| warning.contains(&format!("base {head}, head {head}"))
+                        ))),
+                "{status}"
+            );
             assert_eq!(
                 synthesis["outputs"]["findings"][0]["summary"], "fixture finding",
                 "{status}"
+            );
+            // The run reply reports the same empty range as graph status.
+            let reply = rig.command(&run).map_err(|e| format!("reply: {e}"))?;
+            let reply = String::from_utf8_lossy(&reply.stdout.bytes);
+            assert!(reply.contains("VERDICT: INCONCLUSIVE"), "{reply}");
+            assert!(
+                reply.contains(&format!("base {head}, head {head}")),
+                "{reply}"
             );
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "council did not complete: {status}"
+            "review did not complete: {status}"
         );
         std::thread::park_timeout(std::time::Duration::from_millis(50));
     }
+    assert_ne!(
+        code(&rig.execute(&git, &["symbolic-ref", "--quiet", "HEAD"], None)?),
+        0
+    );
     cleanup.disarm();
     Ok(())
 }
@@ -1284,6 +1412,13 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         return Ok(());
     }
     let mut rig = TestRig::new()?;
+    // A pinned reader refuses an asset grant over its source, and the rig's
+    // product root defaults to the project.
+    let assets = rig.root.join("product");
+    fs::create_dir_all(&assets)?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
+    rig.env
+        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
     let cleanup = rig.process_cleanup();
     for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
         fs::create_dir_all(rig.home.join(path))?;
@@ -1309,7 +1444,9 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         // two reviewers of three attempts each can outlast the rig's
         // ten-second watchdog. Retry chains are covered by
         // `capacity_settlement_resumes_the_same_session` and the run store.
-        "\n[domains.routing]\nsettlement_retries = 0\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low', efforts = ['low'] }}]\n[domains.routing.review.shapes.fixture]\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'"
+        // The path rule below is the behaviour under test, so the default floors
+        // that would raise this workflow path to a larger shape are relaxed.
+        "\n[domains.routing]\nsettlement_retries = 0\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low', efforts = ['low'] }}]\n[domains.routing.review.shapes.fixture]\nframe = false\nverifiers = 0\nsynthesis = 'reduce'\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness-spec', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'\n[domains.routing.review.floors.operations]\npaths = []\ntier = 'routine'\nlenses = []\n[domains.routing.review.floors.unknown]\npaths = []\ntier = 'routine'\nlenses = []"
     )?;
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
@@ -1330,8 +1467,29 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     ] {
         assert_eq!(code(&rig.execute(&git, args, None)?), 0);
     }
+    let changed = rig.execute(&git, &["commit", "--allow-empty", "-qm", "Change"], None)?;
+    assert_eq!(code(&changed), 0);
     let brief = rig.root.join("review-brief.txt");
     fs::write(&brief, "Check this change; fixture slow result")?;
+    let explained = rig.command(&[
+        "review",
+        "HEAD",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--shape",
+        "fixture",
+        "--explain",
+        "--json",
+    ])?;
+    assert_eq!(code(&explained), 0);
+    let explained: Value = serde_json::from_slice(&explained.stdout.bytes)?;
+    let shape = explained["data"]["review_shape"]
+        .as_str()
+        .ok_or("review shape")?;
+    assert!(
+        shape.contains("fixture") && shape.contains("override"),
+        "{shape}"
+    );
     let timed = rig.command(&[
         "review",
         "HEAD",
@@ -1350,11 +1508,17 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         String::from_utf8_lossy(&timed.stdout.bytes)
     );
     let timed: Value = serde_json::from_slice(&timed.stdout.bytes)?;
+    assert_eq!(timed["status"], "waiting");
     let timed_rows = timed["data"]["reviewers"]
         .as_array()
         .ok_or("timed reviewers")?;
     assert_eq!(timed_rows.len(), 2);
-    assert!(timed_rows[0]["run_id"].is_string());
+    assert!(
+        timed_rows
+            .iter()
+            .all(|row| row["run_id"].is_null() || row["run_id"].is_string())
+    );
+    assert!(timed_rows.iter().any(|row| row["run_id"].is_string()));
     assert!(timed_rows.iter().all(|row| row["state"].is_string()));
     let out = rig.command(&[
         "review",
@@ -1363,8 +1527,6 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         brief.to_str().ok_or("brief")?,
         "--shape",
         "fixture",
-        "--range",
-        "missing-ref..HEAD",
         "--wait",
         "60s",
         "--json",
@@ -1377,23 +1539,34 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         String::from_utf8_lossy(&out.stderr.bytes)
     );
     let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(result["data"]["shape"], "fixture");
-    assert_eq!(result["data"]["selection_source"], "override");
+    assert_eq!(result["data"]["graph_id"], timed["data"]["graph_id"]);
     let reviewers = result["data"]["reviewers"].as_array().ok_or("reviewers")?;
     assert_eq!(reviewers.len(), 2);
-    assert_eq!(result["data"]["verdicts"]["approve"], 2);
-    assert_eq!(reviewers[0]["run_id"], timed_rows[0]["run_id"]);
-    for (index, lens) in ["correctness", "tests"].iter().enumerate() {
+    assert_eq!(result["data"]["graph"]["status"], "complete");
+    assert_eq!(result["data"]["graph"]["outcome"], "succeeded");
+    for (index, lens) in ["correctness-spec", "tests"].iter().enumerate() {
         let row = &reviewers[index];
+        assert_eq!(row["node_id"], format!("lenses--lens-{lens}"));
+        assert_eq!(row["lens"], *lens);
         assert_eq!(row["state"], "succeeded", "{row}");
         assert_eq!(row["verdict"], "approve", "{row}");
-        assert_eq!(row["lens"], *lens);
-        assert_eq!(row["substitution"], index == 1);
+        assert_eq!(row["substitution"], index == 1, "{row}");
+        assert_eq!(
+            row["separation"]["outcome"],
+            if index == 1 {
+                "unavailable"
+            } else {
+                "unconstrained"
+            },
+            "{row}"
+        );
         assert!(row["run_id"].is_string());
         assert_eq!(row["applied_route"]["model"], "codex/gpt-6-luna");
-        let path: provenant_records::StructuredPathWire =
-            serde_json::from_value(row["result_path"].clone())?;
-        let output = fs::read_to_string(path.to_path_buf()?)?;
+        assert!(row["result"]["path"].is_string(), "{row}");
+        if timed_rows[index]["run_id"].is_string() {
+            assert_eq!(row["run_id"], timed_rows[index]["run_id"]);
+        }
+        let output = fs::read_to_string(row["result"]["path"].as_str().ok_or("result path")?)?;
         assert!(output.contains(&format!("Lens: {lens}")), "{output}");
         assert!(output.contains("write denied: true"), "{output}");
     }
@@ -1417,7 +1590,13 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         String::from_utf8_lossy(&unknown.stdout.bytes)
     );
     let unknown: Value = serde_json::from_slice(&unknown.stdout.bytes)?;
-    assert_eq!(unknown["data"]["verdicts"]["unknown"], 2);
+    assert!(
+        unknown["data"]["reviewers"]
+            .as_array()
+            .ok_or("unknown reviewers")?
+            .iter()
+            .all(|row| row["verdict"].is_null())
+    );
     fs::create_dir_all(rig.project.join(".github/workflows"))?;
     fs::write(rig.project.join(".github/workflows/check.yml"), "fixture")?;
     let added = rig.execute(&git, &["add", ".github/workflows/check.yml"], None)?;
@@ -1454,8 +1633,34 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         String::from_utf8_lossy(&renamed.stdout.bytes)
     );
     let renamed: Value = serde_json::from_slice(&renamed.stdout.bytes)?;
-    assert_eq!(renamed["data"]["shape"], "fixture");
-    assert_eq!(renamed["data"]["selection_source"], "by_paths");
+    let explained = rig.command(&[
+        "review",
+        "HEAD",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--risk",
+        "low",
+        "--range",
+        "HEAD~1..HEAD",
+        "--explain",
+        "--json",
+    ])?;
+    assert_eq!(code(&explained), 0);
+    let explained: Value = serde_json::from_slice(&explained.stdout.bytes)?;
+    let shape = explained["data"]["review_shape"]
+        .as_str()
+        .ok_or("review shape")?;
+    assert!(
+        shape.contains("fixture") && shape.contains("by_paths"),
+        "{shape}"
+    );
+    assert_eq!(
+        renamed["data"]["reviewers"]
+            .as_array()
+            .ok_or("renamed reviewers")?
+            .len(),
+        2
+    );
     fs::write(&brief, "fixture capacity")?;
     let failed = rig.command(&[
         "review",
@@ -3024,6 +3229,81 @@ fn direct_writer_launches_second_eligible_pool_member() -> Result {
     Ok(())
 }
 
+fn local_wait_returns_while_writer_seed_is_held() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let mut rig = writer_pool_redraw_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let gate = rig.root.join("seed-gate");
+    fs::create_dir(&gate)?;
+    fs::write(gate.join("hold"), b"hold")?;
+    rig.env.push((
+        "PROVENANT_FIXTURE_HOLD_SEED".into(),
+        gate.clone().into_os_string(),
+    ));
+    let prompt = rig.root.join("held-prompt.txt");
+    fs::write(&prompt, "reply OK")?;
+    let args = [
+        "run",
+        "--operation-id",
+        "held-local-seed",
+        "--route",
+        "writer-redraw",
+        "--mode",
+        "worktree-write",
+        "--worktree-branch",
+        "fixture/held-seed",
+        "--base",
+        "HEAD",
+        "--deliver",
+        "none",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait",
+        "1s",
+        "--json",
+    ];
+    let start = std::time::Instant::now();
+    let output = rig.command(&args)?;
+    let elapsed = start.elapsed();
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    // Release even if an assertion fails, so no fixture worker remains held.
+    let entered = provenant_test_support::wait_for(
+        "seed preparation entered",
+        std::time::Duration::from_secs(20),
+        || gate.join("entered").exists(),
+        |ready| *ready,
+    );
+    fs::remove_file(gate.join("hold"))?;
+    entered?;
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "{elapsed:?}: {result}"
+    );
+    // A launch that outlasts the wait is still waiting, and says where.
+    assert_eq!(code(&output), 0, "{result}");
+    assert!(result["error"].is_null(), "{result}");
+    assert!(
+        result["data"]["lanes"][0]["waiting_for"]
+            .as_str()
+            .is_some_and(|phase| phase.starts_with("launch preparation")),
+        "{result}"
+    );
+    assert_eq!(
+        result["data"]["operation_id"], "held-local-seed",
+        "{result}"
+    );
+    let mut retry = args;
+    let wait_index = retry.len() - 2;
+    retry[wait_index] = "30s";
+    let replay = rig.command(&retry)?;
+    let replay: Value = serde_json::from_slice(&replay.stdout.bytes)?;
+    assert_writer_pool_peer_launched(&replay)?;
+    cleanup.disarm();
+    Ok(())
+}
+
 fn graph_writer_launches_second_eligible_pool_member() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -3255,7 +3535,7 @@ fn graph_read_only_alias_does_not_redraw_after_launch_quota() -> Result {
     Ok(())
 }
 
-fn review_council_overcap_runs_through_fake_providers() -> Result {
+fn review_overcap_runs_through_fake_providers() -> Result {
     if !graph_fixture_available().map_err(|e| format!("fixture availability: {e}"))? {
         return Ok(());
     }
@@ -3304,7 +3584,7 @@ fn review_council_overcap_runs_through_fake_providers() -> Result {
         .command(&[
             "run",
             "--preset",
-            "review-council",
+            "review",
             "--prompt-file",
             prompt.to_str().ok_or("brief")?,
             "--set",
@@ -4014,6 +4294,7 @@ fn persisted_attempt_with(
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,
@@ -5365,6 +5646,7 @@ fn main() -> ExitCode {
                 "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
+                "local_wait_returns_while_writer_seed_is_held",
                 "printed_credentials_leave_no_plaintext_in_run_files",
                 "codex_dispatch_observes_rollout",
                 "policy_empty_result_falls_back_without_a_chair_turn",
@@ -5375,7 +5657,7 @@ fn main() -> ExitCode {
                 "handoff_recovery_requires_a_settled_successor",
                 "capacity_settlement_resumes_the_same_session",
                 "fixture_guardian_exits_when_sigkilled_test_owner_dies",
-                "review_council_resolves_identity_only_dispositions",
+                "review_resolves_identity_only_dispositions",
                 "review_fans_out_and_collects_fake_provider",
                 "opencode_usage_limit_settlement_is_bounded",
                 "opencode_usage_limit_stops_hanging_provider",
@@ -5394,7 +5676,7 @@ fn main() -> ExitCode {
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_without_deadline_launches_on_tick",
                 "graph_node_reads_full_upstream_result_from_its_inputs_directory",
-                "review_council_overcap_runs_through_fake_providers",
+                "review_overcap_runs_through_fake_providers",
                 "graph_settlement_records_a_failed_advance_for_status",
                 "opencode_free_pool_cools_second_model",
                 "opencode_free_reset_cools_pool_until_reset_and_restores",
@@ -5428,6 +5710,7 @@ fn main() -> ExitCode {
                     "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation" => {
                         owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
                     }
+                    "local_wait_returns_while_writer_seed_is_held" => local_wait_returns_while_writer_seed_is_held(),
                     "printed_credentials_leave_no_plaintext_in_run_files" => printed_credentials_leave_no_plaintext_in_run_files(),
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),
@@ -5438,9 +5721,9 @@ fn main() -> ExitCode {
                     "handoff_recovery_requires_a_settled_successor" => handoff_recovery_requires_a_settled_successor(),
                     "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
                     "fixture_guardian_exits_when_sigkilled_test_owner_dies" => fixture_guardian_exits_when_sigkilled_test_owner_dies(),
-                    "review_council_resolves_identity_only_dispositions" => review_council_resolves_identity_only_dispositions(),
+                    "review_resolves_identity_only_dispositions" => review_resolves_identity_only_dispositions(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
-                    "review_council_overcap_runs_through_fake_providers" => review_council_overcap_runs_through_fake_providers(),
+                    "review_overcap_runs_through_fake_providers" => review_overcap_runs_through_fake_providers(),
                     "opencode_usage_limit_settlement_is_bounded" => {
                         opencode_usage_limit_settlement_is_bounded()
                     }

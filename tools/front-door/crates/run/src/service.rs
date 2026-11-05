@@ -143,7 +143,11 @@ impl<'a> Service<'a> {
                     None => crate::pr_contribution::read_only_branch(
                         self.store.writer_registry(),
                         self.store.context.project_id,
-                        cwd,
+                        task.access
+                            .source_root
+                            .as_deref()
+                            .filter(|_| task.access.source_live)
+                            .unwrap_or(cwd),
                     )?,
                 };
                 if let Some(branch) = branch {
@@ -168,7 +172,16 @@ impl<'a> Service<'a> {
                         && prior.head == task.head
                 })
             });
-            let git_cwd = writer.as_ref().map_or(cwd, |writer| &writer.worktree);
+            let git_cwd = writer.as_ref().map_or_else(
+                || {
+                    task.access
+                        .source_root
+                        .as_deref()
+                        .filter(|_| task.access.source_live)
+                        .unwrap_or(cwd)
+                },
+                |writer| &writer.worktree,
+            );
             if prior.is_none()
                 && let Some(head) = &task.head
             {
@@ -243,6 +256,7 @@ impl<'a> Service<'a> {
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
             requests.push(TaskRequest {
+                cloud: task.cloud,
                 context: task.context,
                 extra: Default::default(),
                 build_heavy: task.build_heavy,
@@ -646,6 +660,7 @@ error_kinds! {
     Peer => "PEER", "The peer host returned an error.";
     WriterScope => "WRITER_SCOPE", "The writer worktree scope was refused.";
     WriterBusy => "WRITER_BUSY", "The writer or its lock is held by another operation.";
+    WriterLockBusy => "WRITER_LOCK_BUSY", "The writer registry lock is held by another operation.";
     WriterUnknown => "WRITER_UNKNOWN", "Writer custody could not be determined.";
     CredentialRoot => "CREDENTIAL_ROOT", "A requested grant overlaps a credential root.";
     WriterProjectMismatch => "WRITER_PROJECT_MISMATCH", "The writer worktree belongs to a different project than the selected one.";
@@ -703,6 +718,7 @@ impl ErrorKind {
             | Self::Refused
             | Self::WriterScope
             | Self::WriterBusy
+            | Self::WriterLockBusy
             | Self::WriterUnknown
             | Self::SetupLockTimeout
             | Self::RetainedWriterImport
@@ -737,6 +753,7 @@ impl ErrorKind {
             }
             Self::WriterScope
             | Self::WriterBusy
+            | Self::WriterLockBusy
             | Self::WriterUnknown
             | Self::WriterProjectMismatch
             | Self::LaneCoordinationRefused => B::Authority,
@@ -754,7 +771,10 @@ impl From<&RunError> for ErrorKind {
             RunError::WriterProjectMismatch { .. } => Self::WriterProjectMismatch,
             RunError::Writer(
                 provenant_confinement::worktrees::WorktreeError::LockBusy
-                | provenant_confinement::worktrees::WorktreeError::LiveWriter
+                | provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout,
+            ) => Self::WriterLockBusy,
+            RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::LiveWriter
                 | provenant_confinement::worktrees::WorktreeError::WriterBusy { .. },
             ) => Self::WriterBusy,
             RunError::Writer(
@@ -810,6 +830,7 @@ impl From<&RunError> for ErrorKind {
 
 /// Prepared transport-independent dispatch input.
 pub struct DispatchTask {
+    pub cloud: Option<provenant_records::run::CloudPlacement>,
     pub context: Option<provenant_records::run::WorkContext>,
     pub build_heavy: bool,
     pub title: Option<String>,
@@ -853,6 +874,9 @@ fn fresh<T>(make: impl FnOnce([u8; 16]) -> T) -> Result<T> {
 /// before any writer is prepared or any run, reservation or receipt exists.
 /// Named routes resolve their adapter later, where routing checks effort.
 fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Result<()> {
+    if task.cloud.is_some() {
+        return Ok(());
+    }
     let write = Service::has_writes(task.worktree.is_some(), &task.access.write_roots);
     let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
@@ -897,6 +921,23 @@ mod target_tests {
     use super::*;
     use crate::tests::{call, clock, context, input};
     use provenant_core::CancelToken;
+
+    #[test]
+    fn registry_lock_contention_is_distinct_from_a_live_writer() {
+        use provenant_confinement::worktrees::WorktreeError;
+        assert_eq!(
+            ErrorKind::from(&RunError::Writer(WorktreeError::LockBusy)),
+            ErrorKind::WriterLockBusy
+        );
+        assert_eq!(
+            ErrorKind::from(&RunError::Writer(WorktreeError::LiveWriter)),
+            ErrorKind::WriterBusy
+        );
+        assert_eq!(
+            ErrorKind::from(&RunError::Writer(WorktreeError::UnknownWriter)),
+            ErrorKind::WriterUnknown
+        );
+    }
 
     #[test]
     fn bare_target_resolves_attempts_and_unambiguous_runs()

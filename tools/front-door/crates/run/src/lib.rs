@@ -69,13 +69,13 @@ pub use launch::{
     concurrency,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
-pub use plan::read_only_plan;
+pub use plan::{isolated_read_only_plan, live_read_only_plan, read_only_plan};
 pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, ProviderStateGc, ProviderStateIssue, TOMBSTONE,
 };
 pub use writer::{
-    LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_writer,
-    resolve_writer_proposal,
+    LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_reader_source,
+    resolve_writer, resolve_writer_proposal,
 };
 
 pub use db::{ExecutionContext, Request, RunStore};
@@ -324,6 +324,8 @@ pub enum RunError {
     Input { kind: ErrorKind, message: String },
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
+    #[error("host writer delivery could not reconcile the pull request: {reason}; next: {next}")]
+    DeliveryReconciliation { reason: String, next: String },
     #[error(
         "host writer delivery failed at Integrate (integration_head_moved): the integration target moved after the round began and a loop round only fast-forwards it; rerun the graph to review the new head"
     )]
@@ -630,6 +632,11 @@ impl RunError {
                 diagnostic = diagnostic
                     .detail(format!("host writer delivery failed at {stage:?}"))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
+            }
+            Self::DeliveryReconciliation { reason, next } => {
+                diagnostic = diagnostic.detail(reason.clone()).next(next.clone()).fact(
+                    DiagnosticFact::DeliveryStage(WriterDeliveryStage::PullRequest),
+                );
             }
             Self::DeliveryLimit {
                 stage,

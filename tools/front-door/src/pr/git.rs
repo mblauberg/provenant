@@ -64,6 +64,23 @@ impl Git {
         Ok((output.termination == Termination::Exit(0))
             .then(|| String::from_utf8_lossy(&output.stdout.bytes).into_owned()))
     }
+    /// Complete, unmodified output for evidence parsers.
+    pub(super) fn bytes_status(&self, dir: &Path, args: &[&str]) -> Result<(i64, Vec<u8>)> {
+        let mut argv = vec![self.executable.as_str()];
+        argv.extend_from_slice(args);
+        let output = execute_for(dir, &argv, GIT_TIMEOUT, false)?;
+        let Termination::Exit(code) = output.termination else {
+            return Err("Git was terminated by a signal".into());
+        };
+        Ok((code, output.stdout.bytes))
+    }
+    pub(super) fn bytes(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+        let (code, bytes) = self.bytes_status(dir, args)?;
+        if code != 0 {
+            return Err("Git evidence command failed".into());
+        }
+        Ok(bytes)
+    }
     /// Git's exit code, whole stdout and first stderr line, for commands whose
     /// non-zero exit is an answer rather than a failure. A signal is an error.
     pub(super) fn exit(&self, dir: &Path, args: &[&str]) -> Result<(i64, String, String)> {

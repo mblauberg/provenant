@@ -25,6 +25,8 @@ type LaunchSpecLookup<'a> = &'a dyn Fn(&str) -> Option<provenant_records::Adapte
 pub struct RoutingContext<'a> {
     /// Preview-only account policy selection. It never supplies availability.
     pub policy_account_hint: Option<&'a str>,
+    /// Risk and task stratum, when supplied by the dispatch.
+    pub choice_context: Option<(&'a str, &'a str)>,
     pub catalogue: &'a Catalogue,
     pub config: &'a RoutingConfig,
     pub registry: &'a [Registration],
@@ -1557,7 +1559,7 @@ pub fn resolve_for_account_with_seed_excluding(
         rules,
     };
     if let AccountSelection::Known(account) = account {
-        let adapters: BTreeSet<&str> = match &request.choice {
+        let mut adapters: BTreeSet<&str> = match &request.choice {
             RouteChoice::Model(model) => [model.adapter()].into_iter().collect(),
             RouteChoice::NamedRoute(name) => {
                 let name = name.as_str();
@@ -1576,6 +1578,13 @@ pub fn resolve_for_account_with_seed_excluding(
                 }
             }
         };
+        if let Some(model) = context.choice_context.and_then(|(risk, kind)| {
+            context
+                .config
+                .preferred_model(request, risk, kind, context.now)
+        }) {
+            adapters.insert(model.adapter());
+        }
         let availability: Vec<_> = context
             .availability
             .iter()
@@ -1693,7 +1702,55 @@ fn resolve_inner(
         }
         RouteChoice::NamedRoute(name) => {
             let name = name.as_str();
-            if let Some(pool) = effective_pool(context, name) {
+            let preference = context.choice_context.and_then(|(risk, kind)| {
+                context
+                    .config
+                    .preferred_model(request, risk, kind, context.now)
+            });
+            let mut pool = effective_pool(context, name);
+            if let Some(model) = preference
+                .filter(|model| refuse_unlisted_opencode(model, context.catalogue).is_ok())
+            {
+                if pool.is_none() {
+                    pool = context
+                        .config
+                        .routes
+                        .get(name)
+                        .filter(|route| context.catalogue.model(&route.model).is_some())
+                        .map(|route| {
+                            vec![RoutePoolMember {
+                                model: route.model.clone(),
+                                weight: 100,
+                                effort: route.effort.clone(),
+                                efforts: context
+                                    .catalogue
+                                    .model(&route.model)
+                                    .map(|m| m.efforts.clone())
+                                    .unwrap_or_default(),
+                                free: false,
+                            }]
+                        });
+                }
+                if let Some(members) = &mut pool
+                    && !members.iter().any(|member| member.model == *model)
+                {
+                    members.push(RoutePoolMember {
+                        model: model.clone(),
+                        weight: 0,
+                        effort: None,
+                        efforts: context
+                            .catalogue
+                            .model(model)
+                            .map(|entry| entry.efforts.clone())
+                            .unwrap_or_default(),
+                        free: context
+                            .catalogue
+                            .model(model)
+                            .is_some_and(|entry| entry.free),
+                    });
+                }
+            }
+            if let Some(pool) = pool {
                 let selected = select_pool(name, &pool, request, context, seed, excluded_members)?;
                 (selected.route, Some(selected.receipt))
             } else {
@@ -2218,6 +2275,28 @@ fn select_pool(
         }
         Err(error) => return Err(error),
     };
+    let preference = context.choice_context.and_then(|(risk, kind)| {
+        context
+            .config
+            .preferred_model(request, risk, kind, context.now)
+    });
+    let preferred_index = preference.and_then(|model| {
+        classified
+            .weighted
+            .iter()
+            .map(|(index, _)| *index)
+            .chain(classified.zero_ready.iter().copied())
+            .find(|index| members[*index].model == *model)
+    });
+    let draw = if let Some(index) = preferred_index {
+        PoolDraw {
+            index,
+            roll: 0,
+            total_weight: 0,
+        }
+    } else {
+        draw
+    };
     let route = classified
         .routes
         .get(draw.index)
@@ -2234,7 +2313,9 @@ fn select_pool(
         }
         .into(),
     );
-    let rule = if draw.total_weight > 0 {
+    let rule = if preferred_index.is_some() {
+        "model_choice_override"
+    } else if draw.total_weight > 0 {
         "weighted_draw"
     } else if classified.first_zero_ready == Some(draw.index) {
         "first_zero_weight_ready"

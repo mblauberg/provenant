@@ -109,6 +109,27 @@ fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
 }
 
 #[test]
+fn blocked_custody_is_reported_without_hiding_a_running_sibling() -> Result<(), String> {
+    let blocked = || run::Started::Blocked {
+        attempt: AttemptId::from_bytes([1; 16]),
+        error: "custody withdrawal failed".into(),
+    };
+    let error = check_launch_policy(&[blocked()])
+        .err()
+        .ok_or("block was ignored")?;
+    assert_eq!(error.status, Status::Refused);
+    assert!(error.message.contains("custody withdrawal failed"));
+    assert!(
+        matches!(error.detail.as_deref(), Some(provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused { reason, .. }) if reason.contains("custody withdrawal failed"))
+    );
+    check_launch_policy(&[
+        blocked(),
+        run::Started::Launched(AttemptId::from_bytes([2; 16])),
+    ])
+    .map_err(|error| error.message)
+}
+
+#[test]
 fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),

@@ -162,10 +162,11 @@ mod tests {
             .iter()
             .map(|entry| entry.adapter.id())
             .collect();
-        // Host-native delegates to a registered provider and has no registry entry.
+        // Host-native delegates; the feature-gated fixture is injected by its test.
         let provider_specs: BTreeSet<_> = ADAPTER_SPECS
             .iter()
             .filter(|spec| spec.id != provenant_records::Harness::HostNative)
+            .filter(|spec| spec.name != "fixture-provider")
             .map(|spec| spec.name)
             .collect();
         assert_eq!(providers, provider_specs);

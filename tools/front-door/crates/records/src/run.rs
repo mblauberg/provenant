@@ -139,6 +139,10 @@ pub struct WorkContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
@@ -166,6 +170,8 @@ impl WorkContext {
     pub fn valid(&self) -> bool {
         [
             &self.work_item,
+            &self.risk_tier,
+            &self.task_kind,
             &self.graph_id,
             &self.node_id,
             &self.preset,
@@ -183,6 +189,9 @@ impl WorkContext {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRequest {
+    /// Cloud custody is sealed with the request before an attempt can launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudPlacement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<WorkContext>,
     #[serde(flatten)]
@@ -228,6 +237,19 @@ pub struct TaskRequest {
     pub access: LaneAccess,
 }
 
+/// Provider-independent cloud target snapshot used for restart recovery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudPlacement {
+    pub target: String,
+    pub provider: String,
+    pub environment: String,
+    pub repository: String,
+    pub branch: String,
+    pub model: String,
+    pub effort: Option<String>,
+    pub deadline_seconds: u64,
+}
+
 /// Network reach for a lane's provider and the tools it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -254,6 +276,9 @@ pub struct LaneAccess {
     pub database_ipc: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_roots: Vec<std::path::PathBuf>,
+    /// Canonical image files explicitly supplied to this lane.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<std::path::PathBuf>,
     /// A graph node's materialised upstream results, read-only. The host
@@ -261,6 +286,21 @@ pub struct LaneAccess {
     /// where a `--read-root` may not reach; any other path is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inputs_root: Option<std::path::PathBuf>,
+    /// Host-verified graph source checkout for a read-only launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<std::path::PathBuf>,
+    /// Use the verified source checkout directly, without a writer lease.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_live: bool,
+    /// Filesystem identity of the bound source directory at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<SourceIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceIdentity {
+    pub device: u64,
+    pub inode: u64,
 }
 impl LaneAccess {
     pub fn is_default(&self) -> bool {
@@ -613,6 +653,8 @@ pub enum OperationState {
     Accepted,
     Terminal,
     LaunchUnknown,
+    /// Launch preparation failed and custody could not be released.
+    Blocked,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -633,6 +675,8 @@ pub struct OperationRecord {
     pub request_digest: Digest,
     pub run_id: RunId,
     pub state: OperationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1108,6 +1152,12 @@ pub struct AttemptRecord {
     /// Most recent supervisor-observed stdout/stderr activity while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<WallTime>,
+    /// Cloud evidence projected by the host; never a local process observation.
+    #[serde(skip)]
+    pub cloud_observation: Transient<Option<CloudObservation>>,
+    /// Redacted cloud job details observed by the host.
+    #[serde(skip)]
+    pub cloud_view: Transient<Option<serde_json::Value>>,
     /// Transient guardian observation. It is carried over live peer reads but
     /// is never stored in the durable attempt record.
     #[serde(skip)]
@@ -1168,6 +1218,39 @@ impl AttemptRecord {
         self.applied_route.as_ref()?.extra.get("user_skills")
     }
 }
+/// A host view of an advisory cloud job, never a local supervisor exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudObservation {
+    Submitting,
+    Running,
+    Passed,
+    Failed,
+    SetupFailed,
+    Cancelled,
+    CancellationUnconfirmed,
+    Unknown,
+}
+impl CloudObservation {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Passed | Self::Failed | Self::SetupFailed | Self::Cancelled
+        )
+    }
+    pub fn state(self) -> &'static str {
+        match self {
+            Self::Submitting => "cloud_submitting",
+            Self::Running => "cloud_running",
+            Self::Passed => "cloud_passed",
+            Self::Failed => "cloud_failed",
+            Self::SetupFailed => "cloud_setup_failed",
+            Self::Cancelled => "cloud_cancelled",
+            Self::CancellationUnconfirmed => "cloud_cancellation_unconfirmed",
+            Self::Unknown => "cloud_unknown",
+        }
+    }
+}
+
 /// A live-only value that is deliberately absent from durable identity and
 /// equality. It can decorate a record read without making two reads of that
 /// record compare differently.
@@ -1319,6 +1402,7 @@ mod tests {
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,

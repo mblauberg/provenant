@@ -51,6 +51,7 @@ mod preset_tests;
 mod process_tree;
 mod provider_retention;
 mod release_smoke;
+mod review;
 mod roots;
 mod settlement;
 mod status_wait;
@@ -625,7 +626,7 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
 }
 fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     let globals = &inv.globals;
-    let command = match inv.command {
+    let mut command = match inv.command {
         Command::Hook(hook) => return hooks::run(hook, globals),
         Command::ProcessTree { root } => return process_tree::run(root, globals),
         command => command,
@@ -652,6 +653,28 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             return install::home_error(&inv.leaf, &error.to_string(), globals);
         }
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
+    }
+    if let Command::Run(ref mut cmd) = command
+        && cmd.placement.is_none()
+        && cmd.preset.is_none()
+        && cmd.host.is_none()
+        && !matches!(cmd.access.mode(), provenant_cli::Mode::WorktreeWrite)
+        && cmd.access.worktree.is_none()
+        && cmd.branch.is_none()
+        && cmd.worktree_branch.is_none()
+        && let Ok(resolved) = roots::resolve(globals, Workspace::Project, Product::Required)
+        && let Some(project) =
+            provenant_cli::run::preview_project_id(&resolved.roots, &resolved.project)
+        && let Ok(config) =
+            provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
+        && let Some(target) = config
+            .domains
+            .lanes
+            .projects
+            .get(&project.to_string())
+            .and_then(|project| project.cloud_target.as_ref())
+    {
+        cmd.placement = Some(format!("cloud:{target}"));
     }
     match command {
         Command::ProcessTree { .. } => unreachable!("process-tree returned before root validation"),
@@ -821,6 +844,20 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             tick::gc_worker(globals, process.workers())
         }
         Command::Internal(provenant_cli::Internal::TickSeed) => tick::seed_worker(globals),
+        Command::Internal(provenant_cli::Internal::Launch {
+            run,
+            provider_lease_wait,
+        }) => {
+            let receipt_globals = provenant_cli::Globals {
+                json: true,
+                full: globals.full,
+                state_dir: globals.state_dir.clone(),
+                project: globals.project.clone(),
+            };
+            run_edge(&inv.leaf, &receipt_globals, |edge| {
+                provenant_cli::run::launch_worker(run, provider_lease_wait, edge)
+            })
+        }
         Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => match provenant_cli::provider_updates::housekeep(
@@ -974,7 +1011,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Preset(cmd) => preset::command(cmd, globals),
         Command::Run(cmd)
             if cmd.preset.is_some()
-                || (cmd.input.manifest.is_none()
+                || (cmd.placement.is_none()
+                    && cmd.input.manifest.is_none()
                     && (cmd.input.prompt_file.is_some() || cmd.input.prompt_stdin)
                     && cmd.route.model.is_none()
                     && cmd.route.route.is_none()) =>
@@ -1011,9 +1049,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }
             reply
         }),
-        Command::Review(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::review(cmd, edge)
-        }),
+        Command::Review(cmd) => review::run(cmd, globals, process.workers()),
         Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
         Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status(cmd, globals.json, edge)

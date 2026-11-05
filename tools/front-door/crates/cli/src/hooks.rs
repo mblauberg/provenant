@@ -11,7 +11,7 @@ pub fn delivery_capabilities() -> Vec<provenant_records::inbox::DeliveryCapabili
     let mut capabilities = provenant_records::inbox::delivery_capabilities();
     for capability in &mut capabilities {
         // Library readiness only; live injection requires the hook adapter.
-        capability.local_offer_reader = capability.provider == Harness::Claude;
+        capability.local_offer_reader = capability.provider.spec().local_offer_reader;
     }
     capabilities.push(provenant_records::inbox::DeliveryCapability {
         provider: Harness::Claude,

@@ -5,6 +5,9 @@
 pub mod accounts;
 pub mod agy;
 pub mod claude;
+pub mod cloud;
+pub mod cloud_cli;
+pub mod cloud_result;
 pub mod codex;
 pub mod codex_rollout;
 pub mod command;
@@ -36,6 +39,7 @@ pub use stream::*;
 
 use provenant_quota::QuotaSource;
 
+#[derive(Clone, Copy)]
 pub struct Registration {
     pub adapter: &'static dyn Adapter,
     pub quota_source: Option<&'static dyn QuotaSource>,
@@ -45,15 +49,37 @@ pub struct Registration {
     pub quota: provenant_quota::QuotaPolicy,
 }
 
-/// One registry for execution and quota.
-pub static REGISTRY: &[Registration] = &[
-    codex::REGISTRATION,
-    claude::REGISTRATION,
-    cursor::REGISTRATION,
-    agy::REGISTRATION,
-    opencode::REGISTRATION,
-    command::REGISTRATION,
-];
+// Preserve dispatch order independently of the order used to install harnesses.
+const fn ordered_registrations<const N: usize>(
+    mut rows: [(u8, Registration); N],
+) -> [Registration; N] {
+    let mut i = 1;
+    while i < N {
+        let mut j = i;
+        while j > 0 && rows[j].0 < rows[j - 1].0 {
+            rows.swap(j, j - 1);
+            j -= 1;
+        }
+        i += 1;
+    }
+    let mut result = [rows[0].1; N];
+    let mut i = 0;
+    while i < N {
+        result[i] = rows[i].1;
+        i += 1;
+    }
+    result
+}
+
+macro_rules! registrations {
+    ($( $(#[$cfg:meta])* $module:ident : $order:literal,)*) => {
+        /// One registry for execution and quota.
+        pub static REGISTRY: &[Registration] = &ordered_registrations([
+            $( $(#[$cfg])* ($order, $module::REGISTRATION),)*
+        ]);
+    };
+}
+provenant_records::adapter_implementation_bindings!(registrations);
 
 pub fn quota_policies(registry: &[Registration]) -> Vec<provenant_quota::QuotaPolicy> {
     registry

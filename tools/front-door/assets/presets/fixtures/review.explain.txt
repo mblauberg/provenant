@@ -1,9 +1,9 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":4,"edges":22,"limit_reason":null,"max_attempts":22,"nodes":12,"prompt_bytes":38044}
+Inspection: {"dependency_depth":4,"edges":22,"limit_reason":null,"max_attempts":22,"nodes":12,"prompt_bytes":40815}
 tier mix: junior 0 / senior 0 / principal 0
-Preset selection: review-council (override)
-Review shape: deep (by_risk; size=unknown; kind=unknown; risk=crucial)
+Preset selection: review (override)
+Review shape: deep (by_risk; floors=none; size=unknown; kind=unknown; risk=crucial)
 plan: auto -> off (review subject is not large (size=unknown))
 Planner route: principal
 Pending "route_readiness": "Route readiness and quota are checked before launch."
@@ -70,6 +70,6 @@ Roles:
   review.synthesis  origin=bundled digest=<digest>
   review.verify  origin=bundled digest=<digest>
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
-Warning: preset review-council: omitted lens "security-privacy": requires risk tag security
-Warning: preset review-council: omitted lens "concurrency-data-errors": requires risk tag concurrency
-Warning: preset review-council: omitted lens "adversarial": requires risk tag terminal
+Warning: preset review: omitted lens "security-privacy": requires risk tag security
+Warning: preset review: omitted lens "concurrency-data-errors": requires risk tag concurrency
+Warning: preset review: omitted lens "adversarial": requires risk tag terminal

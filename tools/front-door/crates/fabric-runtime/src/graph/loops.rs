@@ -95,12 +95,69 @@ fn allowance(node: &GraphNode, extensions: &[String]) -> usize {
         )
 }
 
+/// Count the nodes produced by loop expansion without requiring late-bound
+/// execution context, using the same allowances as the actual expansion.
+pub(super) fn expanded_node_count(
+    document: &GraphDocument,
+    extensions: &[String],
+) -> Result<usize, String> {
+    for node in &document.nodes {
+        let Some(spec) = &node.loop_body else {
+            continue;
+        };
+        if spec.max_rounds == 0 {
+            return Err(format!(
+                "node {}: loop.max_rounds must be positive",
+                node.id
+            ));
+        }
+        if spec.max_extension_rounds == 0 {
+            return Err(format!(
+                "node {}: loop.max_extension_rounds must be positive",
+                node.id
+            ));
+        }
+        if let Some(reason) = crate::config::GraphLimits::loop_extension_rounds_bound()
+            .refusal(spec.max_extension_rounds)
+        {
+            return Err(format!(
+                "node {}: loop.max_extension_rounds: {reason}",
+                node.id
+            ));
+        }
+        if let Some(reason) = crate::config::GraphLimits::loop_expansion_rounds_bound()
+            .refusal(allowance(node, extensions))
+        {
+            return Err(reason);
+        }
+    }
+    let count = document.nodes.iter().try_fold(0usize, |total, node| {
+        let count = match &node.loop_body {
+            Some(spec) => spec
+                .body
+                .len()
+                .checked_mul(allowance(node, extensions))?
+                .checked_add(1)?,
+            None => 1,
+        };
+        total.checked_add(count)
+    });
+    let count = count.unwrap_or(usize::MAX);
+    if document.nodes.iter().any(|node| node.loop_body.is_some())
+        && let Some(reason) =
+            crate::config::GraphLimits::loop_expansion_nodes_bound().refusal(count)
+    {
+        return Err(reason);
+    }
+    Ok(count)
+}
+
 pub(super) fn validate_extension(
     document: &GraphDocument,
     extension: &str,
     limits: &crate::config::GraphLimits,
 ) -> Result<(), String> {
-    let flattened = composites::expand(document, limits).map_err(|error| error.to_string())?;
+    let flattened = composites::expand(document, limits)?;
     let document = &flattened;
     let (key, value) = extension.split_once('=').ok_or("expected KEY=VALUE")?;
     let key = key.strip_prefix("loop.").ok_or("invalid loop extension")?;
@@ -124,7 +181,7 @@ pub(super) fn validate_resume_extension(
     limits: &crate::config::GraphLimits,
 ) -> Result<(), String> {
     validate_extension(document, extension, limits)?;
-    let flattened = composites::expand(document, limits).map_err(|error| error.to_string())?;
+    let flattened = composites::expand(document, limits)?;
     let document = &flattened;
     if checkpoint.extensions.iter().any(|saved| saved == extension) {
         return Ok(());
@@ -190,47 +247,51 @@ pub(super) fn expand(
     document: &GraphDocument,
     extensions: &[String],
     limits: &crate::config::GraphLimits,
-) -> Result<GraphDocument, AdmissionError> {
+) -> Result<GraphDocument, String> {
     let flattened = composites::expand(document, limits)?;
+    check_expanded_ids(&flattened, extensions)?;
     expand_loops(&flattened, extensions)
 }
 
-fn expand_loops(
+/// Check the longest round ID before lowering, using the same spelling and
+/// validation as execution. A later round cannot have fewer decimal digits.
+pub(super) fn check_expanded_ids(
     document: &GraphDocument,
     extensions: &[String],
-) -> Result<GraphDocument, AdmissionError> {
+) -> Result<(), String> {
+    for node in &document.nodes {
+        let Some(spec) = &node.loop_body else {
+            continue;
+        };
+        let rounds = allowance(node, extensions);
+        if !(1..=1024).contains(&rounds) {
+            continue;
+        }
+        for child in &spec.body {
+            if !valid_identifier(&id(&node.id, rounds, &child.id)) {
+                return Err("expanded loop node id exceeds 64 bytes".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<GraphDocument, String> {
     let declared: std::collections::BTreeSet<_> = document.nodes.iter().map(|n| &n.id).collect();
     if document
         .nodes
         .iter()
         .any(|n| n.depends_on.iter().any(|parent| !declared.contains(parent)))
     {
-        return Err(AdmissionError::Composite("dependency".into()));
+        return Err("dependency".into());
     }
-    if document.nodes.iter().any(|n| n.loop_body.is_some()) {
-        let count = document.nodes.iter().try_fold(0usize, |total, n| {
-            let count = match &n.loop_body {
-                Some(spec) => spec
-                    .body
-                    .len()
-                    .checked_mul(allowance(n, extensions))?
-                    .checked_add(1)?,
-                None => 1,
-            };
-            total.checked_add(count)
-        });
-        if count.is_none_or(|n| n > 16384) {
-            return Err(AdmissionError::Composite(
-                "loop expansion exceeds safety bound".into(),
-            ));
-        }
-    }
+    expanded_node_count(document, extensions)?;
     let mut expanded = document.clone();
     expanded.nodes.clear();
     for node in &document.nodes {
         let Some(spec) = &node.loop_body else {
             if node.kind == Some(NodeKind::Loop) {
-                return Err(AdmissionError::Composite("loop requires a body".into()));
+                return Err("loop requires a body".into());
             }
             expanded.nodes.push(node.clone());
             continue;
@@ -246,51 +307,35 @@ fn expand_loops(
             || !node.prompt.is_empty()
             || node.required_verdict.is_some()
             || spec.body.is_empty()
-            || spec.max_rounds == 0
-            || spec.max_rounds > 1024
-            || spec.max_extension_rounds == 0
-            || spec.max_extension_rounds > 1024
             || spec
                 .decision_session
                 .as_ref()
                 .is_some_and(|s| crate::inbox::session_id(s).is_err())
         {
-            return Err(AdmissionError::Composite(
-                "invalid loop configuration".into(),
-            ));
+            return Err("invalid loop configuration".into());
         }
         let rounds = allowance(node, extensions);
-        if rounds > 1024
-            || spec
-                .body
-                .len()
-                .saturating_mul(rounds)
-                .saturating_add(expanded.nodes.len())
-                > 16384
-        {
-            return Err(AdmissionError::Composite(
-                "loop expansion exceeds safety bound".into(),
-            ));
-        }
         let mut body = spec.body.clone();
         let mut writer = None;
         for child in &mut body {
             if child.id.starts_with("previous.") {
-                return Err(AdmissionError::Composite(
-                    "previous. is reserved for prior round inputs".into(),
-                ));
+                return Err("previous. is reserved for prior round inputs".into());
             }
             let mut selected = std::collections::BTreeSet::new();
             for input in &child.inputs {
+                if input.node.starts_with("previous.") && !input.required_outputs.is_empty() {
+                    return Err(
+                        "required previous-round outputs cannot be enforced in the first round"
+                            .into(),
+                    );
+                }
                 let mut kinds = Vec::new();
                 if !selected.insert(&input.node) || input.outputs.is_empty() {
-                    return Err(AdmissionError::Composite(
-                        "duplicate or empty loop input".into(),
-                    ));
+                    return Err("duplicate or empty loop input".into());
                 }
                 for kind in &input.outputs {
                     if kinds.contains(kind) {
-                        return Err(AdmissionError::Composite("duplicate input output".into()));
+                        return Err("duplicate input output".into());
                     }
                     kinds.push(*kind);
                 }
@@ -302,15 +347,15 @@ fn expand_loops(
                     !matches!(mode, provenant_records::run::DeliveryMode::Integrate(_))
                 })
             {
-                return Err(AdmissionError::Composite("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into()));
+                return Err("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into());
             }
             if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &child.delivery
                 && document.integration_branch.as_deref() != Some(target.as_str())
             {
-                return Err(AdmissionError::Composite("loop body integrate: requires graph integration_branch equal to the node target".into()));
+                return Err("loop body integrate: requires graph integration_branch equal to the node target".into());
             }
             if child.land.is_some() {
-                return Err(AdmissionError::Composite("loop body cannot land".into()));
+                return Err("loop body cannot land".into());
             }
             // A continued writer is outside the body; the expanded plan checks it.
             child.continues = None;
@@ -319,9 +364,7 @@ fn expand_loops(
                     .as_ref()
                     .is_some_and(|path| Some(path) != child.worktree.as_ref())
                 {
-                    return Err(AdmissionError::Composite(
-                        "loop writers must share one worktree".into(),
-                    ));
+                    return Err("loop writers must share one worktree".into());
                 }
                 writer = child.worktree.clone();
             }
@@ -329,9 +372,7 @@ fn expand_loops(
                 if let Some(previous) = input.node.strip_prefix("previous.")
                     && !spec.body.iter().any(|n| n.id == previous)
                 {
-                    return Err(AdmissionError::Composite(
-                        "unknown previous round input".into(),
-                    ));
+                    return Err("unknown previous round input".into());
                 }
             }
             // Prior-round and outer inputs are checked against the expanded
@@ -363,24 +404,19 @@ fn expand_loops(
             ..document.clone()
         };
         let generous = crate::config::GraphLimits {
-            nodes: 16384,
+            nodes: crate::config::GraphLimits::loop_expansion_nodes_bound().maximum,
             edges: usize::MAX,
             graph_prompt_bytes: usize::MAX,
             node_prompt_bytes: usize::MAX,
             routes_per_node: u16::MAX as usize,
             ..Default::default()
         };
-        let (plan, positions) = validate_flat_plan(&body_document, &generous)
-            .map_err(|reason| AdmissionError::Composite(reason.to_string()))?;
+        let (plan, positions) = validate_flat_plan(&body_document, &generous)?;
         let Some(gate) = positions.get(&spec.until).map(|i| &plan.nodes[*i]) else {
-            return Err(AdmissionError::Composite(
-                "loop until must name a body gate".into(),
-            ));
+            return Err("loop until must name a body gate".into());
         };
         if gate.kind != Some(NodeKind::Gate) {
-            return Err(AdmissionError::Composite(
-                "loop until must name a body gate".into(),
-            ));
+            return Err("loop until must name a body gate".into());
         }
         let mut ancestors = std::collections::BTreeSet::new();
         let mut pending = vec![spec.until.clone()];
@@ -390,20 +426,13 @@ fn expand_loops(
             }
         }
         if ancestors.len() != spec.body.len() {
-            return Err(AdmissionError::Composite(
-                "loop gate must follow the entire body".into(),
-            ));
+            return Err("loop gate must follow the entire body".into());
         }
         for round in 1..=rounds {
             for child in &spec.body {
                 let mut child = child.clone();
                 let local = child.id.clone();
                 child.id = id(&node.id, round, &local);
-                if !valid_identifier(&child.id) {
-                    return Err(AdmissionError::Composite(
-                        "expanded loop node id exceeds 64 bytes".into(),
-                    ));
-                }
                 child.round = Some(LoopRound {
                     extra: Default::default(),
                     loop_id: node.id.clone(),
@@ -435,9 +464,7 @@ fn expand_loops(
                 if let Some(SourceBinding::Node { node: source }) = &mut child.source {
                     *source = if let Some(previous) = source.strip_prefix("previous.") {
                         if round == 1 {
-                            return Err(AdmissionError::Composite(
-                                "previous source requires an initial commit binding".into(),
-                            ));
+                            return Err("previous source requires an initial commit binding".into());
                         }
                         id(&node.id, round - 1, previous)
                     } else {
@@ -459,9 +486,9 @@ fn expand_loops(
                 {
                     *target = if let Some(previous) = target.strip_prefix("previous.") {
                         if round == 1 {
-                            return Err(AdmissionError::Composite(
-                                "previous CI target requires an initial node binding".into(),
-                            ));
+                            return Err(
+                                "previous CI target requires an initial node binding".into()
+                            );
                         }
                         id(&node.id, round - 1, previous)
                     } else if spec.body.iter().any(|node| &node.id == target) {
@@ -512,6 +539,11 @@ fn expand_loops(
                             for kind in &input.outputs {
                                 if !own.outputs.contains(kind) {
                                     own.outputs.push(*kind);
+                                }
+                            }
+                            for kind in &input.required_outputs {
+                                if !own.required_outputs.contains(kind) {
+                                    own.required_outputs.push(*kind);
                                 }
                             }
                         } else {
@@ -576,19 +608,32 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
         .nodes
         .iter()
         .map(|n| {
-            prior.remove(&n.id).unwrap_or_else(|| NodeProgress {
+            if let Some(mut progress) = prior.remove(&n.id) {
+                if let Some(composite) = &n.composite {
+                    progress.children.clone_from(&n.composite_members);
+                    progress.min_successful = composite.min_successful;
+                }
+                return progress;
+            }
+            NodeProgress {
                 extra: Default::default(),
                 children: n.composite_members.clone(),
                 min_successful: n.composite.as_ref().and_then(|spec| spec.min_successful),
-                source_commit: None,
+                source_binding: n.source.clone(),
+                source_commit: match &n.source {
+                    Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+                    _ => None,
+                },
+                writer_binding: None,
+                writer_binding_pending: plans::writer(n),
+                review_base: None,
+                review_base_pending: n.access == AccessMode::ReadOnly
+                    && n.extra.contains_key("review_base"),
                 fragment: None,
                 handoff: None,
                 expansion_pause: None,
-                expansion_cause: None,
                 loop_pause: None,
                 loop_pause_code: None,
-                loop_cause: None,
-                truncation_cause: None,
                 round: n.round.clone(),
                 gate: None,
                 separation: None,
@@ -603,9 +648,10 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 advance_error: None,
                 advance_error_code: None,
                 launch_retry: None,
+                last_launch_retry: None,
                 outputs: None,
                 attempts: vec![],
-            })
+            }
         })
         .collect();
 }
@@ -654,14 +700,20 @@ pub(super) fn validate_progress(
     let stopped = checkpoint
         .extensions
         .contains(&format!("loop.{}.decision=stop", node.id));
-    let valid = match progress.state {
-        NodeState::Succeeded => {
-            !failed
-                && settled
-                && (passed || accepted)
-                && progress.outputs == Some(gate_outputs(true))
+    let matches_output = |passed| {
+        let mut expected = gate_outputs(passed);
+        if progress
+            .outputs
+            .as_ref()
+            .is_some_and(|outputs| outputs.findings_available.is_none())
+        {
+            expected.findings_available = None;
         }
-        NodeState::Failed => (failed || stopped) && progress.outputs == Some(gate_outputs(false)),
+        progress.outputs == Some(expected)
+    };
+    let valid = match progress.state {
+        NodeState::Succeeded => !failed && settled && (passed || accepted) && matches_output(true),
+        NodeState::Failed => (failed || stopped) && matches_output(false),
         NodeState::Pending => progress.outputs.is_none(),
         NodeState::Blocked | NodeState::Skipped => {
             progress.outputs.is_none()
@@ -735,13 +787,11 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         progress.outputs = Some(gate_outputs(state == NodeState::Succeeded));
         checkpoint.nodes[index].loop_pause = None;
         checkpoint.nodes[index].loop_pause_code = None;
-        checkpoint.nodes[index].loop_cause = None;
         refresh_pause(checkpoint);
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     } else if settled && dependency_state(node, plan, checkpoint, positions).is_none() {
         if checkpoint.nodes[index].loop_pause.is_none() {
             checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
-            checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
             checkpoint.nodes[index].loop_pause = Some(format!(
                 "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
                 node.id
@@ -769,9 +819,12 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
             if let Some(answer) = checkpoint.asks[position].answer.clone() {
                 return apply(&node.id, rounds, &answer, checkpoint, journal);
             }
-            if checkpoint.nodes[index].loop_cause != Some(NodeDecisionCause::LoopAskClosed) {
+            if checkpoint.nodes[index]
+                .loop_pause
+                .as_ref()
+                .is_none_or(|reason| !reason.contains("graph resume"))
+            {
                 checkpoint.nodes[index].loop_pause_code = Some("loop_ask_closed".into());
-                checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopAskClosed);
                 checkpoint.nodes[index].loop_pause = Some(format!(
                     "loop {} exhausted after {rounds} rounds; ask closed; use graph resume --extend loop.{}.rounds=N or --extend loop.{}.decision=stop|accept",
                     node.id, node.id, node.id
@@ -784,7 +837,6 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         match asks::poll(checkpoint, position, owner) {
             Ok(reply) => {
                 checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
-                checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
                 checkpoint.nodes[index].loop_pause = Some(format!(
                     "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
                     node.id
@@ -867,7 +919,6 @@ pub(super) fn pause_invalid_decision<R: Error + 'static, J: GraphJournal>(
 ) -> Result<(), GraphError<R, J::Error>> {
     if let Some(progress) = checkpoint.nodes.iter_mut().find(|n| n.id == node) {
         progress.loop_pause_code = Some("invalid_loop_decision".into());
-        progress.loop_cause = Some(NodeDecisionCause::InvalidLoopDecision);
         progress.loop_pause = Some(format!(
             "loop {node} exhausted; decision cannot be applied: {}; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept",
             bounded(reason, MAX_ADVANCE_ERROR_BYTES)
@@ -893,7 +944,7 @@ pub(super) fn prepare_decision_extension(
     let mut extensions = checkpoint.extensions.clone();
     extensions.push(extension.to_owned());
     let expanded = plans::expand(document, &extensions, &checkpoint.expansions, limits)?;
-    let (plan, _) = validate_flat_plan(&expanded, limits).map_err(|error| error.to_string())?;
+    let (plan, _) = validate_flat_plan(&expanded, limits).map_err(str::to_owned)?;
     if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
         return Err(reason);
     }
@@ -928,12 +979,10 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
         .iter()
         .filter_map(|n| n.loop_pause.as_deref())
         .collect();
-    if checkpoint.pause_reason.is_none()
-        || checkpoint
-            .pause_code
-            .as_deref()
-            .and_then(NodeDecisionCause::from_loop_code)
-            .is_some()
+    if checkpoint
+        .pause_reason
+        .as_ref()
+        .is_none_or(|r| r.starts_with("loops paused:") || r.starts_with("loop "))
     {
         checkpoint.pause_code = if reasons.is_empty() {
             None
@@ -942,14 +991,8 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
                 checkpoint
                     .nodes
                     .iter()
-                    .filter_map(|node| node.loop_cause.as_ref())
-                    .find_map(|cause| match cause {
-                        NodeDecisionCause::LoopAskClosed => Some("loop_ask_closed"),
-                        NodeDecisionCause::InvalidLoopDecision => Some("invalid_loop_decision"),
-                        NodeDecisionCause::LoopPaused
-                        | NodeDecisionCause::PlanExpansionPaused { .. }
-                        | NodeDecisionCause::CompositeFindingsTruncated { .. } => None,
-                    })
+                    .filter_map(|node| node.loop_pause_code.as_deref())
+                    .find(|code| *code != "loop_paused")
                     .unwrap_or("loop_paused")
                     .into(),
             )
@@ -961,47 +1004,4 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
             )
         });
     }
-}
-
-/// An inbox request a loop raised before node asks, not yet closed. Cancel
-/// closes it under its original operation identity; it is never migrated.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LegacyLoopAsk {
-    pub node_id: String,
-    pub rounds: u64,
-    pub session: String,
-    /// The actor the request was raised under.
-    pub actor: String,
-}
-
-/// Unclosed loop requests recorded in pre-ask node fields.
-pub fn legacy_loop_asks(checkpoint: &GraphCheckpoint) -> Vec<LegacyLoopAsk> {
-    let mut asks = Vec::new();
-    for node in &checkpoint.nodes {
-        let Some(actor) = node
-            .extra
-            .get("loop_decision_actor")
-            .and_then(|v| v.as_str())
-        else {
-            continue;
-        };
-        let stored = node.extra.get("loop_asks").and_then(|v| v.as_array());
-        for ask in stored.into_iter().flatten() {
-            if ask.get("closed").and_then(|v| v.as_bool()) == Some(true) {
-                continue;
-            }
-            if let (Some(rounds), Some(session)) = (
-                ask.get("rounds").and_then(|v| v.as_u64()),
-                ask.get("session").and_then(|v| v.as_str()),
-            ) {
-                asks.push(LegacyLoopAsk {
-                    node_id: node.id.clone(),
-                    rounds,
-                    session: session.to_owned(),
-                    actor: actor.to_owned(),
-                });
-            }
-        }
-    }
-    asks
 }

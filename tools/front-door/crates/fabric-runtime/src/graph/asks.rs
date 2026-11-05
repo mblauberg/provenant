@@ -611,6 +611,7 @@ fn decision_outputs(ask_id: &str, option: &str, answer: &AskAnswer) -> NodeOutpu
         }),
         verdict: Some(option.to_owned()),
         findings: Vec::new(),
+        findings_available: None,
         branch: None,
         commit: None,
         warnings: Vec::new(),
@@ -689,7 +690,7 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
     else {
         return Ok(false);
     };
-    if checkpoint.cancelled || loop_pause(checkpoint) {
+    if checkpoint.cancelled || loop_pause(&reason) {
         return Ok(false);
     }
     let pauses = |ask: &NodeAsk| ask.kind == AskKind::Pause;
@@ -740,7 +741,6 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
                     checkpoint.extensions.push(extension);
                 }
             }
-            checkpoint.deactivate_expansion_pauses();
             checkpoint.pause_reason = None;
             checkpoint.pause_code = None;
             true
@@ -758,12 +758,8 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
     Ok(applied)
 }
 
-pub(super) fn loop_pause(checkpoint: &GraphCheckpoint) -> bool {
-    checkpoint
-        .pause_code
-        .as_deref()
-        .and_then(NodeDecisionCause::from_loop_code)
-        .is_some()
+pub(super) fn loop_pause(reason: &str) -> bool {
+    reason.starts_with("loops paused:") || reason.starts_with("loop ")
 }
 
 fn loop_rounds(checkpoint: &GraphCheckpoint, loop_id: &str) -> usize {
@@ -808,7 +804,7 @@ pub fn close_resolved_asks<R: AttemptOwner, J: GraphJournal>(
                             < loop_rounds(checkpoint, ask.node.as_deref().unwrap_or_default())
                 }
                 AskKind::Decide | AskKind::Land => settled,
-                AskKind::Pause => checkpoint.pause_reason.is_none() || loop_pause(checkpoint),
+                AskKind::Pause => checkpoint.pause_reason.as_deref().is_none_or(loop_pause),
             };
         if gone {
             checkpoint.asks[index].resolved = true;

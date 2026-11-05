@@ -669,6 +669,124 @@ fn explicit_read_only_from_a_linked_worktree_dispatches() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn worktree_access_readers_leave_existing_writer_lease_untouched()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane(
+        "run::tests::worktree_access_readers_leave_existing_writer_lease_untouched",
+    )? {
+        return Ok(());
+    }
+    use provenant_confinement::worktrees;
+    use provenant_supervisor::custody::{self, Scope};
+    let fixture = linked_fixture()?;
+    let prompt = fixture.root.join("prompt.md");
+    std::fs::write(&prompt, "review the checkout")?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            provenant_config::bind_project(
+                edge.roots,
+                provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
+            )?;
+            provenant_config::bind_host(edge.roots)?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let held = worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &fixture.project,
+                &clock,
+                &cancel,
+                |context| {
+                    let verified =
+                        provenant_confinement::verify_worktree(context.repo, &fixture.tree)?;
+                    let info = worktrees::list(context, &cancel)?
+                        .into_iter()
+                        .find(|info| info.path == fixture.tree)
+                        .ok_or(worktrees::WorktreeError::NotFound)?;
+                    worktrees::writer_custody(
+                        context.project_state,
+                        &verified,
+                        &provenant_confinement::repo::GitRefName::branch("writer")
+                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                        info.head,
+                        || {
+                            Ok(provenant_confinement::run_utility(
+                                context.executor,
+                                provenant_confinement::GitRead::WorktreeList,
+                                context.repo,
+                                context.utility,
+                                context.utility_budget,
+                                &cancel,
+                            )?
+                            .stdout
+                            .bytes)
+                        },
+                    )
+                },
+            )?;
+            let lease = custody::acquire_writer(
+                held.0,
+                Scope {
+                    run: RunId::from_bytes([7; 16]),
+                    attempt: AttemptId::from_bytes([7; 16]),
+                    generation: 1,
+                },
+                held.1,
+                provenant_core::WaitBudget::cli(clock.mono_now(), 1)?,
+                &cancel,
+                &clock,
+            )?;
+            for operation in ["reader-one", "reader-two"] {
+                let command = parsed_run(&[
+                    "--operation-id",
+                    operation,
+                    "--model",
+                    "codex/gpt-6-luna",
+                    "--mode",
+                    "read-only",
+                    "--worktree",
+                    fixture.tree.to_str().ok_or("path")?,
+                    "--prompt-file",
+                    prompt.to_str().ok_or("prompt")?,
+                ])?;
+                let reply = dispatch(command, edge);
+                assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+                let id = reply.result.data["run_id"]
+                    .as_str()
+                    .ok_or("run id")?
+                    .parse()?;
+                let request = session.store.request(id, &call)?;
+                assert!(request.tasks[0].writer.is_none());
+                assert!(request.tasks[0].access.source_live);
+                assert_eq!(
+                    request.tasks[0].access.source_root.as_deref(),
+                    Some(fixture.tree.as_path())
+                );
+            }
+            assert!(worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &fixture.project,
+                &clock,
+                &cancel,
+                |context| Ok(matches!(
+                    worktrees::cache_writer_probe(context.project_state, &fixture.tree),
+                    Err(worktrees::WorkerState::Busy)
+                ))
+            )?);
+            drop(lease);
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
 fn run_explain_warns_once_for_existing_brief_paths_outside_read_roots()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -3485,6 +3603,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         lane_depth: 0,
         parent_attempt: None,
         tasks: vec![run::DispatchTask {
+            cloud: None,
             context: None,
             build_heavy: false,
             title: None,
@@ -3709,6 +3828,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         chair: chair.clone(),
         operation_id: OperationId::parse("context-ref-replay").unwrap(),
         tasks: vec![Submitted {
+            cloud: None,
             require_skill_location: true,
             settlement_retry_limit: None,
             context: None,
@@ -3849,6 +3969,7 @@ pub(super) fn trace_run(
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![run::TaskRequest {
+                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,
@@ -3904,6 +4025,172 @@ fn trace_store(
         read_prompts: true,
     };
     Ok(run::RunStore::open(&context, call)?)
+}
+
+#[test]
+fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::cloud::{
+        CloudProvider, CloudResult, CloudSubmission, RemoteJob, RemoteState,
+    };
+    struct Fake {
+        running: bool,
+    }
+    impl CloudProvider for Fake {
+        type Error = ();
+        fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+            Ok(())
+        }
+        fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, ()> {
+            assert_eq!(request.job.commit, "a".repeat(40));
+            Ok("remote-id".into())
+        }
+        fn observe(&mut self, job: &RemoteJob) -> Result<RemoteState, ()> {
+            assert_eq!(job.remote_id, "remote-id");
+            assert_eq!(job.repository, "repository");
+            assert_eq!(job.commit, "a".repeat(40));
+            if self.running {
+                return Ok(RemoteState::Running);
+            }
+            Ok(RemoteState::Finished {
+                result: CloudResult {
+                    job_id: job.job_id.clone(),
+                    nonce: job.nonce.clone(),
+                    commit: "a".repeat(40),
+                    exit_status: 0,
+                    tests_run: vec!["targeted".into()],
+                    tests_failed: vec![],
+                    log_location: "log".into(),
+                    tracked_files_changed: false,
+                    observed_model: Some("small".into()),
+                },
+            })
+        }
+        fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
+            Ok(false)
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|e| e.message)?;
+    let store = trace_store(&temp, &call)?;
+    let mut input = trace_run(
+        40,
+        AttemptId::from_bytes([1; 16]),
+        now(&clock).map_err(|e| e.message)?,
+    )?;
+    input.request.parent_attempt = None;
+    input.request.tasks[0].head = Some("a".repeat(40));
+    input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
+        target: "target".into(),
+        provider: "fake".into(),
+        environment: "env".into(),
+        repository: "repository".into(),
+        branch: "main".into(),
+        model: "small".into(),
+        effort: None,
+        deadline_seconds: 3600,
+    });
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let target = crate::domains::CloudTarget {
+        provider: "fake".into(),
+        environment: "env".into(),
+        model: "small".into(),
+        effort: None,
+        repository: "repository".into(),
+        branch: "main".into(),
+        deadline_seconds: 3600,
+    };
+    let job = cloud_owner::prepare_job(id, "target", &target, &"a".repeat(40), &clock)?;
+    assert_eq!(job.job_id, id.to_string());
+    assert_eq!(job.nonce.len(), 32);
+    assert_ne!(
+        job.nonce,
+        cloud_owner::prepare_job(id, "target", &target, &"a".repeat(40), &clock)?.nonce
+    );
+    let mut wrong_commit = job.clone();
+    wrong_commit.commit = "b".repeat(40);
+    assert!(
+        cloud_owner::submit(
+            &mut Fake { running: true },
+            &store,
+            id,
+            wrong_commit,
+            "run tests",
+            &call
+        )
+        .is_err()
+    );
+    let submitted = cloud_owner::submit(
+        &mut Fake { running: true },
+        &store,
+        id,
+        job,
+        "run tests",
+        &call,
+    )?;
+    drop(store);
+    let store = trace_store(&temp, &call)?;
+    let cancelled = cloud_owner::cancel(&mut Fake { running: true }, &store, id, &call)?;
+    assert_eq!(cancelled.remote_id, submitted.remote_id);
+    assert_eq!(cancelled.state, RemoteState::CancellationUnconfirmed);
+    drop(store);
+    let store = trace_store(&temp, &call)?;
+    let running = cloud_owner::reconcile(&mut Fake { running: true }, &store, id, &call)?;
+    assert_eq!(running.state, RemoteState::CancellationUnconfirmed);
+    // A crash can happen after the remote result is saved but before its run
+    // event is recorded; reconciliation repairs that publication.
+    cloud_store::AttemptCloudStore::with_attempt(
+        &store,
+        id,
+        false,
+        &call,
+        |cloud_store| -> Result<(), String> {
+            let mut job = cloud_store
+                .load()
+                .map_err(|error| error.to_string())?
+                .ok_or("missing cloud job")?;
+            provenant_providers::cloud::reconcile(
+                &mut Fake { running: false },
+                cloud_store,
+                &mut job,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            Ok(())
+        },
+    )??;
+    assert!(!cloud_owner::finished_run(&store, input.run_id, &call)?);
+    let finished = cloud_owner::reconcile(&mut Fake { running: false }, &store, id, &call)?;
+    assert!(matches!(finished.state, RemoteState::Finished { .. }));
+    assert!(cloud_owner::finished_run(&store, input.run_id, &call)?);
+    let event = store.last_event_sequence(id, &call)?;
+    let _ = cloud_owner::reconcile(&mut Fake { running: false }, &store, id, &call)?;
+    assert_eq!(store.last_event_sequence(id, &call)?, event);
+    let mut lanes = vec![store.record(id, &call)?];
+    cloud_owner::hydrate(&store, &mut lanes, &call)?;
+    assert_eq!(status::lane_display_state(&lanes[0]), "cloud_passed");
+    assert!(condition_met(&lanes, Condition::All));
+    let mut data = json!({});
+    let mut human = String::new();
+    status::attach_cloud_jobs(&store, &lanes, &mut data, &mut human, &call)
+        .map_err(|error| error.message)?;
+    assert_eq!(data["cloud_jobs"][0]["state"]["state"], "finished");
+    assert_eq!(data["cloud_jobs"][0]["passed"], true);
+    assert!(human.contains("advisory pass"));
+    let mut setup_failed = finished;
+    setup_failed.state = RemoteState::SetupFailed {
+        detail: "environment setup failed".into(),
+    };
+    let diagnostic = cloud_owner::view(&setup_failed);
+    assert_eq!(diagnostic["target"], "target");
+    assert_eq!(diagnostic["environment"], "env");
+    assert!(
+        diagnostic["remedy"]
+            .as_str()
+            .is_some_and(|text| text.contains("repair"))
+    );
+    Ok(())
 }
 
 #[test]
@@ -4268,7 +4555,7 @@ fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_contr
         .result
         .error
         .expect("failed reconcile must explain its blocker");
-    assert_eq!(error.code, "reconcile_incomplete");
+    assert_eq!(error.code, "RECONCILE_INCOMPLETE");
     assert!(error.message.contains("invalid anchor"));
 }
 
@@ -5205,6 +5492,9 @@ fn render_lanes_says_what_an_unstarted_lane_waits_for() -> Result<(), Box<dyn st
         lane_class: run::LaneClass::ReadOnly,
         waiting_for: "read-only startup spacing: 1.2 s left of 2.0 s".into(),
     };
+    let (preparing, _) =
+        render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+    assert_eq!(preparing["lanes"][0]["waiting_for"], "launch preparation");
     let (data, human) = render_lanes_without_cooldowns(&[lane], &[wait], None, Path::new("/state"));
     assert!(
         human.contains("starting unresolved (read-only startup spacing: 1.2 s left of 2.0 s)"),
@@ -5378,6 +5668,7 @@ fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn st
     for root in roots {
         for (flag, read) in [("--read-root", true), ("--write-root", false)] {
             let access = crate::Access {
+                attach: Vec::new(),
                 mode: Some(Mode::ReadOnly),
                 worktree: None,
                 read_root: if read { vec![root.clone()] } else { vec![] },
@@ -5399,6 +5690,32 @@ fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn lane_access_canonicalises_attachment_files() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let image = temp.path().join("shot.png");
+    std::fs::write(&image, b"image")?;
+    let access = crate::Access {
+        attach: vec![image.clone()],
+        mode: None,
+        worktree: None,
+        read_root: vec![],
+        write_root: vec![],
+        network: None,
+        capability: vec![],
+        no_capability: vec![],
+    };
+    let granted = lane_access(
+        &access,
+        &temp.path().join("state"),
+        Path::new("/fixture/home"),
+    )
+    .map_err(|fail| fail.message)?;
+    assert_eq!(granted.attachments, vec![std::fs::canonicalize(image)?]);
+    assert!(granted.read_roots.is_empty());
+    Ok(())
+}
+
+#[test]
 fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -5414,6 +5731,7 @@ fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
     let config = std::fs::canonicalize(config)?;
     let state = temp.path().join("state");
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
         worktree: None,
         read_root,
@@ -5486,6 +5804,7 @@ fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::e
     let state = tempfile::tempdir()?;
     let state = std::fs::canonicalize(state.path())?;
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
         worktree: None,
         read_root,
@@ -5571,6 +5890,7 @@ fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::er
     std::fs::create_dir_all(&state)?;
     std::fs::create_dir_all(&project)?;
     let access = |mode, network, capability: &[&str], write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(mode),
         worktree: None,
         read_root: Vec::new(),
@@ -5655,6 +5975,7 @@ fn lane_access_refuses_write_root_overlapping_the_worktree()
     std::fs::create_dir_all(&state)?;
     std::fs::create_dir_all(&inside)?;
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::WorktreeWrite),
         worktree: Some(worktree.clone()),
         read_root,
@@ -5695,6 +6016,7 @@ fn lane_access_reads_installed_release_skills_only() -> Result<(), Box<dyn std::
     std::fs::create_dir_all(&skills)?;
     std::fs::create_dir_all(state.join("projects"))?;
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
         worktree: None,
         read_root,
@@ -7599,6 +7921,10 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
         &fixture.tree,
         |edge| -> Result<(), Box<dyn std::error::Error>> {
             crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            std::fs::write(
+                edge.roots.state.as_path().join("config.toml"),
+                "schema_version=1\n[gc]\nfree_floor='1B'\n",
+            )?;
             provenant_config::bind_host(edge.roots)?;
             allow_any_free_disk(edge)?;
 
@@ -7680,7 +8006,8 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
                 "--admission-timeout",
                 "60s",
             ])?;
-            cmd.wait = None;
+            // A wait shorter than the contention must not refuse the lane.
+            cmd.wait = Some(1);
 
             let reply = dispatch_with_workers(cmd, edge, &Free);
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);

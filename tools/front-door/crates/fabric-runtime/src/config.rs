@@ -277,6 +277,114 @@ pub struct GraphLimits {
     )]
     pub concurrency: Option<usize>,
 }
+
+/// One named host graph limit, including its configuration owner.
+pub struct GraphBound<'a> {
+    pub name: &'a str,
+    pub maximum: usize,
+    pub owner: &'static str,
+}
+
+impl GraphBound<'_> {
+    pub fn maximum_u64(&self) -> u64 {
+        u64::try_from(self.maximum).unwrap_or(u64::MAX)
+    }
+
+    pub fn refusal(&self, actual: usize) -> Option<String> {
+        (actual > self.maximum).then(|| {
+            format!(
+                "limits.{}={} reached ({}); set by {}",
+                self.name, self.maximum, actual, self.owner
+            )
+        })
+    }
+}
+
+impl GraphLimits {
+    /// Maximum size of a persisted graph document accepted by graph readers.
+    pub fn document_bytes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "graph_document_bytes",
+            maximum: 8_388_608,
+            owner: "graph document reader",
+        }
+    }
+
+    /// Internal node bound used while expanding a graph before admission.
+    pub fn composite_expansion_safety_nodes(&self) -> usize {
+        self.nodes.max(16_384)
+    }
+
+    /// Internal expansion safety bound used before configured graph limits are
+    /// applied to the flattened graph.
+    pub fn composite_expansion_safety_depth(&self) -> usize {
+        self.expansion_depth.max(64)
+    }
+
+    pub fn bound<'a>(&self, name: &'a str, maximum: usize) -> GraphBound<'a> {
+        GraphBound {
+            name,
+            maximum,
+            owner: "domains.fabric.graph.limits",
+        }
+    }
+
+    pub fn nodes_bound(&self) -> GraphBound<'static> {
+        self.bound("nodes", self.nodes)
+    }
+
+    pub fn expansion_depth_bound(&self) -> GraphBound<'static> {
+        self.bound("expansion_depth", self.expansion_depth)
+    }
+
+    /// Independent safety ceiling for materialising all loop rounds.
+    pub fn loop_expansion_nodes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "loop_expansion_nodes",
+            maximum: 16_384,
+            owner: "internal loop expansion safety",
+        }
+    }
+
+    /// Maximum round allowance accepted by loop expansion.
+    pub fn loop_expansion_rounds_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "loop_expansion_rounds",
+            maximum: 1024,
+            owner: "internal loop expansion safety",
+        }
+    }
+
+    /// Maximum number of extension rounds a loop may request at once.
+    pub fn loop_extension_rounds_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "loop_extension_rounds",
+            maximum: 1024,
+            owner: "internal loop expansion safety",
+        }
+    }
+
+    /// Bound for transient construction using an internal safety minimum.
+    fn composite_bound(name: &'static str, maximum: usize) -> GraphBound<'static> {
+        GraphBound {
+            name,
+            maximum,
+            owner: "composite expansion (domains.fabric.graph.limits and internal safety minima)",
+        }
+    }
+
+    pub fn composite_nodes_bound(maximum: usize) -> GraphBound<'static> {
+        Self::composite_bound("nodes", maximum)
+    }
+
+    pub fn composite_safety_nodes_bound(&self) -> GraphBound<'static> {
+        Self::composite_nodes_bound(self.composite_expansion_safety_nodes())
+    }
+
+    pub fn composite_safety_depth_bound(&self) -> GraphBound<'static> {
+        Self::composite_bound("expansion_depth", self.composite_expansion_safety_depth())
+    }
+}
 fn serialise_concurrency<S: serde::Serializer>(
     value: &Option<usize>,
     serializer: S,
@@ -819,6 +927,16 @@ fn boundary_existing(error: &SectionError) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn graph_document_bound_reports_its_name_and_owner() {
+        let bound = GraphLimits::document_bytes_bound();
+        assert_eq!(bound.maximum, 8_388_608);
+        assert!(bound.refusal(bound.maximum).is_none());
+        let reason = bound.refusal(bound.maximum + 1).unwrap();
+        assert!(reason.contains("graph_document_bytes"), "{reason}");
+        assert!(reason.contains("graph document reader"), "{reason}");
+    }
 
     #[test]
     fn configured_commands_keep_literal_argv_and_validate_executable_and_nuls() {

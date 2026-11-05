@@ -197,7 +197,7 @@ fn guard_reply(
     if in_lane {
         return Ok(None);
     }
-    let Some(client @ Harness::Claude) = client else {
+    let Some(client) = client.filter(|client| client.spec().local_offer_reader) else {
         diagnostic("answer delivery unavailable: unsupported guard harness");
         return Ok(None);
     };

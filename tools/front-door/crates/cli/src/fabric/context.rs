@@ -26,6 +26,8 @@ pub struct Context {
     pub roots: Roots,
     pub identity: Identity,
     pub config: FabricConfig,
+    /// Origin captured with the effective graph configuration.
+    pub graph_prompt_limit_source: provenant_fabric_runtime::graph::InputCapSource,
     /// Captured once from the host-set MCP entry, never from tool arguments.
     pub in_lane: bool,
     pub(super) executor: SystemExecutor,
@@ -107,12 +109,23 @@ pub fn current_session() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn prompt_limit_source(
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+) -> provenant_fabric_runtime::graph::InputCapSource {
+    use provenant_fabric_runtime::graph::InputCapSource;
+    match origins.get("domains.fabric.graph.limits.node_prompt_bytes") {
+        Some(provenant_config::Origin::Compiled { .. }) => InputCapSource::Default,
+        Some(provenant_config::Origin::User { .. }) => InputCapSource::Configured,
+        None => InputCapSource::EffectiveGraphLimits,
+    }
+}
+
 impl Context {
     pub fn open(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         // Validate configuration before allocating identities or opening SQLite.
-        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
-            .domains
-            .fabric;
+        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let config = resolved.domains.fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_root = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
             .map(PathBuf::from)
@@ -158,6 +171,7 @@ impl Context {
             roots,
             identity,
             config,
+            graph_prompt_limit_source,
             in_lane: lane,
             executor,
             home: home.to_path_buf(),
@@ -166,9 +180,9 @@ impl Context {
     }
     /// Resolve existing identity and configuration without creating state.
     pub fn open_read_only(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
-        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
-            .domains
-            .fabric;
+        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
         let executor = SystemExecutor::new(1)?;
@@ -199,6 +213,7 @@ impl Context {
             roots,
             identity,
             config,
+            graph_prompt_limit_source,
             in_lane: in_lane(),
             executor,
             home: home.to_path_buf(),
@@ -214,9 +229,9 @@ impl Context {
     ) -> Result<Self, EdgeError> {
         // Its working directory is the project's, as if started there.
         let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
-        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
-            .domains
-            .fabric;
+        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let config = resolved.domains.fabric;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
         let key = match CrossHostProjectKey::from_home(home, binding.common_dir()) {
             Ok(key) => Some(key),
@@ -236,6 +251,7 @@ impl Context {
             roots,
             identity,
             config,
+            graph_prompt_limit_source,
             in_lane: in_lane(),
             executor: SystemExecutor::new(1)?,
             home: home.to_path_buf(),
@@ -386,14 +402,65 @@ impl Context {
             executable,
             seconds: self.config.limits.peer_seconds,
         };
-        let exchanged = match within {
-            Some(within) => transport.exchange_within(peer, &request, budget, cancel, within),
-            None => transport.exchange(peer, &request, budget, cancel),
+        let started = clock.mono_now();
+        let exchange = |request: &PeerRequest| {
+            let elapsed = Duration::from_micros(
+                clock
+                    .mono_now()
+                    .as_micros()
+                    .saturating_sub(started.as_micros()),
+            );
+            match within {
+                Some(limit) => transport.exchange_within(
+                    peer,
+                    request,
+                    budget,
+                    cancel,
+                    limit.saturating_sub(elapsed),
+                ),
+                None => transport.exchange(peer, request, budget, cancel),
+            }
         };
-        match exchanged
-            .map_err(|error| peer_failure(&peer.destination, &error))?
-            .result
-        {
+        let exchanged = if matches!(request.action, PeerAction::Submit { .. }) {
+            provenant_fabric_runtime::hosts::encode_peer_request(&request)
+                .map_err(|error| peer_failure(&peer.destination, &error))?;
+            let probe = PeerRequest::new(
+                host,
+                self.identity.host,
+                self.identity.inbox.agent.clone(),
+                request.project.clone(),
+                PeerAction::Health {
+                    extra: Default::default(),
+                },
+            );
+            submit_after_probe(
+                &peer.destination,
+                || {
+                    let remaining =
+                        Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
+                    let remaining = within.map_or(remaining, |limit| {
+                        let elapsed = Duration::from_micros(
+                            clock
+                                .mono_now()
+                                .as_micros()
+                                .saturating_sub(started.as_micros()),
+                        );
+                        remaining.min(limit.saturating_sub(elapsed))
+                    });
+                    transport.exchange_within(
+                        peer,
+                        &probe,
+                        budget,
+                        cancel,
+                        (remaining / 4).min(Duration::from_millis(250)),
+                    )
+                },
+                || exchange(&request),
+            )?
+        } else {
+            exchange(&request).map_err(|error| peer_failure(&peer.destination, &error))?
+        };
+        match exchanged.result {
             PeerResult::Error {
                 data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
                 ..
@@ -417,6 +484,91 @@ impl Context {
         }
         Ok(lease.lease_seconds)
     }
+}
+
+fn submit_after_probe(
+    peer: &str,
+    probe: impl FnOnce() -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerError>,
+    submit: impl FnOnce() -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerError>,
+) -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerFailure> {
+    if let Ok(response) = probe() {
+        check_submit_health(peer, response.result)?;
+    }
+    submit().map_err(|error| peer_failure(peer, &error))
+}
+
+const MIN_SUBMIT_RELEASE: (u64, u64, u64) = (1, 6, 5);
+
+/// Refuse only capabilities the peer explicitly reports as incompatible.
+fn check_submit_health(peer: &str, result: PeerResult) -> Result<(), PeerFailure> {
+    let PeerResult::Health { data, .. } = result else {
+        return Ok(());
+    };
+    let version = data.release.as_deref().and_then(|v| {
+        let valid_identifiers = |suffix: &str, prerelease: bool| {
+            suffix.split('.').all(|part| {
+                !part.is_empty()
+                    && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && !(prerelease
+                        && part.len() > 1
+                        && part.starts_with('0')
+                        && part.bytes().all(|b| b.is_ascii_digit()))
+            })
+        };
+        let core = if let Some((core, build)) = v.split_once('+') {
+            if !valid_identifiers(build, false) {
+                return None;
+            }
+            core
+        } else {
+            v
+        };
+        let core = if let Some((core, prerelease)) = core.split_once('-') {
+            if !valid_identifiers(prerelease, true) {
+                return None;
+            }
+            core
+        } else {
+            core
+        };
+        let mut parts = core.split('.').map(|part| {
+            if part.len() > 1 && part.starts_with('0') {
+                return None;
+            }
+            if !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            part.parse::<u64>().ok()
+        });
+        let version = (parts.next()??, parts.next()??, parts.next()??);
+        parts.next().is_none().then_some(version)
+    });
+    if version.is_some_and(|version| version < MIN_SUBMIT_RELEASE) {
+        return Err(PeerFailure::new(
+            FacadeError::PeerVersion,
+            format!(
+                "{peer}: peer release {} is too old for submission; run `provenant upgrade` on the peer",
+                provenant_fabric_runtime::hosts::plain_text(
+                    data.release.as_deref().unwrap_or("unknown"),
+                    80
+                )
+            ),
+        ));
+    }
+    if data
+        .run_capabilities
+        .is_some_and(|capabilities| !capabilities.submit)
+    {
+        return Err(PeerFailure::new(
+            FacadeError::DispatchRefused {
+                reason: "peer does not support submission".into(),
+                disk: None,
+                fact: None,
+            },
+            format!("{peer}: submission capability is unavailable"),
+        ));
+    }
+    Ok(())
 }
 
 /// Configuration directories do not identify the active harness. Conflicting
@@ -482,6 +634,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
         FacadeError::ConfinementRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
         FacadeError::WriterBusy => (Outcome::Refused, ErrorKind::WriterBusy),
+        FacadeError::WriterLockBusy => (Outcome::Refused, ErrorKind::WriterLockBusy),
         FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),
         FacadeError::CredentialRoot { .. } => (Outcome::Refused, ErrorKind::CredentialRoot),
         FacadeError::DispatchRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
@@ -548,6 +701,118 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn submit_preflight_refuses_old_or_incapable_stub_before_launch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::HostId;
+        use provenant_fabric_runtime::{
+            hosts::{PROTOCOL, PeerHealth, PeerResponse, PeerResult},
+            identity::CrossHostProjectKey,
+            runs::RunCapabilities,
+        };
+        use std::{cell::Cell, path::Path};
+        let host = HostId::from_bytes([2; 16]);
+        let project =
+            CrossHostProjectKey::from_home(Path::new("/home/a"), Path::new("/home/a/repo"))?;
+        for (release, submit, code) in [
+            (Some("1.6.4"), Some(true), Some("peer_version")),
+            (Some("1.6.5"), Some(false), Some("dispatch_refused")),
+            (Some("1.6.5"), Some(true), None),
+            (Some("1.6.5-rc.1"), Some(true), None),
+            (None, None, None),
+            (Some("unparseable"), None, None),
+            (Some("1.6.4-"), None, None),
+        ] {
+            let calls = Cell::new(0);
+            let stub = || {
+                calls.set(calls.get() + 1);
+                Ok(PeerResponse {
+                    extra: Default::default(),
+                    version: 1,
+                    protocol: PROTOCOL,
+                    host,
+                    project: project.clone(),
+                    result: PeerResult::Health {
+                        extra: Default::default(),
+                        data: PeerHealth {
+                            extra: Default::default(),
+                            host,
+                            available: true,
+                            execution: submit,
+                            release: release.map(str::to_owned),
+                            run_capabilities: submit.map(|submit| RunCapabilities {
+                                submit,
+                                list: true,
+                                status: true,
+                                wait: true,
+                                cancel: true,
+                                resume: true,
+                                output: true,
+                                events: true,
+                            }),
+                            readiness: None,
+                        },
+                    },
+                })
+            };
+            let result = super::submit_after_probe("worker", stub, stub);
+            if let Some(code) = code {
+                let error = result.unwrap_err();
+                assert_eq!(error.error.code(), code);
+                assert_eq!(calls.get(), 1);
+                if code == "peer_version" {
+                    assert!(
+                        error
+                            .detail
+                            .unwrap_or_default()
+                            .contains("provenant upgrade")
+                    );
+                }
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(calls.get(), 2);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_limit_origin_distinguishes_default_from_explicit_same_value()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::InputCapSource;
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("repo"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let default = provenant_config::load_with_domains::<&[u8], _>(
+            &roots,
+            None,
+            &crate::domains::SECTIONS,
+        )?;
+        assert_eq!(
+            super::prompt_limit_source(&default.origins),
+            InputCapSource::Default
+        );
+        let configured = b"schema_version = 1
+[domains.fabric.graph.limits]
+node_prompt_bytes = 262144
+";
+        let resolved = provenant_config::load_with_domains(
+            &roots,
+            Some(configured.as_slice()),
+            &crate::domains::SECTIONS,
+        )?;
+        assert_eq!(
+            resolved.domains.fabric.graph.limits.node_prompt_bytes,
+            default.domains.fabric.graph.limits.node_prompt_bytes
+        );
+        assert_eq!(
+            super::prompt_limit_source(&resolved.origins),
+            InputCapSource::Configured
+        );
+        Ok(())
+    }
     #[test]
     fn protocol_mismatch_keeps_both_versions_and_the_cli_code() {
         let failure = super::peer_failure(

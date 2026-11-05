@@ -72,6 +72,8 @@ lane_row! {
         provider_seconds: f64 => nullable(number());
         handoff: Value => any();
         provider_error: String => string();
+        cloud: Value => open_object();
+        cloud_state: String => string();
         capabilities: Value => array(object(&[("name", string()), ("source", string())], &[]));
     }
 }
@@ -179,6 +181,11 @@ impl LaneRow {
     pub fn project(lane: &crate::run::AttemptRecord, facts: LaneProjectionFacts) -> Self {
         use crate::run::AttemptState;
         let (state, mut terminal_reason) = Self::state_and_reason(&lane.state);
+        let cloud_state = lane
+            .cloud_observation
+            .0
+            .map(|cloud| cloud.state().to_owned());
+        let state = cloud_state.clone().unwrap_or(state);
         // Settlement reasons are closed, locally recorded facts, unlike the
         // terminal state's free text, which can contain provider output.
         if let Some(reason) = lane.settlement_reason
@@ -359,6 +366,8 @@ impl LaneRow {
             provider_seconds: facts.provider_seconds,
             handoff: None,
             provider_error: None,
+            cloud: lane.cloud_view.0.clone(),
+            cloud_state,
             capabilities: None,
         }
     }

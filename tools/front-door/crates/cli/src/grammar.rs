@@ -277,6 +277,12 @@ pub struct Review {
     /// Show the selected panel without dispatching reviewers
     #[arg(long)]
     pub explain: bool,
+    /// Planner front-end: auto, on or off
+    #[arg(long, value_parser = ["auto", "on", "off"])]
+    pub plan: Option<String>,
+    /// Start a new graph even if this review already ran
+    #[arg(long)]
+    pub fresh: bool,
     /// Overall wait limit (seconds or a duration such as 30m)
     #[arg(long, default_value = "3600", catalog_duration())]
     pub wait: u64,
@@ -616,12 +622,15 @@ pub struct Access {
     /// Access mode: read-only or worktree-write [default: read-only]
     #[arg(long, value_enum)]
     pub mode: Option<Mode>,
-    /// Writer worktree; local run creates an owned worktree for a missing branch name
+    /// Checkout to read or write; a writer can create an owned worktree for a missing branch name
     #[arg(long)]
     pub worktree: Option<PathBuf>,
     /// Extra directory the lane may read (repeatable)
     #[arg(long, catalog_bounds = (0, 32))]
     pub read_root: Vec<PathBuf>,
+    /// Image file to attach to the lane (repeatable)
+    #[arg(long, catalog_bounds = (0, 32))]
+    pub attach: Vec<PathBuf>,
     /// Extra directory the lane may write, outside Git metadata (repeatable)
     #[arg(long, catalog_bounds = (0, 32))]
     pub write_root: Vec<PathBuf>,
@@ -657,6 +666,30 @@ pub struct DispatchInput {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
+    /// Placement: local or named cloud target in cloud:NAME form.
+    #[arg(long, conflicts_with = "preset")]
+    pub placement: Option<String>,
+    /// Override the cloud provider.
+    #[arg(long)]
+    pub cloud_provider: Option<String>,
+    /// Override the provider environment ID.
+    #[arg(long)]
+    pub cloud_environment: Option<String>,
+    /// Override the requested cloud model.
+    #[arg(long)]
+    pub cloud_model: Option<String>,
+    /// Override the requested cloud effort.
+    #[arg(long)]
+    pub cloud_effort: Option<String>,
+    /// Override the cloud repository source.
+    #[arg(long)]
+    pub cloud_repository: Option<String>,
+    /// Override the repository branch made available to the cloud job.
+    #[arg(long)]
+    pub cloud_branch: Option<String>,
+    /// Override the cloud job deadline in seconds.
+    #[arg(long)]
+    pub cloud_deadline: Option<u64>,
     /// Expand and run a named pipeline preset
     #[arg(long, catalog_requires = "prompt_file")]
     pub preset: Option<String>,
@@ -675,10 +708,10 @@ pub struct Dispatch {
     /// Explain roles, limits and the expanded graph without running it
     #[arg(long)]
     pub explain: bool,
-    /// Risk tier supplied to automatic preset selection
+    /// Risk tier supplied to preset selection and model-choice preferences
     #[arg(long)]
     pub risk_tier: Option<String>,
-    /// Task kind supplied to automatic preset selection
+    /// Task kind supplied to preset selection and model-choice preferences
     #[arg(long)]
     pub task_kind: Option<String>,
     /// Changed or declared path supplied to automatic preset selection (repeatable)
@@ -860,6 +893,14 @@ pub enum Condition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "snake_case")]
 pub enum LaneState {
+    CloudSubmitting,
+    CloudRunning,
+    CloudPassed,
+    CloudFailed,
+    CloudSetupFailed,
+    CloudCancelled,
+    CloudCancellationUnconfirmed,
+    CloudUnknown,
     Queued,
     Starting,
     Running,
@@ -883,6 +924,14 @@ pub enum LaneState {
 impl LaneState {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::CloudSubmitting => "cloud_submitting",
+            Self::CloudRunning => "cloud_running",
+            Self::CloudPassed => "cloud_passed",
+            Self::CloudFailed => "cloud_failed",
+            Self::CloudSetupFailed => "cloud_setup_failed",
+            Self::CloudCancelled => "cloud_cancelled",
+            Self::CloudCancellationUnconfirmed => "cloud_cancellation_unconfirmed",
+            Self::CloudUnknown => "cloud_unknown",
             Self::Queued => "queued",
             Self::Starting => "starting",
             Self::Running => "running",
@@ -1373,6 +1422,13 @@ pub enum GitHook {
 }
 #[derive(Debug, Subcommand)]
 pub enum Internal {
+    /// Resume preparation of an admitted local run in a separate process.
+    Launch {
+        run: RunId,
+        /// Seconds to wait when every candidate provider is updating.
+        #[arg(long)]
+        provider_lease_wait: Option<u64>,
+    },
     Settle {
         /// Private durable-settlement resume request from the host.
         request: String,

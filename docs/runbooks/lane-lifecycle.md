@@ -73,7 +73,11 @@ launches at its inherited priority and the reason is recorded as a warning.
 When run from a linked Git worktree with no `--mode` and no target
 (`--worktree`, `--branch` or `--worktree-branch`), `run` refuses with `REFUSED`
 and names both repairs: `--worktree <path>` for a writer, or `--mode read-only`
-for a reader.
+for a reader. To read another registered checkout, pass both `--mode read-only`
+and `--worktree PATH`. Readers use that checkout without acquiring its writer
+lease, including while a writer holds it. The checkout and its Git metadata
+remain read-only even when the project configures ordinary read-only write
+exceptions. Explicit write roots must not overlap the checkout.
 
 Read-only lanes can run offline Cargo tests, including doc-tests, using their
 private `CARGO_TARGET_DIR` under lane scratch; they may execute files they
@@ -95,7 +99,7 @@ by anything other than our own link owned by the same user is left alone and
 the lane uses the real path. Terminal commit, unreserved reconciliation and
 retention unlink the alias (never recursively) when they remove `tmp`.
 
-The receipt names the worktree. `--worktree PATH` uses an existing checkout
+The receipt names the worktree. For writers, `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned
 checkout; for an absolute path or a path below `.worktrees/`, use
 `--branch BRANCH` to create it. Git's worktree inventory establishes membership,
@@ -255,8 +259,30 @@ integrate fast-forward only. If a loop round's delivery fails at the Integrate
 stage, the integration branch moved after the round launched; rerun the graph
 from the new head rather than resuming it.
 
-Drain writer lanes before upgrading, as described in the
-[upgrade procedure](install.md#bootstrap-and-upgrade). Upgrading does not
+For recovery, use the existing operation that matches the situation:
+
+- **Unconfirmed launch:** `LAUNCH_UNKNOWN` means the handoff was not confirmed;
+  the guardian may still have started. Run `provenant reconcile --id RUN` and
+  inspect the attempt and custody evidence before considering another launch.
+- **Blocked custody:** a `launch blocked` notice includes the cause. The
+  reservation remains in place; address the reported cause and inspect the
+  attempt's custody evidence. Do not remove
+  the reservation to force another launch.
+- **Resume a graph:** `provenant fabric graph resume` continues its recorded
+  checkpoint. A plain rerun of the same preset inputs reattaches to that graph.
+- **Retry a lane:** `provenant resume ATTEMPT` continues from the recorded
+  attempt. Address the refusal or other recorded cause before retrying.
+- **Fallback:** an eligible route fallback is selected by the graph's routing
+  policy; resuming the graph does not authorise an unsafe second launch.
+- **Repair:** correct the reported condition, then resume the affected graph or
+  lane with its existing command. Do not reset a worktree containing edits.
+- **Fresh start:** cancel the old graph when appropriate, then rerun a preset
+  with `--fresh` to create a new graph ID.
+
+Drain in-flight graphs and writer lanes before upgrading, as described in the
+[upgrade procedure](install.md#bootstrap-and-upgrade). Finish or cancel each
+graph before upgrading: checkpoint meanings for graph lineage and lifecycle
+change together in this release. Upgrading does not
 force-cancel running lanes. An older interrupted settlement with its private
 objects can resume through the new Git receive import. Without those objects,
 recover its commits on the host and start a fresh run; the refusal names this
