@@ -232,6 +232,28 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
             stream: "stdout"
         }))
     ));
+    assert_eq!(
+        facts.bare_setting(
+            context.repo,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            &cancel(),
+        )?,
+        Some(false)
+    );
+    assert!(matches!(
+        limited.bare_setting(
+            context.repo,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            &cancel(),
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
     let read_only = context.utility.open_read_repo(
         context.executor,
         fixture.repo.root_path(),
