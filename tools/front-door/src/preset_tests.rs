@@ -5845,6 +5845,37 @@ fn request_bindings_follow_declarations_and_warn_when_missing() {
 }
 
 #[test]
+fn copied_generator_evaluator_receives_the_same_request_and_nodes() {
+    let mut layers = Layers::empty();
+    layers.review = Some(shapes());
+    layers
+        .insert(
+            "test",
+            "custom-generator",
+            include_str!("../assets/presets/generator-evaluator.toml"),
+        )
+        .unwrap();
+    let mut documents = Vec::new();
+    for name in ["generator-evaluator", "custom-generator"] {
+        let (bindings, warnings) =
+            request_bindings(&layers, name, Some("crucial"), Some("docs")).unwrap();
+        assert!(warnings.is_empty());
+        assert!(bindings.contains(&("risk_tier".into(), json!("crucial"))));
+        assert!(bindings.contains(&("kind".into(), json!("docs"))));
+        let expansion = super::preset::expand_with(
+            &layers,
+            name,
+            "brief",
+            &bindings,
+            &["parameters.worktree='/repo/lane'".into()],
+        )
+        .unwrap();
+        documents.push(expansion.document["nodes"].clone());
+    }
+    assert_eq!(documents[0], documents[1]);
+}
+
+#[test]
 fn tracker_advice_is_declared_by_parameter() {
     let mut layers = Layers::empty();
     layers
