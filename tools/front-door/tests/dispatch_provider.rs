@@ -1178,6 +1178,15 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
         )
         .map_err(|e| format!("git: {e}"))?;
     assert_eq!(code(&commit), 0);
+    let head = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+    assert_eq!(code(&head), 0);
+    let head = String::from_utf8(head.stdout.bytes)?.trim().to_owned();
+    let detached = rig.execute(&git, &["checkout", "--quiet", "--detach", &head], None)?;
+    assert_eq!(code(&detached), 0);
+    assert_ne!(
+        code(&rig.execute(&git, &["symbolic-ref", "--quiet", "HEAD"], None)?),
+        0
+    );
     let brief = rig.root.join("council-brief.txt");
     fs::write(&brief, "fixture council findings").map_err(|e| format!("brief: {e}"))?;
     let started = rig
@@ -1189,6 +1198,8 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
             brief.to_str().ok_or("brief")?,
             "--set",
             "parameters.review_shape=\"quick\"",
+            "--set",
+            &format!("parameters.subject.commit=\"{head}\""),
             "--plan",
             "off",
             "--wait",
@@ -1210,6 +1221,23 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
             let nodes = status["data"]["checkpoint"]["nodes"]
                 .as_array()
                 .ok_or("nodes")?;
+            let lens = nodes
+                .iter()
+                .find(|node| {
+                    node["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("lenses--lens-"))
+                })
+                .ok_or("lens")?;
+            assert_eq!(lens["state"], "succeeded", "{status}");
+            assert_eq!(lens["source_commit"], head, "{status}");
+            assert!(lens["outputs"]["branch"].is_null(), "{status}");
+            assert!(
+                lens["attempts"]
+                    .as_array()
+                    .is_some_and(|attempts| !attempts.is_empty()),
+                "{status}"
+            );
             let synthesis = nodes
                 .iter()
                 .find(|node| node["id"] == "synthesis")
@@ -1228,6 +1256,10 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
         );
         std::thread::park_timeout(std::time::Duration::from_millis(50));
     }
+    assert_ne!(
+        code(&rig.execute(&git, &["symbolic-ref", "--quiet", "HEAD"], None)?),
+        0
+    );
     cleanup.disarm();
     Ok(())
 }
