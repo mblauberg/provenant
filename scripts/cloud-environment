@@ -3,6 +3,7 @@
 
 import argparse
 from pathlib import Path
+import shlex
 import subprocess
 
 
@@ -36,10 +37,16 @@ def describe(repo: Path) -> str:
                 toolchains.append(name)
         if toolchains:
             lines.append("Use the pinned Rust toolchains: " + ", ".join(toolchains))
-        lines.extend([
-            "For nextest tiers: install cargo-nextest (cargo install cargo-nextest --locked).",
-            "Optional cache warm-up: run cargo build --locked in the workspace; check the provider's setup time limit.",
-        ])
+        lines.append("For nextest tiers: install cargo-nextest (cargo install cargo-nextest --locked).")
+        # Build from each outermost manifest directory so rustup also discovers
+        # the toolchain pinned beside a nested workspace.
+        roots = []
+        for path in sorted((Path(name).parent for name in manifests), key=lambda p: len(p.parts)):
+            if not any(root == path or root in path.parents for root in roots):
+                roots.append(path)
+        lines.append("Optional cache warm-up (check the provider's setup time limit):")
+        for root in roots:
+            lines.append(f"  (cd {shlex.quote(str(root))} && cargo build --locked)")
     else:
         lines.append("Install the toolchain and test runner required by the selected tier.")
     lines.append("Add repository-specific native dependencies and cache setup as needed.")
