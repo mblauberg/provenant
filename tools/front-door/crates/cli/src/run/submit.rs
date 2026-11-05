@@ -1,5 +1,24 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DEFER_PROVIDER_LAUNCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Keep a test submission queued after admission, before provider preparation.
+#[cfg(test)]
+pub(super) fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.set(false));
+        }
+    }
+    TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.set(true));
+    let _reset = Reset;
+    action()
+}
+
 /// Strict manifest: `{schema_version:1,tasks:[...]}`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -639,6 +658,10 @@ pub(super) fn submit_with_host_and_wait(
                 .map_err(run::RunError::from)?;
             }
         }
+    }
+    #[cfg(test)]
+    if TEST_DEFER_PROVIDER_LAUNCH.with(std::cell::Cell::get) {
+        return Ok((record, Vec::new()));
     }
     let started = if parent_attempt.is_some() {
         Vec::new()

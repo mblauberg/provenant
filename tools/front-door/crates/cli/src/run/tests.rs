@@ -442,6 +442,118 @@ fn project_default_dispatch_renders_ipc_only_for_writer() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn project_default_branch_dispatch_renders_database_ipc() -> Result<(), Box<dyn std::error::Error>>
+{
+    if reexec_test_in_lane("run::tests::project_default_branch_dispatch_renders_database_ipc")? {
+        return Ok(());
+    }
+    use provenant_confinement::permissions::{
+        AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
+        ProviderProfileSpec, WorktreeWriteAuthority,
+    };
+    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+    let fixture = linked_fixture()?;
+    let brief = fixture.root.join("brief.md");
+    std::fs::write(&brief, "work")?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(edge.roots.state.as_path())?;
+            let binding = provenant_config::bind_project(
+                edge.roots,
+                provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
+            )?;
+            provenant_config::bind_host(edge.roots)?;
+            std::fs::write(
+                edge.roots.state.as_path().join("config.toml"),
+                format!(
+                    "schema_version = 1\n[gc]\nfree_floor = '1B'\n[domains.lanes.projects.\"{}\"]\ncapabilities = ['postgres']\n",
+                    binding.project_id()
+                ),
+            )?;
+            let mut command = parsed_run(&[
+                "--branch",
+                "capability-branch",
+                "--base",
+                "HEAD",
+                "--model",
+                "codex/gpt-6-luna",
+                "--prompt-file",
+                brief.to_str().ok_or("brief")?,
+            ])?;
+            command.wait = None;
+            let reply = super::submit::with_deferred_provider_launch(|| {
+                dispatch_with_workers(command, edge, &Free)
+            });
+            assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+            let id: RunId = reply.result.data["run_id"]
+                .as_str()
+                .ok_or("run id")?
+                .parse()?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let request = session.store.request(id, &call)?;
+            let access = &request.tasks[0].access;
+            assert!(access.database_ipc);
+            let grant = |path: &str| PathGrant {
+                path: path.into(),
+                scope: PathScope::Subtree,
+            };
+            let plan = PlanPermissions {
+                mode: AccessMode::WorktreeWrite(Box::new(serde_json::from_value::<
+                    WorktreeWriteAuthority,
+                >(
+                    json!({"git_grants_digest":vec![7_u8;32],"publishing":false,"common_git_dir":"/fixture/repo/.git","cargo_cache":{"path":"/fixture/cache","scope":"subtree"}}),
+                )?)),
+                read_only: None,
+                scratch: grant("/fixture/scratch"),
+                private_state: None,
+                read_roots: vec![],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            };
+            let mut profile = ProviderProfile {
+                spec: ProviderProfileSpec::default(),
+                observations: Default::default(),
+            };
+            super::provider::apply_lane_capabilities(&mut profile.spec, access);
+            let sbpl = provenant_confinement::permissions::snapshot::render(
+                &plan,
+                &profile,
+                Path::new("/fixture/home"),
+            )?;
+            assert!(sbpl.contains("(allow ipc-sysv-shm)"));
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
 fn lane_gitdir_resolves_the_registered_project_without_querying_primary()
 -> Result<(), Box<dyn std::error::Error>> {
     if reexec_test_in_lane(
