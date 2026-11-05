@@ -319,6 +319,7 @@ fn valid_signature(secret: &[u8], signature: Option<&str>, body: &[u8]) -> bool 
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)] // Also compiled by the harness=false worktree driver, without libtest.
 mod tests {
     use super::*;
     #[test]

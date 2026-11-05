@@ -102,6 +102,7 @@ fn read_request(stream: &mut impl Read) -> io::Result<Request> {
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)] // Also compiled by the harness=false worktree driver, without libtest.
 mod tests {
     use super::*;
     use std::io::Cursor;
