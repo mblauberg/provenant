@@ -379,7 +379,7 @@ impl LaneRuntime<'_> {
             self.home,
         ]
         .iter()
-        .all(|p| p.is_absolute())
+        .all(|p| p.is_absolute() && p.to_str().is_some())
         {
             return Err(ProviderError::InvalidPath);
         }
@@ -403,7 +403,17 @@ impl LaneRuntime<'_> {
         argv: &mut Vec<OsString>,
         allowed_tools: &str,
     ) -> Result<Vec<SetupStep>, ProviderError> {
-        let mcp = serde_json::json!({"mcpServers": {"fabric": self.mcp(Harness::Claude)?}});
+        let mcp = match self.mcp(Harness::Claude) {
+            Ok(entry) => serde_json::json!({"mcpServers": {"fabric": entry}}),
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: Fabric MCP configuration is unavailable ({error}); continuing without Fabric MCP"
+                );
+                serde_json::json!({"mcpServers": {}})
+            }
+        };
         let mut settings = provenant_config::claude_lane_settings(self.executable, self.state)
             .map_err(|_| ProviderError::UnsupportedPolicy)?;
         settings["attribution"] = serde_json::json!({"commit": "", "pr": ""});
@@ -428,7 +438,17 @@ impl LaneRuntime<'_> {
     }
 
     pub(crate) fn codex(&self, argv: &mut Vec<OsString>) -> Result<(), ProviderError> {
-        let mcp = self.mcp(Harness::Codex)?;
+        let mcp = match self.mcp(Harness::Codex) {
+            Ok(entry) => entry,
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: Fabric MCP configuration is unavailable ({error}); continuing without Fabric MCP"
+                );
+                return Ok(());
+            }
+        };
         for key in ["command", "args", "env"] {
             // JSON values are TOML-compatible except object separators.
             let value = if key == "env" {
@@ -1617,6 +1637,38 @@ mod tests {
         let link = outside.join("link");
         std::os::unix::fs::symlink(&worktree, &link).unwrap();
         assert_eq!(run(&link, &["status"]), bound("status"));
+    }
+
+    #[test]
+    fn unrepresentable_mcp_paths_warn_and_preserve_claude_settings() -> Result<(), ProviderError> {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
+        let lane = LaneRuntime {
+            executable: Path::new("/fixture/provenant"),
+            git: Path::new("/fixture/git"),
+            state: Path::new("/fixture/state"),
+            child_state: &bad,
+            home: Path::new("/fixture/home"),
+            depth: 1,
+            attempt: AttemptId::from_bytes([1; 16]),
+            assets: Path::new("/fixture/assets"),
+        };
+        let mut codex = Vec::new();
+        lane.codex(&mut codex)?;
+        assert!(codex.is_empty());
+        let mut claude = Vec::new();
+        let setup = lane.claude(Path::new("/fixture/scratch"), &mut claude, "Bash")?;
+        let documents: Vec<Value> = setup
+            .iter()
+            .filter_map(|step| match step {
+                SetupStep::WriteFile { bytes, .. } => serde_json::from_slice(bytes).ok(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(documents[0]["mcpServers"], serde_json::json!({}));
+        assert!(documents[1]["hooks"].is_object());
+        assert!(claude.iter().any(|arg| arg == "--setting-sources"));
+        Ok(())
     }
 
     #[test]
