@@ -558,7 +558,7 @@ fn native_attempt_links_only_its_matching_subagent_and_updates_after_settlement(
         Attempt {
             id: "tool-1".into(),
             alias: "reviewer".into(),
-            model: "claude-opus".into(),
+            model: "claude/opus+1".into(),
             effort: Some("high".into()),
             session: "s1".into(),
             config: config.clone(),
@@ -626,6 +626,7 @@ fn native_attempt_links_only_its_matching_subagent_and_updates_after_settlement(
     assert_eq!(other.native_attempt, None);
     let native = native_attempts::report(native_attempts::read(&f.roots)?, &rows);
     assert_eq!(native.attempts[0].attempt.alias, "reviewer");
+    assert_eq!(native.attempts[0].attempt.model, "claude/opus+1");
     assert_eq!(native.attempts[0].models["claude-opus"][4], 4);
     assert_eq!(native.unlinked[0].buckets[4], 14);
     assert!(
@@ -675,11 +676,38 @@ fn native_attempt_store_preserves_unknown_versions_and_rejects_ambiguous_links()
         native_attempts::start(&f.roots, bad),
         Err(native_attempts::AttemptError::Invalid)
     ));
+    native_attempts::start(&f.roots, attempt("tool-3"))?;
+    native_attempts::end(
+        &f.roots,
+        End {
+            config: &config,
+            session: "s1",
+            id: "tool-3",
+            ended_at: "2026-10-01T00:02:00Z",
+            settlement: Settlement::Failed,
+            agent_id: None,
+        },
+    )?;
+    native_attempts::end(
+        &f.roots,
+        End {
+            config: &config,
+            session: "s1",
+            id: "tool-3",
+            ended_at: "2026-10-01T00:03:00Z",
+            settlement: Settlement::Failed,
+            agent_id: Some("b"),
+        },
+    )?;
+    assert_eq!(
+        native_attempts::read(&f.roots)?[2].agent_id.as_deref(),
+        Some("b")
+    );
     let path = f.base.join("state/native-attempts.json");
     let future = br#"{"schema_version":2,"attempts":[]}"#;
     std::fs::write(&path, future)?;
     assert!(matches!(
-        native_attempts::start(&f.roots, attempt("tool-3")),
+        native_attempts::start(&f.roots, attempt("tool-4")),
         Err(native_attempts::AttemptError::Store)
     ));
     assert_eq!(std::fs::read(&path)?, future);

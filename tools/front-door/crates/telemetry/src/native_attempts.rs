@@ -64,6 +64,27 @@ fn token(value: &str, max: usize) -> bool {
         })
 }
 
+fn identifier(value: &str, max: usize) -> bool {
+    (1..=max).contains(&value.len())
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+}
+
+fn session_id(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+}
+
+fn model(value: &str) -> bool {
+    (1..=512).contains(&value.len())
+        && !value
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '#' | ','))
+}
+
 /// Identify the serving config directory without retaining its path.
 pub fn config_key(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
@@ -73,10 +94,10 @@ pub fn config_key(path: &Path) -> String {
 
 fn valid(attempt: &Attempt) -> bool {
     token(&attempt.id, 128)
-        && token(&attempt.alias, 128)
-        && token(&attempt.model, 128)
-        && attempt.effort.as_ref().is_none_or(|v| token(v, 32))
-        && token(&attempt.session, 64)
+        && identifier(&attempt.alias, 64)
+        && model(&attempt.model)
+        && attempt.effort.as_ref().is_none_or(|v| identifier(v, 64))
+        && session_id(&attempt.session)
         && attempt.config.len() == 64
         && attempt.config.bytes().all(|c| c.is_ascii_hexdigit())
         && attempt.started_at.parse::<jiff::Timestamp>().is_ok()
@@ -84,10 +105,7 @@ fn valid(attempt: &Attempt) -> bool {
             .ended_at
             .as_ref()
             .is_none_or(|t| t.parse::<jiff::Timestamp>().is_ok())
-        && attempt
-            .agent_id
-            .as_ref()
-            .is_none_or(|id| token(id, 128) && !id.contains('/'))
+        && attempt.agent_id.as_ref().is_none_or(|id| session_id(id))
         && (attempt.ended_at.is_some() == attempt.settlement.is_some())
         && (attempt.agent_id.is_none() || attempt.ended_at.is_some())
 }
@@ -192,13 +210,8 @@ pub struct End<'a> {
 /// Settle an attempt and, when known, associate its transcript's agent ID.
 pub fn end(roots: &Roots, end: End<'_>) -> Result<(), AttemptError> {
     if !token(end.id, 128)
-        || !token(end.session, 64)
-        || end.agent_id.is_some_and(|id| {
-            !token(id, 64)
-                || id
-                    .bytes()
-                    .any(|c| !(c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
-        })
+        || !session_id(end.session)
+        || end.agent_id.is_some_and(|id| !session_id(id))
         || end.ended_at.parse::<jiff::Timestamp>().is_err()
     {
         return Err(AttemptError::Invalid);
