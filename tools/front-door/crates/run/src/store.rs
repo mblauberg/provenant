@@ -546,6 +546,7 @@ impl RunStore {
             request_digest: digest,
             run_id: input.run_id,
             state: OperationState::Prepared,
+            blocked_reason: None,
         };
         let dir = self.run_dir(input.run_id, true)?;
         let _writer = dir.lock(

@@ -453,6 +453,8 @@ enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
     Busy,
+    /// No guardian was contacted, but custody remains protected.
+    Protected(String),
     /// The guardian may have received the launch.
     Uncertain(String),
 }
@@ -469,6 +471,11 @@ pub enum Started {
     },
     /// Handoff did not confirm; the attempt stays fenced for `reconcile`.
     Unknown {
+        attempt: AttemptId,
+        error: String,
+    },
+    /// Preparation failed and custody must be recovered before retrying.
+    Blocked {
         attempt: AttemptId,
         error: String,
     },
@@ -1744,6 +1751,10 @@ impl RunStore {
                         self.launch_unknown(run, call)?;
                         Started::Unknown { attempt: id, error }
                     }
+                    Err(HandOff::Protected(error)) => {
+                        self.launch_blocked(run, &error, call)?;
+                        Started::Blocked { attempt: id, error }
+                    }
                 },
             );
         }
@@ -1761,6 +1772,26 @@ impl RunStore {
                 return Ok(());
             }
             op.state = OperationState::LaunchUnknown;
+            tx.execute(
+                "UPDATE operations SET record=?1 WHERE run=?2",
+                params![crate::db::bytes(&op)?, run.to_string()],
+            )?;
+            Ok(())
+        })
+    }
+    fn launch_blocked(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
+        self.write(call, |tx| {
+            let raw: Vec<u8> = tx.query_row(
+                "SELECT record FROM operations WHERE run=?1 AND project=?2",
+                params![run.to_string(), self.context.project_id.to_string()],
+                |r| r.get(0),
+            )?;
+            let mut op: OperationRecord = decode(&raw)?;
+            if op.state == OperationState::Terminal {
+                return Err(RunError::Conflict);
+            }
+            op.state = OperationState::Blocked;
+            op.blocked_reason = Some(reason.to_owned());
             tx.execute(
                 "UPDATE operations SET record=?1 WHERE run=?2",
                 params![crate::db::bytes(&op)?, run.to_string()],

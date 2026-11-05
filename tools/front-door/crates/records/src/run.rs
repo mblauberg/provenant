@@ -610,6 +610,8 @@ pub enum OperationState {
     Accepted,
     Terminal,
     LaunchUnknown,
+    /// Launch preparation failed and custody could not be released.
+    Blocked,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -630,6 +632,8 @@ pub struct OperationRecord {
     pub request_digest: Digest,
     pub run_id: RunId,
     pub state: OperationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

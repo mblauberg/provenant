@@ -86,10 +86,12 @@ impl RunStore {
             }
             crate::writer::WriterCustodyError::Admission(
                 custody::CustodyError::ReservationRetained(error),
-            ) => HandOff::Uncertain(format!("custody reservation: {error}")),
+            ) => HandOff::Protected(format!("custody reservation: {error}")),
             crate::writer::WriterCustodyError::Admission(error) => local("custody", &error),
-            crate::writer::WriterCustodyError::Withdrawal(error) => {
-                HandOff::Uncertain(format!("custody withdrawal: {error}"))
+            crate::writer::WriterCustodyError::Withdrawal { admission, release } => {
+                HandOff::Protected(format!(
+                    "custody admission: {admission}; custody withdrawal: {release}"
+                ))
             }
         })?;
         // Once custody is acquired, every local preparation failure must
@@ -99,9 +101,13 @@ impl RunStore {
                 match $result {
                     Ok(value) => value,
                     Err(error) => {
-                        lease
-                            .withdraw_unlaunched()
-                            .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                        lease.withdraw_unlaunched().map_err(|release| {
+                            let cause = match &error {
+                                HandOff::Local(cause) => cause.as_str(),
+                                _ => "launch preparation failed",
+                            };
+                            HandOff::Protected(format!("{cause}; custody withdrawal: {release}"))
+                        })?;
                         return Err(error);
                     }
                 }
@@ -114,10 +120,7 @@ impl RunStore {
                 .and_then(|plan| plan.writer.as_ref())
             && let Err(error) = self.check_writer_lineage(record, &writer.worktree, call)
         {
-            lease
-                .withdraw_unlaunched()
-                .map_err(|error| HandOff::Uncertain(error.to_string()))?;
-            return Err(local("writer lineage", &error));
+            local_or_withdraw!(Err::<(), _>(local("writer lineage", &error)));
         }
         if task.source_head.is_some()
             && let Some(writer) = plan
@@ -148,16 +151,10 @@ impl RunStore {
                     && now.run_id == record.run_id
                     && now.task_id == record.task_id => {}
             Ok(_) => {
-                lease
-                    .withdraw_unlaunched()
-                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                return Err(local("attempt", &"changed before handoff"));
+                local_or_withdraw!(Err::<(), _>(local("attempt", &"changed before handoff")));
             }
             Err(error) => {
-                lease
-                    .withdraw_unlaunched()
-                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                return Err(local("attempt record", &error));
+                local_or_withdraw!(Err::<(), _>(local("attempt record", &error)));
             }
         }
         if let Some(deliver) = &task.deliver {
@@ -179,25 +176,18 @@ impl RunStore {
             match prepare() {
                 Ok(context) => holder_context = context,
                 Err(error) => {
-                    lease
-                        .withdraw_unlaunched()
-                        .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                    return Err(local("delivery", &error));
+                    local_or_withdraw!(Err::<(), _>(local("delivery", &error)));
                 }
             }
         }
         // Keep the shared config lock until custody confirms the child launch.
         let mut _git_setup_lock = None;
         if let Some(confinement) = &mut plan.confinement {
-            _git_setup_lock = match confinement.prepare_git() {
-                Ok(lock) => lock,
-                Err(error) => {
-                    lease
-                        .withdraw_unlaunched()
-                        .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                    return Err(local("Git setup", &error));
-                }
-            };
+            _git_setup_lock = local_or_withdraw!(
+                confinement
+                    .prepare_git()
+                    .map_err(|error| local("Git setup", &error))
+            );
             let writer_attempt = local_or_withdraw!(directory());
             if let Some(writer) = &confinement.writer
                 && let Err(error) = crate::objects::prepare_bound(
@@ -215,10 +205,7 @@ impl RunStore {
                     writer.snapshot(self.context.state_root.as_path(), &writer_attempt, scope)
                 })
             {
-                lease
-                    .withdraw_unlaunched()
-                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                return Err(local("lane Git objects", &error));
+                local_or_withdraw!(Err::<(), _>(local("lane Git objects", &error)));
             }
             match confinement.command(
                 &plan.argv,
@@ -229,10 +216,7 @@ impl RunStore {
             ) {
                 Ok(argv) => plan.argv = argv,
                 Err(error) => {
-                    lease
-                        .withdraw_unlaunched()
-                        .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                    return Err(local("confinement command", &error));
+                    local_or_withdraw!(Err::<(), _>(local("confinement command", &error)));
                 }
             }
         }
@@ -244,21 +228,15 @@ impl RunStore {
             Some(rest) if rest.starts_with('/') => model.to_owned(),
             _ => format!("{provider}/{model}"),
         };
-        let lane_ports = match plan
-            .confinement
-            .as_ref()
-            .filter(|c| c.writer.is_some())
-            .map(|c| lane_port_plan(&c.state_root))
-            .transpose()
-        {
-            Ok(plan) => plan.flatten(),
-            Err(error) => {
-                lease
-                    .withdraw_unlaunched()
-                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                return Err(local("lane ports", &error));
-            }
-        };
+        let lane_ports = local_or_withdraw!(
+            plan.confinement
+                .as_ref()
+                .filter(|c| c.writer.is_some())
+                .map(|c| lane_port_plan(&c.state_root))
+                .transpose()
+                .map_err(|error| local("lane ports", &error))
+        )
+        .flatten();
         let command = ProviderCommand {
             lane_ports,
             resolved_route: route,
@@ -369,6 +347,7 @@ mod tests {
             Err(HandOff::Local(reason)) => assert!(reason.contains("lane priority"), "{reason}"),
             Err(HandOff::Busy) => panic!("custody busy"),
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
+            Err(HandOff::Protected(reason)) => panic!("protected: {reason}"),
             Ok(()) => panic!("unexpected launch"),
         }
         let directory = store.attempt_dir(record.run_id, record.attempt_id, false)?;
@@ -396,7 +375,8 @@ mod tests {
             &call,
         );
         match result {
-            Err(HandOff::Uncertain(reason)) => assert!(reason.contains("fixture"), "{reason}"),
+            Err(HandOff::Protected(reason)) => assert!(reason.contains("fixture"), "{reason}"),
+            Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
             Err(HandOff::Busy) => panic!("busy"),
             Ok(()) => panic!("unexpected launch"),
@@ -423,7 +403,10 @@ mod tests {
             &call,
         );
         match result {
-            Err(HandOff::Uncertain(_)) => {}
+            Err(HandOff::Protected(reason)) => {
+                assert!(reason.contains("lane priority") && reason.contains("custody withdrawal"))
+            }
+            Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
             Err(HandOff::Busy) => panic!("busy"),
             Ok(()) => panic!("unexpected launch"),
@@ -432,6 +415,100 @@ mod tests {
             &store.attempt_dir(record.run_id, id, false)?,
             RunStore::scope(&record),
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_withdrawal_blocks_the_operation_without_relaunch()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for fail_save in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&context(temp.path())?, &call)?;
+            let request = input();
+            store.create(&request, &call)?;
+            let acquisitions = std::cell::Cell::new(0);
+            let acquire = |directory: provenant_os::fs::Directory, scope: Scope, binding| {
+                acquisitions.set(acquisitions.get() + 1);
+                let slot = directory.try_clone()?;
+                let lease = custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    call.lock_budget(),
+                    call.cancel,
+                    call.clock,
+                )?;
+                slot.open_directory(std::ffi::OsStr::new(&scope.attempt.to_string()))?
+                    .mkdir(std::ffi::OsStr::new("settlement.json"), 0o700)?;
+                let mut changed = store.record(scope.attempt, &call).expect("attempt record");
+                changed.revision += 1;
+                store
+                    .write(&call, |tx| {
+                        tx.execute(
+                            "UPDATE attempts SET revision=?1, record=?2 WHERE id=?3",
+                            params![
+                                i64::try_from(changed.revision).expect("fixture revision"),
+                                crate::db::bytes(&changed)?,
+                                scope.attempt.to_string()
+                            ],
+                        )?;
+                        Ok(())
+                    })
+                    .expect("change attempt before handoff");
+                if fail_save {
+                    store.db.execute_batch("CREATE TEMP TRIGGER fail_blocked BEFORE UPDATE ON operations BEGIN SELECT RAISE(ABORT, 'fixture blocked write'); END;").expect("inject write failure");
+                }
+                Ok(lease)
+            };
+            let launch = || {
+                store.start_inner(
+                    request.run_id,
+                    &crate::dispatch_tests::Ready,
+                    &|_, _| Ok(Vec::new()),
+                    &acquire,
+                    None,
+                    None,
+                    &call,
+                )
+            };
+            if fail_save {
+                assert!(matches!(launch(), Err(RunError::Sqlite(_))));
+                store.db.execute_batch("DROP TRIGGER fail_blocked")?;
+            } else {
+                assert!(
+                    matches!(launch()?.as_slice(), [Started::Blocked { error, .. }] if error.contains("changed before handoff") && error.contains("custody withdrawal"))
+                );
+            }
+            let operation = store
+                .operation(&request.operation_id, &call)?
+                .ok_or("operation")?;
+            if fail_save {
+                assert_eq!(operation.state, OperationState::Accepted);
+                assert!(operation.blocked_reason.is_none());
+            } else {
+                assert_eq!(operation.state, OperationState::Blocked);
+                assert!(
+                    operation
+                        .blocked_reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("custody withdrawal"))
+                );
+            }
+            let reopened = RunStore::open(&context(temp.path())?, &call)?;
+            assert_eq!(
+                reopened.operation(&request.operation_id, &call)?,
+                Some(operation)
+            );
+            let record = store.record(request.attempts[0].attempt_id, &call)?;
+            assert!(custody::reservation_present(
+                &store.attempt_dir(request.run_id, record.attempt_id, false)?,
+                RunStore::scope(&record)
+            )?);
+            assert!(launch()?.is_empty());
+            assert_eq!(acquisitions.get(), 1);
+        }
         Ok(())
     }
 }

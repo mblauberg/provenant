@@ -2457,6 +2457,29 @@ pub(super) fn launch_unknown(started: &[run::Started]) -> Vec<String> {
 }
 
 pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
+    if !started.is_empty()
+        && started.iter().all(|item| {
+            matches!(
+                item,
+                run::Started::Refused { .. } | run::Started::Blocked { .. }
+            )
+        })
+        && let Some((attempt, error)) = started.iter().find_map(|item| match item {
+            run::Started::Blocked { attempt, error } => Some((attempt, error)),
+            _ => None,
+        })
+    {
+        let reason = format!("{attempt}: launch blocked: {error}");
+        let mut failure = Fail::new(Status::Refused, ErrorKind::Refused, &reason);
+        failure.detail = Some(Box::new(
+            provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason,
+            },
+        ));
+        return Err(failure);
+    }
     // Preserve the full receipt whenever a sibling can still make progress
     // or needs unknown-handoff recovery, including Fabric's operation replay.
     if started

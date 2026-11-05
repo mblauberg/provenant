@@ -5070,6 +5070,20 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             actor: None,
             chair: None,
         };
+        let operation_id = graph_operation("graph-attempt-operation", key)?;
+        let cancel = self.cancel;
+        let blocked = |owner: &BinaryRunOwner<'_>| -> Result<Option<String>, FacadeError> {
+            let store = owner.store(cancel)?;
+            Ok(store
+                .operation(&operation_id, &owner.call(cancel))
+                .map_err(run_error)?
+                .filter(|operation| operation.state == provenant_run::OperationState::Blocked)
+                .map(|operation| {
+                    operation
+                        .blocked_reason
+                        .unwrap_or_else(|| "custody release failed".into())
+                }))
+        };
         let (target, reference) = if let Some(reference) = replay.stored_ref {
             // An accepted attempt is observed by reference: operation replay is
             // actor-scoped, so resubmitting under another actor would launch again.
@@ -5089,6 +5103,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .parse()
                     .map_err(|_| FacadeError::StateCorrupt)?,
             );
+            if let Some(reason) = blocked(&owner)? {
+                return Err(FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason,
+                });
+            }
             let operation_id = graph_operation("graph-attempt-operation", key)?;
             let store = owner.store(self.cancel)?;
             let call = owner.call(self.cancel);
@@ -5454,6 +5475,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 }
                 result => result?,
             };
+            if let Some(reason) = blocked(&owner)? {
+                return Err(FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason,
+                });
+            }
             owner.actor = None;
             let target = receipt
                 .targets

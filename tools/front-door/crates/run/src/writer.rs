@@ -27,7 +27,10 @@ use std::{
 #[derive(Debug)]
 pub(crate) enum WriterCustodyError {
     Admission(provenant_supervisor::custody::CustodyError),
-    Withdrawal(provenant_supervisor::custody::CustodyError),
+    Withdrawal {
+        admission: String,
+        release: provenant_supervisor::custody::CustodyError,
+    },
 }
 
 #[cfg(test)]
@@ -1673,7 +1676,10 @@ impl crate::RunStore {
         if let Err(error) = checked {
             lease
                 .withdraw_unlaunched()
-                .map_err(WriterCustodyError::Withdrawal)?;
+                .map_err(|release| WriterCustodyError::Withdrawal {
+                    admission: error.to_string(),
+                    release,
+                })?;
             return Err(WriterCustodyError::Admission(
                 provenant_supervisor::custody::CustodyError::Io(std::io::Error::other(
                     error.to_string(),
@@ -2276,7 +2282,7 @@ mod custody_admission_tests {
             },
             &call,
         );
-        assert!(matches!(result, Err(WriterCustodyError::Withdrawal(_))));
+        assert!(matches!(result, Err(WriterCustodyError::Withdrawal { .. })));
         assert!(custody::reservation_present(
             &Directory::open_anchor(&path)?,
             scope

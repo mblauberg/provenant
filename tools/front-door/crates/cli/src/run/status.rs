@@ -493,7 +493,7 @@ pub(super) fn report(
         task: None,
         attempt: None,
     };
-    let (mut data, human, timed_out) = match wait {
+    let (mut data, mut human, timed_out) = match wait {
         Some(seconds) => wait_lanes(
             session,
             &[target],
@@ -540,6 +540,19 @@ pub(super) fn report(
     let unknown = launch_unknown(started);
     if !unknown.is_empty() {
         data["launch_unknown"] = json!(unknown);
+    }
+    let blocked: Vec<_> = started
+        .iter()
+        .filter_map(|item| match item {
+            run::Started::Blocked { attempt, error } => Some(format!("{attempt}: {error}")),
+            _ => None,
+        })
+        .collect();
+    if !blocked.is_empty() {
+        for reason in &blocked {
+            human.push_str(&format!("\nlaunch blocked: {reason}"));
+        }
+        data["launch_blocked"] = json!(blocked);
     }
     Ok((data, format!("run {}\n{human}", record.run_id), timed_out))
 }

@@ -608,6 +608,14 @@ after the original recovery process exits. Predecessors without an import marker
 keep their existing admission semantics. Reservation release retires the marker's
 active fence; its evidence may remain beside the retired reservation.
 
+If launch preparation fails after acquiring custody, it withdraws the
+unlaunched reservation before reporting a local refusal. A failed withdrawal
+keeps the reservation and durably blocks the operation with the preparation
+and withdrawal causes. A reservation publication whose durability is uncertain
+also blocks; an unconfirmed guardian handoff remains launch-unknown. Neither
+case authorises a route switch. If the blocked-operation write fails, the
+storage error is returned and the reservation stays in place.
+
 An attempt record version 2 carries the terminal evidence and distinguishes
 `unsettled` from `lost`. Effect receipts are stored independently of the
 immutable decision. A terminal wait view includes `custody_pending`; a pending
