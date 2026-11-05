@@ -932,10 +932,47 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
-    fn settlement_failure_in_one_graph_does_not_stop_another_graph()
+    fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_hint_requires_a_matching_attempt")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+        let fixture = SettlementFixture::resumed()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request { clock: &clock, cancel: &cancel };
+        let mut record = fixture.store.record(fixture.settled.attempt_id, &call)?;
+        let document = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"hint-test","nodes":[{"id":"one","prompt":"work","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+        }))?;
+        let checkpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"hint-test","plan_digest":"digest","nodes":[{
+                "id":"one","worktree":null,"state":"running","attempts":[{
+                    "key":{"graph_id":"hint-test","node_id":"one","route_index":0},
+                    "route":{"adapter":"fixture","model":"fixture/model"},"state":"starting",
+                    "launched":true,"launch_actor":"fixture", "attempt_ref":format!("host/{}",record.attempt_id)
+                }]
+            }]
+        }))?;
+        let mut journal = FileJournal::open(&fixture.roots.state, fixture.settled.project_id, "hint-test", call.lock_budget(), &cancel, &clock)?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution { extra: Default::default(), integration_base: None, review_base: None, directory: fixture.rig.project.clone(), document })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).is_none());
+        record.context = Some(provenant_records::run::WorkContext { graph_id: Some("unknown".into()), ..Default::default() });
+        assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).is_none());
+        record.context.as_mut().ok_or("context")?.graph_id = Some("hint-test".into());
+        assert_eq!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).as_deref(), Some("hint-test"));
+        record.attempt_id = AttemptId::from_bytes([99; 16]);
+        assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_without_hint_does_not_advance_unrelated_graphs()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(
-            "fabric::peer_tests::settlement_failure_in_one_graph_does_not_stop_another_graph",
+            "fabric::peer_tests::settlement_without_hint_does_not_advance_unrelated_graphs",
         )? {
             return Ok(());
         }
@@ -1034,8 +1071,8 @@ pub(crate) mod peer_tests {
             )?;
             assert_eq!(seeded.checkpoint.nodes[0].state, NodeState::Running);
         }
-        // An unsafe receipt path makes settlement itself fail before the graph
-        // loop. It must leave A observable and still allow B to complete.
+        // An unsafe receipt path makes settlement fail. With no graph hint,
+        // neither graph is advanced by this settlement.
         let receipt_path = fixture
             .rig
             .state
@@ -1071,7 +1108,7 @@ pub(crate) mod peer_tests {
                 "a-settlement-error"
             )?
             .as_deref(),
-            Some(settlement_error.as_str())
+            None
         );
         let completed = FileJournal::read_checkpoint(
             &fixture.roots.state,
@@ -1079,14 +1116,14 @@ pub(crate) mod peer_tests {
             "b-completes",
         )?
         .ok_or("B checkpoint")?;
-        assert_eq!(completed.nodes[0].state, NodeState::Succeeded);
+        assert_eq!(completed.nodes[0].state, NodeState::Running);
         assert!(
             FileJournal::pending_execution(
                 &fixture.roots.state,
                 fixture.settled.project_id,
                 "b-completes"
             )?
-            .is_none()
+            .is_some()
         );
         assert!(
             FileJournal::read_advance_error(

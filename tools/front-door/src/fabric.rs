@@ -3428,7 +3428,7 @@ fn advance_graphs_after_settlement(
     settled: &provenant_run::HolderContext,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_fabric_runtime::graph::{FileJournal, advance_with_budget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
 
     let Some(host) = &settled.launch else {
         return Ok(());
@@ -3444,8 +3444,37 @@ fn advance_graphs_after_settlement(
     let settlement_error = settle_owned_worktree(settled, &roots, workers, None).err();
     let settlement_reason = settlement_error.as_ref().map(|error| error.to_string());
     let mut first_error = settlement_error.or_else(|| pressure_error.map(Into::into));
-    for id in FileJournal::graph_ids(&roots.state, settled.project_id)? {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let context = provenant_run::ExecutionContext {
+        state_root: roots.state.clone(),
+        project_id: settled.project_id,
+        actor_id: settled.actor_id,
+        read_prompts: true,
+    };
+    let store = provenant_run::RunStore::open(&context, &call)?;
+    let record = store.record(settled.attempt_id, &call)?;
+    if let Some(id) = matching_graph_hint(&roots.state, settled.project_id, &record) {
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let budget = WaitBudget::cli(clock.mono_now(), 55)?;
+            let mut journal = FileJournal::open(
+                &roots.state,
+                settled.project_id,
+                &id,
+                budget,
+                &cancel,
+                &clock,
+            )?;
+            let Some(checkpoint) = journal.load(&id)? else {
+                return Ok(());
+            };
+            if !checkpoint_matches_attempt(&checkpoint, &record) {
+                return Ok(());
+            }
             let Some(execution) =
                 FileJournal::pending_execution(&roots.state, settled.project_id, &id)?
             else {
@@ -3471,16 +3500,6 @@ fn advance_graphs_after_settlement(
                 mcp_project: None,
                 workers,
             };
-            let cancel = CancelToken::new();
-            let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-            let mut journal = FileJournal::open(
-                &roots.state,
-                settled.project_id,
-                &id,
-                budget,
-                &cancel,
-                &factory.clock,
-            )?;
             let mut owner = BoundGraphOwner {
                 factory: &factory,
                 integration_base: Some(BoundGraphBases {
@@ -3508,23 +3527,7 @@ fn advance_graphs_after_settlement(
         // If the attempt store itself refused the retention receipt, retain
         // the error on the graph containing this lane, without affecting
         // the status or advancement of any other graph.
-        let settlement_reason = settlement_reason.as_deref().filter(|_| {
-            FileJournal::read_checkpoint(&roots.state, settled.project_id, &id)
-                .ok()
-                .flatten()
-                .is_some_and(|checkpoint| {
-                    checkpoint.nodes.iter().any(|node| {
-                        node.attempts.iter().any(|attempt| {
-                            attempt
-                                .attempt_ref
-                                .as_deref()
-                                .and_then(|reference| reference.rsplit_once('/'))
-                                .and_then(|(_, attempt)| attempt.parse().ok())
-                                == Some(settled.attempt_id)
-                        })
-                    })
-                })
-        });
+        let settlement_reason = settlement_reason.as_deref();
         // The guardian's output is discarded, so `graph status` shows a failure.
         let advance_reason = result.as_ref().err().map(|error| error.to_string());
         let recorded = FileJournal::set_advance_error(
@@ -3541,6 +3544,38 @@ fn advance_graphs_after_settlement(
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+fn checkpoint_matches_attempt(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    record: &provenant_records::run::AttemptRecord,
+) -> bool {
+    checkpoint
+        .nodes
+        .iter()
+        .flat_map(|node| &node.attempts)
+        .any(|attempt| {
+            attempt
+                .attempt_ref
+                .as_deref()
+                .and_then(|reference| reference.rsplit('/').next())
+                == Some(record.attempt_id.to_string().as_str())
+                || graph_operation("graph-attempt-operation", &attempt.key)
+                    .is_ok_and(|operation| operation == record.operation_id)
+        })
+}
+
+fn matching_graph_hint(
+    root: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    record: &provenant_records::run::AttemptRecord,
+) -> Option<String> {
+    let id = record.context.as_ref()?.graph_id.as_deref()?;
+    provenant_fabric_runtime::graph::FileJournal::read_checkpoint(root, project, id)
+        .ok()
+        .flatten()
+        .filter(|checkpoint| checkpoint_matches_attempt(checkpoint, record))?;
+    Some(id.to_owned())
 }
 
 fn settle_owned_worktree(
@@ -3586,51 +3621,9 @@ fn settle_owned_worktree(
         && record.delivery.is_none()
         && store.delivered(record.attempt_id, &call)?.is_none()
     {
-        let mut ownership_unknown = false;
-        let ids = match provenant_fabric_runtime::graph::FileJournal::graph_ids(
-            &roots.state,
-            settled.project_id,
-        ) {
-            Ok(ids) => ids,
-            Err(_) => {
-                ownership_unknown = true;
-                Vec::new()
-            }
-        };
-        let mut graph_member = false;
-        for id in ids {
-            let checkpoint = match provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
-                &roots.state,
-                settled.project_id,
-                &id,
-            ) {
-                Ok(Some(checkpoint)) => checkpoint,
-                Ok(None) => continue,
-                Err(_) => {
-                    ownership_unknown = true;
-                    continue;
-                }
-            };
-            for node in &checkpoint.nodes {
-                for attempt in &node.attempts {
-                    if attempt
-                        .attempt_ref
-                        .as_deref()
-                        .and_then(|reference| reference.rsplit('/').next())
-                        == Some(record.attempt_id.to_string().as_str())
-                        || graph_operation("graph-attempt-operation", &attempt.key)
-                            .is_ok_and(|operation| operation == record.operation_id)
-                    {
-                        graph_member = true;
-                    }
-                }
-            }
-            if graph_member {
-                break;
-            }
-        }
-        // Unknown graph custody retains graph operations conservatively; unrelated lanes still settle.
-        if graph_member || ownership_unknown && record.operation_id.as_str().starts_with("graph-") {
+        let graph_member = matching_graph_hint(&roots.state, settled.project_id, &record).is_some();
+        // An unmatched graph operation retains custody without scanning other graphs.
+        if graph_member || record.operation_id.as_str().starts_with("graph-") {
             let reason = if graph_member {
                 "graph writer worktree retained for continuation, later rounds and explicit delivery"
             } else {
