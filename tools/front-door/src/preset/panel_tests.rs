@@ -147,7 +147,11 @@ fn review_spec_states_only_what_the_stage_sets() {
             repo_files: &mut repo_files,
             scope: "",
         }
-        .review_spec()
+        .review_spec(
+            json!({"min_successful":"${min_reviews}"})
+                .as_object()
+                .unwrap(),
+        )
         .map(|spec| serde_json::to_value(spec).unwrap())
         .unwrap()
     };

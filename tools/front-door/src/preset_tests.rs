@@ -5451,6 +5451,7 @@ fn a_generator_review_defers_its_size_until_the_writer_has_run() {
     assert_eq!(lens["kind"], "plan");
     assert_eq!(lens["source"]["type"], "node");
     assert_eq!(lens["source"]["node"], "implement");
+    assert_eq!(lens["review"]["min_successful"], 0);
     assert!(lens["lens_templates"].is_object());
     let sized = expand(
         &layers,
@@ -5464,6 +5465,17 @@ fn a_generator_review_defers_its_size_until_the_writer_has_run() {
     .unwrap()
     .document;
     assert_eq!(sized["schema_version"], 1);
+    let group = sized["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "lens")
+        .unwrap();
+    let members = group["composite"]["nodes"].as_array().unwrap();
+    assert_eq!(
+        group["composite"]["min_successful"],
+        members.len().saturating_sub(1).max(1)
+    );
 }
 
 #[test]

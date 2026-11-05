@@ -2212,6 +2212,11 @@ impl StageBuilder<'_> {
             return Err(format!("preset composition depth exceeds {DEPTH}"));
         }
         let object = entry.as_object().ok_or("stage entries must be tables")?;
+        if let Some(mode) = object.get("zero_minimum")
+            && (mode.as_str() != Some("all_but_one") || !object.contains_key("parallel"))
+        {
+            return Err("zero_minimum must be all_but_one on a parallel group".into());
+        }
         if object
             .get("review_lenses")
             .is_some_and(|flag| !flag.is_boolean())
@@ -2474,6 +2479,7 @@ impl StageBuilder<'_> {
                     self.deferred_review(&id, entries, &object, deps, &outputs, depth, nodes)?
                 {
                     object.remove("min_successful");
+                    object.remove("zero_minimum");
                     object.remove("exports");
                     (deferred, true)
                 } else {
@@ -2491,14 +2497,17 @@ impl StageBuilder<'_> {
                     let exports = object
                         .remove("exports")
                         .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
+                    let all_but_one = object
+                        .remove("zero_minimum")
+                        .is_some_and(|mode| mode == "all_but_one");
                     let min_successful = object
                         .remove("min_successful")
                         .map(|value| {
-                            if value.as_str() == Some("${min_lenses}") {
+                            if all_but_one {
                                 let requested =
                                     interpolate(&value, &self.parameters, self.prompt, 1)?
                                         .as_u64()
-                                        .ok_or("min_lenses must be a non-negative integer")?;
+                                        .ok_or("min_successful must be a non-negative integer")?;
                                 Ok(if requested == 0 {
                                     ends.len().saturating_sub(1).max(1) as u64
                                 } else {

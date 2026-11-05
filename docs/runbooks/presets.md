@@ -38,6 +38,9 @@ A typed parameter can declare `bind = "risk_tier"` or `bind = "kind"` to receive
 the corresponding `--risk-tier` or `--task-kind` request. An unbound flag warns
 and is dropped. Parameter files and `--set` retain their usual precedence.
 
+A parallel group can declare `zero_minimum = "all_but_one"` so a zero
+`min_successful` requires all but one member, at least one.
+
 A `for_each` stage may declare `review_lenses = true` to apply the review
 shape and risk-tag selection to its list.
 

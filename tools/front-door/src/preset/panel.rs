@@ -517,7 +517,7 @@ impl StageBuilder<'_> {
         if !self.review_is_deferred(entries, object, nodes) {
             return Ok(None);
         }
-        let spec = self.review_spec()?;
+        let spec = self.review_spec(object)?;
         let names = self.review_candidates(&spec.lenses)?;
         let items: Vec<Value> = names
             .iter()
@@ -602,7 +602,10 @@ impl StageBuilder<'_> {
     /// The `ReviewSpec` this stage hands to launch-time resolution. Only what the
     /// stage states goes in: a size is recorded when the stage overrides it,
     /// and otherwise the host measures it when the review launches.
-    pub fn review_spec(&self) -> Result<ReviewSpec, String> {
+    pub fn review_spec(
+        &self,
+        group: &serde_json::Map<String, Value>,
+    ) -> Result<ReviewSpec, String> {
         let text = |key: &str| {
             self.parameters
                 .get(key)
@@ -673,23 +676,21 @@ impl StageBuilder<'_> {
             risk_tags,
             worktree: text("worktree"),
             lenses,
-            min_successful: if let Some(value) = self.parameters.get("min_lenses") {
-                Some(
-                    usize::try_from(
-                        value
+            min_successful: group
+                .get("min_successful")
+                .map(|value| {
+                    let count = if group.get("zero_minimum").and_then(Value::as_str)
+                        == Some("all_but_one")
+                    {
+                        super::interpolate(value, &self.parameters, self.prompt, 1)?
                             .as_u64()
-                            .ok_or("min_lenses must be a non-negative integer")?,
-                    )
-                    .map_err(|_| "min_lenses is too large")?,
-                )
-            } else {
-                self.parameters
-                    .get("min_reviews")
-                    .map(|value| self.minimum_successful(value))
-                    .transpose()?
-                    .map(|count| usize::try_from(count).map_err(|_| "min_reviews is too large"))
-                    .transpose()?
-            },
+                            .ok_or("min_successful must be a non-negative integer")?
+                    } else {
+                        self.minimum_successful(value)?
+                    };
+                    usize::try_from(count).map_err(|_| "min_successful is too large".to_owned())
+                })
+                .transpose()?,
             max_nodes: names.len().saturating_add(1).max(2),
         })
     }
