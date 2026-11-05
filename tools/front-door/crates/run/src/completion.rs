@@ -168,7 +168,7 @@ fn read_snapshot(attempt: &Directory) -> Result<Option<Handoff>> {
 /// The slot-wait rule every writer lane is told. A writer's `cargo` commands
 /// that compile take one of the host's shared build slots, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = "Build slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\n";
+pub const BUILD_SLOT_GUIDANCE: &str = "Test tiers: when the repository defines test tiers, start with T0 and choose T1 targets for the change. T2 and T3 normally run in CI or on a configured host.\nBuild slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\n";
 
 /// The text placed before a lane's task: model policy, the build-slot rule for
 /// writers only, then the handoff file.
@@ -198,10 +198,8 @@ mod tests {
     fn writer_preamble_states_the_slot_wait_rule_and_read_only_does_not() {
         let handoff = Path::new("/state/handoff.json");
         let writer = lane_preamble("Model policy.", true, handoff);
-        assert_eq!(
-            writer,
-            "Model policy.\nBuild slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\nProgress handoff JSON: /state/handoff.json. Update this file atomically throughout the task and repeat its current value in the final handoff fence. It is lane state, never a repository file or a commit.\n"
-        );
+        assert!(writer.contains(BUILD_SLOT_GUIDANCE));
+        assert!(writer.contains("/state/handoff.json"));
         let reader = lane_preamble("Model policy.", false, handoff);
         assert!(!reader.contains("Build slots"));
         assert!(reader.starts_with("Model policy.\nProgress handoff JSON"));

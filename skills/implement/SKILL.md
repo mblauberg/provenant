@@ -17,6 +17,8 @@ record an engineering call as `Decided (<source>): <reason>` and proceed.
 
 Repository specifics (verify commands, commit and PR rules, review ladder) come
 from the repo's own `AGENTS.md`, `CONTRIBUTING` and runbooks. Look there first.
+Where the repository defines test tiers, use T0 for touched work, T1 for
+named targets, and leave T2 and T3 to CI or a configured host.
 
 ## How it runs
 

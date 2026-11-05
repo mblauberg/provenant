@@ -1,17 +1,43 @@
-# Test tier selection (partial implementation)
+# Test tiers
 
-`scripts/verify-tier` selects T0 by default and T1 with `--tier 1`. It prints
-selected crates, integration targets and their matching paths before running.
-Selection compares the working tree and committed changes against `origin/main`;
-the base, commands and integration mappings can be overridden in
-`.provenant/verify.json`. T0 formats, checks and tests touched crates; T1 runs
-mapped integration binaries. The mapping is intentionally incomplete and must
-be extended as targets are identified.
+Owner: repository maintainers
+Anchor: scripts/verify-tier
 
-T2 and T3 have no default commands yet. Configured commands may be supplied
-under `tiers`, keyed by tier number, as arrays of command strings. A configured
-runner under `runners` is an argument array whose `{commit}` and `{tier}` fields
-are substituted before invocation. Remote execution and its commit provenance
-are not yet independently verified. The existing CI workflow remains the source
-of full-suite coverage. The entry point does not yet separate build-slot
-occupancy from test execution.
+Run `scripts/verify-tier` for T0 and `scripts/verify-tier --tier 1` for T1.
+It prints the selected crates, integration targets and matching paths. Selection
+compares committed and working-tree changes against `origin/main`. Configure the
+base, workspace, commands, integration mappings, warning threshold and
+suggested host in `.provenant/verify.json`. T0 formats, checks and runs unit
+tests for touched crates; T1 runs mapped integration binaries. Add mappings as
+integration ownership is identified.
+
+T2 runs the unpartitioned CI nextest suite and its example test. T3 repeats the
+suite and runs the advisory mutation script; the CI native jobs additionally
+cover native-only environments. Heavy tiers warn locally and continue. Configure
+an appropriate host for them.
+
+Use `scripts/verify-tier --tier 2 --host ci` after pushing the commit to a
+branch. The `ci` runner dispatches the `verify-tiers.yml` workflow using `gh`,
+then waits for its conclusion and verifies its commit. The workflow must first
+exist on the remote's default branch; GitHub credentials must permit workflow
+dispatch and reading runs. The runner uses hosted CI and no model tokens.
+
+A configured runner is an argument array with `{commit}` and `{tier}` fields.
+It must execute that pushed commit and return a final JSON line with `commit`,
+`tier` (a string) and integer `exit_status`. It exits zero when it successfully
+returns the receipt, including when the tier itself failed. Any prior stdout
+lines are displayed as logs. The entry point checks the pushed branch tip,
+receipt and transport status before reporting the outcome. Runners for peers
+or cloud sessions may use the same contract. For an SSH peer, configure an
+argument array such as `["scripts/verify-peer-runner", "peer-name",
+"https://example.org/owner/repo.git", "{commit}", "{tier}"]`. It clones the
+pushed repository into peer scratch, checks out the requested commit and removes
+the checkout afterward. The caller must trust the runner's attestation that it
+checked out the reported commit.
+
+The default tier commands build the selected test binaries under a build slot,
+then reuse nextest metadata to execute them without holding that slot. This
+uses scratch metadata rather than a second target directory. Other Cargo test
+commands still hold their slot until they exit. Existing lanes use the shim
+version installed at their launch; the split takes effect in newly launched
+lanes after upgrading Provenant.

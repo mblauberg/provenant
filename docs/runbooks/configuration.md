@@ -211,7 +211,10 @@ its PATH only when its environment sets `CARGO_TARGET_DIR` and
 short aliases) takes one slot before the real cargo starts. The shim process
 holds the slot itself, runs cargo as its child and releases the slot when that
 child exits, so `cargo run` and `cargo test` hold the slot for the whole of the
-program or test run, not only the compile. Other commands, such as `fmt` and
+program or test run, not only the compile. A `cargo nextest run` using both
+`--cargo-metadata` and `--binaries-metadata` reuses an existing build and takes
+no build slot; tier verification uses that path after a gated binary listing.
+Other commands, such as `fmt` and
 `metadata`, take none. A cargo started inside a gated build skips the gate only
 when the `PROVENANT_BUILD_SLOT` marker, `pid:start` (the holder shim's pid and
 native process start time), names a live ancestor of the nested shim that began

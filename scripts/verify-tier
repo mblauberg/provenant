@@ -16,12 +16,13 @@ DEFAULTS = {
     "load_per_cpu": 1.0,
     "suggested_host": "CI",
     "tiers": {
-        "0": ["cargo fmt {packages} -- --check", "cargo check --locked {packages}", "cargo nextest run --profile lane --locked {packages} --lib --bins"],
-        "1": ["cargo nextest run --profile lane --locked {integration_args}"],
-        "2": [],
-        "3": [],
+        "0": ["cargo fmt {packages} -- --check", "cargo check --locked {packages}", "../../scripts/verify-nextest --profile lane --locked {packages} --lib --bins"],
+        "1": ["../../scripts/verify-nextest --profile lane --locked {integration_args}"],
+        "2": ["../../scripts/verify-nextest --profile ci --workspace --locked --features provenant-providers/recording", "cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result"],
+        "3": ["../../scripts/verify-nextest --profile ci --workspace --locked --features provenant-providers/recording --stress-count 20", "../../scripts/run-mutants"],
     },
     "integrations": [],
+    "remote": "origin",
     "runners": {},
 }
 
@@ -75,20 +76,37 @@ def main():
         runner = cfg["runners"].get(args.host)
         if not runner:
             parser.error(f"no runner configured for {args.host}")
-        refs = subprocess.check_output(["git", "branch", "-r", "--contains", commit], cwd=ROOT, text=True).strip()
-        if not refs:
-            parser.error("commit is not present in a remote-tracking ref; push it before remote verification")
+        refs = subprocess.check_output(["git", "ls-remote", "--heads", cfg["remote"]], cwd=ROOT, text=True)
+        if not any(line.split()[0] == commit for line in refs.splitlines() if line.split()):
+            parser.error("commit is not the tip of a pushed branch")
         command = [part.format(commit=commit, tier=args.tier) for part in runner]
         print(f"tier T{args.tier} on {args.host}, commit {commit}: {shlex.join(command)}", flush=True)
-        result = subprocess.run(command, cwd=ROOT).returncode
-        print(f"result: host={args.host} tier=T{args.tier} commit={commit} exit_status={result}", flush=True)
-        return result
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end="")
+        lines = result.stdout.splitlines()
+        for line in lines[:-1]:
+            print(line)
+        try:
+            receipt = json.loads(lines[-1])
+            status = receipt["exit_status"]
+            if (receipt["commit"] != commit or receipt["tier"] != args.tier
+                    or type(status) is not int or not 0 <= status <= 255
+                    or result.returncode != 0):
+                raise ValueError("runner receipt or transport status does not match")
+        except (IndexError, KeyError, TypeError, ValueError) as error:
+            print(f"invalid runner receipt: {error}", file=sys.stderr)
+            return 1
+        print(f"result: host={args.host} tier=T{args.tier} commit={commit} exit_status={status}", flush=True)
+        return status
     if int(args.tier) > cfg["local_max_tier"] or (int(args.tier) >= 2 and os.getloadavg()[0] > cfg["load_per_cpu"] * (os.cpu_count() or 1)):
         print(f"warning: T{args.tier} may load this host; consider {cfg['suggested_host']}", file=sys.stderr)
-    metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, text=True))
-    packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(ROOT))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
-    paths = changed_paths(ROOT, cfg["base"])
-    touched, integrations = select(paths, packages, cfg["integrations"])
+    touched, integrations = [], []
+    if args.tier in ("0", "1"):
+        metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, text=True))
+        packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(ROOT))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
+        paths = changed_paths(ROOT, cfg["base"])
+        touched, integrations = select(paths, packages, cfg["integrations"])
     print(f"tier T{args.tier} on local, commit {commit}; touched crates: {', '.join(touched) or 'none'}", flush=True)
     for package, binary, matches in integrations:
         print(f"integration {package}/{binary}: {', '.join(matches)}", flush=True)
