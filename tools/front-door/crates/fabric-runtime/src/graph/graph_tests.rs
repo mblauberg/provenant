@@ -1587,8 +1587,15 @@ fn findings_error_names_first_entry_and_field() {
             "line",
         ),
     ] {
-        let progress = synthesis_run(&findings_text(&entry));
-        let error = progress.advance_error.as_deref().unwrap();
+        let capture = capture(&findings_text(&entry));
+        let outputs = make_outputs(Some(&capture), None, None, None, None);
+        assert!(
+            outputs
+                .findings
+                .iter()
+                .any(|finding| finding.id == "broken")
+        );
+        let error = &outputs.warnings[0];
         assert!(
             error.contains("entry 1") && error.contains("broken"),
             "{error}"
@@ -7972,13 +7979,13 @@ fn identity_dispositions_preserve_large_inherited_fields() {
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
     }];
-    let long = "x".repeat(1024);
-    let entries: Vec<_> = (0..2).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":long,"file":long,"summary":long,"status":long})).collect();
+    let long = "x".repeat(900);
+    let entries: Vec<_> = (0..3).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":long,"summary":long,"status":long})).collect();
     let review = format!(
         "```findings\n{}\n```\nVERDICT: PASS",
         serde_json::json!({"schema_version":1,"findings":entries})
     );
-    let decisions = (0..2)
+    let decisions = (0..3)
         .map(|i| {
             format!(
                 r#"{{"id":"F{i}","disposition":"rejected","reason":"{}"}}"#,
