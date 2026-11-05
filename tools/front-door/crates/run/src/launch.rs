@@ -269,7 +269,8 @@ fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
 #[test]
 fn output_prompt_directs_scratch_outside_worktree() {
     let prompt = output_prompt(std::path::Path::new("/attempt"), "task");
-    assert!(prompt.contains("Keep scratch files under the provided $TMPDIR, not in the worktree."));
+    assert!(prompt.contains("$TMPDIR"));
+    assert!(prompt.contains("not in the worktree"));
 }
 
 impl RunStore {

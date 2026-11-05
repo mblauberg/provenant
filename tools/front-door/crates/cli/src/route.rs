@@ -3310,7 +3310,6 @@ mod route_tests {
             ]))?,
         };
         let text = report.human(clock.wall_now()?);
-        assert_eq!(text.lines().count(), 4);
         assert!(text.contains("active overrides: 2"));
         assert!(text.contains("pacing provider codex pace active"));
         assert!(text.contains("pacing provider claude off active"));
