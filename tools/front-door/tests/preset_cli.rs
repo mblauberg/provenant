@@ -561,6 +561,7 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
     );
     let first: serde_json::Value = serde_json::from_slice(&first.stdout)?;
     assert_eq!(first["data"]["graph"]["status"], "complete");
+    assert_eq!(first["data"]["graph"]["outcome"], "succeeded");
     let graph_id = first["data"]["graph"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or("graph id")?;
@@ -633,6 +634,7 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
         prefix,
     ] {
         let status = graph("status", selector)?;
+        assert_eq!(status["data"]["outcome"], first["data"]["graph"]["outcome"]);
         assert_eq!(
             status["data"]["checkpoint"]["graph_id"], graph_id,
             "{selector}"

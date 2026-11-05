@@ -496,7 +496,13 @@ pub fn apply(
         .ok_or_else(|| {
             format!("preset {name}: plan.replaces names no top-level stage: {replaces}")
         })?;
-    let fallback_stage = stages[position].clone();
+    let mut fallback_stage = stages[position].clone();
+    // Planned workers and their deterministic fallback require all members.
+    if (fallback_stage.get("count").is_some() || fallback_stage.get("for_each").is_some())
+        && let Some(stage) = fallback_stage.as_object_mut()
+    {
+        stage.remove("min_successful");
+    }
     let mut planner = json!({
         "id": "plan",
         "role": "plan.shape",

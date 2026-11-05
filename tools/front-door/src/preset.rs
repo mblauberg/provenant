@@ -465,7 +465,7 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
-const SPEC_KEYS: [&str; 6] = ["type", "default", "min", "max", "enum", "doc"];
+const SPEC_KEYS: [&str; 7] = ["type", "default", "min", "max", "enum", "doc", "optional"];
 const TYPE_NAMES: [&str; 6] = ["string", "integer", "number", "boolean", "list", "table"];
 /// Parameters every parent hands to a child preset that declares them.
 const AMBIENT: [&str; 3] = ["risk_tier", "subject", "local_check_policy"];
@@ -740,9 +740,18 @@ fn flatten_parameters(
         let fail = |message: String| {
             invalid_config(name, &format!("parameters.{key}"), &message, scope, origins)
         };
-        let default = value
-            .get("default")
-            .ok_or_else(|| fail("required parameter is missing".into()))?;
+        if value
+            .get("optional")
+            .is_some_and(|optional| !optional.is_boolean())
+        {
+            return Err(fail("optional must be a boolean".into()));
+        }
+        let absent = Value::Null;
+        let default = match value.get("default") {
+            Some(default) => default,
+            None if value.get("optional") == Some(&Value::Bool(true)) => &absent,
+            None => return Err(fail("required parameter is missing".into())),
+        };
         if let Some(kind) = value.get("type")
             && !kind.as_str().is_some_and(|kind| TYPE_NAMES.contains(&kind))
         {
@@ -769,6 +778,10 @@ fn flatten_parameters(
         ) && min > max
         {
             return Err(fail("min must not exceed max".into()));
+        }
+        if default.is_null() {
+            plain.insert(key.clone(), Value::Null);
+            continue;
         }
         if (value.get("min").is_some() || value.get("max").is_some())
             && !matches!(
@@ -2069,8 +2082,8 @@ struct StageBuilder<'a> {
 }
 
 impl StageBuilder<'_> {
-    /// Lenses that must succeed for a partial group. Zero takes the review
-    /// ladder minimum for `risk_tier`, and never less than one review.
+    /// Members that must succeed. Zero takes the configured review ladder's
+    /// minimum for `risk_tier`, and never less than one member.
     fn minimum_successful(&self, value: &Value) -> Result<u64, String> {
         let minimum = interpolate(value, &self.parameters, self.prompt, 1)?
             .as_u64()
@@ -2126,6 +2139,65 @@ impl StageBuilder<'_> {
             return Err(format!("preset composition depth exceeds {DEPTH}"));
         }
         let object = entry.as_object().ok_or("stage entries must be tables")?;
+        if (object.contains_key("count") || object.contains_key("for_each"))
+            && let Some(minimum) = object.get("min_successful")
+            && !interpolate(minimum, &self.parameters, self.prompt, 1)?.is_null()
+        {
+            let mut member = object.clone();
+            member.remove("min_successful");
+            let id = object
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or(default_id);
+            if !valid_name(id) {
+                return Err(format!("invalid stage node ID: {id}"));
+            }
+            if nodes.iter().any(|node| node["id"] == id) {
+                return Err(format!("duplicate stage node ID: {id}"));
+            }
+            let mut children = Vec::new();
+            let ends = self.entry(
+                &Value::Object(member),
+                default_id,
+                &[],
+                &mut children,
+                depth + 1,
+            )?;
+            let minimum = interpolate(minimum, &self.parameters, self.prompt, 1)?
+                .as_u64()
+                .filter(|minimum| *minimum > 0)
+                .ok_or("min_successful must be a positive integer")?;
+            if minimum as usize > ends.len() {
+                return Err(format!(
+                    "min_successful ({}) {minimum} exceeds group {id} width ({}) {}",
+                    object
+                        .get("min_successful")
+                        .and_then(Value::as_str)
+                        .unwrap_or("literal"),
+                    object
+                        .get("count")
+                        .and_then(Value::as_str)
+                        .unwrap_or("members"),
+                    ends.len()
+                ));
+            }
+            let outputs = interpolate(
+                object.get("outputs").unwrap_or(&json!(["result"])),
+                &self.parameters,
+                self.prompt,
+                1,
+            )?;
+            let exports = selected_inputs(&ends, &outputs);
+            nodes.push(composite(
+                id,
+                children,
+                exports,
+                deps,
+                &outputs,
+                Some(minimum),
+            ));
+            return Ok(vec![id.to_owned()]);
+        }
         let items: Vec<Option<Value>> = if let Some(list) = object.get("for_each") {
             if object.contains_key("count") {
                 return Err("for_each and count are exclusive".into());
@@ -2189,6 +2261,12 @@ impl StageBuilder<'_> {
             let mut object = object.clone();
             object.remove("count");
             object.remove("for_each");
+            if object.get("min_successful").is_some_and(|value| {
+                interpolate(value, &self.parameters, self.prompt, 1)
+                    .is_ok_and(|value| value.is_null())
+            }) {
+                object.remove("min_successful");
+            }
             object.remove("id");
             let fallback_stage = object.remove("fallback_stage");
             let distinct_families = object.remove("distinct_families");

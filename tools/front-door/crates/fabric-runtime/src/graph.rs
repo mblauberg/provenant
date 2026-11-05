@@ -1037,6 +1037,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .map(|node| NodeProgress {
                         extra: Default::default(),
                         children: node.composite_members.clone(),
+                        min_successful: node
+                            .composite
+                            .as_ref()
+                            .and_then(|spec| spec.min_successful),
                         source_commit: None,
                         fragment: None,
                         handoff: None,
@@ -1066,6 +1070,24 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             checkpoint
         }
     };
+
+    // Older checkpoints predate outcome reporting. Recover their declared
+    // minima from the validated plan when they are next advanced.
+    let mut recovered_minimum = false;
+    for (progress, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
+        if progress.min_successful.is_none()
+            && let Some(minimum) = planned
+                .composite
+                .as_ref()
+                .and_then(|spec| spec.min_successful)
+        {
+            progress.min_successful = Some(minimum);
+            recovered_minimum = true;
+        }
+    }
+    if recovered_minimum {
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
 
     if may_ask(&plan) && (checkpoint.instance_id.is_none() || checkpoint.ask_actor.is_none()) {
         asks::identity::<R, J::Error>(&mut checkpoint, owner)?;
@@ -1180,6 +1202,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     } else {
                         GraphStatus::Paused
                     },
+                    outcome: None,
                     checkpoint,
                     advance_error: None,
                 });
@@ -1300,6 +1323,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
                 return Ok(GraphRun {
                     status: GraphStatus::Cancelled,
+                    outcome: None,
                     checkpoint,
                     advance_error: None,
                 });
@@ -2886,6 +2910,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             .find_map(|node| node.advance_error.clone());
         return Ok(GraphRun {
             status,
+            outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
             checkpoint,
             advance_error,
         });

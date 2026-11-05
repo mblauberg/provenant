@@ -739,6 +739,9 @@ pub struct NodeProgress {
     /// Direct children of a composite, whose individual evidence stays available.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<String>,
+    /// Minimum declared by this composite, retained for outcome reporting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_successful: Option<usize>,
     /// Resolved once before launch and retained across retries and replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
@@ -872,6 +875,43 @@ impl NodeState {
 }
 
 impl GraphCheckpoint {
+    /// Classify settled work without relaxing the strict delivery gate.
+    pub fn outcome(&self) -> GraphOutcome {
+        if self.successful() {
+            return GraphOutcome::Succeeded;
+        }
+        if self
+            .nodes
+            .iter()
+            .any(|node| node.min_successful.is_some() && !self.node_successful(node))
+        {
+            return GraphOutcome::Failed;
+        }
+        let mut covered = std::collections::BTreeSet::new();
+        let mut pending: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|node| node.min_successful.is_some() && node.state == NodeState::Succeeded)
+            .flat_map(|node| node.children.iter())
+            .collect();
+        while let Some(id) = pending.pop() {
+            if covered.insert(id)
+                && let Some(node) = self.nodes.iter().find(|node| &node.id == id)
+            {
+                pending.extend(node.children.iter());
+            }
+        }
+        if self
+            .nodes
+            .iter()
+            .any(|node| !self.node_successful(node) && !covered.contains(&node.id))
+        {
+            GraphOutcome::Failed
+        } else {
+            GraphOutcome::Partial
+        }
+    }
+
     /// Failed gates are handled only when their recovery path succeeds.
     pub fn successful(&self) -> bool {
         if self.nodes.iter().any(|n| n.expansion_pause.is_some()) {
@@ -958,6 +998,14 @@ impl NodeProgress {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum GraphOutcome {
+    Succeeded,
+    Partial,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GraphStatus {
     Pending,
     Complete,
@@ -968,6 +1016,8 @@ pub enum GraphStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GraphRun {
     pub status: GraphStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<GraphOutcome>,
     pub checkpoint: GraphCheckpoint,
     /// Why the last automatic advance failed, as recorded for `status`.
     #[serde(skip_serializing_if = "Option::is_none")]

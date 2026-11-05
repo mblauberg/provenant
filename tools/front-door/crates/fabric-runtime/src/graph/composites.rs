@@ -508,7 +508,7 @@ fn outputs(
             headers.push(notice);
         }
         if !unavailable.is_empty() {
-            headers.push(format!("Unavailable lenses:\n{}", unavailable.join("\n")));
+            headers.push(format!("Unavailable members:\n{}", unavailable.join("\n")));
         }
         let full_header = headers.join("\n");
         let header = bounded(&full_header, header_limit);
@@ -656,7 +656,7 @@ fn unavailable(
             let reason = progress.advance_error.as_deref().unwrap_or_else(|| {
                 match progress.attempts.last().and_then(|a| a.outcome.as_ref()) {
                     Some(AttemptOutcome::AdapterUnavailable) => "adapter unavailable",
-                    _ => "lens failed",
+                    _ => "member failed",
                 }
             });
             format!("{}: {reason}", progress.id)
@@ -678,7 +678,7 @@ fn coverage_shortfall(
         .count();
     (succeeded < minimum).then(|| {
         format!(
-            "coverage_below_minimum: {succeeded} of {} lenses succeeded, minimum {minimum}; unavailable: {}",
+            "coverage_below_minimum: {succeeded} of {} members succeeded, minimum {minimum}; unavailable: {}",
             members.len(),
             unavailable(spec, checkpoint, positions).join("; ")
         )
@@ -819,7 +819,13 @@ pub(super) fn validate_progress(
     let failed_for_coverage = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && progress.advance_error_code.as_deref() == Some("coverage_below_minimum")
-        && progress.advance_error == shortfall;
+        && (progress.advance_error == shortfall
+            || shortfall.as_ref().is_some_and(|reason| {
+                let legacy = reason
+                    .replace(" members succeeded, minimum", " lenses succeeded, minimum")
+                    .replace("member failed", "lens failed");
+                progress.advance_error.as_deref() == Some(legacy.as_str())
+            }));
     let export = node
         .composite
         .as_ref()
@@ -841,9 +847,21 @@ pub(super) fn validate_progress(
             NodeState::Pending => progress.outputs.is_none(),
             NodeState::Running => state == NodeState::Running && progress.outputs.is_none(),
             NodeState::Succeeded => {
-                state == NodeState::Succeeded
-                    && shortfall.is_none()
-                    && progress.outputs == export.and_then(Result::ok)
+                state == NodeState::Succeeded && shortfall.is_none() && {
+                    let expected = export.and_then(Result::ok);
+                    progress.outputs == expected
+                        || expected.is_some_and(|mut expected| {
+                            if let Some(result) = &mut expected.result {
+                                result.excerpt = result
+                                    .excerpt
+                                    .replace("Unavailable members:", "Unavailable lenses:")
+                                    .replace("member failed", "lens failed");
+                                result.digest =
+                                    CanonicalV1::file_digest(result.excerpt.as_bytes()).to_string();
+                            }
+                            progress.outputs.as_ref() == Some(&expected)
+                        })
+                }
             }
             NodeState::Blocked | NodeState::Skipped => {
                 state == progress.state && progress.outputs.is_none()

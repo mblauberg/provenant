@@ -293,6 +293,13 @@ provenant run --preset fan-out --prompt-file brief.md \
   --set 'parameters.width=3' --set 'parameters.route="junior"' --explain
 ```
 
+For `fan-out` and `fan-out-synthesise`, set `parameters.min_branches` to a
+value from 1 through `width` to allow synthesis after some branches fail.
+Omitting it requires every branch to succeed. A graph that meets its minimum
+with failures reports `partial` and exits successfully; it does not deliver a
+pull request. When the planner replaces the branch stage, its workers require
+all-success instead.
+
 Address a stage by its id instead of a path into its internals: on a stage
 that runs a preset, `--set 'council.risk_tags=["security"]'` sets that
 preset's parameter; on a role stage, `--set 'task.tier="junior"'` sets the

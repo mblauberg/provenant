@@ -80,6 +80,59 @@ topic = "compiler"
 }
 
 #[test]
+fn repeated_stage_minimum_creates_a_composite() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "group", r#"
+stages = [{id="branch", role="scout", count=3, min_successful=2}, {id="synthesis", kind="synthesise"}]
+"#).unwrap();
+    let expanded = expand(&layers, "group", "brief", &[]).unwrap();
+    let group = &expanded.document["nodes"][0];
+    assert_eq!(group["composite"]["min_successful"], 2);
+    assert_eq!(group["composite"]["nodes"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        expanded.document["nodes"][1]["depends_on"],
+        json!(["branch"])
+    );
+}
+
+#[test]
+fn fan_out_minimum_is_optional_and_bounded_by_width() {
+    let layers = Layers::empty();
+    for name in ["fan-out", "fan-out-synthesise"] {
+        let default = expand(&layers, name, "brief", &[]).unwrap();
+        assert!(default.document["nodes"][0].get("composite").is_none());
+        let expanded = expand(
+            &layers,
+            name,
+            "brief",
+            &[
+                "parameters.width=3".into(),
+                "parameters.min_branches=2".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            expanded.document["nodes"][0]["composite"]["min_successful"],
+            2
+        );
+        let error = expand(
+            &layers,
+            name,
+            "brief",
+            &[
+                "parameters.width=2".into(),
+                "parameters.min_branches=3".into(),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("min_branches") && error.contains("width"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn node_titles_default_to_node_ids() {
     let mut layers = Layers::empty();
     layers
@@ -3313,14 +3366,15 @@ fn every_catalogue_preset_has_a_pattern_and_an_explanation() {
         assert!(explained["next"].as_array().is_some_and(|n| !n.is_empty()));
     }
     let explained = layers.explain("fan-out").unwrap();
-    assert_eq!(
-        explained["parameters"],
-        json!([
-            {"name":"distinct_families","type":"boolean","default":false,"doc":"Prefer different model families across the branches. A preference only: every branch still runs.","origin":"bundled"},
-            {"name":"route","type":"string","default":"senior","doc":"Routing pool for every branch.","origin":"bundled"},
-            {"name":"width","type":"integer","default":2,"min":1,"max":32,"doc":"Number of parallel branches.","origin":"bundled"}
-        ])
-    );
+    let minimum = explained["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|parameter| parameter["name"] == "min_branches")
+        .unwrap();
+    assert_eq!(minimum["type"], "integer");
+    assert_eq!(minimum["min"], 1);
+    assert_eq!(minimum["optional"], true);
     assert_eq!(
         explained["stages"],
         json!([{"id":"branch","count":"${width}"}])

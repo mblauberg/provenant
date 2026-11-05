@@ -5927,6 +5927,7 @@ impl Factory {
             use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphRun, GraphStatus};
             GraphRun {
                 status: GraphStatus::Paused,
+                outcome: None,
                 checkpoint: GraphCheckpoint {
                     extra: Default::default(),
                     expansions: Vec::new(),

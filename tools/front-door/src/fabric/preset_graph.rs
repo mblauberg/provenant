@@ -243,7 +243,12 @@ pub(crate) fn run_preset_graph(
             }
             status_command.push_str(&format!(" fabric graph status {graph_id}"));
             let outcome = match run.status {
-                GraphStatus::Complete if run.checkpoint.successful() => Outcome::Ok,
+                GraphStatus::Complete
+                    if run.outcome
+                        != Some(provenant_fabric_runtime::graph::GraphOutcome::Failed) =>
+                {
+                    Outcome::Ok
+                }
                 GraphStatus::Complete => Outcome::Failed,
                 GraphStatus::Cancelled => Outcome::Cancelled,
                 GraphStatus::Paused => Outcome::Refused,
