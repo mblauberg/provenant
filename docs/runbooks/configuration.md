@@ -711,15 +711,19 @@ and cache collection.
 
 `gc.projects` is keyed by the registered Fabric project ID. Each project's
 `regenerable` list contains directory names, matched at any depth in its
-registered linked worktrees. The default is an empty list, which prunes
-nothing. `keep` contains optional paths relative to the worktree; those paths,
-their descendants and any matching directory containing them are preserved.
+registered linked worktrees. When the project has no entry, a root
+`Cargo.toml` defaults the list to `["target"]`; other projects default to an
+empty list. An explicit project entry overrides that default. `keep` contains
+optional paths relative to the worktree; those paths, their descendants and
+any matching directory containing them are preserved.
 Tracked paths are also preserved. `.git`, `.worktrees`, absolute names and
 parent traversal are refused. Declared output must be Git-ignored. An idle
 registered linked worktree can qualify without a terminal lane when no lane
 or writer lease is live. The minimum idle age is `--idle-days`, or one day
-below the free-space floor. The primary checkout and unknown writers remain
-protected. JSON reports this class separately as `worktree_cleanup[].idle_output`.
+below the free-space floor. Unknown-writer worktrees may also have ignored
+output reclaimed when the whole worktree is idle, a complete census finds no
+holder, and no lane is live. The primary checkout remains protected. JSON
+reports this class separately as `worktree_cleanup[].idle_output`.
 Failures skip individual entries. Lane caches still use their existing GC path.
 
 `foreign_worktrees = "merged-clean"` opts this project into removing linked

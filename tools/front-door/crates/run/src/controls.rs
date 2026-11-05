@@ -763,9 +763,13 @@ mod lineage_tests {
         init_base_repository(&project)?;
         let clock = provenant_os::clock::SystemClock;
         let cancel = provenant_core::CancelToken::new();
-        for (index, origin) in [None, Some(WorktreeOrigin::Adopted)]
-            .into_iter()
-            .enumerate()
+        for (index, origin) in [
+            None,
+            Some(WorktreeOrigin::Adopted),
+            Some(WorktreeOrigin::Lane),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let mut original = crate::tests::input();
             original.run_id = RunId::from_bytes([60 + index as u8; 16]);
@@ -788,8 +792,10 @@ mod lineage_tests {
                         worktrees::save_owner(
                             &tree,
                             &WorktreeOwner {
-                                attempt_id: None,
-                                operation_id: None,
+                                attempt_id: (origin == WorktreeOrigin::Lane)
+                                    .then(|| AttemptId::from_bytes([110; 16])),
+                                operation_id: (origin == WorktreeOrigin::Lane)
+                                    .then(|| "settled-owner".parse().unwrap()),
                                 branch: info
                                     .branch
                                     .clone()
@@ -823,6 +829,53 @@ mod lineage_tests {
                 &store.attempt_dir(record.run_id, prior, false)?,
                 RunStore::scope(&record),
             )?;
+            if origin.is_none() {
+                let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+                worktrees::save_owner(
+                    &launch.worktree,
+                    &WorktreeOwner {
+                        attempt_id: None,
+                        operation_id: None,
+                        branch: format!("explicit-{index}"),
+                        base: info.head.to_string(),
+                        host: provenant_core::HostId::from_bytes([3; 16]),
+                        created_at: original.created_at,
+                        origin: WorktreeOrigin::Adopted,
+                        label: None,
+                    },
+                )?;
+                assert!(matches!(
+                    crate::writer::seal_writer_ownership(
+                        &store.attempt_dir(record.run_id, prior, false)?,
+                        &launch.worktree
+                    ),
+                    Err(RunError::Conflict)
+                ));
+                std::fs::remove_file(
+                    launch
+                        .worktree
+                        .repo()
+                        .private_git_dir()
+                        .join("provenant-owner.json"),
+                )?;
+            }
+            if origin == Some(WorktreeOrigin::Lane) {
+                let attempt = store.attempt_dir(record.run_id, prior, false)?;
+                let snapshot = attempt.current_path()?.join("writer-owned.json");
+                let legacy = br#"{"schema_version":1,"lane_owned":true}"#;
+                std::fs::write(&snapshot, legacy)?;
+                let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+                crate::writer::seal_writer_ownership(&attempt, &launch.worktree)?;
+                assert_eq!(std::fs::read(&snapshot)?, legacy);
+                assert!(matches!(
+                    store.check_writer_lineage(&record, &launch.worktree, &call),
+                    Err(RunError::Validation(
+                        "continuation worktree belongs to another lane"
+                    ))
+                ));
+                std::fs::remove_file(snapshot)?;
+                crate::writer::seal_writer_ownership(&attempt, &launch.worktree)?;
+            }
             std::fs::write(info.path.join("pending.txt"), "keep these edits")?;
             store.withdraw(
                 prior,
@@ -1860,6 +1913,7 @@ impl RunStore {
         let mut current = record.clone();
         let mut seen = std::collections::HashSet::new();
         let mut was_owned = false;
+        let mut initial_owner = None;
         loop {
             if !seen.insert(current.attempt_id) || seen.len() > 128 {
                 return Err(RunError::Validation("continuation parent chain"));
@@ -1874,12 +1928,19 @@ impl RunStore {
             if let Some(raw) = read_sealed(&directory, "writer-owned.json", crate::RECORD_LIMIT)? {
                 // Recorded under custody before launch. A later owner removal or
                 // adoption cannot turn an owned lane into an explicit tree.
-                was_owned |= crate::db::decode::<crate::writer::WriterOwnership>(&raw)?.lane_owned;
+                let snapshot = crate::db::decode::<crate::writer::WriterOwnership>(&raw)?;
+                was_owned |= snapshot.lane_owned;
+                if current.retry_of.is_none() {
+                    initial_owner = snapshot.owner;
+                }
             }
             let Some(parent) = current.retry_of else {
                 break;
             };
             current = self.record(parent, call)?;
+        }
+        if lane.is_some() && owner == initial_owner {
+            return Ok(owner);
         }
         if lane.is_some() {
             return Err(RunError::Validation(

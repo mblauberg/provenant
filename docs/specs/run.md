@@ -1222,6 +1222,10 @@ pushes and open PRs retain local branches. Settlement rechecks ownership, termin
 registration, writer custody, Git sequencer state and head under the existing
 removal locks. Resumed attempts may settle a worktree whose owner is in their
 recorded continuation lineage, using the same bounded ancestry proof as resume.
+For an explicitly selected worktree, launch seals its owner under writer custody.
+A continuation accepts that unchanged owner even when it names an earlier lane;
+a changed owner is refused. Existing snapshots without an owner retain the
+conservative lineage check. Custody still excludes live writers.
 Ignored output uses GC's existing declared-regenerable walker
 and keep paths. Only the project's declared regenerable output may be removed;
 other ignored files retain the tree. Other worktrees keep the existing

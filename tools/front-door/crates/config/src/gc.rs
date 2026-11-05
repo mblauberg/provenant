@@ -46,6 +46,9 @@ pub struct LaneBuildSettings {
     /// Minutes a build waits for a build slot or a Cargo lock before giving up.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub build_wait_minutes: Option<u64>,
+    /// Seconds a writer waits for its repository's Git setup lock.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub setup_lock_wait_seconds: Option<u64>,
     /// First port of the range split into per-writer-lane blocks.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub lane_port_base: Option<u64>,
@@ -80,6 +83,7 @@ pub struct LaneBuildSettings {
 pub const DEFAULT_MAX_WRITER_LANES: u64 = 40;
 pub const DEFAULT_MAX_PROJECT_WRITER_LANES: u64 = 30;
 pub const DEFAULT_BUILD_WAIT_MINUTES: u64 = 30;
+pub const DEFAULT_SETUP_LOCK_WAIT_SECONDS: u64 = 14400;
 /// Default lane port space: 64 blocks of 16 ports from 30000, below the
 /// ephemeral ranges of macOS and Linux and one block per possible writer lane.
 pub const DEFAULT_LANE_PORT_BASE: u64 = 30000;
@@ -152,6 +156,12 @@ impl LaneBuildSettings {
         }
         if !in_range(self.build_wait_minutes, 1440) {
             invalid.push("build_wait_minutes");
+        }
+        if !in_range(
+            self.setup_lock_wait_seconds,
+            provenant_core::MAX_LANE_RUNTIME_SECONDS,
+        ) {
+            invalid.push("setup_lock_wait_seconds");
         }
         if self
             .lane_port_base
@@ -251,6 +261,11 @@ impl LaneBuildSettings {
                 .clamp(1, 1440),
         )
     }
+    pub fn setup_lock_wait_seconds(&self) -> u64 {
+        self.setup_lock_wait_seconds
+            .unwrap_or(DEFAULT_SETUP_LOCK_WAIT_SECONDS)
+            .clamp(1, provenant_core::MAX_LANE_RUNTIME_SECONDS)
+    }
     pub fn jobs(&self) -> u64 {
         self.cargo_build_jobs.unwrap_or_else(|| {
             std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1) as u64)
@@ -312,6 +327,17 @@ impl Default for GcSettings {
 }
 
 impl GcSettings {
+    /// Resolve a project's explicit settings, or its language-specific default.
+    pub fn project_settings(&self, project: &str, root: &Path) -> ProjectGcSettings {
+        self.projects.get(project).cloned().unwrap_or_else(|| {
+            let mut settings = ProjectGcSettings::default();
+            if root.join("Cargo.toml").is_file() {
+                settings.regenerable.push("target".into());
+            }
+            settings
+        })
+    }
+
     /// Read the owning section without resolving unrelated domain settings.
     /// Invalid optional settings warn and fall back to compiled defaults.
     pub fn read(state: &Path) -> std::io::Result<Self> {
@@ -554,6 +580,43 @@ mod tests {
     }
 
     #[test]
+    fn gc_project_defaults_cargo_output_only_without_an_override()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let mut settings = super::GcSettings::default();
+        assert!(
+            settings
+                .project_settings("p", root.path())
+                .regenerable
+                .is_empty()
+        );
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n")?;
+        assert_eq!(
+            settings.project_settings("p", root.path()).regenerable,
+            ["target"]
+        );
+        settings.projects.insert(
+            "p".into(),
+            super::ProjectGcSettings {
+                regenerable: vec!["build".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            settings.project_settings("p", root.path()).regenerable,
+            ["build"]
+        );
+        settings.projects.get_mut("p").unwrap().regenerable.clear();
+        assert!(
+            settings
+                .project_settings("p", root.path())
+                .regenerable
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn free_floor_defaults_to_ten_percent_with_a_fifty_gib_minimum() {
         let gib = 1024_u64.pow(3);
         assert_eq!(super::default_free_floor(100 * gib), 50 * gib);
@@ -597,6 +660,21 @@ mod tests {
 #[cfg(test)]
 mod build_tests {
     use super::LaneBuildSettings;
+    #[test]
+    fn setup_lock_wait_validates_bounds_and_automatic_default() {
+        let defaults: LaneBuildSettings =
+            toml_edit::de::from_str("setup_lock_wait_seconds = -1").unwrap();
+        assert_eq!(defaults.setup_lock_wait_seconds(), 14400);
+        let configured: LaneBuildSettings =
+            toml_edit::de::from_str("setup_lock_wait_seconds = 17").unwrap();
+        assert!(configured.invalid_keys().is_empty());
+        assert_eq!(configured.setup_lock_wait_seconds(), 17);
+        for value in [0, 14401] {
+            let invalid: LaneBuildSettings =
+                toml_edit::de::from_str(&format!("setup_lock_wait_seconds = {value}")).unwrap();
+            assert_eq!(invalid.invalid_keys(), ["setup_lock_wait_seconds"]);
+        }
+    }
     #[test]
     fn memory_pressure_defaults_to_critical_and_accepts_host_policy() {
         use provenant_os::sys::resources::MemoryPressure;

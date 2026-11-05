@@ -2733,6 +2733,97 @@ fn preset_file_spec_resolves_from_checkout_subdirectory() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn preset_reuses_one_worktree_inventory_for_planning_and_spec()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    let git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    };
+    git(&["init", "-q"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "initial",
+    ])?;
+    for index in 0..100 {
+        let path = temp.path().join(format!("worktree-{index}"));
+        git(&[
+            "worktree",
+            "add",
+            "--detach",
+            "--no-checkout",
+            "-q",
+            path.to_str().ok_or("path")?,
+        ])?;
+    }
+    std::fs::write(
+        project.join("spec.md"),
+        "acceptance from the primary checkout",
+    )?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "review")?;
+    let counter = temp.path().join("list-count");
+    let wrapper = temp.path().join("git-wrapper");
+    let native = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let quote =
+        |path: &std::path::Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprevious=\nfor arg do\n  if [ \"$previous\" = worktree ] && [ \"$arg\" = list ]; then printf x >> {}; fi\n  previous=$arg\ndone\nexec {} \"$@\"\n",
+            quote(&counter),
+            quote(&native)
+        ),
+    )?;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("PROVENANT_GIT", &wrapper)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args([
+            "--json",
+            "run",
+            "--preset",
+            "review-council",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .args(["--explain", "--set", "parameters.spec='spec.md'"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("acceptance from the primary checkout")
+    );
+    assert_eq!(std::fs::read(&counter)?, b"x");
+    Ok(())
+}
+
+#[test]
 fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     std::fs::create_dir(temp.path().join("home"))?;
