@@ -926,6 +926,9 @@ impl LaneState {
 }
 #[derive(Debug, Clone, Args)]
 pub struct Lanes {
+    /// Stream a bounded page for the SessionStart collector.
+    #[arg(long, hide = true)]
+    pub session_stream: bool,
     /// Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)
     #[arg(long)]
     pub id: Vec<Target>,
@@ -1266,6 +1269,9 @@ pub enum Worktree {
     },
     /// List worktrees
     List,
+    /// Stream advisory worktree inventory for the SessionStart collector.
+    #[command(hide = true)]
+    SessionList,
     /// Remove a worktree or merged ones, allowing declared ignored output
     Remove(Remove),
 }

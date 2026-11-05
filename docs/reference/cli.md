@@ -766,6 +766,32 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
+## `provenant fabric graph wait`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Wait limit (seconds or a duration such as 30m)", "name": "wait", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Wait for a task graph to settle without advancing it",
+  "groups": [
+    {
+      "arguments": [
+        "id",
+        "wait"
+      ],
+      "multiple": true,
+      "name": "Wait",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant fabric graph cancel`
 
 | Argument | Contract |
@@ -2748,6 +2774,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--session-stream` | `{"defaults": ["false"], "description": "Stream a bounded page for the SessionStart collector", "name": "session_stream", "values": ["true", "false"]}` |
 | `--id` | `{"description": "Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)", "name": "id", "repeatable": true}` |
 | `--host` | `{"conflicts": ["id", "cursor"], "description": "List, wait on or watch a configured peer's own lanes, by label or host ID", "name": "host"}` |
 | `--session` | `{"conflicts": ["all"], "description": "Keep lanes submitted by this session (its agent label)", "name": "session"}` |
@@ -2768,6 +2795,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
   "groups": [
     {
       "arguments": [
+        "session_stream",
         "id",
         "host",
         "session",
@@ -5130,4 +5158,6 @@ which may be reworded.
 | `GUARDIAN_IDENTITY` | The guardian process identity could not be observed. |
 | `HOST_CLOCK` | Startup spacing cannot be judged: the monotonic clock or boot identity is unreadable. |
 | `WRITER_REF_LOCKED` | A writer Git ref lock already exists. |
+| `SETUP_LOCK_TIMEOUT` | The writer Git setup lock wait expired. |
+| `WRITER_IMPORT_RETAINED` | A predecessor writer import remains unresolved. |
 | `OBJECT_IMPORT_LIMIT` | A lane's Git object import exceeded its limits. |

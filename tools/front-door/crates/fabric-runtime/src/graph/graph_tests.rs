@@ -2200,6 +2200,143 @@ fn composite_qualified_propagation_resolves_identity_only_disposition() {
     );
 }
 
+// A verifier reuses short ids across lenses and names each lens finding without
+// the composite prefix; synthesis settles the lens findings by qualified id.
+#[test]
+fn verifier_markers_without_the_composite_prefix_keep_each_lens_finding_separate() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1, "graph_id":"short-markers", "nodes":[
+            {"id":"lenses", "kind":"composite", "access":"read_only", "composite":{
+                "nodes":[
+                    {"id":"lens-a", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}},
+                    {"id":"lens-b", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}}
+                ],
+                "exports":[
+                    {"node":"lens-a", "outputs":["findings"]},
+                    {"node":"lens-b", "outputs":["findings"]}
+                ]
+            }},
+            {"id":"verify", "access":"read_only", "prompt":"verify", "route":{"alias":"senior"},
+             "depends_on":["lenses"], "inputs":[{"node":"lenses", "outputs":["findings"]}]},
+            {"id":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"dispose", "route":{"alias":"senior"},
+             "depends_on":["lenses", "verify"], "inputs":[{"node":"lenses", "outputs":["findings"]}, {"node":"verify", "outputs":["findings"]}],
+             "dispositions":["accepted", "rejected", "deferred"]}
+        ]
+    })).unwrap();
+    let verified = [
+        entry(",\"propagates\":\"lenses--lens-a:F1\""),
+        entry(",\"propagates\":\"lenses--lens-b:F1\""),
+    ]
+    .join(",");
+    let settled = [
+        r#"{"id":"lenses--lens-a:F1","disposition":"accepted","reason":"reproduced"}"#,
+        r#"{"id":"lenses--lens-b:F1","disposition":"rejected","reason":"contradicted"}"#,
+    ]
+    .join(",");
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&verified)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&settled)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let node = |id: &str| {
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap()
+    };
+    let synthesis = node("synthesis");
+    assert_eq!(
+        synthesis.state,
+        NodeState::Succeeded,
+        "{:?}",
+        synthesis.advance_error
+    );
+    assert!(
+        !node("verify")
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unresolved propagates"))
+    );
+    let disposition = |id: &str| {
+        synthesis
+            .outputs
+            .as_ref()
+            .unwrap()
+            .findings
+            .iter()
+            .filter(|finding| finding.id == id)
+            .map(|finding| finding.disposition.as_deref())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(
+        disposition("lenses--lens-a:F1"),
+        [Some("accepted")].into_iter().collect()
+    );
+    assert_eq!(
+        disposition("lenses--lens-b:F1"),
+        [Some("rejected")].into_iter().collect()
+    );
+}
+
+// A bare id shared by two roots names neither of them.
+#[test]
+fn a_marker_shared_by_several_findings_stays_unresolved() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1, "graph_id":"ambiguous-marker", "nodes":[
+            {"id":"lenses", "kind":"composite", "access":"read_only", "composite":{
+                "nodes":[
+                    {"id":"lens-a", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}},
+                    {"id":"lens-b", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}}
+                ],
+                "exports":[
+                    {"node":"lens-a", "outputs":["findings"]},
+                    {"node":"lens-b", "outputs":["findings"]}
+                ]
+            }},
+            {"id":"verify", "access":"read_only", "prompt":"verify", "route":{"alias":"senior"},
+             "depends_on":["lenses"], "inputs":[{"node":"lenses", "outputs":["findings"]}]}
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"propagates\":\"F1\"")),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let verify = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "verify")
+        .unwrap();
+    assert!(
+        verify
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unresolved propagates"))
+    );
+}
+
 #[test]
 fn qualified_propagations_group_colliding_originals() {
     let input = |id: &str| GraphInput {

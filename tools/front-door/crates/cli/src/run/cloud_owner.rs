@@ -381,10 +381,16 @@ pub(super) fn hydrate(
 ) -> Result<(), String> {
     use provenant_records::run::CloudObservation as State;
     for lane in lanes {
-        if placement(store, lane, call)?.is_none() {
+        let Some(placement) = placement(store, lane, call)? else {
             continue;
-        }
-        let observation = match load(store, lane.attempt_id, call)? {
+        };
+        let job = load(store, lane.attempt_id, call)?;
+        let mut cloud_view = job.as_ref().map(view).unwrap_or_else(
+            || serde_json::json!({"target": placement.target, "state": {"state": "submitting"}}),
+        );
+        cloud_view["attempt_id"] = serde_json::json!(lane.attempt_id);
+        lane.cloud_view.0 = Some(cloud_view);
+        let observation = match job {
             None => State::Submitting,
             Some(job) => match &job.state {
                 RemoteState::Submitting => State::Submitting,

@@ -255,12 +255,12 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         if let Some(reason) = row["reason"].as_str() {
             human.push_str(&format!("{}\n", plain_text(reason, usize::MAX)));
         }
-        if (row["result_path"].is_string()
+        if (!row["result_path"].is_null()
             || (row["host"].is_string()
                 && !matches!(state, "queued" | "starting" | "running" | "settling")))
             && let Ok(attempt) = id.parse()
         {
-            let target = if row["result_path"].is_string() {
+            let target = if !row["result_path"].is_null() {
                 lane_target(&row)
             } else {
                 None
@@ -2706,6 +2706,34 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         .any(|started| !matches!(started, run::Started::Refused { .. }))
     {
         return Ok(());
+    }
+    if let Some(seconds) = started.iter().find_map(|started| match started {
+        run::Started::Refused {
+            kind: run::RefusalKind::SetupLockTimeout { seconds },
+            ..
+        } => Some(*seconds),
+        _ => None,
+    }) {
+        return Err(run::RunError::SetupLockTimeout { seconds }.into());
+    }
+    if let Some((run, attempt, worktree)) = started.iter().find_map(|started| match started {
+        run::Started::Refused {
+            kind:
+                run::RefusalKind::RetainedImport {
+                    run,
+                    attempt,
+                    worktree,
+                },
+            ..
+        } => Some((*run, *attempt, worktree.clone())),
+        _ => None,
+    }) {
+        return Err(run::RunError::RetainedWriterImport {
+            run,
+            attempt,
+            worktree,
+        }
+        .into());
     }
     // Candidate preparation reports route exclusions as `route: detail` entries.
     // Promote pacing specifically; other preparation refusals remain in the receipt.

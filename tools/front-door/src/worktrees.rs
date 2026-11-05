@@ -132,10 +132,14 @@ enum Data {
 }
 
 pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
+    if matches!(command, Worktree::SessionList) {
+        return session_list(globals, workers);
+    }
     let name = match &command {
         Worktree::SeedBuild => "worktree seed-build",
         Worktree::Create { .. } => "worktree create",
         Worktree::List => "worktree list",
+        Worktree::SessionList => unreachable!(),
         Worktree::Remove(_) => "worktree remove",
     };
     let read_only = matches!(command, Worktree::List);
@@ -234,6 +238,7 @@ fn execute(
                     cancel,
                 )?),
                 Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
+                Worktree::SessionList => unreachable!(),
                 Worktree::Remove(mut args) => {
                     let upstream = if args.discard {
                         None
@@ -298,6 +303,49 @@ fn execute(
             })
         },
     )
+}
+
+/// The hook reads complete newline-delimited records even when its child
+/// deadline stops this command before the inventory is complete.
+fn session_list(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
+    use std::io::Write;
+    let result = (|| -> Result<(), Error> {
+        let resolved = roots::resolve(
+            globals,
+            roots::Workspace::Checkout,
+            roots::Product::Required,
+        )?;
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
+        let mut failed = false;
+        with_context(
+            &resolved.roots,
+            &resolved.home,
+            &resolved.project,
+            MUTATION_TIMEOUT,
+            workers,
+            |context, cancel| {
+                worktrees::list_streaming(context, cancel, |total, row| {
+                    if failed {
+                        return;
+                    }
+                    let event = match row {
+                        None => serde_json::json!({"total": total}),
+                        Some(row) => serde_json::json!({"worktree": row}),
+                    };
+                    failed = serde_json::to_writer(&mut output, &event).is_err()
+                        || output.write_all(b"\n").is_err()
+                        || output.flush().is_err();
+                })?;
+                Ok(())
+            },
+        )?;
+        if failed {
+            return Err(Error::GcObservation("cannot write worktree inventory"));
+        }
+        Ok(())
+    })();
+    if result.is_ok() { 0 } else { 1 }
 }
 
 #[derive(Serialize, Default)]
@@ -536,6 +584,16 @@ fn gc_data_summary(data: &GcData) -> String {
         {
             human.push_str(&format!("{} {}\n", output.reason, output.path.display()));
         }
+        for output in project
+            .idle_output
+            .iter()
+            .filter(|entry| entry.reason == "would_remove")
+        {
+            human.push_str(&format!(
+                "would reclaim idle output {}\n",
+                output.path.display()
+            ));
+        }
     }
     for path in &data.unobserved_projects {
         human.push_str(&format!("unobserved project {}\n", path.display()));
@@ -641,7 +699,7 @@ fn gc_project(
                         .join("worktrees")
                         .join(context.binding.project_id().to_string()),
                 )?,
-                lanes: worktrees::list(context, cancel)?,
+                lanes: worktrees::list_for_gc(context, cancel)?,
             })
         },
     )
@@ -1014,10 +1072,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     for project in &mut projects {
         let settings = config
             .gc
-            .projects
-            .get(&project.binding.project_id().to_string())
-            .cloned()
-            .unwrap_or_default();
+            .project_settings(&project.binding.project_id().to_string(), &project.path);
         let cleanup = with_context_mode(
             &roots,
             &home,
@@ -1085,7 +1140,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     .wall_now()
                     .map(|now| i128::from(now.as_micros()) * 1_000)
                     .map_err(|_| Error::Budget)?;
-                let mut report = worktrees::collect(
+                let mut report = worktrees::collect_lazy(
                     context,
                     &project.lanes,
                     &worktrees::WorktreeGcPolicy {
@@ -1513,6 +1568,23 @@ mod gc_preview_tests {
             let json = serde_json::to_value(&data).unwrap_or_default();
             assert_eq!(json["provider_state"]["expired_events"], 3);
         }
+    }
+    #[test]
+    fn gc_preview_names_idle_output_and_why_it_qualifies() {
+        let mut data = GcData::default();
+        let mut project = worktrees::WorktreeGcReport::default();
+        project.idle_output.push(worktrees::OutputEntry {
+            path: "/checkout/target".into(),
+            removed: false,
+            reason: "would_remove".into(),
+        });
+        data.worktree_cleanup.push(project);
+        assert!(gc_data_summary(&data).contains("would reclaim idle output /checkout/target"));
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(
+            json["worktree_cleanup"][0]["idle_output"][0]["reason"],
+            "would_remove"
+        );
     }
     #[test]
     fn gc_default_output_aggregates_routine_rows_and_keeps_exceptions() {

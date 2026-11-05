@@ -333,6 +333,71 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     );
     assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("no open contribution binding"));
     let landed = json(&output)?;
+    let projected = landed["data"]["lanes"]
+        .as_array()
+        .ok_or("land lane evidence unavailable")?;
+    for id in &ids {
+        let lane = projected
+            .iter()
+            .find(|lane| lane["attempt_id"] == id.as_str())
+            .ok_or("missing projected land lane")?;
+        let record = Service::new(&store).status(id.parse()?, &call)?;
+        let (state, _) = provenant_records::wire::LaneRow::state_and_reason(&record.state);
+        assert_eq!(lane["run_id"], record.run_id.to_string());
+        assert_eq!(lane["task_id"], record.task_id.to_string());
+        assert_eq!(lane["state"], state);
+        assert_eq!(lane["retry_of"], serde_json::json!(record.retry_of));
+    }
+    let fixture_id = &ids[0];
+    let land_lane = projected
+        .iter()
+        .find(|lane| lane["attempt_id"] == fixture_id.as_str())
+        .ok_or("land fixture lane")?;
+    let list = json(&command(
+        &landing.rig,
+        &["lanes", "--all", "--id", fixture_id, "--json"],
+    )?)?;
+    let status_view = json(&command(&landing.rig, &["status", fixture_id, "--json"])?)?;
+    let output_view = json(&command(
+        &landing.rig,
+        &["output", fixture_id, "--part", "prompt", "--json"],
+    )?)?;
+    let cancel_view = json(&command(
+        &landing.rig,
+        &[
+            "cancel",
+            fixture_id,
+            "--operation-id",
+            "land-fixture-cancel",
+            "--json",
+        ],
+    )?)?;
+    for field in [
+        "run_id",
+        "task_id",
+        "attempt_id",
+        "state",
+        "cause",
+        "retry_of",
+        "superseded_by",
+    ] {
+        assert_eq!(
+            list["data"]["lanes"][0][field], land_lane[field],
+            "lanes {field}"
+        );
+        assert_eq!(
+            status_view["data"]["lanes"][0][field], land_lane[field],
+            "status {field}"
+        );
+        assert_eq!(
+            output_view["data"][field], land_lane[field],
+            "output {field}"
+        );
+        assert_eq!(
+            cancel_view["data"]["lanes"][0][field], land_lane[field],
+            "cancel {field}"
+        );
+    }
     db.execute_batch("DROP TRIGGER reject_binding; DROP TRIGGER reject_binding_update;")?;
     assert_eq!(status(&landed, "worktree")?, "done", "{landed}");
     assert!(!landing.worktree.exists());

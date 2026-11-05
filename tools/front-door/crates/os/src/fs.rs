@@ -212,6 +212,7 @@ enum AtomicWritePhase {
 #[derive(Debug)]
 pub struct LockGuard {
     _file: File,
+    exclusive: bool,
 }
 impl LockGuard {
     /// Identity of the locked file, to compare with its directory entry: a
@@ -229,7 +230,10 @@ impl LockGuard {
     }
     #[doc(hidden)]
     pub fn from_handoff(file: File) -> Self {
-        Self { _file: file }
+        Self {
+            _file: file,
+            exclusive: false,
+        }
     }
 }
 
@@ -735,7 +739,12 @@ impl Directory {
         }
         loop {
             match os::try_flock(&file, mode) {
-                Ok(()) => return Ok(ForeignLock::Acquired(LockGuard { _file: file })),
+                Ok(()) => {
+                    return Ok(ForeignLock::Acquired(LockGuard {
+                        _file: file,
+                        exclusive: false,
+                    }));
+                }
                 Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
                     return Ok(ForeignLock::Held);
                 }
@@ -794,7 +803,12 @@ impl Directory {
                     if cancel.is_cancelled() {
                         return Err(FsError::Cancelled { path });
                     }
-                    return Ok(LockGuard { _file: file });
+                    let guard = LockGuard {
+                        _file: file,
+                        exclusive: mode == LockMode::Exclusive,
+                    };
+                    self.verify_held_lock(name, &guard)?;
+                    return Ok(guard);
                 }
                 Err(source)
                     if source.kind() == io::ErrorKind::WouldBlock
@@ -854,7 +868,12 @@ impl Directory {
                     if cancel.is_cancelled() {
                         return Err(FsError::Cancelled { path });
                     }
-                    return Ok(LockGuard { _file: file });
+                    let guard = LockGuard {
+                        _file: file,
+                        exclusive: mode == LockMode::Exclusive,
+                    };
+                    self.verify_held_lock(name, &guard)?;
+                    return Ok(guard);
                 }
                 Err(source)
                     if source.kind() == io::ErrorKind::WouldBlock
@@ -870,6 +889,37 @@ impl Directory {
             }
             os::wait(remaining.min(Duration::from_millis(5)));
         }
+    }
+    fn verify_held_lock(&self, name: &OsStr, guard: &LockGuard) -> Result<()> {
+        let held = guard.metadata()?;
+        let named = self.metadata_at(name, false).map_err(|error| {
+            if error.is_not_found() {
+                FsError::RaceRefused { name: name.into() }
+            } else {
+                error
+            }
+        })?;
+        if held.links != 1 || !held.same_identity(&named) {
+            return Err(FsError::RaceRefused { name: name.into() });
+        }
+        Ok(())
+    }
+
+    /// Retire an owner lock while holding it. Call this only after all data
+    /// protected by the lock has been removed, as a final operation under it.
+    /// Waiters verify their lock identity after acquisition and refuse stale inodes.
+    pub fn retire_owner_lock(&self, name: &OsStr, guard: &LockGuard) -> Result<()> {
+        let name = component(name)?;
+        if !name.as_bytes().ends_with(b".lock") {
+            return Err(FsError::InvalidLockName { name: name.into() });
+        }
+        if !guard.exclusive {
+            return Err(FsError::RaceRefused { name: name.into() });
+        }
+        self.verify_held_lock(name, guard)?;
+        os::unlink(&self.file, name, false)
+            .map_err(error("unlinkat owner lock", &self.path.join(name)))?;
+        self.sync()
     }
     /// Exclusive create, mode 0600 subject to umask, O_NOFOLLOW | O_CLOEXEC.
     pub fn create_new(&self, name: &OsStr) -> Result<FileHandle> {

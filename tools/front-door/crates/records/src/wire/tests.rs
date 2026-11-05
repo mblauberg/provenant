@@ -4,10 +4,14 @@ use serde_json::json;
 
 fn row() -> LaneRow {
     LaneRow {
+        project_id: "9".repeat(32),
         run_id: "0".repeat(32),
         task_id: "1".repeat(32),
         attempt_id: "2".repeat(32),
         attempt_number: 1,
+        retry_of: None,
+        superseded_by: None,
+        cause: None,
         state: "running".into(),
         exit_code: None,
         reason: None,
@@ -15,6 +19,7 @@ fn row() -> LaneRow {
         lane_class: Some("writer".into()),
         waiting_for: None,
         requested_route: json!({"kind": "named", "name": "utility"}),
+        host: None,
         resolved_route: Some(Value::Null),
         applied_route: Value::Null,
         skipped_routes: json!([]),
@@ -26,9 +31,10 @@ fn row() -> LaneRow {
         finished_at: Value::Null,
         last_output_at: Value::Null,
         runtime_deadline: Value::Null,
-        overdue: false,
-        stale: false,
+        overdue: Some(false),
+        stale: Some(false),
         partial_signals: json!([]),
+        usage: json!({}),
         delivery_id: None,
         write_grants: json!([]),
         read_only_writable: json!([]),
@@ -45,6 +51,8 @@ fn row() -> LaneRow {
         provider_seconds: None,
         handoff: None,
         provider_error: None,
+        cloud: None,
+        cloud_state: None,
     }
 }
 
@@ -86,6 +94,9 @@ fn lane_rows_validate_with_and_without_optional_members() {
     }
     let mut full = row();
     full.state = "terminal".into();
+    full.retry_of = Some("3".repeat(32));
+    full.superseded_by = Some("4".repeat(32));
+    full.cause = Some(crate::run::SettlementReason::DeclaredStop);
     full.exit_code = Some(0);
     full.reason = Some("done".into());
     full.settlement = Some(LaneSettlement {
@@ -98,6 +109,8 @@ fn lane_rows_validate_with_and_without_optional_members() {
     full.provider_seconds = Some(1.5);
     full.handoff = Some(Value::Null);
     full.provider_error = Some("failed".into());
+    full.cloud = Some(json!({"target": "verify"}));
+    full.cloud_state = Some("cloud_passed".into());
     full.transcript = Some(LaneTranscript {
         adapter: "codex".into(),
         session: "s".into(),
@@ -107,6 +120,9 @@ fn lane_rows_validate_with_and_without_optional_members() {
     let value = serde_json::to_value(&full).unwrap();
     assert_eq!(value["requested_priority"], 10);
     assert_eq!(value["title"], "Review\nchanges");
+    assert_eq!(value["cause"], "declared_stop");
+    assert_eq!(value["retry_of"], "3".repeat(32));
+    assert_eq!(value["superseded_by"], "4".repeat(32));
 }
 
 #[test]
@@ -145,24 +161,20 @@ fn lanes_and_status_share_one_list_type() {
 
 fn chunk() -> OutputChunk {
     OutputChunk {
-        attempt_id: "2".repeat(32),
-        state: "terminal".into(),
-        reason: None,
+        lane: row(),
         part: "result".into(),
         offset: 0,
         next_offset: 5,
-        length: 5,
+        length: Some(5),
         eof: true,
-        clipped: false,
-        complete: true,
+        clipped: Some(false),
+        complete: Some(true),
         digest: Some(format!("sha256:{}", "a".repeat(64))),
         bytes: ChunkBytes::Utf8("hello".into()),
         tail: None,
         tail_clamped: None,
         changed_files: None,
         changed_files_total: None,
-        provider_error: None,
-        result_path: None,
         selected: None,
     }
 }
@@ -170,26 +182,24 @@ fn chunk() -> OutputChunk {
 #[test]
 fn every_output_mode_matches_exactly_one_variant() {
     let schema = output::output_data_schema();
-    let id = "2".repeat(32);
     let modes = vec![
         OutputData::Trace {
-            attempt_id: id.clone(),
+            lane: row(),
             trace: json!({"x": 1}),
             grants: json!({}),
         },
         OutputData::Path {
-            attempt_id: id.clone(),
+            lane: row(),
             part: "result".into(),
-            path: "/s/result.md".into(),
+            path: crate::StructuredPathWire::from_path(std::path::Path::new("/s/result.md"))
+                .unwrap(),
         },
         OutputData::Events {
-            attempt_id: id.clone(),
+            lane: row(),
             events: vec![json!({"revision": 1})],
         },
         OutputData::Receipt(Box::new(ReviewerReceipt {
-            run_id: id.clone(),
-            task_id: id.clone(),
-            attempt_id: id.clone(),
+            lane: row(),
             adapter: json!("codex"),
             model: json!("m"),
             effort: Value::Null,
@@ -214,10 +224,12 @@ fn chunk_optional_members_and_encodings() {
     full.bytes = ChunkBytes::Base64("//8=".into());
     full.tail = Some(20);
     full.tail_clamped = Some(true);
-    full.changed_files = Some(json!(["a.rs"]));
+    full.changed_files =
+        Some(json!([{"kind":"relative", "relative":{"encoding":"utf8", "path":"a.rs"}}]));
     full.changed_files_total = Some(json!(1));
-    full.provider_error = Some(None);
-    full.result_path = Some(Some("/s/result.md".into()));
+    full.lane.provider_error = Some("failed".into());
+    full.lane.result_path =
+        json!(crate::StructuredPathWire::from_path(std::path::Path::new("/s/result.md")).unwrap());
     full.selected = Some(json!({"attempt": "x"}));
     accepted(&schema, &OutputData::Chunk(Box::new(full)));
     let plain = serde_json::to_value(chunk()).unwrap();
@@ -255,20 +267,26 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         );
         rows.push(CancelRow::Receipt {
             attempt_id: id.clone(),
+            host: None,
             receipt,
         });
     }
     assert_eq!(names, CANCEL_STATES);
     rows.push(CancelRow::Error {
         attempt_id: id.clone(),
+        host: None,
         error: CancelRowError {
             code: "NOT_FOUND".into(),
             message: "gone".into(),
+            cause: None,
+            repair: None,
+            diagnostic: None,
         },
     });
     let mut data = CancelData {
         operation_id: "op-1".into(),
         receipts: rows,
+        host: None,
         recovered: None,
         lanes: None,
         condition_met: None,
@@ -286,6 +304,7 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         attempt_id: id,
         found: cancel::ReconciledWire::Settling {
             phase: "delivering".into(),
+            blocking_reason: None,
         },
     }]);
     data.lanes = Some(vec![row()]);
@@ -298,10 +317,11 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
         json!({"state": "queued"}),
         json!({"state": "held"}),
         json!({"state": "deadline_stop"}),
-        json!({"state": "settling", "phase": "delivery"}),
+        json!({"state": "settling", "phase": "delivery", "blocking_reason": null}),
+        json!({"state": "abandoned", "reason": "released"}),
         json!({"state": "finished"}),
         json!({"state": "temporary_removed"}),
-        json!({"state": "temporary_retained", "path": "/tmp/a", "reason": "retained"}),
+        json!({"state": "temporary_retained", "path": {"kind":"path", "root":"/", "relative":{"encoding":"utf8", "path":"tmp/a"}}, "reason": "retained"}),
         json!({"state": "withdrawn"}),
         json!({"state": "escaped", "pids": [123]}),
         json!({"state": "uncertain", "reason": {"kind": "no_launch_summary"}}),
@@ -442,10 +462,9 @@ fn path_encoding_and_provider_seconds_match_the_runtime_forms() {
 fn mcp_results_validate_by_tag_and_allow_unknown_members() {
     let run = mcp::run_result_schema();
     let id = "5".repeat(32);
-    let attempt = json!({
-        "attempt_id": id, "run_id": id, "task_id": id, "state": {"state": "running"},
-        "provider_seconds": 1.5, "future_member": true
-    });
+    let mut attempt = serde_json::to_value(row()).unwrap();
+    attempt["provider_seconds"] = json!(1.5);
+    attempt["future_member"] = json!(true);
     for value in [
         json!({"result": "status", "attempt": attempt}),
         json!({"result": "cancel", "attempt": attempt}),
@@ -471,28 +490,28 @@ fn mcp_results_validate_by_tag_and_allow_unknown_members() {
 
     let out = mcp::output_result_schema();
     let target = json!({"attempt": id, "host": null});
-    validate(&out, &json!({
+    let mut chunk = json!({
         "kind": "chunk", "target": target, "part": "result", "state": "terminal", "reason": null,
         "offset": 0, "next_offset": 2, "eof": true, "digest": "sha256:00",
         "bytes": {"encoding": "utf8", "data": "ok"}
-    })).unwrap();
-    validate(
-        &out,
-        &json!({
-            "kind": "artifact", "target": target, "digest": "sha256:00",
-            "artifact": {"path": {"encoding": "utf8", "path": "result.md"}, "digest": null},
-            "bytes": {"encoding": "base64", "data": "AA=="}
-        }),
-    )
-    .unwrap();
-    rejected(
-        &out,
-        json!({
-            "kind": "artifact", "target": target, "digest": "sha256:00",
-            "artifact": {"path": {"encoding": "utf8", "path": "result.md"}, "digest": null},
-            "bytes": {"encoding": "base64", "data": "%%%"}
-        }),
-    );
+    });
+    chunk
+        .as_object_mut()
+        .unwrap()
+        .extend(attempt.as_object().unwrap().clone());
+    validate(&out, &chunk).unwrap();
+    let mut artifact = json!({
+        "kind": "artifact", "target": target, "digest": "sha256:00",
+        "artifact": {"path": {"kind":"relative", "relative":{"encoding":"utf8", "path":"result.md"}}, "digest": null},
+        "bytes": {"encoding": "base64", "data": "AA=="}
+    });
+    artifact
+        .as_object_mut()
+        .unwrap()
+        .extend(attempt.as_object().unwrap().clone());
+    validate(&out, &artifact).unwrap();
+    artifact["bytes"]["data"] = json!("%%%");
+    rejected(&out, artifact);
 }
 
 #[test]

@@ -855,6 +855,17 @@ mod tests {
             (idle.kind, idle.min, idle.max, &idle.default),
             ("int", Some(1), Some(3650), &json!(7))
         );
+        let graph_retention = field("gc.graph_checkpoint_days");
+        assert_eq!(graph_retention.source, provenant_config::Layer::Default);
+        assert_eq!(
+            (
+                graph_retention.kind,
+                graph_retention.min,
+                graph_retention.max,
+                &graph_retention.default
+            ),
+            ("int", Some(1), Some(3650), &json!(90))
+        );
         assert!(
             schema.fields.iter().any(
                 |field| field.path == "domains.quota.polling_intervals.{adapter}.timer_seconds"

@@ -998,6 +998,9 @@ pub struct AttemptRecord {
     /// Cloud evidence projected by the host; never a local process observation.
     #[serde(skip)]
     pub cloud_observation: Transient<Option<CloudObservation>>,
+    /// Redacted cloud job details observed by the host.
+    #[serde(skip)]
+    pub cloud_view: Transient<Option<serde_json::Value>>,
     /// Transient guardian observation. It is carried over live peer reads but
     /// is never stored in the durable attempt record.
     #[serde(skip)]

@@ -2310,6 +2310,9 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
         ],
     )?;
     assert_eq!(created["command"], "worktree create");
+    assert!(created["data"].is_object());
+    assert_eq!(created["data"]["path"]["kind"], "path");
+    assert_eq!(created["data"]["path"]["relative"]["encoding"], "utf8");
     assert_eq!(created["data"]["head"], base);
     assert!(rig.project.join(".worktrees/feature-topic/.git").is_file());
     let listed = ok(&rig, &["worktree", "list", "--json"])?;
@@ -2317,6 +2320,11 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
         .as_array()
         .ok_or("worktree list is not an array")?;
     assert_eq!(trees.len(), 2);
+    assert!(
+        trees
+            .iter()
+            .any(|tree| tree["path"] == created["data"]["path"])
+    );
     assert!(
         trees
             .iter()

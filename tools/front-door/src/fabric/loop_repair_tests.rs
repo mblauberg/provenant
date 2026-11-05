@@ -37,7 +37,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 .observe_or_start(key, node, route, access, worktree, replay)
         }
     }
-    let fixture = SettlementFixture::resumed()?;
+    let fixture = SettlementFixture::settled_fixture("graph-round-one", Some("loop-settlement"))?;
     let factory = Factory {
         context: Context::open(
             fixture.roots.clone(),
@@ -69,13 +69,16 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
     let second = provenant_run::Service::new(&fixture.store).dispatch(
         provenant_run::DispatchRequest {
             chair: None,
-            operation_id: "loop-round-two".parse()?,
+            operation_id: "graph-round-two".parse()?,
             concurrency: 1,
             lane_depth: 1,
             parent_attempt: None,
             tasks: vec![provenant_run::DispatchTask {
                 cloud: None,
-                context: None,
+                context: Some(provenant_records::run::WorkContext {
+                    graph_id: Some("loop-settlement".into()),
+                    ..Default::default()
+                }),
                 build_heavy: false,
                 title: None,
                 task_id: TaskId::from_bytes([71; 16]),

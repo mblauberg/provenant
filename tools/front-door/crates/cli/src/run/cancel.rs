@@ -50,6 +50,7 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     "no matching attempts",
                 ));
             }
+            let selected_ids = selected.clone();
             let target = &targets[0];
             let resolved = targets::local(&session, target, &call)?;
             let bound = match (resolved.attempt, resolved.task) {
@@ -119,7 +120,7 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     Err(fail) => {
                         status = Status::Failed;
                         human.push_str(&format!("{id} error: {}\n", fail.message));
-                        json!({ "attempt_id": id, "error": { "code": fail.kind.code(), "message": fail.message } })
+                        json!({ "attempt_id": id, "error": command_error(&fail) })
                     }
                 };
                 receipts.push(row);
@@ -156,7 +157,13 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                                 status = Status::Failed;
                             }
                             human.push_str(&format!("{id} {}\n", reconcile_summary(state)));
-                            rows.push(json!({ "attempt_id": id, "found": state }));
+                            let mut found = json!(state);
+                            if let run::Reconciled::TemporaryRetained { path, .. } = state {
+                                found["path"] = json!(
+                                    provenant_records::StructuredPathWire::from_path(path).ok()
+                                );
+                            }
+                            rows.push(json!({ "attempt_id": id, "found": found }));
                         }
                         data["recovered"] = Value::Array(rows);
                     }
@@ -184,6 +191,22 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                 )?;
                 apply_cancel_wait(&mut data, &lanes, timed_out, &mut status);
                 human.push_str(&rendered);
+            } else {
+                let lanes = selected_ids
+                    .into_iter()
+                    .map(|id| session.service().status(id, &call))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let waits = session.store.lane_waits(&lanes, &call);
+                let successors = policy_successors(&session, &lanes, &call)?;
+                let (rendered, _) = render_lanes_with_lineage(
+                    &lanes,
+                    &waits,
+                    None,
+                    session.context.state_root.as_path(),
+                    None,
+                    &successors,
+                );
+                data["lanes"] = rendered["lanes"].clone();
             }
             Ok((data, human))
         })(),

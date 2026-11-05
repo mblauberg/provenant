@@ -10,24 +10,1024 @@
             {
               "additionalProperties": false,
               "properties": {
+                "account": {},
+                "applied_route": {},
                 "attempt_id": {
                   "type": "string"
                 },
+                "attempt_number": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "cache_read_share": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cause": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "completed",
+                        "handoff_missing",
+                        "declared_stop",
+                        "provider_stop",
+                        "uncommitted_work",
+                        "pre_launch_refusal",
+                        "cancelled",
+                        "lost",
+                        "unsettled",
+                        "failed"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cloud": {
+                  "type": "object"
+                },
+                "cloud_state": {
+                  "type": "string"
+                },
+                "continuation": {},
+                "delivery": {},
+                "delivery_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "exit_code": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "finished_at": {},
+                "git_grants_digest": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "grants": {},
-                "trace": {}
+                "handoff": {},
+                "head": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "host": {
+                  "type": "string"
+                },
+                "lane_class": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "last_output_at": {},
+                "observed_route": {},
+                "overdue": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "partial_signals": {},
+                "planner_fallback": {},
+                "priority": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "project_id": {
+                  "type": "string"
+                },
+                "protected_paths": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "oneOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "root"
+                              }
+                            },
+                            "required": [
+                              "kind"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "relative"
+                              },
+                              "relative": {
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "relative"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "path"
+                              },
+                              "relative": {
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              },
+                              "root": {
+                                "const": "/"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "root",
+                              "relative"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "provider_error": {
+                  "type": "string"
+                },
+                "provider_seconds": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "queued_at": {},
+                "read_only_writable": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "root"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "relative"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "path"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "root": {
+                                    "const": "/"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "root",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requested_priority": {
+                  "type": "integer"
+                },
+                "requested_route": {},
+                "resolved_route": {},
+                "result_path": {
+                  "anyOf": [
+                    {
+                      "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "root"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "relative"
+                            },
+                            "relative": {
+                              "properties": {
+                                "encoding": {
+                                  "enum": [
+                                    "utf8",
+                                    "native_bytes"
+                                  ],
+                                  "type": "string"
+                                },
+                                "path": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "encoding",
+                                "path"
+                              ],
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "relative"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "path"
+                            },
+                            "relative": {
+                              "properties": {
+                                "encoding": {
+                                  "enum": [
+                                    "utf8",
+                                    "native_bytes"
+                                  ],
+                                  "type": "string"
+                                },
+                                "path": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "encoding",
+                                "path"
+                              ],
+                              "type": "object"
+                            },
+                            "root": {
+                              "const": "/"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "root",
+                            "relative"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retry_of": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "runtime_deadline": {},
+                "selected": {},
+                "settlement": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "skipped_routes": {},
+                "stale": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "started_at": {},
+                "state": {
+                  "type": "string"
+                },
+                "superseded_by": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "tail": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tail_clamped": {
+                  "type": "boolean"
+                },
+                "tail_text": {
+                  "type": "string"
+                },
+                "task_id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "to": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "root"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "relative"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "relative"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "path"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        },
+                        "root": {
+                          "const": "/"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "root",
+                        "relative"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "trace": {},
+                "transcript": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "adapter": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "root"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "relative"
+                                    },
+                                    "relative": {
+                                      "properties": {
+                                        "encoding": {
+                                          "enum": [
+                                            "utf8",
+                                            "native_bytes"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "encoding",
+                                        "path"
+                                      ],
+                                      "type": "object"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "relative"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "path"
+                                    },
+                                    "relative": {
+                                      "properties": {
+                                        "encoding": {
+                                          "enum": [
+                                            "utf8",
+                                            "native_bytes"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "encoding",
+                                        "path"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "root": {
+                                      "const": "/"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "root",
+                                    "relative"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "session": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "adapter",
+                        "session",
+                        "path"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "usage": {},
+                "waiting_for": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "write_grants": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "properties": {
+                          "path": {
+                            "anyOf": [
+                              {
+                                "oneOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "root"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "relative"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "path"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "root": {
+                                        "const": "/"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "root",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "path"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "written": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
               },
               "required": [
-                "attempt_id",
                 "trace",
-                "grants"
+                "grants",
+                "project_id",
+                "run_id",
+                "task_id",
+                "attempt_id",
+                "attempt_number",
+                "retry_of",
+                "superseded_by",
+                "cause",
+                "state",
+                "exit_code",
+                "reason",
+                "settlement",
+                "lane_class",
+                "waiting_for",
+                "requested_route",
+                "applied_route",
+                "skipped_routes",
+                "account",
+                "observed_route",
+                "queued_at",
+                "started_at",
+                "priority",
+                "finished_at",
+                "last_output_at",
+                "runtime_deadline",
+                "overdue",
+                "stale",
+                "partial_signals",
+                "usage",
+                "delivery_id",
+                "write_grants",
+                "read_only_writable",
+                "git_grants_digest",
+                "head",
+                "protected_paths",
+                "delivery",
+                "continuation",
+                "cache_read_share",
+                "result_path",
+                "transcript"
               ],
               "type": "object"
             },
             {
               "additionalProperties": false,
               "properties": {
+                "account": {},
+                "applied_route": {},
                 "attempt_id": {
                   "type": "string"
+                },
+                "attempt_number": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "cache_read_share": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cause": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "completed",
+                        "handoff_missing",
+                        "declared_stop",
+                        "provider_stop",
+                        "uncommitted_work",
+                        "pre_launch_refusal",
+                        "cancelled",
+                        "lost",
+                        "unsettled",
+                        "failed"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cloud": {
+                  "type": "object"
+                },
+                "cloud_state": {
+                  "type": "string"
+                },
+                "continuation": {},
+                "delivery": {},
+                "delivery_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "exit_code": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "finished_at": {},
+                "git_grants_digest": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "handoff": {},
+                "head": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "host": {
+                  "type": "string"
+                },
+                "lane_class": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "last_output_at": {},
+                "observed_route": {},
+                "overdue": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "part": {
                   "enum": [
@@ -38,62 +1038,2643 @@
                   ],
                   "type": "string"
                 },
+                "partial_signals": {},
                 "path": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "root"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "relative"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "relative"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "path"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        },
+                        "root": {
+                          "const": "/"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "root",
+                        "relative"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "planner_fallback": {},
+                "priority": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "project_id": {
                   "type": "string"
+                },
+                "protected_paths": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "oneOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "root"
+                              }
+                            },
+                            "required": [
+                              "kind"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "relative"
+                              },
+                              "relative": {
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "relative"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "path"
+                              },
+                              "relative": {
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              },
+                              "root": {
+                                "const": "/"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "root",
+                              "relative"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "provider_error": {
+                  "type": "string"
+                },
+                "provider_seconds": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "queued_at": {},
+                "read_only_writable": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "root"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "relative"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "path"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "root": {
+                                    "const": "/"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "root",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requested_priority": {
+                  "type": "integer"
+                },
+                "requested_route": {},
+                "resolved_route": {},
+                "result_path": {
+                  "anyOf": [
+                    {
+                      "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "root"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "relative"
+                            },
+                            "relative": {
+                              "properties": {
+                                "encoding": {
+                                  "enum": [
+                                    "utf8",
+                                    "native_bytes"
+                                  ],
+                                  "type": "string"
+                                },
+                                "path": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "encoding",
+                                "path"
+                              ],
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "relative"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "path"
+                            },
+                            "relative": {
+                              "properties": {
+                                "encoding": {
+                                  "enum": [
+                                    "utf8",
+                                    "native_bytes"
+                                  ],
+                                  "type": "string"
+                                },
+                                "path": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "encoding",
+                                "path"
+                              ],
+                              "type": "object"
+                            },
+                            "root": {
+                              "const": "/"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "root",
+                            "relative"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retry_of": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "runtime_deadline": {},
+                "selected": {},
+                "settlement": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "skipped_routes": {},
+                "stale": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "started_at": {},
+                "state": {
+                  "type": "string"
+                },
+                "superseded_by": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "tail": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tail_clamped": {
+                  "type": "boolean"
+                },
+                "tail_text": {
+                  "type": "string"
+                },
+                "task_id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "to": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "root"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "relative"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "relative"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "path"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        },
+                        "root": {
+                          "const": "/"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "root",
+                        "relative"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "transcript": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "adapter": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "root"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "relative"
+                                    },
+                                    "relative": {
+                                      "properties": {
+                                        "encoding": {
+                                          "enum": [
+                                            "utf8",
+                                            "native_bytes"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "encoding",
+                                        "path"
+                                      ],
+                                      "type": "object"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "relative"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "path"
+                                    },
+                                    "relative": {
+                                      "properties": {
+                                        "encoding": {
+                                          "enum": [
+                                            "utf8",
+                                            "native_bytes"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "encoding",
+                                        "path"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "root": {
+                                      "const": "/"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "root",
+                                    "relative"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "session": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "adapter",
+                        "session",
+                        "path"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "usage": {},
+                "waiting_for": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "write_grants": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "properties": {
+                          "path": {
+                            "anyOf": [
+                              {
+                                "oneOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "root"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "relative"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "path"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "root": {
+                                        "const": "/"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "root",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "path"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "written": {
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
-                "attempt_id",
                 "part",
-                "path"
+                "path",
+                "project_id",
+                "run_id",
+                "task_id",
+                "attempt_id",
+                "attempt_number",
+                "retry_of",
+                "superseded_by",
+                "cause",
+                "state",
+                "exit_code",
+                "reason",
+                "settlement",
+                "lane_class",
+                "waiting_for",
+                "requested_route",
+                "applied_route",
+                "skipped_routes",
+                "account",
+                "observed_route",
+                "queued_at",
+                "started_at",
+                "priority",
+                "finished_at",
+                "last_output_at",
+                "runtime_deadline",
+                "overdue",
+                "stale",
+                "partial_signals",
+                "usage",
+                "delivery_id",
+                "write_grants",
+                "read_only_writable",
+                "git_grants_digest",
+                "head",
+                "protected_paths",
+                "delivery",
+                "continuation",
+                "cache_read_share",
+                "result_path",
+                "transcript"
               ],
               "type": "object"
             },
             {
               "additionalProperties": false,
               "properties": {
+                "account": {},
+                "applied_route": {},
                 "attempt_id": {
                   "type": "string"
+                },
+                "attempt_number": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "cache_read_share": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cause": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "completed",
+                        "handoff_missing",
+                        "declared_stop",
+                        "provider_stop",
+                        "uncommitted_work",
+                        "pre_launch_refusal",
+                        "cancelled",
+                        "lost",
+                        "unsettled",
+                        "failed"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cloud": {
+                  "type": "object"
+                },
+                "cloud_state": {
+                  "type": "string"
+                },
+                "continuation": {},
+                "delivery": {},
+                "delivery_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "events": {
                   "items": {},
                   "type": "array"
+                },
+                "exit_code": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "finished_at": {},
+                "git_grants_digest": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "handoff": {},
+                "head": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "host": {
+                  "type": "string"
+                },
+                "lane_class": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "last_output_at": {},
+                "observed_route": {},
+                "overdue": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "partial_signals": {},
+                "planner_fallback": {},
+                "priority": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "project_id": {
+                  "type": "string"
+                },
+                "protected_paths": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "oneOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "root"
+                              }
+                            },
+                            "required": [
+                              "kind"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "relative"
+                              },
+                              "relative": {
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "relative"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "path"
+                              },
+                              "relative": {
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              },
+                              "root": {
+                                "const": "/"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "root",
+                              "relative"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "provider_error": {
+                  "type": "string"
+                },
+                "provider_seconds": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "queued_at": {},
+                "read_only_writable": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "root"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "relative"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "path"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "root": {
+                                    "const": "/"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "root",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requested_priority": {
+                  "type": "integer"
+                },
+                "requested_route": {},
+                "resolved_route": {},
+                "result_path": {
+                  "anyOf": [
+                    {
+                      "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "root"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "relative"
+                            },
+                            "relative": {
+                              "properties": {
+                                "encoding": {
+                                  "enum": [
+                                    "utf8",
+                                    "native_bytes"
+                                  ],
+                                  "type": "string"
+                                },
+                                "path": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "encoding",
+                                "path"
+                              ],
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "relative"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "path"
+                            },
+                            "relative": {
+                              "properties": {
+                                "encoding": {
+                                  "enum": [
+                                    "utf8",
+                                    "native_bytes"
+                                  ],
+                                  "type": "string"
+                                },
+                                "path": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "encoding",
+                                "path"
+                              ],
+                              "type": "object"
+                            },
+                            "root": {
+                              "const": "/"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "root",
+                            "relative"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retry_of": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "runtime_deadline": {},
+                "selected": {},
+                "settlement": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "skipped_routes": {},
+                "stale": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "started_at": {},
+                "state": {
+                  "type": "string"
+                },
+                "superseded_by": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "tail": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tail_clamped": {
+                  "type": "boolean"
+                },
+                "tail_text": {
+                  "type": "string"
+                },
+                "task_id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "to": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "root"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "relative"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "relative"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "path"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        },
+                        "root": {
+                          "const": "/"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "root",
+                        "relative"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "transcript": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "adapter": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "root"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "relative"
+                                    },
+                                    "relative": {
+                                      "properties": {
+                                        "encoding": {
+                                          "enum": [
+                                            "utf8",
+                                            "native_bytes"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "encoding",
+                                        "path"
+                                      ],
+                                      "type": "object"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "relative"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "path"
+                                    },
+                                    "relative": {
+                                      "properties": {
+                                        "encoding": {
+                                          "enum": [
+                                            "utf8",
+                                            "native_bytes"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "encoding",
+                                        "path"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "root": {
+                                      "const": "/"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "root",
+                                    "relative"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "session": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "adapter",
+                        "session",
+                        "path"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "usage": {},
+                "waiting_for": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "write_grants": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "properties": {
+                          "path": {
+                            "anyOf": [
+                              {
+                                "oneOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "root"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "relative"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "path"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "root": {
+                                        "const": "/"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "root",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "path"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "written": {
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
+                "events",
+                "project_id",
+                "run_id",
+                "task_id",
                 "attempt_id",
-                "events"
+                "attempt_number",
+                "retry_of",
+                "superseded_by",
+                "cause",
+                "state",
+                "exit_code",
+                "reason",
+                "settlement",
+                "lane_class",
+                "waiting_for",
+                "requested_route",
+                "applied_route",
+                "skipped_routes",
+                "account",
+                "observed_route",
+                "queued_at",
+                "started_at",
+                "priority",
+                "finished_at",
+                "last_output_at",
+                "runtime_deadline",
+                "overdue",
+                "stale",
+                "partial_signals",
+                "usage",
+                "delivery_id",
+                "write_grants",
+                "read_only_writable",
+                "git_grants_digest",
+                "head",
+                "protected_paths",
+                "delivery",
+                "continuation",
+                "cache_read_share",
+                "result_path",
+                "transcript"
               ],
               "type": "object"
             },
             {
               "additionalProperties": false,
               "properties": {
+                "account": {},
                 "adapter": {},
+                "applied_route": {},
                 "attempt_id": {
                   "type": "string"
                 },
+                "attempt_number": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "cache_read_share": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cause": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "completed",
+                        "handoff_missing",
+                        "declared_stop",
+                        "provider_stop",
+                        "uncommitted_work",
+                        "pre_launch_refusal",
+                        "cancelled",
+                        "lost",
+                        "unsettled",
+                        "failed"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cloud": {
+                  "type": "object"
+                },
+                "cloud_state": {
+                  "type": "string"
+                },
+                "continuation": {},
+                "delivery": {},
+                "delivery_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "effort": {},
+                "exit_code": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "family": {},
+                "finished_at": {},
+                "git_grants_digest": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "handoff": {},
+                "head": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "host": {
+                  "type": "string"
+                },
+                "lane_class": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "last_output_at": {},
                 "model": {},
+                "observed_route": {},
+                "overdue": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "partial_signals": {},
+                "planner_fallback": {},
+                "priority": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "project_id": {
+                  "type": "string"
+                },
+                "protected_paths": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "oneOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "root"
+                              }
+                            },
+                            "required": [
+                              "kind"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "relative"
+                              },
+                              "relative": {
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "relative"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "path"
+                              },
+                              "relative": {
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              },
+                              "root": {
+                                "const": "/"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "root",
+                              "relative"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "provider_error": {
+                  "type": "string"
+                },
+                "provider_seconds": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "queued_at": {},
+                "read_only_writable": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "root"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "relative"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "path"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "root": {
+                                    "const": "/"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "root",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "receipt": {
                   "type": "string"
                 },
+                "requested_priority": {
+                  "type": "integer"
+                },
+                "requested_route": {},
                 "resolved_from": {},
+                "resolved_route": {},
+                "result_path": {
+                  "anyOf": [
+                    {
+                      "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "root"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "relative"
+                            },
+                            "relative": {
+                              "properties": {
+                                "encoding": {
+                                  "enum": [
+                                    "utf8",
+                                    "native_bytes"
+                                  ],
+                                  "type": "string"
+                                },
+                                "path": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "encoding",
+                                "path"
+                              ],
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "relative"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "path"
+                            },
+                            "relative": {
+                              "properties": {
+                                "encoding": {
+                                  "enum": [
+                                    "utf8",
+                                    "native_bytes"
+                                  ],
+                                  "type": "string"
+                                },
+                                "path": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "encoding",
+                                "path"
+                              ],
+                              "type": "object"
+                            },
+                            "root": {
+                              "const": "/"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "root",
+                            "relative"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retry_of": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "reviewer": {},
                 "reviewer_provenance": {},
                 "role": {},
                 "run_id": {
                   "type": "string"
                 },
+                "runtime_deadline": {},
+                "selected": {},
+                "settlement": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "skipped_routes": {},
+                "stale": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "started_at": {},
+                "state": {
+                  "type": "string"
+                },
+                "superseded_by": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "tail": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tail_clamped": {
+                  "type": "boolean"
+                },
+                "tail_text": {
+                  "type": "string"
+                },
                 "task_id": {
                   "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "to": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "root"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "relative"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "relative"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "path"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        },
+                        "root": {
+                          "const": "/"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "root",
+                        "relative"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "transcript": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "adapter": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "root"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "relative"
+                                    },
+                                    "relative": {
+                                      "properties": {
+                                        "encoding": {
+                                          "enum": [
+                                            "utf8",
+                                            "native_bytes"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "encoding",
+                                        "path"
+                                      ],
+                                      "type": "object"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "relative"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "path"
+                                    },
+                                    "relative": {
+                                      "properties": {
+                                        "encoding": {
+                                          "enum": [
+                                            "utf8",
+                                            "native_bytes"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "encoding",
+                                        "path"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "root": {
+                                      "const": "/"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "root",
+                                    "relative"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "session": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "adapter",
+                        "session",
+                        "path"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "usage": {},
+                "waiting_for": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "write_grants": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "properties": {
+                          "path": {
+                            "anyOf": [
+                              {
+                                "oneOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "root"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "relative"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "path"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "root": {
+                                        "const": "/"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "root",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "path"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "written": {
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
-                "run_id",
-                "task_id",
-                "attempt_id",
                 "adapter",
                 "model",
                 "effort",
@@ -102,15 +3683,61 @@
                 "resolved_from",
                 "receipt",
                 "reviewer",
-                "reviewer_provenance"
+                "reviewer_provenance",
+                "project_id",
+                "run_id",
+                "task_id",
+                "attempt_id",
+                "attempt_number",
+                "retry_of",
+                "superseded_by",
+                "cause",
+                "state",
+                "exit_code",
+                "reason",
+                "settlement",
+                "lane_class",
+                "waiting_for",
+                "requested_route",
+                "applied_route",
+                "skipped_routes",
+                "account",
+                "observed_route",
+                "queued_at",
+                "started_at",
+                "priority",
+                "finished_at",
+                "last_output_at",
+                "runtime_deadline",
+                "overdue",
+                "stale",
+                "partial_signals",
+                "usage",
+                "delivery_id",
+                "write_grants",
+                "read_only_writable",
+                "git_grants_digest",
+                "head",
+                "protected_paths",
+                "delivery",
+                "continuation",
+                "cache_read_share",
+                "result_path",
+                "transcript"
               ],
               "type": "object"
             },
             {
               "additionalProperties": false,
               "properties": {
+                "account": {},
+                "applied_route": {},
                 "attempt_id": {
                   "type": "string"
+                },
+                "attempt_number": {
+                  "minimum": 0,
+                  "type": "integer"
                 },
                 "bytes": {
                   "oneOf": [
@@ -149,13 +3776,177 @@
                     }
                   ]
                 },
-                "changed_files": {},
+                "cache_read_share": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cause": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "completed",
+                        "handoff_missing",
+                        "declared_stop",
+                        "provider_stop",
+                        "uncommitted_work",
+                        "pre_launch_refusal",
+                        "cancelled",
+                        "lost",
+                        "unsettled",
+                        "failed"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "changed_files": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "root"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "relative"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "path"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "root": {
+                                    "const": "/"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "root",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "changed_files_total": {},
                 "clipped": {
-                  "type": "boolean"
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cloud": {
+                  "type": "object"
+                },
+                "cloud_state": {
+                  "type": "string"
                 },
                 "complete": {
-                  "type": "boolean"
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "continuation": {},
+                "delivery": {},
+                "delivery_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "digest": {
                   "anyOf": [
@@ -170,17 +3961,81 @@
                 "eof": {
                   "type": "boolean"
                 },
+                "exit_code": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "finished_at": {},
+                "git_grants_digest": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "handoff": {},
+                "head": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "host": {
+                  "type": "string"
+                },
+                "lane_class": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "last_output_at": {},
                 "length": {
-                  "minimum": 0,
-                  "type": "integer"
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "next_offset": {
                   "minimum": 0,
                   "type": "integer"
                 },
+                "observed_route": {},
                 "offset": {
                   "minimum": 0,
                   "type": "integer"
+                },
+                "overdue": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "part": {
                   "enum": [
@@ -191,10 +4046,224 @@
                   ],
                   "type": "string"
                 },
-                "provider_error": {
+                "partial_signals": {},
+                "planner_fallback": {},
+                "priority": {
                   "anyOf": [
                     {
-                      "type": "string"
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "project_id": {
+                  "type": "string"
+                },
+                "protected_paths": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "oneOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "root"
+                              }
+                            },
+                            "required": [
+                              "kind"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "relative"
+                              },
+                              "relative": {
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "relative"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "path"
+                              },
+                              "relative": {
+                                "properties": {
+                                  "encoding": {
+                                    "enum": [
+                                      "utf8",
+                                      "native_bytes"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "encoding",
+                                  "path"
+                                ],
+                                "type": "object"
+                              },
+                              "root": {
+                                "const": "/"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "root",
+                              "relative"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "provider_error": {
+                  "type": "string"
+                },
+                "provider_seconds": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "queued_at": {},
+                "read_only_writable": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "root"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "relative"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "path"
+                                  },
+                                  "relative": {
+                                    "properties": {
+                                      "encoding": {
+                                        "enum": [
+                                          "utf8",
+                                          "native_bytes"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "encoding",
+                                      "path"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "root": {
+                                    "const": "/"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "root",
+                                  "relative"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "type": "array"
                     },
                     {
                       "type": "null"
@@ -211,7 +4280,103 @@
                     }
                   ]
                 },
+                "requested_priority": {
+                  "type": "integer"
+                },
+                "requested_route": {},
+                "resolved_route": {},
                 "result_path": {
+                  "anyOf": [
+                    {
+                      "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "root"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "relative"
+                            },
+                            "relative": {
+                              "properties": {
+                                "encoding": {
+                                  "enum": [
+                                    "utf8",
+                                    "native_bytes"
+                                  ],
+                                  "type": "string"
+                                },
+                                "path": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "encoding",
+                                "path"
+                              ],
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "relative"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "path"
+                            },
+                            "relative": {
+                              "properties": {
+                                "encoding": {
+                                  "enum": [
+                                    "utf8",
+                                    "native_bytes"
+                                  ],
+                                  "type": "string"
+                                },
+                                "path": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "encoding",
+                                "path"
+                              ],
+                              "type": "object"
+                            },
+                            "root": {
+                              "const": "/"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "root",
+                            "relative"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retry_of": {
                   "anyOf": [
                     {
                       "type": "string"
@@ -221,9 +4386,61 @@
                     }
                   ]
                 },
+                "run_id": {
+                  "type": "string"
+                },
+                "runtime_deadline": {},
                 "selected": {},
+                "settlement": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "skipped_routes": {},
+                "stale": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "started_at": {},
                 "state": {
                   "type": "string"
+                },
+                "superseded_by": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "tail": {
                   "minimum": 0,
@@ -231,12 +4448,341 @@
                 },
                 "tail_clamped": {
                   "type": "boolean"
+                },
+                "tail_text": {
+                  "type": "string"
+                },
+                "task_id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "to": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "root"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "relative"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "relative"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "path"
+                        },
+                        "relative": {
+                          "properties": {
+                            "encoding": {
+                              "enum": [
+                                "utf8",
+                                "native_bytes"
+                              ],
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "path"
+                          ],
+                          "type": "object"
+                        },
+                        "root": {
+                          "const": "/"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "root",
+                        "relative"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "transcript": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "adapter": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "root"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "relative"
+                                    },
+                                    "relative": {
+                                      "properties": {
+                                        "encoding": {
+                                          "enum": [
+                                            "utf8",
+                                            "native_bytes"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "encoding",
+                                        "path"
+                                      ],
+                                      "type": "object"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "relative"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "kind": {
+                                      "const": "path"
+                                    },
+                                    "relative": {
+                                      "properties": {
+                                        "encoding": {
+                                          "enum": [
+                                            "utf8",
+                                            "native_bytes"
+                                          ],
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "encoding",
+                                        "path"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "root": {
+                                      "const": "/"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "root",
+                                    "relative"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "session": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "adapter",
+                        "session",
+                        "path"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "usage": {},
+                "waiting_for": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "write_grants": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "properties": {
+                          "path": {
+                            "anyOf": [
+                              {
+                                "oneOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "root"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "relative"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "kind": {
+                                        "const": "path"
+                                      },
+                                      "relative": {
+                                        "properties": {
+                                          "encoding": {
+                                            "enum": [
+                                              "utf8",
+                                              "native_bytes"
+                                            ],
+                                            "type": "string"
+                                          },
+                                          "path": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "encoding",
+                                          "path"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "root": {
+                                        "const": "/"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "root",
+                                      "relative"
+                                    ],
+                                    "type": "object"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "path"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "written": {
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
-                "attempt_id",
-                "state",
-                "reason",
                 "part",
                 "offset",
                 "next_offset",
@@ -245,7 +4791,47 @@
                 "clipped",
                 "complete",
                 "digest",
-                "bytes"
+                "bytes",
+                "project_id",
+                "run_id",
+                "task_id",
+                "attempt_id",
+                "attempt_number",
+                "retry_of",
+                "superseded_by",
+                "cause",
+                "state",
+                "exit_code",
+                "reason",
+                "settlement",
+                "lane_class",
+                "waiting_for",
+                "requested_route",
+                "applied_route",
+                "skipped_routes",
+                "account",
+                "observed_route",
+                "queued_at",
+                "started_at",
+                "priority",
+                "finished_at",
+                "last_output_at",
+                "runtime_deadline",
+                "overdue",
+                "stale",
+                "partial_signals",
+                "usage",
+                "delivery_id",
+                "write_grants",
+                "read_only_writable",
+                "git_grants_digest",
+                "head",
+                "protected_paths",
+                "delivery",
+                "continuation",
+                "cache_read_share",
+                "result_path",
+                "transcript"
               ],
               "type": "object"
             }
@@ -289,6 +4875,9 @@
         {
           "additionalProperties": false,
           "properties": {
+            "category": {
+              "type": "string"
+            },
             "cause": {
               "anyOf": [
                 {
@@ -302,7 +4891,13 @@
             "code": {
               "type": "string"
             },
+            "detail": {
+              "type": "string"
+            },
             "message": {
+              "type": "string"
+            },
+            "next": {
               "type": "string"
             },
             "repair": {

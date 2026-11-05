@@ -8382,6 +8382,33 @@ fn lane_waits_report_only_the_running_lanes_own_disk_pause() -> TestResult {
 }
 
 #[test]
+fn setup_lock_wait_is_visible_only_while_the_launcher_holds_its_marker() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let id = starting(&store, &lane(120, true), &call)?;
+    let record = store.record(id, &call)?;
+    let attempt = store.attempt_dir(record.run_id, id, false)?;
+    let held = attempt.try_lock(
+        std::ffi::OsStr::new(crate::writer::SETUP_WAIT_LOCK),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let waits = store.lane_waits(std::slice::from_ref(&record), &call);
+    assert_eq!(waits.len(), 1);
+    assert_eq!(waits[0].attempt_id, id);
+    assert!(waits[0].waiting_for.contains("provenant-lane-setup.lock"));
+    drop(held);
+    let waits = store.lane_waits(&[record], &call);
+    assert!(
+        waits
+            .iter()
+            .all(|wait| !wait.waiting_for.contains("provenant-lane-setup.lock"))
+    );
+    Ok(())
+}
+
+#[test]
 fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
     use provenant_os::build_slots::WAIT_MARKER;
     let temp = tempfile::tempdir()?;

@@ -160,6 +160,7 @@ else:
     assert_eq!(lanes["data"]["cloud_jobs"][0]["state"]["state"], "finished");
     assert_eq!(lanes["data"]["cloud_jobs"][0]["passed"], true);
     assert_eq!(lanes["data"]["lanes"][0]["state"], "cloud_passed");
+    assert_eq!(lanes["data"]["lanes"][0]["cloud"]["passed"], true);
     let filtered = command(
         &rig,
         &["lanes", "--id", &id, "--state", "cloud_passed", "--json"],
@@ -171,6 +172,7 @@ else:
     assert_eq!(code(&waited), 0, "{waited:?}");
     let waited: Value = serde_json::from_slice(&waited.stdout.bytes)?;
     assert_eq!(waited["data"]["condition_met"], true);
+    assert_eq!(waited["data"]["lanes"][0]["cloud"]["target"], "verify");
     let status_wait = command(
         &rig,
         &[
@@ -202,9 +204,15 @@ else:
         "unknown"
     );
     assert_eq!(status["data"]["lanes"][0]["cloud_state"], "cloud_passed");
+    assert_eq!(
+        status["data"]["lanes"][0]["cloud"]["observed_model_status"],
+        "unknown"
+    );
     let output = command(&rig, &["output", &id, "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(output["data"]["state"], "cloud_passed");
+    assert_eq!(output["data"]["cloud_state"], "cloud_passed");
     assert_eq!(
         output["data"]["cloud"]["state"]["result"]["log_location"],
         "fixture-log"
