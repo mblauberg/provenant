@@ -1109,7 +1109,7 @@ mod tests {
         let names = lens_names(&panel);
         assert_eq!(names.len(), shape.reviewers.iter().map(|reviewer| reviewer.count).sum());
         assert_eq!(names.iter().copied().collect::<std::collections::BTreeSet<_>>().len(), names.len());
-        assert!(names.iter().all(|name| review.lenses.order.iter().any(|lens| lens == name)));
+        assert!(names.iter().all(|name| review.lenses.order.iter().any(|lens| lens.as_str() == *name)));
     }
 
     #[test]

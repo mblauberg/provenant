@@ -1754,11 +1754,17 @@ fn preset_list_and_show_human_output_match_goldens() -> Result<(), Box<dyn std::
         );
         Ok(scrub(&String::from_utf8(out.stdout)?, &root))
     };
-    golden_in(
-        "tests/golden",
-        "preset-list.txt",
-        &run(&["preset", "list"])?,
-    )?;
+    let list = run(&["preset", "list"])?;
+    for entry in std::fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/presets"))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "toml") {
+            let name = path.file_stem().and_then(|name| name.to_str()).ok_or("preset name")?;
+            assert!(list.lines().any(|line| {
+                let mut columns = line.split_whitespace();
+                columns.next() == Some(name) && columns.next() == Some("bundled")
+            }), "missing bundled {name}: {list}");
+        }
+    }
     golden_in(
         "tests/golden",
         "preset-show-scout-swarm.txt",

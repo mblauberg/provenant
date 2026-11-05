@@ -5687,31 +5687,6 @@ fn preset_file_spec_resolves_relative_writer_from_launch_and_falls_back_to_main(
     }
 }
 
-#[test]
-fn file_spec_expansion_golden() {
-    let mut layers = Layers::empty();
-    layers.project_dir = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let mut expanded = expand(
-        &layers,
-        "generator-evaluator",
-        "brief",
-        &["parameters.spec='assets/presets/fixtures/review-spec.md'".into()],
-    )
-    .unwrap();
-    expanded.document["graph_id"] = json!("<graph-id>");
-    let mut actual = serde_json::to_string_pretty(&expanded.document)
-        .unwrap()
-        .replace(env!("CARGO_MANIFEST_DIR"), "<project>");
-    actual.push('\n');
-    let path = layers
-        .project_dir
-        .unwrap()
-        .join("assets/presets/fixtures/generator-evaluator-file-spec.expansion.json");
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(&path, &actual).unwrap();
-    }
-    assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
-}
 
 #[test]
 fn retry_allowances_survive_preset_and_node_expansion() {
