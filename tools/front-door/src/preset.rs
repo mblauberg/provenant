@@ -3116,6 +3116,12 @@ impl StageBuilder<'_> {
                     false,
                 )
             };
+            if selects_review_lenses(entry)
+                && !decorate_wrapper
+                && let Some(group) = item.as_ref().and_then(|item| item.get("family_group"))
+            {
+                node["family_group"] = group.clone();
+            }
             // Siblings of a fan-out prefer different model families. It is a
             // preference only: every branch still runs.
             if let Some(flag) = distinct_families {

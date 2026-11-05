@@ -361,6 +361,7 @@ fn outputs(
     let mut finding_members = Vec::new();
     let mut truncation_header = None;
     let mut inherited_notices = Vec::new();
+    let mut family_notices = Vec::new();
     let partial = spec.min_successful.is_some() || spec.reduce_verdict;
     let unavailable = unavailable_with_wording(spec, checkpoint, positions, legacy);
     for export in &spec.exports {
@@ -373,17 +374,22 @@ fn outputs(
         let Some(source) = member.outputs.as_ref() else {
             continue;
         };
-        if spec.reduce_verdict
-            && member
-                .separation
-                .as_ref()
-                .is_some_and(|separation| separation.outcome == SeparationOutcome::Unavailable)
-            && selected.warnings.len() < MAX_WARNINGS
+        if member
+            .separation
+            .as_ref()
+            .is_some_and(|separation| separation.outcome == SeparationOutcome::Unavailable)
         {
-            selected.warnings.push(bounded(
-                &format!("{}: no separate model family was available", export.node),
+            let notice = bounded(
+                &format!(
+                    "{}: no separate model family was available; this review is not cross-family evidence",
+                    export.node
+                ),
                 WARNING_BYTES,
-            ));
+            );
+            if selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(notice.clone());
+            }
+            family_notices.push(notice);
         }
         for warning in source
             .warnings
@@ -564,7 +570,7 @@ fn outputs(
             })
         }
     };
-    if !unavailable.is_empty() || truncation_header.is_some() {
+    if !unavailable.is_empty() || truncation_header.is_some() || !family_notices.is_empty() {
         // The unavailable list leads and is bounded on its own, so a long
         // review body can never truncate it away.
         let mut headers = Vec::new();
@@ -575,6 +581,9 @@ fn outputs(
         };
         if let Some(notice) = truncation_header {
             headers.push(notice);
+        }
+        if !family_notices.is_empty() {
+            headers.push(family_notices.join("\n"));
         }
         if !unavailable.is_empty() {
             headers.push(format!(

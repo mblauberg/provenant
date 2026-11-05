@@ -422,8 +422,7 @@ fn review_rows(
                 "run_id": run_id,
                 "state": node.state,
                 "attempt_ref": attempt.and_then(|a| a.attempt_ref.as_deref()),
-                "substitution": node.attempts.iter().any(|a| a.review_substitution)
-                    || node.separation.as_ref().is_some_and(|separation| separation.outcome == provenant_fabric_runtime::graph::SeparationOutcome::Unavailable),
+                "substitution": review_substitution(node),
                 "separation": node.separation,
                 "verdict": node.outputs.as_ref().and_then(review_verdict),
                 "applied_route": applied_route,
@@ -431,6 +430,13 @@ fn review_rows(
             }))
         })
         .collect()
+}
+
+fn review_substitution(node: &provenant_fabric_runtime::graph::NodeProgress) -> bool {
+    node.attempts.iter().any(|a| a.review_substitution)
+        || node.separation.as_ref().is_some_and(|separation| {
+            separation.outcome == provenant_fabric_runtime::graph::SeparationOutcome::Unavailable
+        })
 }
 
 fn document_model_verdict(
@@ -520,6 +526,18 @@ pub(super) fn shell_path(path: &std::path::Path) -> String {
 mod tests {
     use super::{private_graph_directory_refusal, retry_collected_document};
     use std::path::Path;
+
+    #[test]
+    fn review_row_marks_unavailable_family_as_substitution() {
+        let mut node: provenant_fabric_runtime::graph::NodeProgress = serde_json::from_value(serde_json::json!({
+            "id":"lenses--lens-tests", "state":"succeeded", "worktree":null, "attempts":[],
+            "separation":{"strength":"prefer", "excluded":["openai"], "applied":"openai", "outcome":"unavailable"}
+        })).unwrap();
+        assert!(super::review_substitution(&node));
+        node.separation.as_mut().unwrap().outcome =
+            provenant_fabric_runtime::graph::SeparationOutcome::Separated;
+        assert!(!super::review_substitution(&node));
+    }
 
     #[test]
     fn review_exit_evidence_requires_a_valid_approval() {

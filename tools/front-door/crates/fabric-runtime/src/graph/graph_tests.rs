@@ -1086,6 +1086,68 @@ fn reduced_panel_reports_unavailable_family_separation() {
             .iter()
             .any(|warning| warning.contains("family"))
     );
+    assert!(
+        panel
+            .outputs
+            .as_ref()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()
+            .excerpt
+            .contains("not cross-family evidence")
+    );
+}
+
+#[test]
+fn synthesis_input_reports_same_family_reviewers() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2, "graph_id":"family-synthesis", "nodes":[{
+            "id":"panel", "kind":"composite", "access":"read_only", "composite":{
+                "nodes":[
+                    {"id":"one", "access":"read_only", "prompt":"review", "family_group":"panel", "route":{"alias":"senior"}},
+                    {"id":"two", "access":"read_only", "prompt":"review", "family_group":"panel", "route":{"alias":"senior"}}
+                ], "exports":[{"node":"one","outputs":["result"]},{"node":"two","outputs":["result"]}]
+            }
+        }]
+    })).unwrap();
+    for (families, expected) in [(vec!["a"], true), (vec!["a", "b"], false)] {
+        let mut owner = FakeOwner {
+            family_pool: families.into_iter().map(str::to_owned).collect(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let panel = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "panel")
+            .unwrap();
+        let second = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "panel--two")
+            .unwrap();
+        assert_eq!(
+            second.separation.as_ref().unwrap().outcome,
+            if expected {
+                SeparationOutcome::Unavailable
+            } else {
+                SeparationOutcome::Separated
+            }
+        );
+        assert_eq!(
+            panel
+                .outputs
+                .as_ref()
+                .unwrap()
+                .result
+                .as_ref()
+                .is_some_and(|result| result.excerpt.contains("not cross-family evidence")),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -1197,7 +1259,7 @@ fn required_writer_separation_records_enforced_and_preferred_families() {
     assert_eq!(separation.strength, FamilyStrength::Require);
     assert_eq!(separation.excluded, ["openai"]);
     assert_eq!(separation.preferred, ["anthropic"]);
-    assert_eq!(separation.outcome, SeparationOutcome::Separated);
+    assert_eq!(separation.outcome, SeparationOutcome::Unavailable);
 }
 
 #[test]

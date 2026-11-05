@@ -1517,6 +1517,15 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         assert_eq!(row["state"], "succeeded", "{row}");
         assert_eq!(row["verdict"], "approve", "{row}");
         assert_eq!(row["substitution"], index == 1, "{row}");
+        assert_eq!(
+            row["separation"]["outcome"],
+            if index == 1 {
+                "unavailable"
+            } else {
+                "unconstrained"
+            },
+            "{row}"
+        );
         assert!(row["run_id"].is_string());
         assert_eq!(row["applied_route"]["model"], "codex/gpt-6-luna");
         assert!(row["result"]["path"].is_string(), "{row}");

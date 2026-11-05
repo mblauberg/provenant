@@ -2565,6 +2565,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .take(SEPARATION_FAMILIES)
                                     .map(|family| bounded(family, FAMILY_BYTES))
                                     .collect();
+                                if record
+                                    .applied
+                                    .as_ref()
+                                    .is_some_and(|family| family_peers.contains(family))
+                                {
+                                    record.outcome = SeparationOutcome::Unavailable;
+                                }
                             }
                             Some(record)
                         }

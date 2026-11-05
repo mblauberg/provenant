@@ -3309,6 +3309,7 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
         .as_array()
         .unwrap();
     assert_eq!(route(&nodes[0])["alias"], "principal");
+    assert!(nodes[0].get("family_group").is_none());
     for (tier, expected) in [
         (
             "'codex/gpt-6@high'",
@@ -3326,6 +3327,38 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
             expected
         );
     }
+}
+
+#[test]
+fn review_shape_family_groups_reach_lens_nodes() {
+    let mut layers = Layers::empty();
+    let selector = shapes();
+    layers.review = Some(Box::new(move |query| {
+        let mut hint = selector(query)?;
+        hint.groups = vec![
+            serde_json::from_value(
+                json!({"pool":"junior", "count":5, "lenses":[], "distinct_families":true}),
+            )
+            .unwrap(),
+        ];
+        Ok(hint)
+    }));
+    let document = expand(
+        &layers,
+        "review",
+        "the change",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.review_shape='standard'".into(),
+        ],
+    )
+    .unwrap()
+    .document;
+    let nodes = document["nodes"][1]["composite"]["nodes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(nodes.len(), 5);
+    assert!(nodes.iter().all(|node| node["family_group"] == "group-0"));
 }
 
 fn lens_count(document: &serde_json::Value, council: &str) -> usize {
