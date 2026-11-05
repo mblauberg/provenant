@@ -757,6 +757,10 @@ fn render_with_waits(
                 .or(lane.trace.host);
             row["host"] = json!(host);
             row["result_path"] = Value::Null;
+            row["stale"] = Value::Null;
+            if row["transcript"].is_object() {
+                row["transcript"]["path"] = Value::Null;
+            }
         }
     }
     let mut hosts: Vec<_> = selected.iter().map(|(host, _)| host.to_string()).collect();
@@ -1283,7 +1287,7 @@ pub(super) fn output(
         ));
     };
     let peer = Peer::open_for(edge, [placement])?;
-    read_output(command, host, attempt, peer)
+    read_output(command, host, attempt, peer, edge.roots.state.as_path())
 }
 
 /// `output --host PEER` or `PEER/ATTEMPT`: the peer's own attempt, with no
@@ -1346,7 +1350,7 @@ pub(super) fn output_on_peer(
         .ok_or_else(|| Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required"))?;
     let peer = Peer::open(edge)?;
     peer.project()?;
-    read_output(command, host, attempt, peer)
+    read_output(command, host, attempt, peer, edge.roots.state.as_path())
 }
 
 fn read_output(
@@ -1354,6 +1358,7 @@ fn read_output(
     host: HostId,
     attempt: AttemptId,
     peer: Peer,
+    state_root: &std::path::Path,
 ) -> Result<(Value, String), Fail> {
     if command.path {
         return Err(unsupported("--path"));
@@ -1434,6 +1439,33 @@ fn read_output(
         chunk
     };
     let (mut data, mut text) = chunk_response(attempt, host, &command.part, chunk)?;
+    let records = read_records(
+        &[(host, attempt)],
+        &window,
+        &mut |host, action, duration| peer.call_within(host, action, duration),
+    )?;
+    let record = records.first().ok_or_else(corrupt)?;
+    let successors = record
+        .superseded_by
+        .map(|id| (record.attempt_id, id))
+        .into_iter()
+        .collect();
+    let mut row = super::project_lane(
+        record,
+        &[],
+        state_root,
+        &successors,
+        SystemClock::new().wall_now().ok(),
+    );
+    row.host = Some(host.to_string());
+    row.stale = None;
+    row.result_path = Value::Null;
+    if let Some(transcript) = &mut row.transcript {
+        transcript.path = None;
+    }
+    if let (Some(data), Some(row)) = (data.as_object_mut(), json!(row).as_object()) {
+        data.extend(row.clone());
+    }
     if let Some(reason) = fallback {
         super::output::add_planner_fallback(&mut data, &mut text, reason);
     }

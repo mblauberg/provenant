@@ -48,7 +48,7 @@ lane_row! {
         last_output_at: Value => any();
         runtime_deadline: Value => any();
         overdue: bool => boolean();
-        stale: bool => boolean();
+        stale: Option<bool> => nullable(boolean());
         partial_signals: Value => any();
         delivery_id: Option<String> => nullable(string());
         write_grants: Value => any();
@@ -63,6 +63,7 @@ lane_row! {
         transcript: Option<LaneTranscript> => nullable(object(&[("adapter", string()), ("session", string()), ("path", nullable(super::schema::worktree_path()))], &[]));
     }
     optional {
+        host: String => string();
         resolved_route: Value => any();
         title: String => string();
         requested_priority: i64 => integer();
