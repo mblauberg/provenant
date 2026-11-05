@@ -1768,7 +1768,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     );
     assert_eq!(
         layered.domains.routing.review.shapes["standard"].reviewers[0].count,
-        3
+        5
     );
     assert_eq!(
         layered.domains.routing.review.select.by_risk["routine"],
