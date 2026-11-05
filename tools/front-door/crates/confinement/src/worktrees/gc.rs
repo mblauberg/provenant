@@ -352,18 +352,27 @@ fn prune_unknown_output(
         return Err(WorktreeError::UnknownWriter);
     }
     let repo = locked.verified.repo();
-    if policy.written_before_ns != i128::MAX
-        && newest_worktree(
+    if policy.written_before_ns != i128::MAX {
+        let mut newest = newest_worktree(
             repo.root_dir(),
             0,
             &mut 1_000_000,
             std::time::Instant::now(),
-        )? >= policy.written_before_ns
-    {
-        return Err(FsError::RaceRefused {
-            name: "recent worktree activity".into(),
+        )?;
+        // Index-only operations also count as worktree activity.
+        for name in ["index", "HEAD"] {
+            match repo.private_dir().metadata_at(OsStr::new(name), false) {
+                Ok(metadata) => newest = newest.max(metadata.modified_ns),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
         }
-        .into());
+        if newest >= policy.written_before_ns {
+            return Err(FsError::RaceRefused {
+                name: "recent worktree activity".into(),
+            }
+            .into());
+        }
     }
     let protected = output_protection(context, repo, policy.keep, cancel)?;
     walk_output(

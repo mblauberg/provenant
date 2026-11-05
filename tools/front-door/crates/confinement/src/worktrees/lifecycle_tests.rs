@@ -36,7 +36,9 @@ pub(super) struct FreeWorkers;
 
 #[test]
 fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Error>> {
-    for scenario in ["preview", "idle", "unowned", "recent", "live", "unknown"] {
+    for scenario in [
+        "preview", "idle", "unowned", "recent", "index", "live", "unknown",
+    ] {
         let fixture = Fixture::new()?;
         fs::write(fixture.root.join(".gitignore"), "target/\n")?;
         fixture.run(&["add", ".gitignore"])?;
@@ -54,6 +56,20 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         fs::create_dir(path.join("target"))?;
         fs::write(path.join("target/artifact"), "output")?;
         fs::write(path.join("untracked"), "source")?;
+        if scenario == "index" {
+            let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+            let tree = verify_worktree(context.repo, &path)?;
+            for item in [
+                path.join("target/artifact"),
+                path.join("target"),
+                path.join("untracked"),
+                path.join(".gitignore"),
+                path.clone(),
+                tree.repo().private_git_dir().join("HEAD"),
+            ] {
+                fs::File::open(item)?.set_times(fs::FileTimes::new().set_modified(old))?;
+            }
+        }
         let mut lane = list(&context, &cancel())?
             .into_iter()
             .find(|lane| lane.path == path)
@@ -81,7 +97,15 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                 no_live_lanes: &|_| true,
                 regenerable: &["target".into()],
                 keep: &[],
-                written_before_ns: if scenario == "recent" { 0 } else { i128::MAX },
+                written_before_ns: match scenario {
+                    "recent" => 0,
+                    "index" => {
+                        (std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+                            .duration_since(std::time::UNIX_EPOCH)?
+                            .as_nanos() as i128
+                    }
+                    _ => i128::MAX,
+                },
                 dry_run: scenario == "preview",
                 foreign_merged_clean: false,
             },
@@ -109,7 +133,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                     .any(|entry| entry.path == path.join("target") && entry.removed)
             );
         }
-        if matches!(scenario, "recent" | "live" | "unknown") {
+        if matches!(scenario, "recent" | "index" | "live" | "unknown") {
             assert!(report.idle_output.iter().all(|entry| !entry.removed));
         }
     }
