@@ -1226,14 +1226,15 @@ mod tests {
             extra: Default::default(),
         })
         .unwrap();
-        assert_eq!(value["data"]["error"]["code"], "LAUNCH_UNKNOWN");
+        // The peer wire keeps its own tag; only the code a caller sees changed spelling.
+        assert_eq!(value["data"]["error"]["code"], "launch_unknown");
         assert!(matches!(
             serde_json::from_value::<PeerResult>(value).unwrap(),
             PeerResult::Error { data: crate::hosts::PeerResultError { error: actual, .. }, .. } if actual == error
         ));
         for error in [
             serde_json::json!({"code": "unknown_error"}),
-            serde_json::json!({"code": "LAUNCH_UNKNOWN"}),
+            serde_json::json!({"code": "launch_unknown"}),
         ] {
             assert!(serde_json::from_value::<facade::FacadeError>(error).is_err());
         }
