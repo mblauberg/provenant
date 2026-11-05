@@ -81,6 +81,7 @@ struct FakeOwner {
     fallback_evidence:
         std::collections::BTreeMap<String, provenant_records::run::PreparationFailure>,
     omit_fallback_evidence: bool,
+    fallback_facts: Option<PreparationFallbackEvidence>,
     fail_fallback_evidence: bool,
 }
 
@@ -112,11 +113,22 @@ impl AttemptOwner for FakeOwner {
         &mut self,
         _key: &AttemptKey,
         reference: &str,
-    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+    ) -> Result<Option<PreparationFallbackEvidence>, Self::Error> {
         if self.fail_fallback_evidence {
             return Err(NoObservation);
         }
-        Ok(self.fallback_evidence.get(reference).copied())
+        if let Some(facts) = self.fallback_facts {
+            return Ok(Some(facts));
+        }
+        Ok(self
+            .fallback_evidence
+            .get(reference)
+            .copied()
+            .map(|failure| PreparationFallbackEvidence {
+                failure,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+            }))
     }
 
     fn resolve_review(
@@ -6394,6 +6406,41 @@ fn fallback_reports_unreadable_evidence() {
 }
 
 #[test]
+fn live_fallback_rejects_uncertain_or_unreleased_custody_facts() {
+    for (handoff, custody_released) in [
+        (
+            provenant_routing::FallbackHandoff::UncertainOrLaunched,
+            true,
+        ),
+        (provenant_routing::FallbackHandoff::Local, false),
+    ] {
+        let mut task = node("node", route("first"));
+        task.route = None;
+        task.routes = Some(vec![route("first"), route("second")]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([preparation_refusal(
+                "host/attempt",
+                AttemptOutcome::AuthRequired,
+            )]),
+            fallback_facts: Some(PreparationFallbackEvidence {
+                failure: provenant_records::run::PreparationFailure::AuthRequired,
+                handoff,
+                custody_released,
+            }),
+            ..Default::default()
+        };
+        let result = advance(
+            &graph(vec![task]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(result.checkpoint.nodes[0].state, NodeState::Failed);
+        assert_eq!(owner.calls.len(), 1);
+    }
+}
+
+#[test]
 fn live_fallback_without_release_proof_stops() {
     let mut task = node("node", route("first"));
     task.route = None;
@@ -8114,6 +8161,72 @@ fn launch_retry_backoff_cap_is_at_least_the_first_delay() {
     owner.now = Some(at(10));
     let second = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(retry_of(&second.checkpoint).wake_at, Some(at(20)));
+}
+
+#[test]
+fn uncertain_launch_is_reobserved_with_one_guardian_and_route() {
+    struct Owner {
+        key: Option<AttemptKey>,
+        route: Option<GraphRoute>,
+        starts: usize,
+        now: provenant_core::WallTime,
+    }
+    impl AttemptOwner for Owner {
+        type Error = crate::coordination::facade::FacadeError;
+        fn actor(&self) -> String {
+            "actor".into()
+        }
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            Some(self.now)
+        }
+        fn observe_or_start(
+            &mut self,
+            key: &AttemptKey,
+            _: NodeInput<'_>,
+            route: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            _: Replay<'_>,
+        ) -> Result<AttemptObservation, Self::Error> {
+            if let Some(prior) = &self.key {
+                assert_eq!(prior, key);
+                assert_eq!(self.route.as_ref(), Some(route));
+                Ok(AttemptObservation::Pending {
+                    attempt_ref: Some("host/1".into()),
+                })
+            } else {
+                self.key = Some(key.clone());
+                self.route = Some(route.clone());
+                self.starts += 1;
+                Err(crate::coordination::facade::FacadeError::LaunchUnknown {
+                    operation_id: provenant_core::OperationId::parse("uncertain").unwrap(),
+                })
+            }
+        }
+    }
+    let mut task = node("one", route("first"));
+    task.route = None;
+    task.routes = Some(vec![route("first"), route("second")]);
+    let document = graph(vec![task]);
+    let mut owner = Owner {
+        key: None,
+        route: None,
+        starts: 0,
+        now: at(0),
+    };
+    let mut journal = MemoryJournal::default();
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.nodes[0].attempts.len(), 1);
+    owner.now = at(5);
+    let second = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(second.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(
+        second.checkpoint.nodes[0].attempts[0]
+            .attempt_ref
+            .as_deref(),
+        Some("host/1")
+    );
+    assert_eq!(owner.starts, 1);
 }
 
 #[test]

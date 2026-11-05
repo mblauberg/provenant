@@ -67,6 +67,14 @@ pub(super) fn review_member(node: &PlannedNode) -> bool {
         })
 }
 
+/// Host-observed facts that guard a route switch after preparation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparationFallbackEvidence {
+    pub failure: provenant_records::run::PreparationFailure,
+    pub handoff: provenant_routing::FallbackHandoff,
+    pub custody_released: bool,
+}
+
 /// Preparation fallback still needs live evidence before a new route starts.
 pub(super) fn review_preparation_substitution(node: &PlannedNode, attempt: &GraphAttempt) -> bool {
     review_member(node)
@@ -81,7 +89,7 @@ pub(super) fn live_fallback_allowed(
     outcome: AttemptOutcome,
     launched: bool,
     access: AccessMode,
-    evidence: Option<provenant_records::run::PreparationFailure>,
+    evidence: Option<PreparationFallbackEvidence>,
 ) -> bool {
     use provenant_records::run::PreparationFailure;
     if launched {
@@ -95,19 +103,21 @@ pub(super) fn live_fallback_allowed(
         }
         .allows_switch();
     }
-    let expected = match evidence {
-        Some(PreparationFailure::AuthRequired) => provenant_routing::FallbackOutcome::AuthRequired,
-        Some(PreparationFailure::UsageLimited) => provenant_routing::FallbackOutcome::UsageLimited,
-        Some(PreparationFailure::AdapterUnavailable) => {
+    let Some(evidence) = evidence else {
+        return false;
+    };
+    let expected = match evidence.failure {
+        PreparationFailure::AuthRequired => provenant_routing::FallbackOutcome::AuthRequired,
+        PreparationFailure::UsageLimited => provenant_routing::FallbackOutcome::UsageLimited,
+        PreparationFailure::AdapterUnavailable => {
             provenant_routing::FallbackOutcome::AdapterUnavailable
         }
-        None => return false,
     };
     expected == routing_outcome(outcome)
         && provenant_routing::FallbackPolicy {
             outcome: expected,
-            handoff: provenant_routing::FallbackHandoff::Local,
-            custody_released: true,
+            handoff: evidence.handoff,
+            custody_released: evidence.custody_released,
             read_only: access == AccessMode::ReadOnly,
             budget_remaining: true,
             pinned: false,
@@ -162,31 +172,59 @@ mod fallback_evidence_tests {
     use super::*;
     use provenant_records::run::PreparationFailure;
 
+    fn local(failure: PreparationFailure) -> PreparationFallbackEvidence {
+        PreparationFallbackEvidence {
+            failure,
+            handoff: provenant_routing::FallbackHandoff::Local,
+            custody_released: true,
+        }
+    }
+
+    #[test]
+    fn uncertain_handoff_and_unreleased_custody_deny_fallback() {
+        let mut evidence = local(PreparationFailure::AuthRequired);
+        evidence.handoff = provenant_routing::FallbackHandoff::UncertainOrLaunched;
+        assert!(!live_fallback_allowed(
+            AttemptOutcome::AuthRequired,
+            false,
+            AccessMode::ReadOnly,
+            Some(evidence)
+        ));
+        evidence.handoff = provenant_routing::FallbackHandoff::Local;
+        evidence.custody_released = false;
+        assert!(!live_fallback_allowed(
+            AttemptOutcome::AuthRequired,
+            false,
+            AccessMode::WorktreeWrite,
+            Some(evidence)
+        ));
+    }
+
     #[test]
     fn contradictory_or_wrong_scope_evidence_cannot_switch() {
         assert!(live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             false,
             AccessMode::WorktreeWrite,
-            Some(PreparationFailure::AuthRequired)
+            Some(local(PreparationFailure::AuthRequired))
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,
             true,
             AccessMode::WorktreeWrite,
-            Some(PreparationFailure::AuthRequired)
+            Some(local(PreparationFailure::AuthRequired))
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::UsageLimited,
             false,
             AccessMode::WorktreeWrite,
-            Some(PreparationFailure::AuthRequired)
+            Some(local(PreparationFailure::AuthRequired))
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::TaskFailed,
             false,
             AccessMode::WorktreeWrite,
-            Some(PreparationFailure::AuthRequired)
+            Some(local(PreparationFailure::AuthRequired))
         ));
         assert!(!live_fallback_allowed(
             AttemptOutcome::AuthRequired,

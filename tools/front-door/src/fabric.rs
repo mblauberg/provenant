@@ -4633,7 +4633,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
         reference: &str,
-    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+    ) -> Result<Option<provenant_fabric_runtime::graph::PreparationFallbackEvidence>, Self::Error>
+    {
         let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
         // Only this host can verify its writer fences and custody lock.
         if host != self.factory.context.identity.host.to_string() {
@@ -4661,10 +4662,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         {
             return Ok(None);
         }
-        if !store.custody_released(&record, &call).map_err(run_error)? {
-            return Ok(None);
-        }
-        Ok(record.preparation_failure)
+        let custody_released = store.custody_released(&record, &call).map_err(run_error)?;
+        Ok(record.preparation_failure.map(|failure| {
+            provenant_fabric_runtime::graph::PreparationFallbackEvidence {
+                failure,
+                handoff: if record.provider_launched == Some(false) {
+                    provenant_routing::FallbackHandoff::Local
+                } else {
+                    provenant_routing::FallbackHandoff::UncertainOrLaunched
+                },
+                custody_released,
+            }
+        }))
     }
 
     fn resolve_review(

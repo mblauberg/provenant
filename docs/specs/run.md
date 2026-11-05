@@ -1365,7 +1365,9 @@ discard that plan and prepare again at the derived final paths after admission.
 This preserves crash retry without reusing unrecorded staging; launch repeats
 policy and write-grant validation before handoff.
 Later custody or handoff failures are reported as execution outcomes of the
-accepted attempt, as for dispatch.
+accepted attempt, as for dispatch. Graph route fallback receives the host's
+recorded preparation outcome, handoff fact and custody-release observation;
+a failed release or uncertain handoff cannot authorise a different candidate.
 Before admission and again under writer custody, continuations verify the
 worktree owner's lane lineage. Launch snapshots durably record whether the tree
 was lane-owned. Explicit unowned and adopted trees resume in place unless a
