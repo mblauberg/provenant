@@ -984,6 +984,9 @@ mod result_tests {
 
     #[test]
     fn graph_status_reads_without_advancing_checkpoint() -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test("fabric::result_tests::graph_status_reads_without_advancing_checkpoint")? {
+            return Ok(());
+        }
         use super::*;
         use provenant_fabric_runtime::graph::{
             FileJournal, GraphDocument, GraphExecution, GraphJournal,
@@ -1086,6 +1089,9 @@ mod result_tests {
     #[test]
     fn remote_upstream_is_materialised_and_unreachable_peer_is_named()
     -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test("fabric::result_tests::remote_upstream_is_materialised_and_unreachable_peer_is_named")? {
+            return Ok(());
+        }
         use super::*;
         use provenant_fabric_runtime::graph::{AttemptKey, InputRequest, MaterialisedInput};
         use std::os::unix::fs::PermissionsExt;
