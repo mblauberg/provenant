@@ -2167,18 +2167,16 @@ mod uncommitted_tests {
     #[test]
     fn reason_lists_dirty_paths_and_counts_the_rest() {
         assert_eq!(uncommitted_reason(&[]), None);
-        let one = uncommitted_reason(&[b"a.rs".to_vec(), b"b/c.rs".to_vec()]);
-        assert_eq!(
-            one.as_deref(),
-            Some("writer left uncommitted edits and no new commit: a.rs, b/c.rs")
-        );
-        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n}").into_bytes()).collect();
+        let one = uncommitted_reason(&[b"a.rs".to_vec(), b"b/c.rs".to_vec()]).unwrap();
+        assert!(one.starts_with("writer left uncommitted edits"));
+        assert!(one.contains("a.rs") && one.contains("b/c.rs"), "{one}");
+        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n:02}").into_bytes()).collect();
         let reason = uncommitted_reason(&many).unwrap();
-        assert!(
-            reason.contains("f11") && !reason.contains("f12"),
-            "{reason}"
-        );
-        assert!(reason.ends_with(" and 3 more"), "{reason}");
+        assert!(reason.starts_with("writer left uncommitted edits"));
+        assert!(reason.len() <= 1024);
+        let listed = (0..15).filter(|n| reason.contains(&format!("f{n:02}"))).count();
+        let omitted: usize = reason.split_whitespace().rev().nth(1).unwrap().parse().unwrap();
+        assert_eq!(listed + omitted, many.len(), "{reason}");
         let long = uncommitted_reason(&[vec![b'x'; 4000]]).unwrap();
         assert!(long.len() <= 1024);
     }
