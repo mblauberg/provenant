@@ -324,10 +324,6 @@ declaration using the [review wire grammar](../specs/fabric.md#typed-node-output
 The prompt offers approval, change request or inconclusive; it does not offer
 approval with nits. The collector uses the complete verified result stream;
 duplicate declarations, an unrecognised token or an unreadable result is `unknown`.
-For one release, retained first-line legacy outputs remain readable when there
-is no captured final verdict, exactly one declaration in the complete stream,
-and the first non-empty excerpt line is a legacy approval, change request or
-inconclusive verdict. Legacy case and Markdown emphasis remain accepted.
 JSON includes verdict counts, with planned
 but `not_submitted` reviewers counted separately. The command
 exits successfully only when every reviewer succeeds and approves; a failed,
