@@ -1088,6 +1088,8 @@ land.
   `::an_ask_tier_without_a_session_fails_with_guidance`;
   `::a_pending_land_is_observed_again_and_a_refusal_fails_the_node`;
   `::a_pending_land_persists_a_retry_deadline_that_survives_restart`;
+  `::merged_land_is_reobserved_after_its_checkpoint_save_fails`;
+  `::pending_land_without_a_wall_clock_keeps_the_prior_checkpoint`;
   `::a_failed_review_routed_to_land_never_calls_the_host`;
   `::a_review_of_an_earlier_head_never_lands_a_continuation`;
   `::a_composite_verdict_binds_to_the_head_its_producer_reviewed`;
@@ -1429,7 +1431,7 @@ failed advance is recorded as `advance_error` until the next success;
 `resume` is the manual path. A lane settlement error is recorded only on graphs
 containing that attempt and does not stop other graphs from advancing.
 - Why: dependants progress without a daemon.
-- Test: `crates/fabric-runtime/src/graph.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory`;
+- Test: `crates/fabric-runtime/src/graph.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory`;
   `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`;
   `src/fabric.rs::settlement_failure_in_one_graph_does_not_stop_another_graph`
 - Owner: `crates/fabric-runtime/src/graph.rs`
