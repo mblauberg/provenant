@@ -22,6 +22,10 @@ pub enum JournalError {
     BadEnvelope,
     #[error("graph checkpoint digest does not match its contents")]
     BadDigest,
+    #[error(
+        "graph checkpoint predates node asks; finish or cancel it with the previous release, or cancel it here to retire the record"
+    )]
+    RetiredLoopCheckpoint,
 }
 
 impl JournalError {
@@ -29,7 +33,11 @@ impl JournalError {
     pub fn is_unreadable(&self) -> bool {
         matches!(
             self,
-            Self::Decode(_) | Self::BadEnvelope | Self::BadDigest | Self::Canonical(_)
+            Self::Decode(_)
+                | Self::BadEnvelope
+                | Self::BadDigest
+                | Self::Canonical(_)
+                | Self::RetiredLoopCheckpoint
         )
     }
 
@@ -46,6 +54,7 @@ impl JournalError {
             Self::Io(_) => "io",
             Self::BadEnvelope => "bad_envelope",
             Self::BadDigest => "bad_digest",
+            Self::RetiredLoopCheckpoint => "retired_loop_checkpoint",
         }
     }
 }
@@ -603,6 +612,13 @@ pub(super) fn decode_checkpoint(
     )?;
     if digest.to_string() != stored.digest {
         return Err(JournalError::BadDigest);
+    }
+    if stored.checkpoint.nodes.iter().any(|node| {
+        ["loop_asks", "loop_inbox_error", "loop_decision_actor"]
+            .iter()
+            .any(|field| node.extra.contains_key(*field))
+    }) {
+        return Err(JournalError::RetiredLoopCheckpoint);
     }
     if stored.checkpoint.graph_id != graph_id
         || stored.execution.document.graph_id != graph_id

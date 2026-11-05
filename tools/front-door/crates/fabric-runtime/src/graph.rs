@@ -61,9 +61,7 @@ pub use asks::{
 };
 pub use composites::CompositeSpec;
 pub use land::{LandAuthority, LandObservation, LandRecord, LandRequest, LandSpec};
-pub use loops::{
-    InvalidLoopDecision, LegacyLoopAsk, LoopDecision, LoopRound, LoopSpec, legacy_loop_asks,
-};
+pub use loops::{InvalidLoopDecision, LoopDecision, LoopRound, LoopSpec};
 pub use plans::{
     Expansion, PatternInstantiation, PatternParameter, PatternParameterKind, PatternSpec, PlanSpec,
     RemainingBudgets,
@@ -951,18 +949,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
     let mut checkpoint = match stored {
         Some(checkpoint) => {
-            if let Some(reason) = loops::legacy(&checkpoint) {
-                if checkpoint.cancelled && !resume {
-                    let mut checkpoint = checkpoint;
-                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
-                    return Ok(GraphRun {
-                        status: GraphStatus::Cancelled,
-                        checkpoint,
-                        advance_error: None,
-                    });
-                }
-                return Err(GraphError::Refused(reason));
-            }
             let mut validation = checkpoint.clone();
             restore_cancelled_nodes(&mut validation)
                 .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;

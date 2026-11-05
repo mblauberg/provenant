@@ -3164,49 +3164,6 @@ fn graph_inbox_close(
     }
 }
 
-/// Close the loop requests a checkpoint from before node asks raised under
-/// `actor`, by their original inbox operation. Only cancel does this; such a
-/// checkpoint is never migrated.
-fn graph_legacy_loop_close(
-    service: &provenant_fabric_runtime::inbox::InboxService<'_>,
-    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
-    actor: provenant_core::ActorId,
-    cancel: &CancelToken,
-) -> Result<(), FacadeError> {
-    let Some(instance_id) = checkpoint.instance_id.as_deref() else {
-        return Ok(());
-    };
-    let asks = provenant_fabric_runtime::graph::legacy_loop_asks(checkpoint);
-    for ask in asks.iter().filter(|ask| ask.actor == actor.to_string()) {
-        let digest = provenant_records::CanonicalV1::record_digest(
-            "graph-loop-inbox",
-            1,
-            &(
-                checkpoint.graph_id.as_str(),
-                instance_id,
-                ask.node_id.as_str(),
-                ask.rounds,
-                ask.session.as_str(),
-            ),
-        )
-        .map_err(|_| FacadeError::StateCorrupt)?;
-        let operation = provenant_core::OperationId::parse(&format!(
-            "loop-{}",
-            provenant_core::hex(digest.as_bytes())
-        ))
-        .map_err(|_| FacadeError::StateCorrupt)?;
-        graph_inbox_close(
-            service,
-            &ask.session,
-            &operation,
-            actor,
-            &format!("close legacy loop ask {}", ask.node_id),
-            cancel,
-        )?;
-    }
-    Ok(())
-}
-
 fn load_graph_prices(assets: &std::path::Path) -> Result<provenant_telemetry::PriceTable, String> {
     let path = assets.join("config/telemetry-prices.toml");
     let text =
@@ -5347,13 +5304,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .map_err(dispatch_refused)?;
             grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
-            let receipt = owner.submit_with_access(
-                input,
-                self.budget,
-                self.cancel,
-                grants,
-                retry_limit,
-            )?;
+            let receipt =
+                owner.submit_with_access(input, self.budget, self.cancel, grants, retry_limit)?;
             owner.actor = None;
             let target = receipt
                 .targets
@@ -6167,9 +6119,6 @@ impl Factory {
             {
                 first_error.get_or_insert_with(|| FacadeError::io("close cancelled graph asks"));
             }
-            if let Err(error) = self.close_legacy_loop_asks(&checkpoint, cancel) {
-                first_error.get_or_insert(error);
-            }
             if let Some(error) = first_error {
                 return Err(error);
             }
@@ -6212,37 +6161,6 @@ fn graph_selector_forms() -> String {
 }
 
 impl Factory {
-    /// Close the inbox requests of a checkpoint from before node asks, one
-    /// inbox actor at a time.
-    fn close_legacy_loop_asks(
-        &self,
-        checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
-        cancel: &CancelToken,
-    ) -> Result<(), FacadeError> {
-        let actors: std::collections::BTreeSet<_> =
-            provenant_fabric_runtime::graph::legacy_loop_asks(checkpoint)
-                .into_iter()
-                .map(|ask| ask.actor)
-                .collect();
-        for actor in actors {
-            let mut identity = self.context.identity.clone();
-            identity.inbox.actor = actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
-            let service = provenant_fabric_runtime::inbox::InboxService::open(
-                &self.context.roots.state,
-                &identity,
-                &self.clock,
-                cancel,
-            )
-            .map_err(|error| FacadeError::DispatchRefused {
-                fact: None,
-                disk: None,
-                reason: format!("close legacy loop asks: {error}"),
-            })?;
-            graph_legacy_loop_close(&service, checkpoint, identity.inbox.actor, cancel)?;
-        }
-        Ok(())
-    }
-
     /// Cancel one live graph attempt. A missing checkpoint reference (a crash
     /// between acceptance and the save) is recovered from the stable operation ID.
     fn cancel_graph_attempt(

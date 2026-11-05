@@ -46,6 +46,10 @@ Before upgrading across the prepared-operation replay change, finish or cancel
 active graphs with the old binary and wait for their attempts to settle. A
 prepared graph operation from the older binary may otherwise need a new graph
 ID after the upgrade; inspect the existing attempts and their custody first.
+Checkpoints with pre-node-ask loop state are unreadable after the upgrade. If
+one remains, `provenant fabric graph status <id>` names the remedy and
+`provenant fabric graph cancel <id>` retires its record. Retirement does not
+cancel its attempts or close old inbox requests; inspect and settle those first.
 
 Use a graph for a writer followed by a review. Create and register the writer's
 worktree first with `provenant worktree create`, then save the following

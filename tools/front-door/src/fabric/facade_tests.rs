@@ -185,62 +185,68 @@ pub(crate) mod peer_tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let project = factory.context.identity.project;
-        drop(FileJournal::open(
-            &roots.state,
-            project,
-            "broken",
-            budget,
-            &cancel,
-            &factory.clock,
-        )?);
-        let directory = roots
-            .state
-            .as_path()
-            .join("fabric/graphs")
-            .join(project.to_string());
-        std::fs::write(directory.join("graph-broken.json"), b"invalid json")?;
-        let status = factory.graph(
-            GraphInput::Status {
-                extra: Default::default(),
-                id: "broken".into(),
-            },
-            budget,
-            &cancel,
-        )?;
-        assert_eq!(status.status, GraphStatus::Paused);
-        assert!(
-            status
-                .advance_error
-                .unwrap()
-                .contains("cancel it to retire")
-        );
-        let retired = factory.graph(
-            GraphInput::Cancel {
-                extra: Default::default(),
-                id: "broken".into(),
-                reason: None,
-            },
-            budget,
-            &cancel,
-        )?;
-        assert!(
-            retired
-                .advance_error
-                .unwrap()
-                .contains("Active attempts were not cancelled")
-        );
-        assert!(!directory.join("graph-broken.json").exists());
-        assert!(matches!(
-            factory.graph(
+        for (id, contents) in [
+            ("broken", b"invalid json".as_slice()),
+            ("g-test", include_bytes!("fixtures/pre-node-asks-checkpoint.json").as_slice()),
+        ] {
+            drop(FileJournal::open(
+                &roots.state,
+                project,
+                id,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?);
+            let directory = roots
+                .state
+                .as_path()
+                .join("fabric/graphs")
+                .join(project.to_string());
+            let path = directory.join(format!("graph-{id}.json"));
+            std::fs::write(&path, contents)?;
+            let status = factory.graph(
                 GraphInput::Status {
                     extra: Default::default(),
-                    id: "broken".into()
+                    id: id.into(),
                 },
                 budget,
-                &cancel
-            ),
-            Err(FacadeError::NotFound)
-        ));
+                &cancel,
+            )?;
+            assert_eq!(status.status, GraphStatus::Paused);
+            let explanation = status.advance_error.unwrap();
+            assert!(explanation.contains("cancel it to retire"), "{explanation}");
+            if id == "g-test" {
+                assert!(explanation.contains("predates node asks"), "{explanation}");
+                assert!(explanation.contains("previous release"), "{explanation}");
+            }
+            let retired = factory.graph(
+                GraphInput::Cancel {
+                    extra: Default::default(),
+                    id: id.into(),
+                    reason: None,
+                },
+                budget,
+                &cancel,
+            )?;
+            assert!(
+                retired
+                    .advance_error
+                    .unwrap()
+                    .contains("Active attempts were not cancelled")
+            );
+            assert!(!path.exists());
+            assert!(matches!(
+                factory.graph(
+                    GraphInput::Status {
+                        extra: Default::default(),
+                        id: id.into()
+                    },
+                    budget,
+                    &cancel
+                ),
+                Err(FacadeError::NotFound)
+            ));
+        }
         Ok(())
     }
 
