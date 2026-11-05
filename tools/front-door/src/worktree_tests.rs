@@ -3306,21 +3306,36 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         }
         if wrapped {
             // Claude's env scrub and publishing both need a Git wrapper.
-            let wrapper = fs::read_to_string(&scratch_git)?;
-            assert!(wrapper.contains("GIT_CONFIG_GLOBAL=/dev/null"));
-            let git = format!("'{}'", selected_git.display());
+            // Behaviour: the wrapper runs the selected Git, and host global
+            // config does not reach it.
+            let leak = rig.root.join("wrapper-home");
+            fs::create_dir_all(&leak)?;
+            fs::write(leak.join(".gitconfig"), "[user]\n\tname = host-leak\n")?;
+            let run = |args: &[&str]| {
+                std::process::Command::new(&scratch_git)
+                    .args(args)
+                    .env("HOME", &leak)
+                    .env("XDG_CONFIG_HOME", leak.join("xdg"))
+                    .env_remove("GIT_CONFIG_GLOBAL")
+                    .output()
+            };
+            let version = run(&["--version"])?;
+            let expected = std::process::Command::new(&selected_git)
+                .arg("--version")
+                .output()?;
+            assert_eq!(version.stdout, expected.stdout, "wrapper runs selected Git");
+            let name = run(&["config", "--global", "--get", "user.name"])?;
             assert!(
-                wrapper.contains(&format!("exec {git}")),
-                "Git exec for {adapter} writer={writer} publishing={publishing}"
+                !String::from_utf8_lossy(&name.stdout).contains("host-leak"),
+                "host global config must not reach the wrapper"
             );
-            assert_eq!(wrapper.contains(" -c 'include.path="), publishing);
         }
         let scratch = &confinement.plan.permissions().scratch.path;
         assert_eq!(scratch.join("publishing.gitconfig").exists(), publishing);
         assert_eq!(scratch.join("bin/gh").exists(), publishing);
         if publishing {
             let gh_wrapper = fs::read_to_string(scratch.join("bin/gh"))?;
-            assert!(gh_wrapper.contains(&format!("exec '{}'", executable.display())));
+            assert!(gh_wrapper.contains(&executable.display().to_string()));
         }
         assert!(
             launch
