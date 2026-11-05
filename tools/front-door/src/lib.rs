@@ -598,6 +598,7 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             holder: Some(&holder),
             nested_children: Some(&holder),
             stdout_decoder: Some(holder.stdout_decoder()),
+            stderr_decoder: Some(holder.stderr_decoder()),
             stdout_filter: Some(&mut stdout_filter),
             stderr_filter: Some(&mut stderr_filter),
             ..Default::default()
@@ -1015,17 +1016,25 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             provenant_cli::run::status(cmd, globals.json, edge)
         }),
         Command::Land {
-            number,
+            numbers,
             head,
             wait,
             poll,
             explain,
-        } => pr::land::run(
-            number,
-            head,
-            wait,
-            poll,
-            explain,
+            batch,
+            shadow,
+            tier,
+        } => pr::landing::run(
+            pr::landing::Options {
+                numbers,
+                head,
+                wait,
+                poll,
+                explain,
+                batch,
+                shadow,
+                tier,
+            },
             globals,
             process.workers(),
         ),

@@ -243,6 +243,104 @@ fn pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers() -> Result {
     }
     Ok(())
 }
+#[test]
+fn pre_push_local_gate_resolves_config_and_refuses_enforce() -> Result {
+    let rig = TestRig::new()?;
+    prepare_gate_repo(&rig)?;
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(fs::canonicalize(rig.project.join(".git"))?)?,
+    )?;
+    let config = rig.state.join("config.toml");
+    let run = || {
+        rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["hook", "git", "pre-push", "origin", "fixture"],
+            Some(b""),
+        )
+    };
+    fs::write(
+        &config,
+        format!(
+            "schema_version=1\n[domains.pr.land.local_gate]\nmode='warn'\ncommands=['exit 17']\n[domains.pr.land.projects.\"{}\".local_gate]\nmode='enforce'\n",
+            binding.project_id()
+        ),
+    )?;
+    let output = run()?;
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert_eq!(code(&output), 1, "{stderr}");
+    assert!(
+        stderr.contains("exit 17") && stderr.contains("exit status 17"),
+        "{stderr}"
+    );
+
+    fs::write(
+        &config,
+        "schema_version=1\n[domains.pr.land.local_gate]\nmode='warn'\ncommands=['exit 17']\n",
+    )?;
+    let output = run()?;
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert_eq!(code(&output), 0, "{stderr}");
+    assert!(
+        stderr.contains("exit 17") && stderr.contains("exit status 17"),
+        "{stderr}"
+    );
+
+    fs::write(&config, "schema_version = [")?;
+    let output = run()?;
+    assert_eq!(code(&output), 0);
+    assert!(
+        output.stderr.bytes.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    Ok(())
+}
+
+#[test]
+fn pre_push_enforce_refuses_unavailable_project_binding() -> Result {
+    let rig = TestRig::new()?;
+    prepare_gate_repo(&rig)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.pr.land.local_gate]\nmode='enforce'\ncommands=['true']\n",
+    )?;
+    fs::write(rig.state.join("projects"), "not a directory")?;
+    let output = rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["hook", "git", "pre-push", "origin", "fixture"],
+        Some(b""),
+    )?;
+    assert_eq!(
+        code(&output),
+        1,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes).contains("local gate settings unavailable")
+    );
+    Ok(())
+}
+
+fn prepare_gate_repo(rig: &TestRig) -> Result {
+    git(rig, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
+    commit(rig, "initial", "initial\n")?;
+    git(
+        rig,
+        &[
+            "remote",
+            "add",
+            "origin",
+            rig.project.to_str().ok_or("project")?,
+        ],
+    )?;
+    Ok(())
+}
+
 fn check_push_policy(rig: &TestRig) -> Result {
     git(rig, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
     let first = commit(rig, "initial", "initial\n")?;

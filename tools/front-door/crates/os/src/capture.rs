@@ -23,9 +23,14 @@ pub enum FrameEvent {
 pub struct DecodeFailure;
 
 /// Provider-specific parsing returns lifecycle facts only. It has no process
-/// or signalling capability and receives complete frames capped at FRAME_LIMIT.
+/// or signalling capability. Frames and partial frames are capped at FRAME_LIMIT.
 pub trait FrameDecoder: Send + Sync {
     fn decode(&self, frame: &[u8]) -> Result<FrameEvent, DecodeFailure>;
+
+    /// Whether a partial frame is sufficient evidence for a terminal event.
+    fn partial_terminal(&self, _frame: &[u8]) -> bool {
+        false
+    }
 }
 
 /// Bounded, nonblocking delivery of provider facts to Run's event channel.
@@ -49,6 +54,7 @@ pub(crate) struct Frames {
     bytes: Vec<u8>,
     oversized: bool,
     filter_disabled: bool,
+    partial_terminal_sent: bool,
 }
 
 /// Incremental stream capture using S1's stream policy, outcome, filter and
@@ -84,6 +90,7 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
                 bytes: Vec::with_capacity(FRAME_LIMIT),
                 oversized: false,
                 filter_disabled: false,
+                partial_terminal_sent: false,
             },
             finished: false,
             outcome: CapturedStream::default(),
@@ -189,11 +196,12 @@ impl Frames {
         };
         for &byte in chunk {
             if byte == b'\n' {
-                if !self.oversized && self.deliver(&sink).is_err() {
+                if !self.oversized && !self.partial_terminal_sent && self.deliver(&sink).is_err() {
                     out.decoder_lost_frames = out.decoder_lost_frames.saturating_add(1);
                 }
                 self.bytes.clear();
                 self.oversized = false;
+                self.partial_terminal_sent = false;
             } else if !self.oversized {
                 if self.bytes.len() == FRAME_LIMIT {
                     self.bytes.clear();
@@ -204,11 +212,23 @@ impl Frames {
                 }
             }
         }
+        if !self.oversized
+            && !self.partial_terminal_sent
+            && let FrameDelivery::Provider { decoder, events } = sink
+            && decoder.partial_terminal(&self.bytes)
+        {
+            if events.try_send(FrameEvent::Terminal).is_err() {
+                out.decoder_lost_frames = out.decoder_lost_frames.saturating_add(1);
+            } else {
+                self.partial_terminal_sent = true;
+            }
+        }
     }
 
     fn finish_delivery(&mut self, sink: Option<FrameDelivery<'_>>, out: &mut CapturedStream) {
         if !self.bytes.is_empty()
             && !self.oversized
+            && !self.partial_terminal_sent
             && sink.is_some_and(|sink| self.deliver(&sink).is_err())
         {
             out.decoder_lost_frames = out.decoder_lost_frames.saturating_add(1);
@@ -385,6 +405,9 @@ mod tests {
                 _ => Err(DecodeFailure),
             }
         }
+        fn partial_terminal(&self, frame: &[u8]) -> bool {
+            frame == b"terminal"
+        }
     }
 
     #[derive(Default)]
@@ -469,6 +492,32 @@ mod tests {
 
     fn provider<'a>(decoder: &'a TestDecoder, events: &'a EventSink) -> FrameDelivery<'a> {
         FrameDelivery::Provider { decoder, events }
+    }
+
+    #[test]
+    fn partial_terminal_is_delivered_once_across_chunks_and_eof() {
+        let decoder = TestDecoder;
+        let events = EventSink::default();
+        let mut capture = StreamCapture::new(
+            StreamPolicy::Discard,
+            Some(provider(&decoder, &events)),
+            None,
+        )
+        .unwrap();
+        capture.push(b"ter").unwrap();
+        assert!(events.collected().is_empty());
+        capture.push(b"minal").unwrap();
+        assert_eq!(events.collected(), vec![FrameEvent::Terminal]);
+        capture.push(b"\nprogress\nterminal").unwrap();
+        capture.finish();
+        assert_eq!(
+            events.collected(),
+            vec![
+                FrameEvent::Terminal,
+                FrameEvent::Progress,
+                FrameEvent::Terminal
+            ]
+        );
     }
 
     #[test]
