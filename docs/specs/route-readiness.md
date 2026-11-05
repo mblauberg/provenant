@@ -2,7 +2,7 @@
 
 Owner: `crates/quota` (record, freshness, publication), `crates/cli/src/quota.rs`
 (persistence and the edge read)
-Anchor: `crates/quota/src/readiness.rs`, `crates/cli/src/quota.rs`, `tests/quota.rs`
+Anchor: `crates/quota/src/readiness.rs`, `crates/cli/src/quota.rs`, `tests/quota.rs`, `tests/hosts_signin.rs`
 
 Quota owns one readiness record per host, adapter, account and canonical model
 or verified pool. It records a schema version, state (ready, unavailable or
