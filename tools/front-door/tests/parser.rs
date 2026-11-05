@@ -1424,6 +1424,45 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_refuses_authority_
 }
 
 #[test]
+fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let show = rig.command(&["config", "show", "--json"])?;
+    assert_eq!(code(&show), 0);
+    let show: serde_json::Value = serde_json::from_slice(&show.stdout.bytes)?;
+    assert_eq!(show["data"]["gc"]["graph_checkpoint_days"], 90);
+    assert_eq!(
+        show["data"]["origins"]["gc.graph_checkpoint_days"]["kind"],
+        "compiled"
+    );
+    let schema = rig.command(&["config", "schema", "--json"])?;
+    assert_eq!(code(&schema), 0);
+    let schema: serde_json::Value = serde_json::from_slice(&schema.stdout.bytes)?;
+    let field = schema["data"]["fields"]
+        .as_array()
+        .ok_or("schema fields")?
+        .iter()
+        .find(|field| field["path"] == "gc.graph_checkpoint_days")
+        .ok_or("retention field")?;
+    assert_eq!(field["default"], 90);
+    assert_eq!(field["value"], 90);
+    assert_eq!(field["source"], "default");
+    std::fs::create_dir_all(&rig.state)?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\ngraph_checkpoint_days=30\n",
+    )?;
+    let show = rig.command(&["config", "show", "--json"])?;
+    assert_eq!(code(&show), 0);
+    let show: serde_json::Value = serde_json::from_slice(&show.stdout.bytes)?;
+    assert_eq!(show["data"]["gc"]["graph_checkpoint_days"], 30);
+    assert_eq!(
+        show["data"]["origins"]["gc.graph_checkpoint_days"]["kind"],
+        "user"
+    );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn config_check_and_doctor_report_pool_effort_warnings_as_advice() -> Result {
     let rig = TestRig::new()?;
     std::fs::write(
