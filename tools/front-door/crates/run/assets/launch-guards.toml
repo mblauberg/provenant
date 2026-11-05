@@ -384,11 +384,6 @@ boundary = "authority"
 reason = "Claude's isolated settings must retain the Provenant pre-tool guard; an unrepresentable hook executable or state path cannot safely substitute inherited settings."
 
 [[guard]]
-site = "providers/src/lane.rs#LaneRuntime::claude"
-boundary = "unclassified"
-reason = "Remaining MCP and runtime setup path failures require classification."
-
-[[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "authority"
 reason = "Request digest and host-owned retry checks bind launch to the validated request and caller."
