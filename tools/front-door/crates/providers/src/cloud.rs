@@ -177,6 +177,32 @@ pub struct RemoteJob {
     pub state: RemoteState,
 }
 
+/// An actionable failure observed while the provider prepared the VM.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EnvironmentDiagnostic<'a> {
+    pub target: &'a str,
+    pub environment: &'a str,
+    pub detail: &'a str,
+    pub remedy: &'static str,
+}
+
+const ENVIRONMENT_REMEDY: &str =
+    "Create or repair the named provider environment and select the repository, then retry.";
+
+impl RemoteJob {
+    pub fn environment_diagnostic(&self) -> Option<EnvironmentDiagnostic<'_>> {
+        match &self.state {
+            RemoteState::SetupFailed { detail } => Some(EnvironmentDiagnostic {
+                target: &self.target,
+                environment: &self.environment,
+                detail,
+                remedy: ENVIRONMENT_REMEDY,
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RemoteState {
@@ -186,8 +212,21 @@ pub enum RemoteState {
     Finished {
         result: CloudResult,
     },
+    /// The provider reported a terminal environment setup failure.
+    SetupFailed {
+        detail: String,
+    },
     Cancelled,
     CancellationUnconfirmed,
+}
+
+impl RemoteState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Finished { .. } | Self::SetupFailed { .. } | Self::Cancelled
+        )
+    }
 }
 
 /// The task is supplied only at submission and is not stored in the job record.
@@ -251,12 +290,14 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
     }
     job.remote_id.clear();
     job.state = RemoteState::Submitting;
-    provider.check_environment(CloudSubmission { job: &job, task }).map_err(|error| CloudJobError::Environment {
-        target: job.target.clone(),
-        environment: job.environment.clone(),
-        remedy: "Create or repair the named provider environment and select the repository, then retry.",
-        error,
-    })?;
+    provider
+        .check_environment(CloudSubmission { job: &job, task })
+        .map_err(|error| CloudJobError::Environment {
+            target: job.target.clone(),
+            environment: job.environment.clone(),
+            remedy: ENVIRONMENT_REMEDY,
+            error,
+        })?;
     store.begin(&job).map_err(CloudJobError::Store)?;
     job.remote_id = provider
         .submit(CloudSubmission { job: &job, task })
@@ -280,10 +321,7 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
     store: &mut S,
     job: &mut RemoteJob,
 ) -> Result<(), CloudJobError<P::Error, S::Error>> {
-    if matches!(
-        job.state,
-        RemoteState::Finished { .. } | RemoteState::Cancelled
-    ) {
+    if job.state.is_terminal() {
         return Ok(());
     }
     if job.state == RemoteState::Submitting {
@@ -310,10 +348,7 @@ pub fn cancel<P: CloudProvider, S: CloudJobStore>(
     store: &mut S,
     job: &mut RemoteJob,
 ) -> Result<(), CloudJobError<P::Error, S::Error>> {
-    if matches!(
-        job.state,
-        RemoteState::Finished { .. } | RemoteState::Cancelled
-    ) {
+    if job.state.is_terminal() {
         return Ok(());
     }
     if job.state == RemoteState::Submitting {
@@ -546,6 +581,31 @@ mod lifecycle_tests {
             matches!(error, CloudJobError::Environment { target, environment, remedy, .. } if target == "target" && environment == "env" && remedy.contains("Create or repair"))
         );
         assert!(store.saved.is_none());
+    }
+
+    #[test]
+    fn cloud_setup_failure_after_submission_is_terminal_and_actionable() {
+        let mut provider = FakeProvider {
+            observed: RemoteState::SetupFailed {
+                detail: "setup command failed".into(),
+            },
+            confirmed: false,
+            submitted: 0,
+        };
+        let mut store = FakeStore::default();
+        let submitted = submit(&mut provider, &mut store, job(), "run tests").unwrap();
+        let mut recovered = store.saved.clone().unwrap();
+        assert_eq!(submitted, recovered);
+        reconcile(&mut provider, &mut store, &mut recovered).unwrap();
+        let diagnostic = recovered.environment_diagnostic().unwrap();
+        assert_eq!(diagnostic.target, "target");
+        assert_eq!(diagnostic.environment, "env");
+        assert_eq!(diagnostic.detail, "setup command failed");
+        assert!(diagnostic.remedy.contains("repair"));
+        provider.observed = RemoteState::Running;
+        reconcile(&mut provider, &mut store, &mut recovered).unwrap();
+        cancel(&mut provider, &mut store, &mut recovered).unwrap();
+        assert_eq!(store.saved, Some(recovered));
     }
 
     #[test]

@@ -19,6 +19,8 @@ contacting the provider and records the returned remote identity before the
 first wait. A lost response or a failure to persist that identity leaves
 custody unknown; it does not authorise another submission. Cancellation is
 confirmed only on provider evidence; otherwise it remains unconfirmed.
+An observed environment setup failure is terminal and retains the target,
+environment and a repair hint, including when it is discovered after dispatch.
 
 A terminal result is advisory and must come from a channel authorised for that
 job. It binds the full tested commit, exit status, tests and log location;

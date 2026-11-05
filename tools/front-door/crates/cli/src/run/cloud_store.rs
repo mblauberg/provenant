@@ -119,11 +119,7 @@ impl CloudJobStore for AttemptCloudStore<'_> {
             let old = &record.job;
             // Once terminal evidence is durable, a stale observer must not
             // replace it with a later sample or a different terminal result.
-            if matches!(
-                old.state,
-                RemoteState::Finished { .. } | RemoteState::Cancelled
-            ) && old.state != job.state
-            {
+            if old.state.is_terminal() && old.state != job.state {
                 return Err(Error::Identity);
             }
             if (
@@ -305,6 +301,37 @@ mod tests {
             store.load()?.unwrap().state,
             RemoteState::Finished { .. }
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn cloud_store_preserves_setup_failure_after_reopen() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let directory = Directory::open_anchor(temp.path())?;
+        let mut store = AttemptCloudStore::new(&directory);
+        let mut running = job();
+        let mut intent = running.clone();
+        intent.remote_id.clear();
+        intent.state = RemoteState::Submitting;
+        store.begin(&intent)?;
+        store.save(&running)?;
+        running.state = RemoteState::SetupFailed {
+            detail: "setup failed".into(),
+        };
+        store.save(&running)?;
+        drop(store);
+        let directory = Directory::open_anchor(temp.path())?;
+        let mut reopened = AttemptCloudStore::new(&directory);
+        let recovered = reopened.load()?.ok_or("missing job")?;
+        let diagnostic = recovered
+            .environment_diagnostic()
+            .ok_or("missing diagnostic")?;
+        assert_eq!((diagnostic.target, diagnostic.environment), ("test", "env"));
+        let mut stale = recovered.clone();
+        stale.state = RemoteState::Running;
+        assert!(matches!(reopened.save(&stale), Err(Error::Identity)));
+        assert_eq!(reopened.load()?, Some(recovered));
         Ok(())
     }
 }
