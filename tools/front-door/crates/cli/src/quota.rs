@@ -1,4 +1,6 @@
 //! Quota arguments, composition through OS crate's safe filesystem, and render.
+#[path = "quota_notice.rs"]
+mod notice;
 use crate::metadata::CatalogueArg;
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
@@ -502,6 +504,7 @@ pub(crate) fn persist_provider_success(
         expected: current,
         replacement: Some(next),
         readiness_probe_result: None,
+        login_probe_expiry: None,
     };
     write_intent(&directory, state_root, &intent, &mut records)?;
 
@@ -637,6 +640,29 @@ fn read_readiness_file(
 /// nothing here reads as ready unless fresh evidence says so. Routing and the
 /// route and host commands read through this.
 pub(crate) fn read_readiness(state: &Path, scope: &ReadinessScope, now: i64) -> ReadinessRead {
+    read_readiness_after_probe(state, scope, now, None)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LoginEvidence {
+    Verified(i64),
+    Unverified(i64),
+}
+
+impl LoginEvidence {
+    pub(crate) fn observed_at(self) -> i64 {
+        match self {
+            Self::Verified(at) | Self::Unverified(at) => at,
+        }
+    }
+}
+
+pub(crate) fn read_readiness_after_probe(
+    state: &Path,
+    scope: &ReadinessScope,
+    now: i64,
+    reprobe: Option<LoginEvidence>,
+) -> ReadinessRead {
     if !component(&scope.adapter) || !component(&scope.account_key) {
         return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
     }
@@ -646,7 +672,31 @@ pub(crate) fn read_readiness(state: &Path, scope: &ReadinessScope, now: i64) -> 
         })
     });
     match read {
-        Ok(Some(file)) => file.get(scope, now),
+        Ok(Some(mut file)) => {
+            if let Some(reprobe) = reprobe {
+                let observed_at = reprobe.observed_at();
+                file.records.retain(|record| {
+                    !(record.scope.host == scope.host
+                        && record.scope.adapter == scope.adapter
+                        && record.scope.account_key == scope.account_key
+                        && record.observed_unix_seconds <= observed_at
+                        && (matches!(
+                            record.reason,
+                            Some(ReadinessReason::SignedOut | ReadinessReason::LoginExpired)
+                        ) || (matches!(reprobe, LoginEvidence::Verified(_))
+                            && record.reason == Some(ReadinessReason::AccountMismatch))))
+                });
+                if file.login.as_ref().is_some_and(|login| {
+                    login.scope.host == scope.host
+                        && login.scope.adapter == scope.adapter
+                        && login.scope.account_key == scope.account_key
+                        && login.observed_unix_seconds <= observed_at
+                }) {
+                    file.login = None;
+                }
+            }
+            file.get(scope, now)
+        }
         Ok(None) => ReadinessRead::absent(),
         Err(_) => ReadinessRead::unknown(ReadinessReason::InvalidEvidence),
     }
@@ -687,11 +737,26 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
                 .map_or(300, |policy| policy.timer_seconds);
             file.sync_probe_result(record, LOCAL_HOST, now, interval, reason)?;
         }
+        if let Some((expiry, interval)) = intent.login_probe_expiry {
+            file.login = Some(LoginObservation {
+                scope: ReadinessScope {
+                    host: LOCAL_HOST.into(),
+                    adapter: adapter.clone(),
+                    account_key: key.clone(),
+                    route: ACCOUNT_ROUTE.into(),
+                },
+                observed_unix_seconds: now,
+                valid_until_unix_seconds: now
+                    .saturating_add(i64::try_from(interval.max(1)).unwrap_or(i64::MAX)),
+                expires_unix_seconds: expiry,
+            });
+        }
         file.sync_refusals(record, LOCAL_HOST, &admission)?;
     } else {
         file.records.clear();
+        file.login = None;
     }
-    if file.records.is_empty() {
+    if file.records.is_empty() && file.login.is_none() {
         if let Some(dir) = existing {
             match dir.unlink(OsStr::new(&name)) {
                 Ok(()) => dir.sync()?,
@@ -970,6 +1035,7 @@ fn refresh_auth_metadata(
                 expected: current,
                 replacement: Some(next),
                 readiness_probe_result: None,
+                login_probe_expiry: None,
             },
             records,
         )?;
@@ -991,6 +1057,87 @@ fn keychain_repair(
         "expected {expected}; re-register with `provenant accounts register --adapter agy --directory ~ {label}` if this is the login-keychain account, or create the isolated keychain per docs/runbooks/providers.md"
     )
 }
+pub(crate) fn login_repair(entry: Option<&provenant_providers::accounts::Registration>) -> String {
+    let Some(entry) = entry else {
+        return "account-specific login remedy unavailable; check `provenant accounts list`".into();
+    };
+    let Some(directory) = entry.directory.to_str().filter(|path| {
+        entry.directory.is_absolute() && !path.chars().any(char::is_control) && !path.contains('`')
+    }) else {
+        return "account-specific login remedy unavailable; check the registered directory".into();
+    };
+    let quoted = format!("'{}'", directory.replace('\'', "'\\''"));
+    let Some(spec) = provenant_records::AdapterSpec::get(&entry.adapter) else {
+        return "account-specific login remedy unavailable; consult the provider's sign-in instructions".into();
+    };
+    if let Some(template) = spec.login_template {
+        format!(
+            "run `{}` interactively",
+            template.replace("{directory}", &quoted)
+        )
+    } else if !spec.login_hint.is_empty() {
+        format!(
+            "consult the provider's sign-in instructions (`{}`)",
+            spec.login_hint
+        )
+    } else {
+        "account-specific login remedy unavailable; consult the provider's sign-in instructions"
+            .into()
+    }
+}
+
+/// Assemble account-scoped login facts from one configuration and cache snapshot.
+pub(crate) fn account_login_diagnostic<'a>(
+    entries: impl IntoIterator<Item = &'a provenant_providers::accounts::Registration>,
+    records: &[AccountRecord],
+    adapter: &str,
+    key: Option<&str>,
+    reason: &provenant_records::RouteExclusionReason,
+) -> String {
+    let entry = entries
+        .into_iter()
+        .find(|entry| entry.adapter == adapter && Some(entry.key.as_str()) == key);
+    let last = records
+        .iter()
+        .find(|record| {
+            record.account.adapter == adapter && Some(record.account.account_key.as_str()) == key
+        })
+        .and_then(|record| record.snapshot.as_ref())
+        .map(|snapshot| snapshot.observed_unix_seconds);
+    login_diagnostic(entry, last, reason)
+}
+
+/// Diagnostic facts are account-scoped and contain no provider output.
+pub(crate) fn login_diagnostic(
+    entry: Option<&provenant_providers::accounts::Registration>,
+    last_success: Option<i64>,
+    reason: &provenant_records::RouteExclusionReason,
+) -> String {
+    let account = entry.map_or_else(
+        || "account unavailable".to_owned(),
+        |entry| {
+            format!(
+                "{} [{}]",
+                entry.label.escape_debug(),
+                entry.adapter.escape_debug()
+            )
+        },
+    );
+    let cause = match reason {
+        provenant_records::RouteExclusionReason::LoginExpired => "login expired",
+        provenant_records::RouteExclusionReason::AccountMismatch => {
+            "signed-in account differs from registration"
+        }
+        _ => "login required",
+    };
+    let observed = last_success
+        .and_then(|at| jiff::Timestamp::from_second(at).ok())
+        .map_or_else(|| "unknown".to_owned(), |at| at.to_string());
+    format!(
+        "{account}: {cause}; last successful observation {observed}; {}",
+        login_repair(entry)
+    )
+}
 /// Attaches menu bar choices from config; hidden and order are applied by the app.
 fn decorate(
     report: &mut QuotaReport,
@@ -1009,13 +1156,19 @@ fn decorate(
             None
         };
     for row in &mut report.accounts {
-        row.repair = (row.error == Some(ProbeFailure::IsolatedKeychainUnavailable)).then(|| {
-            let entry = accounts.entries.values().find(|entry| {
-                entry.adapter == provenant_records::Harness::Agy.spec().name
-                    && entry.key == row.account.account_key
-            });
-            keychain_repair(entry, &row.account.label)
+        let entry = accounts.entries.values().find(|entry| {
+            entry.adapter == row.account.adapter && entry.key == row.account.account_key
         });
+        row.repair = match row.error {
+            Some(ProbeFailure::IsolatedKeychainUnavailable) => {
+                Some(keychain_repair(entry, &row.account.label))
+            }
+            Some(
+                ProbeFailure::Auth | ProbeFailure::LoginExpired | ProbeFailure::AccountMismatch,
+            ) => Some(login_repair(entry)),
+            None if row.status == QuotaStatus::AuthRequired => Some(login_repair(entry)),
+            _ => None,
+        };
         row.display = accounts
             .entries
             .iter()
@@ -1028,6 +1181,116 @@ fn decorate(
                 headline: e.headline,
             });
     }
+}
+
+/// Project the same account-scoped expiry evidence for human and JSON output.
+fn decorate_login(
+    report: &mut QuotaReport,
+    state: &Path,
+    accounts: &provenant_providers::accounts::Settings,
+    warning_seconds: u64,
+    now: i64,
+) {
+    for row in &mut report.accounts {
+        row.login_expiry = Some(login_expiry_at(state, &row.account, warning_seconds, now));
+        if row.repair.is_none()
+            && row.error != Some(provenant_quota::ProbeFailure::Network)
+            && row.login_expiry.as_ref().is_some_and(|view| {
+                matches!(
+                    view.state,
+                    LoginExpiryState::Expiring | LoginExpiryState::Expired
+                )
+            })
+        {
+            let entry = accounts.entries.values().find(|entry| {
+                entry.adapter == row.account.adapter && entry.key == row.account.account_key
+            });
+            row.repair = Some(login_repair(entry));
+        }
+    }
+}
+fn login_expiry_at(
+    state: &Path,
+    account: &AccountScope,
+    warning_seconds: u64,
+    now: i64,
+) -> LoginExpiryView {
+    let observation = (component(&account.adapter) && component(&account.account_key))
+        .then(|| open_readiness_account(state, &account.account_key))
+        .transpose()
+        .ok()
+        .flatten()
+        .flatten()
+        .and_then(|dir| {
+            read_readiness_file(&dir, &account.adapter, &account.account_key)
+                .ok()
+                .flatten()
+        })
+        .and_then(|file| file.login)
+        .filter(|login| login.scope.host == LOCAL_HOST);
+    let status = observation
+        .as_ref()
+        .map_or(LoginExpiryState::Unknown, |item| {
+            item.state(now, warning_seconds)
+        });
+    LoginExpiryView {
+        state: status,
+        expires_unix_seconds: observation.as_ref().and_then(|item| {
+            (status != LoginExpiryState::Unknown)
+                .then_some(item.expires_unix_seconds)
+                .flatten()
+        }),
+        observed_unix_seconds: observation.map(|item| item.observed_unix_seconds),
+    }
+}
+
+/// Read account login facts for doctor without probing providers or credentials.
+pub fn recorded_login_rows(roots: &Roots) -> Result<Vec<AccountRow>, String> {
+    recorded_login_rows_inner(roots).map_err(|error| error.to_string())
+}
+fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError> {
+    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
+    let accounts = domains.accounts.with_derived_accounts();
+    let mut configured: Vec<_> = accounts
+        .entries
+        .values()
+        .map(|entry| AccountScope {
+            adapter: entry.adapter.clone(),
+            account_key: entry.key.clone(),
+            label: entry.label.clone(),
+        })
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    configured
+        .retain(|account| seen.insert((account.adapter.clone(), account.account_key.clone())));
+    let mut records = read_cache(roots)?;
+    records.retain(|record| {
+        configured.iter().any(|account| {
+            account.adapter == record.account.adapter
+                && account.account_key == record.account.account_key
+        })
+    });
+    add_configured(&mut records, &configured);
+    let now = SystemClock::new().unix_seconds();
+    let policies =
+        provenant_providers::scheduling_policies(&domains.quota, provenant_providers::REGISTRY);
+    let mut report = schedule::report(
+        &policies,
+        &records,
+        &[],
+        &QuotaQuery { adapter: None },
+        now,
+        String::new(),
+    )?;
+    decorate(&mut report, &accounts, &domains.quota.display);
+    decorate_login(
+        &mut report,
+        roots.state.as_path(),
+        &accounts,
+        domains.quota.login_expiry_warning_seconds,
+        now,
+    );
+    Ok(report.accounts)
 }
 fn execute(
     command: &Quota,
@@ -1091,6 +1354,13 @@ fn execute(
         let mut report =
             schedule::report(&policies, &records, &detected, &query, now, report_path)?;
         decorate(&mut report, &entries, &settings.display);
+        decorate_login(
+            &mut report,
+            roots.state.as_path(),
+            &entries,
+            settings.login_expiry_warning_seconds,
+            now,
+        );
         return Ok(report);
     };
     let root = private(roots.state.as_path())?;
@@ -1169,6 +1439,7 @@ fn execute(
             .iter()
             .filter_map(|r| r.quota_source)
             .find(|s| s.adapter_id() == account.adapter);
+        let mut login_expiry = None;
         let outcome = match source {
             Some(source) => {
                 let probe_deadline = schedule::probe_deadline(plan.deadline_unix_seconds, at)?;
@@ -1181,7 +1452,9 @@ fn execute(
                     .probe(account, &input)
                     .map_err(|_| ProbeFailure::Disabled)
                     .and_then(|probe| {
-                        let capture = effects.capture(&probe, current.as_ref())?;
+                        let capture = effects.capture(&probe, current.as_ref());
+                        login_expiry = effects.login_expiry_unix_seconds();
+                        let capture = capture?;
                         source
                             .decode(&probe, &capture)
                             .map_err(|_| ProbeFailure::Malformed)
@@ -1207,7 +1480,23 @@ fn execute(
         {
             match schedule::complete(reserved, &token, finished, outcome, None) {
                 Ok(mut complete) => {
-                    complete.readiness_probe_result = Some(readiness_reason);
+                    // A later failure cannot disprove a previously verified
+                    // mismatch: publish the same sticky reason as the account
+                    // record until a successful probe establishes recovery.
+                    let reason = if readiness_reason.is_some()
+                        && complete.replacement.as_ref().is_some_and(|record| {
+                            record.last_error == Some(ProbeFailure::AccountMismatch)
+                        }) {
+                        Some(ReadinessReason::AccountMismatch)
+                    } else {
+                        readiness_reason
+                    };
+                    complete.readiness_probe_result = Some(reason);
+                    let interval = policies
+                        .iter()
+                        .find(|policy| policy.adapter == account.adapter)
+                        .map_or(300, |policy| policy.timer_seconds);
+                    complete.login_probe_expiry = Some((login_expiry, interval));
                     write_intent(&dir, roots.state.as_path(), &complete, &mut records)?;
                     // Best effort: a history fault never fails the refresh.
                     if let Some(snapshot) = complete
@@ -1245,6 +1534,13 @@ fn execute(
         report_path,
     )?;
     decorate(&mut report, &entries, &settings.display);
+    decorate_login(
+        &mut report,
+        roots.state.as_path(),
+        &entries,
+        settings.login_expiry_warning_seconds,
+        now,
+    );
     let bytes = serde_json::to_vec(&report)?;
     if bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(EdgeError::TooLarge);
@@ -1265,9 +1561,33 @@ fn execute(
         &detected,
         &query,
         now,
-        report.report_path,
+        report.report_path.clone(),
     )?;
     decorate(&mut shown, &entries, &settings.display);
+    decorate_login(
+        &mut shown,
+        roots.state.as_path(),
+        &entries,
+        settings.login_expiry_warning_seconds,
+        now,
+    );
+    // Fabric delivery must not hold the quota lock. A deterministic operation
+    // ID makes retry safe if the process stops after delivery.
+    drop(_lock);
+    if !crate::fabric::in_lane()
+        && let Err(error) = notice::deliver(
+            roots,
+            &report,
+            settings.login_expiry_warning_seconds,
+            &clock,
+        )
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            io::stderr().lock(),
+            "Warning: could not deliver login expiry notice: {error}"
+        );
+    }
     Ok(shown)
 }
 /// Chair sessions the SessionStart hook recorded in `[since, until)`, with the
@@ -1610,6 +1930,25 @@ fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String
             row.account.adapter,
             reset.map_or_else(String::new, |label| format!(" {label}"))
         ));
+        if let Some(login) = &row.login_expiry {
+            match (
+                login.state,
+                login
+                    .expires_unix_seconds
+                    .and_then(|at| jiff::Timestamp::from_second(at).ok()),
+            ) {
+                (LoginExpiryState::Fresh, Some(expiry)) => {
+                    human.push_str(&format!("; login expires {expiry}"))
+                }
+                (LoginExpiryState::Expiring, Some(expiry)) => {
+                    human.push_str(&format!("; login expiring {expiry}"))
+                }
+                (LoginExpiryState::Expired, Some(expiry)) => {
+                    human.push_str(&format!("; login expired {expiry}"))
+                }
+                _ => human.push_str("; login expiry unknown"),
+            }
+        }
         for refusal in displayed_refusals(row) {
             let name = refusal.model.escape_debug();
             let pool = refusal
@@ -1641,7 +1980,9 @@ fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String
                     human.push_str(&format!("; dashboard calibration until {expiry}"));
                 }
             }
-            if matches!(row.status, QuotaStatus::Stale | QuotaStatus::AuthRequired) {
+            if row.error.is_some()
+                || matches!(row.status, QuotaStatus::Stale | QuotaStatus::AuthRequired)
+            {
                 human.push_str(" (last known)");
             }
             for window in &snapshot.windows {
@@ -1662,17 +2003,53 @@ fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String
                 .and_then(|v| v.as_str().map(str::to_owned))
                 .unwrap_or_else(|| "unknown".into());
             human.push_str(&format!("; refresh failed: {reason}"));
-            if error == ProbeFailure::Auth {
+            if matches!(error, ProbeFailure::Auth | ProbeFailure::LoginExpired) {
                 human.push_str(" (needs login in this identity)");
+                if let Some(repair) = &row.repair {
+                    human.push_str(&format!("; {repair}"));
+                } else {
+                    human.push_str("; account-specific login remedy unavailable");
+                }
             } else if error == ProbeFailure::AccountMismatch {
-                human.push_str(
-                    " (the signed-in account differs from the registered one; run `provenant accounts register --adapter agy --directory <dir> <label>`)",
-                );
+                human.push_str(" (the signed-in account differs from the registered one)");
+                if let Some(repair) = &row.repair {
+                    human.push_str(&format!("; {repair}"));
+                } else {
+                    human.push_str("; account-specific login remedy unavailable");
+                }
             } else if error == ProbeFailure::IsolatedKeychainUnavailable
                 && let Some(repair) = &row.repair
             {
                 human.push_str(&format!("; isolated keychain unavailable: {repair}"));
             }
+        }
+        if row.error.is_none() && row.status == QuotaStatus::AuthRequired {
+            human.push_str("; ");
+            human.push_str(
+                row.repair
+                    .as_deref()
+                    .unwrap_or("account-specific login remedy unavailable"),
+            );
+        }
+        if !(row.error.is_none() && row.status == QuotaStatus::AuthRequired)
+            && !matches!(
+                row.error,
+                Some(
+                    ProbeFailure::Auth
+                        | ProbeFailure::LoginExpired
+                        | ProbeFailure::AccountMismatch
+                        | ProbeFailure::IsolatedKeychainUnavailable
+                )
+            )
+            && row.login_expiry.as_ref().is_some_and(|view| {
+                matches!(
+                    view.state,
+                    LoginExpiryState::Expiring | LoginExpiryState::Expired
+                )
+            })
+            && let Some(repair) = &row.repair
+        {
+            human.push_str(&format!("; {repair}"));
         }
         for cooldown in &row.capacity_cooldowns {
             human.push_str(&format!(
@@ -1984,6 +2361,139 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recorded_doctor_rows_use_the_same_login_observation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let root = private(roots.state.as_path())?;
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version = 1\n[domains.accounts.entries.work]\nadapter = 'claude'\nlabel = 'work'\nkey = 'key'\ndirectory = '/fixture/account'\n",
+        )?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let now = SystemClock::new().unix_seconds();
+        let account = AccountScope {
+            adapter: "claude".into(),
+            account_key: "key".into(),
+            label: "work".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.revision = 1;
+        record.last_error = Some(ProbeFailure::LoginExpired);
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: account.clone(),
+            revision: 1,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: now - 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+            details: None,
+        });
+        let intent = UpdateIntent {
+            account,
+            expected: None,
+            replacement: Some(record),
+            readiness_probe_result: Some(Some(ReadinessReason::LoginExpired)),
+            login_probe_expiry: Some((Some(now - 1), 300)),
+        };
+        write_intent(&dir, roots.state.as_path(), &intent, &mut Vec::new())?;
+        let rows = recorded_login_rows(&roots).map_err(std::io::Error::other)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account.label, "work");
+        assert_eq!(rows[0].error, Some(ProbeFailure::LoginExpired));
+        assert_eq!(
+            rows[0].login_expiry.as_ref().unwrap().state,
+            LoginExpiryState::Expired
+        );
+        let readiness = read_readiness(
+            roots.state.as_path(),
+            &ReadinessScope {
+                host: LOCAL_HOST.into(),
+                adapter: "claude".into(),
+                account_key: "key".into(),
+                route: "claude/model".into(),
+            },
+            SystemClock::new().unix_seconds(),
+        );
+        assert_eq!(readiness.reason, Some(ReadinessReason::LoginExpired));
+        assert!(matches!(
+            readiness.project(),
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::LoginExpired,
+                ..
+            }
+        ));
+        assert_eq!(
+            rows[0].snapshot.as_ref().unwrap().observed_unix_seconds,
+            now - 100
+        );
+        assert!(
+            rows[0]
+                .repair
+                .as_ref()
+                .unwrap()
+                .contains("CLAUDE_CONFIG_DIR='/fixture/account'")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn login_repair_uses_registered_account_context_or_says_unavailable() {
+        let mut entry: provenant_providers::accounts::Registration = serde_json::from_value(
+            serde_json::json!({"adapter":"claude","label":"work","key":"key","directory":"/tmp/account's files"}),
+        )
+        .unwrap();
+        assert_eq!(
+            login_repair(Some(&entry)),
+            "run `CLAUDE_CONFIG_DIR='/tmp/account'\\''s files' claude auth login` interactively"
+        );
+        let diagnostic = login_diagnostic(
+            Some(&entry),
+            Some(100),
+            &provenant_records::RouteExclusionReason::LoginExpired,
+        );
+        assert!(
+            diagnostic.contains("work [claude]: login expired"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("1970-01-01T00:01:40Z"), "{diagnostic}");
+        let mismatch = login_diagnostic(
+            Some(&entry),
+            Some(100),
+            &provenant_records::RouteExclusionReason::AccountMismatch,
+        );
+        assert!(mismatch.contains("signed-in account differs from registration"));
+        assert!(mismatch.contains("CLAUDE_CONFIG_DIR="));
+        assert!(
+            diagnostic.contains("CLAUDE_CONFIG_DIR='/tmp/account'\\''s files'"),
+            "{diagnostic}"
+        );
+        let missing = login_diagnostic(
+            None,
+            None,
+            &provenant_records::RouteExclusionReason::LoginExpired,
+        );
+        assert!(
+            missing.contains("last successful observation unknown"),
+            "{missing}"
+        );
+        assert!(missing.contains("remedy unavailable"), "{missing}");
+        entry.directory = "/tmp/line\nbreak".into();
+        assert!(login_repair(Some(&entry)).contains("unavailable"));
+        entry.directory = "/tmp/`command`".into();
+        assert!(login_repair(Some(&entry)).contains("unavailable"));
+        entry.directory = "/tmp/account".into();
+        entry.adapter = "unknown".into();
+        assert!(login_repair(Some(&entry)).contains("unavailable"));
+        assert!(login_repair(None).contains("unavailable"));
+    }
+
+    #[test]
     fn account_mismatch_names_the_repair_and_sign_out_keeps_login_text() {
         let human = |error| {
             let report = QuotaReport {
@@ -1995,6 +2505,7 @@ mod tests {
                         account_key: "agy-google-abc".into(),
                         label: "work".into(),
                     },
+                    login_expiry: None,
                     snapshot: None,
                     status: QuotaStatus::AuthRequired,
                     resets_at: None,
@@ -2025,8 +2536,7 @@ mod tests {
             "{mismatch}"
         );
         assert!(
-            mismatch
-                .contains("provenant accounts register --adapter agy --directory <dir> <label>"),
+            mismatch.contains("account-specific login remedy unavailable"),
             "{mismatch}"
         );
         let signed_out = human(ProbeFailure::Auth);
@@ -2042,6 +2552,7 @@ mod tests {
                 account_key: "agy-google-abc".into(),
                 label: label.into(),
             },
+            login_expiry: None,
             snapshot: None,
             status: QuotaStatus::KeychainUnavailable,
             resets_at: None,
@@ -2089,6 +2600,7 @@ mod tests {
                     account_key: "agy-google-abc".into(),
                     label: "legacy".into(),
                 },
+                login_expiry: None,
                 snapshot: None,
                 status: QuotaStatus::KeychainUnavailable,
                 resets_at: None,
@@ -2127,6 +2639,7 @@ mod tests {
                 account_key: "key".into(),
                 label: format!("{status:?}"),
             },
+            login_expiry: None,
             snapshot: None,
             status,
             resets_at: None,
@@ -2171,6 +2684,7 @@ mod tests {
                 account_key: label.into(),
                 label: label.into(),
             },
+            login_expiry: None,
             snapshot: None,
             status: QuotaStatus::Exhausted,
             resets_at: resets_at.map(str::to_owned),
@@ -2228,6 +2742,25 @@ mod tests {
             serde_json::to_value(&today).unwrap()["accounts"][0]["resets_at"],
             "2026-11-02T00:11:00Z"
         );
+
+        let mut failed = today.clone();
+        let row = &mut failed.accounts[0];
+        row.error = Some(ProbeFailure::Auth);
+        row.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: row.account.clone(),
+            revision: 0,
+            status: QuotaStatus::Exhausted,
+            observed_unix_seconds: second("2026-11-01T23:00:00Z"),
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![],
+            details: None,
+        });
+        let failed_human = quota_human_at(&failed, zone.clone());
+        assert!(failed_human.contains("zen [opencode]: EXHAUSTED"));
+        assert!(failed_human.contains("(last known)"));
+        assert!(failed_human.contains("refresh failed: auth"));
 
         let mut scoped = today.clone();
         scoped.accounts[1].status = QuotaStatus::Available;
@@ -2354,6 +2887,7 @@ mod tests {
                 account_key: "k".into(),
                 label: "agy".into(),
             },
+            login_expiry: None,
             snapshot,
             status,
             resets_at: None,
@@ -2430,6 +2964,7 @@ mod tests {
                 expected: None,
                 replacement: Some(record),
                 readiness_probe_result: None,
+                login_probe_expiry: None,
             },
             &mut Vec::new(),
         )?;
@@ -2564,6 +3099,7 @@ mod tests {
                 expected: None,
                 replacement: Some(record),
                 readiness_probe_result: None,
+                login_probe_expiry: None,
             },
             &mut records,
         )?;
@@ -2630,6 +3166,7 @@ mod tests {
                 expected: Some(records[0].clone()),
                 replacement: Some(reserved.clone()),
                 readiness_probe_result: None,
+                login_probe_expiry: None,
             },
             &mut records,
         )?;
@@ -2644,6 +3181,7 @@ mod tests {
                 expected: Some(records[0].clone()),
                 replacement: Some(failed),
                 readiness_probe_result: None,
+                login_probe_expiry: None,
             },
             &mut records,
         )?;
@@ -2722,6 +3260,7 @@ mod tests {
                     expected: None,
                     replacement: Some(record),
                     readiness_probe_result: None,
+                    login_probe_expiry: None,
                 },
                 &mut records,
             )?;
@@ -2801,6 +3340,163 @@ mod tests {
                 .unwrap()
                 .status,
             QuotaStatus::AuthRequired
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn healthy_account_probe_supersedes_only_older_auth_readiness()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let state = temp.path();
+        let directory = state.join("readiness/key");
+        std::fs::create_dir_all(&directory)?;
+        for path in [
+            state,
+            state.join("readiness").as_path(),
+            directory.as_path(),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let scope = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "codex".into(),
+            account_key: "key".into(),
+            route: "codex/model".into(),
+        };
+        let mut file = ReadinessFile::default();
+        let mut account = AccountRecord::empty(provenant_quota::AccountScope {
+            adapter: "codex".into(),
+            account_key: "key".into(),
+            label: "work".into(),
+        });
+        account.backoff_until_unix_seconds = Some(500);
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            100,
+            300,
+            Some(ReadinessReason::SignedOut),
+        )?;
+        let path = directory.join("codex.json");
+        std::fs::write(&path, serde_json::to_vec(&file)?)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        assert_eq!(
+            read_readiness(state, &scope, 150).reason,
+            Some(ReadinessReason::SignedOut)
+        );
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Verified(120)))
+                .reason,
+            Some(ReadinessReason::NotProbed)
+        );
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Verified(90)))
+                .reason,
+            Some(ReadinessReason::SignedOut)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unverified_login_preserves_mismatch_refusal_and_newer_auth()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let state = temp.path();
+        let dir = state.join("readiness/go");
+        std::fs::create_dir_all(&dir)?;
+        for path in [state, state.join("readiness").as_path(), dir.as_path()] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let scope = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            route: "opencode/model".into(),
+        };
+        let account = AccountRecord::empty(provenant_quota::AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        });
+        let path = dir.join("opencode.json");
+        let write = |file: &ReadinessFile| -> Result<(), Box<dyn std::error::Error>> {
+            std::fs::write(&path, serde_json::to_vec(file)?)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            Ok(())
+        };
+        let mut file = ReadinessFile::default();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            100,
+            300,
+            Some(ReadinessReason::SignedOut),
+        )?;
+        write(&file)?;
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
+                .reason,
+            Some(ReadinessReason::NotProbed)
+        );
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(90)))
+                .reason,
+            Some(ReadinessReason::SignedOut)
+        );
+        file = ReadinessFile::default();
+        file.login = Some(provenant_quota::LoginObservation {
+            scope: ReadinessScope {
+                route: provenant_quota::ACCOUNT_ROUTE.into(),
+                ..scope.clone()
+            },
+            observed_unix_seconds: 100,
+            valid_until_unix_seconds: 400,
+            expires_unix_seconds: Some(120),
+        });
+        write(&file)?;
+        assert_eq!(
+            read_readiness(state, &scope, 150).reason,
+            Some(ReadinessReason::LoginExpired)
+        );
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
+                .reason,
+            Some(ReadinessReason::NotProbed)
+        );
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(90)))
+                .reason,
+            Some(ReadinessReason::LoginExpired)
+        );
+        file.login = None;
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            100,
+            300,
+            Some(ReadinessReason::AccountMismatch),
+        )?;
+        write(&file)?;
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
+                .reason,
+            Some(ReadinessReason::AccountMismatch)
+        );
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            100,
+            300,
+            Some(ReadinessReason::ProviderRefusal),
+        )?;
+        write(&file)?;
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
+                .reason,
+            Some(ReadinessReason::ProviderRefusal)
         );
         Ok(())
     }
@@ -2948,6 +3644,7 @@ mod tests {
                 expected: Some(current),
                 replacement: Some(next),
                 readiness_probe_result: None,
+                login_probe_expiry: None,
             },
             &mut records,
         )?;
@@ -2962,6 +3659,7 @@ mod tests {
             expected: Some(records[0].clone()),
             replacement: None,
             readiness_probe_result: None,
+            login_probe_expiry: None,
         };
         write_intent(&dir, state, &drop, &mut records)?;
         assert!(!state.join("readiness/key").exists());
@@ -2973,6 +3671,7 @@ mod tests {
         struct Effects {
             failure: Option<ProbeFailure>,
             malformed: bool,
+            expiry: Option<i64>,
         }
         impl QuotaEffects for Effects {
             fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
@@ -3001,6 +3700,9 @@ mod tests {
                     exit_code: Some(0),
                     overflowed: false,
                 })
+            }
+            fn login_expiry_unix_seconds(&self) -> Option<i64> {
+                self.expiry
             }
         }
         for (failure, malformed, expected) in [
@@ -3041,12 +3743,52 @@ mod tests {
                 trigger: Trigger::Manual,
                 power: Power::Ac,
             };
-            execute(
+            let expiry = SystemClock::new().unix_seconds() + 60;
+            let expiry = (failure.is_none() && !malformed).then_some(expiry);
+            let report = execute(
                 &command,
                 &roots,
                 provenant_providers::REGISTRY,
-                &Effects { failure, malformed },
+                &Effects {
+                    failure,
+                    malformed,
+                    expiry,
+                },
             )?;
+            let login = report.accounts[0].login_expiry.as_ref().unwrap();
+            assert_eq!(login.expires_unix_seconds, expiry);
+            assert_eq!(
+                login.state,
+                if expiry.is_some() {
+                    LoginExpiryState::Expiring
+                } else {
+                    LoginExpiryState::Unknown
+                }
+            );
+            let human = quota_human(&report);
+            assert!(
+                human.contains(if expiry.is_some() {
+                    "login expiring"
+                } else {
+                    "login expiry unknown"
+                }),
+                "{human}"
+            );
+            if expiry.is_some() {
+                assert!(
+                    human.contains("account-specific login remedy unavailable"),
+                    "{human}"
+                );
+            }
+            let json = serde_json::to_value(&report)?;
+            assert_eq!(
+                json["accounts"][0]["login_expiry"]["state"],
+                if expiry.is_some() {
+                    "expiring"
+                } else {
+                    "unknown"
+                }
+            );
             let read = read_readiness(
                 roots.state.as_path(),
                 &ReadinessScope {
@@ -3092,6 +3834,7 @@ mod tests {
         };
         let file = ReadinessFile {
             schema_version: 1,
+            login: None,
             records: vec![provenant_quota::RouteReadiness {
                 schema_version: 1,
                 scope: scope.clone(),
@@ -3160,6 +3903,7 @@ mod tests {
                 expected: None,
                 replacement: Some(initial),
                 readiness_probe_result: None,
+                login_probe_expiry: None,
             },
             &mut records,
         )?;
@@ -3173,6 +3917,7 @@ mod tests {
             expected: Some(current),
             replacement: Some(failed),
             readiness_probe_result: Some(Some(ReadinessReason::ProbeTimeout)),
+            login_probe_expiry: None,
         };
         write_intent(&dir, state, &failure, &mut records)?;
         let route = ReadinessScope {
@@ -3194,6 +3939,7 @@ mod tests {
             expected: Some(current),
             replacement: Some(succeeded),
             readiness_probe_result: Some(None),
+            login_probe_expiry: None,
         };
         write_intent(&dir, state, &success, &mut records)?;
         assert_eq!(
@@ -3232,6 +3978,7 @@ mod tests {
             expected: None,
             replacement: Some(initial),
             readiness_probe_result: None,
+            login_probe_expiry: None,
         };
         write_intent(&dir, temp.path(), &add, &mut records)?;
         // The state root is explicit, so a directory not named quota still signals.
@@ -3244,6 +3991,7 @@ mod tests {
             expected: Some(records[0].clone()),
             replacement: None,
             readiness_probe_result: None,
+            login_probe_expiry: None,
         };
         write_intent(&dir, temp.path(), &drop_intent, &mut records)?;
         assert_eq!(records.len(), 0);

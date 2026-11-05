@@ -4295,8 +4295,15 @@ fn claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token() {
             now + 60_000,
             &authority,
         );
-        quota.join().unwrap().expect("quota refresh succeeds");
-        dispatch.expect("concurrent dispatch must not reuse the rotated refresh token");
+        let quota_token = quota.join().unwrap().expect("quota refresh succeeds");
+        let dispatch_token =
+            dispatch.expect("concurrent dispatch must not reuse the rotated refresh token");
+        for output in [format!("{quota_token:?}"), format!("{dispatch_token:?}")] {
+            assert!(!output.contains("fixture-old"));
+            assert!(!output.contains("fixture-renewed"));
+            assert!(!output.contains("fixture-single-use"));
+            assert!(!output.contains("fixture-rotated"));
+        }
     });
     assert_eq!(
         *executor.exchanges.lock().unwrap(),

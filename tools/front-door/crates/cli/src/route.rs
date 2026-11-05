@@ -814,6 +814,8 @@ pub struct RoutePreview {
     pub nearest_models: Vec<String>,
     pub pacing: Vec<provenant_routing::PacingPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_diagnostic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub quota: Option<provenant_quota::QuotaSnapshot>,
 }
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
@@ -999,6 +1001,7 @@ fn with_context<T>(
     access: &[AccessContext<'_>],
     host: &str,
     requested_models: &[ModelId],
+    revalidated_auth: bool,
     action: impl FnOnce(
         &RoutingContext<'_>,
         &[provenant_quota::AccountRecord],
@@ -1041,6 +1044,53 @@ fn with_context<T>(
     domains
         .quota
         .apply_calibration(&mut quota_records, timestamp.as_second());
+    // Fresh login evidence can replace older sign-out or expiry evidence.
+    // Only an account-identifying check can clear an identity mismatch.
+    let login_evidence = |adapter: &str, key: &str, now: i64| {
+        if !revalidated_auth {
+            return None;
+        }
+        availability
+            .iter()
+            .filter(|record| {
+                record.adapter == adapter
+                    && record.account_key.as_deref() == Some(key)
+                    && record.observed_unix_seconds <= now
+                    && record.expires_unix_seconds > now
+            })
+            .filter_map(|record| {
+                let at = record.observed_unix_seconds;
+                let spec = provenant_records::AdapterSpec::get(adapter)?;
+                let observed = match spec.login_observation {
+                    provenant_records::LoginObservation::AccountAvailability => true,
+                    provenant_records::LoginObservation::Reprobe => {
+                        record.fixture_ref == format!("installed/{adapter}/login-status")
+                    }
+                    provenant_records::LoginObservation::ExecutableOnly => {
+                        record.fixture_ref == format!("installed/{adapter}/login-unverified")
+                    }
+                    provenant_records::LoginObservation::None => false,
+                };
+                observed.then_some(if spec.login_check_names_account {
+                    crate::quota::LoginEvidence::Verified(at)
+                } else {
+                    crate::quota::LoginEvidence::Unverified(at)
+                })
+            })
+            .max_by_key(|probe| probe.observed_at())
+    };
+    for record in &mut quota_records {
+        let probe = login_evidence(
+            &record.account.adapter,
+            &record.account.account_key,
+            timestamp.as_second(),
+        );
+        if record.last_error == Some(provenant_quota::ProbeFailure::AccountMismatch)
+            && matches!(probe, Some(crate::quota::LoginEvidence::Verified(at)) if record.last_attempt_unix_seconds.is_none_or(|attempt| at >= attempt))
+        {
+            record.last_error = None;
+        }
+    }
     let quota = quota_observations(
         &catalogue,
         availability,
@@ -1053,10 +1103,14 @@ fn with_context<T>(
         .flat_map(|record| record.capacity_cooldowns.iter().cloned())
         .collect();
     let now = WallTime::from_micros(timestamp.as_microsecond())?;
-    // Readiness is read from quota's own tree, never probed from here.
     let state = roots.state.as_path();
-    let readiness = |scope: &provenant_quota::ReadinessScope, now: i64| {
-        crate::quota::read_readiness(state, scope, now)
+    let readiness = |scope: &provenant_quota::ReadinessScope, now: i64| match login_evidence(
+        &scope.adapter,
+        &scope.account_key,
+        now,
+    ) {
+        Some(reprobe) => crate::quota::read_readiness_after_probe(state, scope, now, Some(reprobe)),
+        None => crate::quota::read_readiness(state, scope, now),
     };
     action(
         &RoutingContext {
@@ -1314,6 +1368,7 @@ fn resolve_dispatch_excluding(
         access,
         host,
         &requested_models,
+        true,
         |context, records, policies| {
             let mut excluded_members = initial_exclusions.to_vec();
             let mut refusals = Vec::new();
@@ -1570,16 +1625,24 @@ fn list_data(
     roots: &Roots,
     query: &RouteListRequest,
 ) -> Result<Box<provenant_routing::RouteList>, EdgeError> {
-    with_context(roots, &[], &[], "local-preview", &[], |context, _, _| {
-        Ok(Box::new(provenant_routing::list(
-            &provenant_routing::RouteListQuery {
-                adapter: query.adapter.clone(),
-                pool: query.pool.clone(),
-                valid: query.valid,
-            },
-            context,
-        )?))
-    })
+    with_context(
+        roots,
+        &[],
+        &[],
+        "local-preview",
+        &[],
+        false,
+        |context, _, _| {
+            Ok(Box::new(provenant_routing::list(
+                &provenant_routing::RouteListQuery {
+                    adapter: query.adapter.clone(),
+                    pool: query.pool.clone(),
+                    valid: query.valid,
+                },
+                context,
+            )?))
+        },
+    )
 }
 
 pub(crate) fn effective_members(
@@ -2112,6 +2175,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
             &[],
             "local-preview",
             &[],
+            false,
             |context, records, _| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),
@@ -2158,6 +2222,26 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                                     )))
                     })
                     .and_then(|r| r.snapshot.clone());
+                let login_diagnostic = match &route.readiness {
+                    RouteReadiness::Unavailable {
+                        reason:
+                            reason @ (provenant_records::RouteExclusionReason::AuthRequired
+                            | provenant_records::RouteExclusionReason::LoginExpired
+                            | provenant_records::RouteExclusionReason::AccountMismatch),
+                        ..
+                    } => {
+                        let config =
+                            provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
+                        Some(crate::quota::account_login_diagnostic(
+                            config.domains.accounts.entries.values(),
+                            records,
+                            &route.adapter,
+                            route.account_key.as_deref(),
+                            reason,
+                        ))
+                    }
+                    _ => None,
+                };
                 let pacing = provenant_routing::pacing_preview(&model, context);
                 let entry = context.catalogue.model(&model);
                 let allow_unknown_partial_headroom = context
@@ -2178,6 +2262,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                         Vec::new()
                     },
                     pacing,
+                    login_diagnostic,
                     quota,
                 })))
             },
@@ -2327,6 +2412,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
         &[],
         "local-preview",
         &[],
+        false,
         |context, records, policies| {
             let request = resolve_request(&query, context)?;
             let rules = effective_exclusion_rules(exclude, roots)?;
@@ -2457,6 +2543,9 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }),
         diagnostics
     );
+    if let Some(diagnostic) = &preview.login_diagnostic {
+        text.push_str(&format!("login: {diagnostic}\n"));
+    }
     text.push_str(&format!("model policy sources={}\n{}\ncompaction break-even turns (15k summary, zero rework): {:?}\n", preview.model_policy.sources.join(", "), preview.model_policy.policy.guidance(), preview.compaction_break_even_turns));
     for note in &preview.exclusion_notes {
         text.push_str(&format!("note: {note}\n"));
@@ -2776,6 +2865,266 @@ mod route_tests {
         let roots = inputs.resolve(&Resolver)?;
         std::fs::create_dir_all(roots.state.as_path())?;
         Ok(roots)
+    }
+
+    #[test]
+    fn dispatch_rechecks_recorded_auth_with_a_healthy_account_probe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_quota::{
+            AccountRecord, AccountScope, LOCAL_HOST, ReadinessFile, ReadinessReason,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let dir = roots.state.as_path().join("readiness/key");
+        std::fs::create_dir_all(&dir)?;
+        for path in [
+            roots.state.as_path(),
+            roots.state.as_path().join("readiness").as_path(),
+            dir.as_path(),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let account = AccountRecord::empty(AccountScope {
+            adapter: "codex".into(),
+            account_key: "key".into(),
+            label: "work".into(),
+        });
+        let mut file = ReadinessFile::default();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            now - 10,
+            300,
+            Some(ReadinessReason::SignedOut),
+        )?;
+        let path = dir.join("codex.json");
+        std::fs::write(&path, serde_json::to_vec(&file)?)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let catalogue = super::Catalogue::bundled()?;
+        let mut available = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "codex".into(),
+            executable: "/fixture/codex".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "installed/codex/version".into(),
+            catalogue_revision: catalogue.revision().into(),
+            account_key: Some("key".into()),
+            observed_models: Vec::new(),
+            observed_unix_seconds: now,
+            expires_unix_seconds: now + 300,
+        };
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: Some(super::Model("codex/unlisted-exact".into())),
+            route: None,
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        }
+        .to_domain()?;
+        let access = [provenant_routing::AccessContext {
+            adapter: "codex",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        }];
+        let resolve = |record: &provenant_providers::AvailabilityRecord| {
+            super::resolve_dispatch(
+                &request,
+                &roots,
+                Some("key"),
+                ("fixture", 0),
+                std::slice::from_ref(record),
+                &access,
+                "fixture",
+                None,
+                &[],
+            )
+        };
+        let before = resolve(&available)?;
+        assert!(matches!(
+            before.readiness,
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::AuthRequired,
+                ..
+            }
+        ));
+        available.fixture_ref = "installed/codex/login-status".into();
+        let after = resolve(&available)?;
+        assert!(matches!(
+            after.readiness,
+            provenant_records::RouteReadiness::Ready { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn opencode_unverified_login_allows_selected_account_to_try()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_quota::{
+            AccountRecord, AccountScope, LOCAL_HOST, ReadinessFile, ReadinessReason,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let dir = roots.state.as_path().join("readiness/go");
+        std::fs::create_dir_all(&dir)?;
+        for path in [
+            roots.state.as_path(),
+            roots.state.as_path().join("readiness").as_path(),
+            dir.as_path(),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let account = AccountRecord::empty(AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        });
+        let mut file = ReadinessFile::default();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            now - 10,
+            300,
+            Some(ReadinessReason::SignedOut),
+        )?;
+        let path = dir.join("opencode.json");
+        std::fs::write(&path, serde_json::to_vec(&file)?)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let catalogue = super::Catalogue::bundled()?;
+        let mut available = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "opencode".into(),
+            executable: "/fixture/opencode".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "installed/opencode/version".into(),
+            catalogue_revision: catalogue.revision().into(),
+            account_key: Some("go".into()),
+            observed_models: Vec::new(),
+            observed_unix_seconds: now,
+            expires_unix_seconds: now + 300,
+        };
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: Some(super::Model(
+                "opencode/opencode-go/deepseek-v4.1-flash".into(),
+            )),
+            route: None,
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        }
+        .to_domain()?;
+        let access = [provenant_routing::AccessContext {
+            adapter: "opencode",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        }];
+        let resolve = |record: &provenant_providers::AvailabilityRecord| {
+            super::resolve_dispatch(
+                &request,
+                &roots,
+                Some("go"),
+                ("fixture", 0),
+                std::slice::from_ref(record),
+                &access,
+                "fixture",
+                None,
+                &[],
+            )
+        };
+        assert!(matches!(
+            resolve(&available)?.readiness,
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::AuthRequired,
+                ..
+            }
+        ));
+        available.fixture_ref = "installed/opencode/login-unverified".into();
+        assert!(matches!(
+            resolve(&available)?.readiness,
+            provenant_records::RouteReadiness::Ready { .. }
+        ));
+        // The probe does not erase the recorded failure.
+        assert_eq!(
+            file.get(
+                &provenant_quota::ReadinessScope {
+                    host: LOCAL_HOST.into(),
+                    adapter: "opencode".into(),
+                    account_key: "go".into(),
+                    route: "opencode/opencode-go/deepseek-v4.1-flash".into()
+                },
+                now
+            )
+            .reason,
+            Some(ReadinessReason::SignedOut)
+        );
+        let zen_dir = roots.state.as_path().join("readiness/zen");
+        std::fs::create_dir_all(&zen_dir)?;
+        std::fs::set_permissions(&zen_dir, std::fs::Permissions::from_mode(0o700))?;
+        let zen = AccountRecord::empty(AccountScope {
+            adapter: "opencode".into(),
+            account_key: "zen".into(),
+            label: "zen".into(),
+        });
+        let mut zen_readiness = ReadinessFile::default();
+        zen_readiness.sync_probe_result(
+            &zen,
+            LOCAL_HOST,
+            now - 10,
+            300,
+            Some(ReadinessReason::SignedOut),
+        )?;
+        let zen_path = zen_dir.join("opencode.json");
+        std::fs::write(&zen_path, serde_json::to_vec(&zen_readiness)?)?;
+        std::fs::set_permissions(&zen_path, std::fs::Permissions::from_mode(0o600))?;
+        let mut zen_available = available.clone();
+        zen_available.account_key = Some("zen".into());
+        zen_available.fixture_ref = "installed/opencode/version".into();
+        let zen_request = super::RouteRequest {
+            read_heavy: false,
+            model: Some(super::Model(
+                "opencode/opencode/deepseek-v4.1-flash-free".into(),
+            )),
+            route: None,
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        }
+        .to_domain()?;
+        let zen_result = super::resolve_dispatch(
+            &zen_request,
+            &roots,
+            Some("zen"),
+            ("fixture", 0),
+            &[available.clone(), zen_available],
+            &access,
+            "fixture",
+            None,
+            &[],
+        )?;
+        assert!(matches!(
+            zen_result.readiness,
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::AuthRequired,
+                ..
+            }
+        ));
+        Ok(())
     }
 
     #[test]

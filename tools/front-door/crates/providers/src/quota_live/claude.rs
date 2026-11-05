@@ -1,44 +1,41 @@
 use super::*;
 use provenant_os::fs::{Directory, PublishMode};
-use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+use std::os::unix::ffi::OsStrExt;
+use std::{collections::BTreeMap, ffi::OsStr};
 
 // No Debug/Serialize: an identity can carry an access token only in memory.
-#[derive(Default)]
-pub(super) struct Identity {
-    fingerprint: Option<String>,
+struct Identity {
     token: Option<String>,
     expires: Option<i64>,
     missing: bool,
+    fingerprint: String,
 }
-fn freshest<'a>(
-    fingerprint: &str,
-    fixed: &'a Identity,
-    default: &'a Identity,
-    at: i64,
-) -> Option<&'a Identity> {
-    [fixed, default]
-        .into_iter()
-        .filter(|i| {
-            i.fingerprint.as_deref() == Some(fingerprint)
-                && i.token.is_some()
-                && i.expires.is_some_and(|e| e > at + 60)
-        })
-        .max_by_key(|i| i.expires)
+fn usable(identity: &Identity, at: i64) -> bool {
+    identity.token.is_some() && identity.expires.is_some_and(|e| e > at.saturating_add(60))
+}
+// An expired access token alone does not prove that refresh was rejected.
+fn no_usable_identity(fixed: &Identity) -> ProbeFailure {
+    if fixed.missing {
+        ProbeFailure::Auth
+    } else {
+        ProbeFailure::Network
+    }
+}
+fn is_fingerprint(key: &str) -> bool {
+    key.len() == 16 && key.bytes().all(|b| b.is_ascii_hexdigit())
 }
 fn expected_fingerprint<'a>(
-    configured: Option<&'a str>,
-    previous: Option<&'a str>,
+    expected: &str,
     live: Option<&'a str>,
 ) -> Result<&'a str, ProbeFailure> {
-    let expected = configured
-        .or(previous)
-        .or(live)
-        .ok_or(ProbeFailure::Network)?;
     let live = live.ok_or(ProbeFailure::Network)?;
-    if live != expected {
-        return Err(ProbeFailure::Network);
+    // Older hand-keyed registrations do not encode an identity. Adopt the
+    // observed fingerprint for this probe and bracket every credential read.
+    let fingerprint_key = is_fingerprint(expected);
+    if fingerprint_key && live != expected {
+        return Err(ProbeFailure::AccountMismatch);
     }
-    Ok(expected)
+    Ok(live)
 }
 fn claude_executable() -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -47,31 +44,6 @@ fn claude_executable() -> Option<std::path::PathBuf> {
         .filter(|path| provenant_os::sys::is_executable(path))
         .find_map(|path| path.canonicalize().ok())
 }
-fn may_refresh(
-    fixed: &Path,
-    default: &Path,
-    mut store: impl FnMut(&Path) -> Result<Value, ProbeFailure>,
-) -> Result<bool, ProbeFailure> {
-    if fixed == default {
-        return Ok(true);
-    }
-    // Refresh tokens are single-use. Compare only in memory: refreshing a
-    // cloned fixed login would invalidate the default session's shared token.
-    let fixed = store(fixed)?;
-    let default = match store(default) {
-        Ok(value) => value,
-        Err(ProbeFailure::ProbeDirectory) => return Err(ProbeFailure::ProbeDirectory),
-        Err(_) => return Ok(false),
-    };
-    let fixed = fixed
-        .pointer("/claudeAiOauth/refreshToken")
-        .and_then(Value::as_str);
-    let default = default
-        .pointer("/claudeAiOauth/refreshToken")
-        .and_then(Value::as_str);
-    Ok(!fixed.is_some_and(|fixed| Some(fixed) == default))
-}
-
 // Missing credentials may leave an identity without a token. Transient errors
 // must reach the quota report rather than masquerading as missing credentials.
 fn optional_probe<T>(result: Result<T, ProbeFailure>) -> Result<Option<T>, ProbeFailure> {
@@ -121,15 +93,8 @@ fn status_fingerprint(result: Result<ExecOutcome, ProbeFailure>) -> Result<Strin
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(|s| fingerprint(s, 16))
+        .filter(|s| is_fingerprint(s))
         .ok_or(ProbeFailure::Network)
-}
-
-fn default_identity(result: Result<Identity, ProbeFailure>) -> Result<Identity, ProbeFailure> {
-    match result {
-        Ok(identity) => Ok(identity),
-        Err(ProbeFailure::ProbeDirectory) => Err(ProbeFailure::ProbeDirectory),
-        Err(_) => Ok(Identity::default()),
-    }
 }
 
 fn parse_credentials(raw: &[u8]) -> Result<Value, ProbeFailure> {
@@ -164,10 +129,31 @@ fn refresh(
     struct Watch<'a> {
         executor: &'a dyn Executor,
         directory_failed: AtomicBool,
+        rejected: AtomicBool,
     }
     impl Executor for Watch<'_> {
-        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-            let result = self.executor.execute(options);
+        fn execute(&self, mut options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let probe = options.argv.get(1).is_some_and(|arg| arg == "-p");
+            if probe {
+                options.stderr = StreamPolicy::Capture { limit: 16 * 1024 };
+            }
+            let mut result = self.executor.execute(options);
+            if let Ok(out) = &mut result
+                && probe
+            {
+                if clean(out) && !matches!(out.termination, Termination::Exit(0)) {
+                    let text = String::from_utf8_lossy(&out.stderr.bytes).to_ascii_lowercase();
+                    if provenant_records::Harness::Claude
+                        .spec()
+                        .auth_markers
+                        .iter()
+                        .any(|marker| text.contains(marker))
+                    {
+                        self.rejected.store(true, Ordering::Relaxed);
+                    }
+                }
+                out.stderr.bytes.clear();
+            }
             if matches!(
                 &result,
                 Err(ExecError::Io {
@@ -183,22 +169,85 @@ fn refresh(
     let watched = Watch {
         executor,
         directory_failed: AtomicBool::new(false),
+        rejected: AtomicBool::new(false),
     };
-    let _ = crate::claude::refresh_if_expiring(&watched, login, now_ms, deadline_ms, None);
+    let result = crate::claude::refresh_if_expiring(&watched, login, now_ms, deadline_ms, None);
     if watched.directory_failed.load(Ordering::Relaxed) {
         Err(ProbeFailure::ProbeDirectory)
     } else {
-        Ok(())
+        result.map(|_| ()).map_err(|error| match error {
+            // An unchanged expired token alone does not prove rejection: the CLI
+            // may have been offline. Retry on the network schedule.
+            crate::ProviderError::CredentialExpired if watched.rejected.load(Ordering::Relaxed) => {
+                ProbeFailure::LoginExpired
+            }
+            crate::ProviderError::CredentialExpired => ProbeFailure::Network,
+            crate::ProviderError::CredentialNotFound => ProbeFailure::Auth,
+            _ => ProbeFailure::Network,
+        })
     }
 }
 
 impl LiveQuota {
+    fn pin_first_fingerprint(
+        &self,
+        key: &str,
+        live: &str,
+        confirmed: bool,
+    ) -> Result<(), ProbeFailure> {
+        if is_fingerprint(key) {
+            return expected_fingerprint(key, Some(live)).map(|_| ());
+        }
+        // Quota ticks hold the quota lock. Check an existing binding before
+        // opening the credential; save a first binding after both status probes agree.
+        let dir = Directory::open_anchor(&self.state).map_err(|_| ProbeFailure::Network)?;
+        let mut pins: BTreeMap<String, String> =
+            match dir.open_read(OsStr::new("quota-claude-identities.json")) {
+                Ok(file) => {
+                    let mut bytes = Vec::new();
+                    file.take(LIMIT as u64 + 1)
+                        .read_to_end(&mut bytes)
+                        .map_err(|_| ProbeFailure::Network)?;
+                    if bytes.len() > LIMIT {
+                        return Err(ProbeFailure::Malformed);
+                    }
+                    serde_json::from_slice(&bytes).map_err(|_| ProbeFailure::Malformed)?
+                }
+                Err(error) if error.is_not_found() => BTreeMap::new(),
+                Err(_) => return Err(ProbeFailure::Network),
+            };
+        if let Some(expected) = pins.get(key) {
+            if !is_fingerprint(expected) {
+                return Err(ProbeFailure::Malformed);
+            }
+            return expected_fingerprint(expected, Some(live)).map(|_| ());
+        }
+        if !confirmed {
+            return Ok(());
+        }
+        pins.insert(key.to_owned(), live.to_owned());
+        let bytes = serde_json::to_vec(&pins).map_err(|_| ProbeFailure::Malformed)?;
+        dir.atomic_write_with_permissions(
+            OsStr::new("quota-claude-identities.json"),
+            ".quota-identities",
+            &bytes,
+            0o600,
+            PublishMode::Replace,
+        )
+        .map_err(|_| ProbeFailure::Network)?
+        .require_durable()
+        .map_err(|_| ProbeFailure::Network)?;
+        Ok(())
+    }
     fn claude_selector<'a>(&self, dir: &'a Path) -> Option<(&'static str, &'a Path)> {
         (dir != self.home.join(".claude")).then_some(("CLAUDE_CONFIG_DIR", dir))
     }
-    fn claude_identity(&self, dir: &Path, deadline: i64) -> Result<Identity, ProbeFailure> {
-        let credential = optional_probe(self.claude_token(dir, deadline))?;
-        let missing = credential.is_none();
+    fn claude_identity(
+        &self,
+        dir: &Path,
+        expected: &str,
+        deadline: i64,
+    ) -> Result<Identity, ProbeFailure> {
         let fingerprint = status_fingerprint(self.command(
             "claude",
             &["auth", "status", "--json"],
@@ -207,27 +256,31 @@ impl LiveQuota {
             deadline,
             10,
         ))?;
+        // Verify the registered identity before opening its credential. A
+        // directory can have been signed in as another account since the last
+        // observation; its secret must not be attributed to this registration.
+        self.pin_first_fingerprint(expected, &fingerprint, false)?;
+        let credential = optional_probe(self.claude_token(dir, deadline))?;
+        let missing = credential.is_none();
         let (token, expires) = credential.map_or((None, None), |(t, e)| (Some(t), Some(e)));
-        // The default session can rotate while a tick is in flight. Confirm
-        // the identity after reading its credential before attributing it.
-        if dir == self.home.join(".claude") {
-            let confirmed = status_fingerprint(self.command(
-                "claude",
-                &["auth", "status", "--json"],
-                None,
-                None,
-                deadline,
-                10,
-            ))?;
-            if confirmed != fingerprint {
-                return Err(ProbeFailure::Network);
-            }
+        // Every selected directory can rotate while a tick is in flight.
+        let confirmed = status_fingerprint(self.command(
+            "claude",
+            &["auth", "status", "--json"],
+            self.claude_selector(dir),
+            None,
+            deadline,
+            10,
+        ))?;
+        if confirmed != fingerprint {
+            return Err(ProbeFailure::Network);
         }
+        self.pin_first_fingerprint(expected, &fingerprint, true)?;
         Ok(Identity {
-            fingerprint: Some(fingerprint),
             token,
             expires,
             missing,
+            fingerprint,
         })
     }
     fn claude_credentials(&self, dir: &Path, deadline: i64) -> Result<Value, ProbeFailure> {
@@ -281,120 +334,85 @@ impl LiveQuota {
             .ok_or(ProbeFailure::Network)?;
         Ok((token, expires))
     }
-    fn mark_refresh(&self, account: &Account, expires: i64) -> Result<bool, ProbeFailure> {
-        let key = account.scope.account_key.clone();
-        // Re-read under the quota tick lock; unreadable markers must not allow
-        // another refresh attempt for an already attempted expiry.
-        let dir = Directory::open_anchor(&self.state).map_err(|_| ProbeFailure::Network)?;
-        let mut markers: BTreeMap<String, i64> =
-            match dir.open_read(OsStr::new("quota-claude-refresh.json")) {
-                Ok(file) => {
-                    let mut bytes = Vec::new();
-                    file.take(LIMIT as u64 + 1)
-                        .read_to_end(&mut bytes)
-                        .map_err(|_| ProbeFailure::Network)?;
-                    if bytes.len() > LIMIT {
-                        return Err(ProbeFailure::Malformed);
-                    }
-                    serde_json::from_slice(&bytes).map_err(|_| ProbeFailure::Malformed)?
-                }
-                Err(e) if e.is_not_found() => BTreeMap::new(),
-                Err(_) => return Err(ProbeFailure::Network),
-            };
-        if markers.get(&key) == Some(&expires) {
-            return Ok(false);
-        }
-        markers.retain(|key, _| {
-            self.accounts
-                .borrow()
-                .iter()
-                .any(|a| a.scope.adapter == "claude" && a.scope.account_key == *key)
-        });
-        markers.insert(key, expires);
-        let bytes = serde_json::to_vec(&markers).map_err(|_| ProbeFailure::Malformed)?;
-        provenant_os::fs::Directory::atomic_write_with_permissions(
-            &dir,
-            OsStr::new("quota-claude-refresh.json"),
-            ".quota-refresh",
-            &bytes,
-            0o600,
-            PublishMode::Replace,
-        )
-        .map_err(|_| ProbeFailure::Network)?
-        .require_durable()
-        .map_err(|_| ProbeFailure::Network)?;
-        Ok(true)
-    }
     pub(super) fn claude(
         &self,
         account: &Account,
-        previous: Option<&AccountRecord>,
         deadline: i64,
         details: &mut QuotaDetails,
     ) -> Result<Value, ProbeFailure> {
-        if self.claude_default.borrow().is_none() {
-            let default =
-                default_identity(self.claude_identity(&self.home.join(".claude"), deadline))?;
-            *self.claude_default.borrow_mut() = Some(default);
-        }
-        let mut fixed = self.claude_identity(&account.identity_dir, deadline)?;
-        let expected = expected_fingerprint(
-            account.options.get("fingerprint").and_then(Value::as_str),
-            previous
-                .and_then(|r| r.snapshot.as_ref())
-                .and_then(|s| s.details.as_ref())
-                .and_then(|d| d.fingerprint.as_deref()),
-            fixed.fingerprint.as_deref(),
-        )?
-        .to_owned();
-        // Refresh only through Claude Code. The deliberately unknown model is
-        // rejected before inference; credentials are never written by Provenant.
-        let has_fresh = self
-            .claude_default
-            .borrow()
-            .as_ref()
-            .is_some_and(|default| freshest(&expected, &fixed, default, self.now()).is_some());
-        if !has_fresh
+        let mut fixed =
+            self.claude_identity(&account.identity_dir, &account.scope.account_key, deadline)?;
+        let expected = fixed.fingerprint.clone();
+        *self.login_expiry.borrow_mut() = fixed.expires;
+        // Distinct account fingerprints prove that the selected and default
+        // directories cannot hold the same account's single-use refresh token.
+        if !usable(&fixed, self.now())
             && self.refresh_expired
             && fixed.expires.is_some_and(|e| e <= self.now() + 60)
-            && may_refresh(&account.identity_dir, &self.home.join(".claude"), |dir| {
-                self.claude_credentials(dir, deadline)
-            })?
-            && self.mark_refresh(account, fixed.expires.ok_or(ProbeFailure::Network)?)?
         {
-            // The shared refresh resolves the executable and applies the
-            // hardening flags on every platform; only its keychain read is
-            // macOS-specific, and the identity is re-read below regardless.
-            if let (Some(executable), Some(user)) = (
-                claude_executable(),
-                std::env::var_os("USER").or_else(|| std::env::var_os("LOGNAME")),
-            ) && let Ok(system) = SystemExecutor::new(1)
-            {
-                // Each command gets a fresh private cwd under the stable host
-                // state root, so a killed run's leftovers are swept next time.
-                let executor = crate::host::HostProbeExecutor::new(&system, &self.state)
-                    .map_err(|_| ProbeFailure::ProbeDirectory)?;
-                let login = crate::claude::Login {
-                    executable: &executable,
-                    home: &self.home,
-                    user: user.as_os_str(),
-                    config_dir: &account.identity_dir,
-                };
-
-                let now_ms = || (self.now().max(0) as u64).saturating_mul(1000);
-                let deadline_ms = (deadline.max(0) as u64).saturating_mul(1000);
-                refresh(&executor, &login, &now_ms, deadline_ms)?;
-            }
-            fixed = self.claude_identity(&account.identity_dir, deadline)?;
-        }
-        let borrowed = self.claude_default.borrow();
-        let default = borrowed.as_ref().ok_or(ProbeFailure::Network)?;
-        let identity =
-            freshest(&expected, &fixed, default, self.now()).ok_or(if fixed.missing {
-                ProbeFailure::Auth
+            let default = self.home.join(".claude");
+            let independent = if account.identity_dir == default {
+                true
             } else {
-                ProbeFailure::Network
-            })?;
+                let default_fingerprint = status_fingerprint(self.command(
+                    "claude",
+                    &["auth", "status", "--json"],
+                    None,
+                    None,
+                    deadline,
+                    10,
+                ))
+                .map_err(|error| {
+                    if error == ProbeFailure::Auth {
+                        ProbeFailure::Network
+                    } else {
+                        error
+                    }
+                })?;
+                default_fingerprint != fixed.fingerprint
+            };
+            let mut refresh_error = None;
+            if independent {
+                #[cfg(test)]
+                let executable = self
+                    .executor
+                    .as_ref()
+                    .map(|_| PathBuf::from("/fixture/claude"))
+                    .or_else(claude_executable);
+                #[cfg(not(test))]
+                let executable = claude_executable();
+                if let (Some(executable), Some(user)) = (
+                    executable,
+                    std::env::var_os("USER").or_else(|| std::env::var_os("LOGNAME")),
+                ) && let Ok(system) = SystemExecutor::new(1)
+                {
+                    #[cfg(test)]
+                    let base: &dyn Executor = self.executor.as_deref().unwrap_or(&system);
+                    #[cfg(not(test))]
+                    let base: &dyn Executor = &system;
+                    let executor = crate::host::HostProbeExecutor::new(base, &self.state)
+                        .map_err(|_| ProbeFailure::ProbeDirectory)?;
+                    let login = crate::claude::Login {
+                        executable: &executable,
+                        home: &self.home,
+                        user: user.as_os_str(),
+                        config_dir: &account.identity_dir,
+                    };
+                    let now_ms = || (self.now().max(0) as u64).saturating_mul(1000);
+                    let deadline_ms = (deadline.max(0) as u64).saturating_mul(1000);
+                    refresh_error = refresh(&executor, &login, &now_ms, deadline_ms).err();
+                }
+                *self.login_expiry.borrow_mut() = None;
+                fixed = self.claude_identity(&account.identity_dir, &expected, deadline)?;
+                *self.login_expiry.borrow_mut() = fixed.expires;
+            }
+            if !usable(&fixed, self.now()) {
+                return Err(refresh_error.unwrap_or_else(|| no_usable_identity(&fixed)));
+            }
+        }
+        if !usable(&fixed, self.now()) {
+            return Err(no_usable_identity(&fixed));
+        }
         details.fingerprint = Some(expected);
         self.http(
             "https://api.anthropic.com/api/oauth/usage",
@@ -403,7 +421,7 @@ impl LiveQuota {
                     "Authorization",
                     format!(
                         "Bearer {}",
-                        identity.token.as_ref().ok_or(ProbeFailure::Network)?
+                        fixed.token.as_ref().ok_or(ProbeFailure::Network)?
                     ),
                 ),
                 ("anthropic-beta", "oauth-2025-04-20".into()),
@@ -414,6 +432,23 @@ impl LiveQuota {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unusable_identity_distinguishes_expired_from_uncertain() {
+        use super::*;
+        let mut identity = Identity {
+            token: Some("fake".into()),
+            expires: Some(1000),
+            missing: false,
+            fingerprint: "fake".into(),
+        };
+        assert_eq!(no_usable_identity(&identity), ProbeFailure::Network);
+        assert_eq!(no_usable_identity(&identity), ProbeFailure::Network);
+        identity.expires = None;
+        assert_eq!(no_usable_identity(&identity), ProbeFailure::Network);
+        identity.missing = true;
+        assert_eq!(no_usable_identity(&identity), ProbeFailure::Auth);
+    }
+
     #[test]
     fn timed_out_keychain_read_is_transient() {
         use super::*;
@@ -482,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_out_status_and_optional_default_are_classified() {
+    fn signed_out_status_is_classified() {
         use super::*;
         let outcome = |json: &[u8], code, timed_out| ExecOutcome {
             termination: Termination::Exit(code),
@@ -515,25 +550,6 @@ mod tests {
             status_fingerprint(Ok(outcome(br#"{"loggedIn":false}"#, 1, true))),
             Err(ProbeFailure::Network)
         );
-        let fixed = Identity {
-            fingerprint: Some("fixed".into()),
-            token: Some("fake".into()),
-            expires: Some(5000),
-            missing: false,
-        };
-        for error in [ProbeFailure::Auth, ProbeFailure::Network] {
-            let default = default_identity(Err(error)).unwrap();
-            assert!(
-                default.fingerprint.is_none()
-                    && default.token.is_none()
-                    && default.expires.is_none()
-            );
-            assert!(freshest("fixed", &fixed, &default, 1000).is_some());
-        }
-        assert!(matches!(
-            default_identity(Err(ProbeFailure::ProbeDirectory)),
-            Err(ProbeFailure::ProbeDirectory)
-        ));
         assert_eq!(
             credential_open_error(std::io::ErrorKind::NotFound.into()),
             ProbeFailure::Auth
@@ -541,16 +557,6 @@ mod tests {
         assert_eq!(
             credential_open_error(std::io::ErrorKind::PermissionDenied.into()),
             ProbeFailure::Network
-        );
-        assert_eq!(
-            may_refresh(Path::new("fixed"), Path::new("default"), |p| {
-                if p == Path::new("fixed") {
-                    Ok(serde_json::json!({}))
-                } else {
-                    Err(ProbeFailure::Network)
-                }
-            }),
-            Ok(false)
         );
     }
 
@@ -603,6 +609,127 @@ mod tests {
     }
 
     #[test]
+    fn refresh_reports_a_transient_failure_without_provider_output() {
+        use super::*;
+        struct Busy;
+        impl Executor for Busy {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                Err(ExecError::Busy)
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"fake-expiring","expiresAt":1000}}"#,
+        )
+        .unwrap();
+        let login = crate::claude::Login {
+            executable: Path::new("/fake/claude"),
+            home: Path::new("/fake/home"),
+            user: OsStr::new("fake"),
+            config_dir: temp.path(),
+        };
+        assert_eq!(
+            refresh(&Busy, &login, &|| 1000, 100000),
+            Err(ProbeFailure::Network)
+        );
+    }
+
+    #[test]
+    fn transient_refresh_can_be_retried_successfully() {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Retry<'a> {
+            path: &'a Path,
+            calls: AtomicUsize,
+        }
+        impl Executor for Retry<'_> {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    return Err(ExecError::Busy);
+                }
+                std::fs::write(
+                    self.path,
+                    br#"{"claudeAiOauth":{"accessToken":"fake-new","expiresAt":5000000}}"#,
+                )
+                .unwrap();
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".credentials.json");
+        std::fs::write(
+            &path,
+            br#"{"claudeAiOauth":{"accessToken":"fake-old","expiresAt":1000}}"#,
+        )
+        .unwrap();
+        let executor = Retry {
+            path: &path,
+            calls: AtomicUsize::new(0),
+        };
+        let login = crate::claude::Login {
+            executable: Path::new("/fake/claude"),
+            home: temp.path(),
+            user: OsStr::new("fake"),
+            config_dir: temp.path(),
+        };
+        assert_eq!(
+            refresh(&executor, &login, &|| 1000, 100000),
+            Err(ProbeFailure::Network)
+        );
+        assert_eq!(refresh(&executor, &login, &|| 1000, 100000), Ok(()));
+        assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn rejected_refresh_is_distinct_from_transient_failure() {
+        use super::*;
+        struct Reject;
+        impl Executor for Reject {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(1),
+                    stdout: Default::default(),
+                    stderr: provenant_os::exec::CapturedStream {
+                        bytes: b"authentication_failed".to_vec(),
+                        ..Default::default()
+                    },
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"fake","expiresAt":1000}}"#,
+        )
+        .unwrap();
+        let login = crate::claude::Login {
+            executable: Path::new("/fake/claude"),
+            home: temp.path(),
+            user: OsStr::new("fake"),
+            config_dir: temp.path(),
+        };
+        assert_eq!(
+            refresh(&Reject, &login, &|| 1000, 100000),
+            Err(ProbeFailure::LoginExpired)
+        );
+    }
+
+    #[test]
     fn refresh_preserves_a_probe_directory_failure_even_if_the_next_call_differs() {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -636,82 +763,67 @@ mod tests {
     }
 
     #[test]
-    fn fixed_refresh_skips_byte_identical_default_refresh_token() {
-        use super::{ProbeFailure, may_refresh};
-        use serde_json::json;
-        use std::{collections::BTreeMap, path::Path};
-        let fixed = Path::new("/fake/fixed");
-        let default = Path::new("/fake/.claude");
-        let mut stores = BTreeMap::from([
-            (
-                fixed,
-                json!({"claudeAiOauth": {"refreshToken": "fake-shared"}}),
-            ),
-            (
-                default,
-                json!({"claudeAiOauth": {"refreshToken": "fake-shared"}}),
-            ),
-        ]);
-        let read = |path: &Path| stores.get(path).cloned().ok_or(ProbeFailure::Auth);
-        assert!(!may_refresh(fixed, default, read).unwrap());
-        assert!(may_refresh(default, default, read).unwrap());
-        stores.insert(
-            default,
-            json!({"claudeAiOauth": {"refreshToken": "fake-other"}}),
-        );
-        assert!(
-            may_refresh(fixed, default, |path| stores
-                .get(path)
-                .cloned()
-                .ok_or(ProbeFailure::Auth))
-            .unwrap()
-        );
-    }
-    #[test]
     fn fixed_directory_rejects_changed_account_fingerprint() {
         use super::{ProbeFailure, expected_fingerprint};
-        for (configured, previous) in [(Some("pinned"), None), (None, Some("recorded"))] {
-            assert!(matches!(
-                expected_fingerprint(configured, previous, Some("other")),
-                Err(ProbeFailure::Network)
-            ));
-        }
+        assert!(matches!(
+            expected_fingerprint("0123456789abcdef", Some("fedcba9876543210")),
+            Err(ProbeFailure::AccountMismatch)
+        ));
         assert_eq!(
-            expected_fingerprint(None, None, Some("first-login")).unwrap(),
-            "first-login"
+            expected_fingerprint("hand-keyed", Some("0123456789abcdef")).unwrap(),
+            "0123456789abcdef"
         );
         assert_eq!(
-            expected_fingerprint(Some("pinned"), None, None),
+            expected_fingerprint("pinned", None),
             Err(ProbeFailure::Network)
         );
     }
     #[test]
-    fn rotating_default_is_attributed_only_to_matching_fingerprint_and_expiry() {
-        use super::{Identity, freshest};
-        let fixed = Identity {
-            fingerprint: Some("pro-hash".into()),
-            token: Some("redacted-fixed".into()),
-            expires: Some(900),
-            missing: false,
-        };
-        let default = Identity {
-            fingerprint: Some("pro-hash".into()),
-            token: Some("redacted-default".into()),
-            expires: Some(5000),
-            missing: false,
+    fn hand_keyed_registration_pins_its_first_observed_login() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let quota = LiveQuota {
+            home: temp.path().to_owned(),
+            state: temp.path().to_owned(),
+            roots: None,
+            accounts: RefCell::new(Vec::new()),
+            refresh_expired: false,
+            login_expiry: RefCell::new(None),
+            readiness_failure: RefCell::new(None),
+            last_reconcile_error: RefCell::new(None),
+            clock: SystemClock::new(),
+            executor: None,
         };
         assert_eq!(
-            freshest("pro-hash", &fixed, &default, 1000).and_then(|i| i.token.as_deref()),
-            Some("redacted-default")
+            quota.pin_first_fingerprint("manual", "0123456789abcdef", false),
+            Ok(())
         );
-        assert!(freshest("anese-hash", &fixed, &default, 1000).is_none());
-        let rotated = Identity {
-            fingerprint: Some("anese-hash".into()),
-            token: Some("redacted-rotated".into()),
-            expires: Some(6000),
+        assert!(!temp.path().join("quota-claude-identities.json").exists());
+        assert_eq!(
+            quota.pin_first_fingerprint("manual", "0123456789abcdef", true),
+            Ok(())
+        );
+        assert_eq!(
+            quota.pin_first_fingerprint("manual", "0123456789abcdef", true),
+            Ok(())
+        );
+        assert_eq!(
+            quota.pin_first_fingerprint("manual", "fedcba9876543210", true),
+            Err(ProbeFailure::AccountMismatch)
+        );
+    }
+    #[test]
+    fn selected_identity_needs_a_token_with_safety_margin() {
+        use super::{Identity, usable};
+        let mut selected = Identity {
+            token: Some("fake".into()),
+            expires: Some(1061),
             missing: false,
+            fingerprint: "fake".into(),
         };
-        assert!(freshest("pro-hash", &fixed, &rotated, 1000).is_none());
-        assert!(freshest("pro-hash", &fixed, &default, 5000).is_none());
+        assert!(usable(&selected, 1000));
+        assert!(!usable(&selected, 1001));
+        selected.token = None;
+        assert!(!usable(&selected, 1000));
     }
 }

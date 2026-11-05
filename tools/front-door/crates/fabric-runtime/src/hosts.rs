@@ -17,7 +17,7 @@ use std::{
 pub const PROTOCOL: u64 = 6;
 pub const CONSOLE_PROTOCOL: u64 = 7;
 pub const INBOX_PROTOCOL: u64 = 8;
-pub const DOCTOR_PROTOCOL: u64 = 9;
+pub const DOCTOR_PROTOCOL: u64 = 12;
 pub const CONSOLE_DETAIL_PROTOCOL: u64 = 10;
 pub const CONSOLE_INBOX_PROTOCOL: u64 = 11;
 pub const MAX_FRAME: usize = 1_048_576;
@@ -1267,7 +1267,7 @@ mod tests {
         // reports the newest feature level beside it, so 6 cannot read as
         // stale. A new action family must raise the ceiling it negotiates.
         assert_eq!(PROTOCOL, 6);
-        assert_eq!(newest_feature_protocol(), CONSOLE_INBOX_PROTOCOL);
+        assert_eq!(newest_feature_protocol(), DOCTOR_PROTOCOL);
     }
 
     #[test]

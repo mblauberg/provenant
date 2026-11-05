@@ -204,6 +204,8 @@ pub enum RouteExclusionReason {
     /// Partial usage is a lower bound and its headroom is uncalibrated.
     UnknownPartialHeadroom,
     AuthRequired,
+    /// The selected account's credential was observed past its expiry.
+    LoginExpired,
     UnverifiedModel,
     /// Persisted evidence shows the executable's account differs from the registered one.
     AccountMismatch,

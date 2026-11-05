@@ -100,6 +100,7 @@ pub fn record_capacity_cooldown(
         expected: current.cloned(),
         replacement: Some(record),
         readiness_probe_result: None,
+        login_probe_expiry: None,
     }))
 }
 
@@ -437,6 +438,7 @@ pub fn record_refusal(
         expected: current.cloned(),
         replacement: Some(record),
         readiness_probe_result: None,
+        login_probe_expiry: None,
     })
 }
 

@@ -1,4 +1,121 @@
 #[test]
+fn codex_auth_reprobe_uses_selected_home_and_trusts_status()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor, Termination};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Fake {
+        directory: std::path::PathBuf,
+        healthy: AtomicBool,
+    }
+    impl Executor for Fake {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert_eq!(options.argv[1], "login");
+            assert_eq!(options.argv[2], "status");
+            assert!(
+                options
+                    .env
+                    .unwrap()
+                    .iter()
+                    .any(|(key, value)| key == "CODEX_HOME" && value == self.directory.as_os_str())
+            );
+            Ok(ExecOutcome {
+                termination: Termination::Exit(if self.healthy.load(Ordering::Relaxed) {
+                    0
+                } else {
+                    1
+                }),
+                stdout: Default::default(),
+                stderr: Default::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let entry: provenant_providers::accounts::Registration = serde_json::from_value(
+        serde_json::json!({"adapter":"codex","label":"work","key":"fake","directory":temp.path().join("selected")}),
+    )?;
+    let fake = Fake {
+        directory: entry.directory.clone(),
+        healthy: AtomicBool::new(true),
+    };
+    let executor = provenant_providers::host::HostProbeExecutor::new(&fake, temp.path())?;
+    let probe = Probe {
+        roots: None,
+        executor: &executor,
+        home: temp.path(),
+        user: "fake".as_ref(),
+        scratch: temp.path(),
+    };
+    assert!(codex_login_is_healthy(
+        &entry,
+        std::path::Path::new("/fake/codex"),
+        &probe
+    ));
+    fake.healthy.store(false, Ordering::Relaxed);
+    assert!(!codex_login_is_healthy(
+        &entry,
+        std::path::Path::new("/fake/codex"),
+        &probe
+    ));
+    Ok(())
+}
+
+#[test]
+fn cursor_auth_reprobe_accepts_only_selected_host_login() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+    struct Fake;
+    impl Executor for Fake {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert_eq!(options.argv[1], "status");
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                stdout: CapturedStream {
+                    bytes: b"Logged in successfully".to_vec(),
+                    ..Default::default()
+                },
+                stderr: Default::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let mut entry: provenant_providers::accounts::Registration = serde_json::from_value(
+        serde_json::json!({"adapter":"cursor","label":"default","key":"local","directory":temp.path()}),
+    )?;
+    let executor = provenant_providers::host::HostProbeExecutor::new(&Fake, temp.path())?;
+    let probe = Probe {
+        roots: None,
+        executor: &executor,
+        home: temp.path(),
+        user: "fake".as_ref(),
+        scratch: temp.path(),
+    };
+    assert!(cursor_login_is_healthy(
+        &entry,
+        std::path::Path::new("/fake/agent"),
+        &probe
+    ));
+    entry.directory = temp.path().join("another");
+    assert!(!cursor_login_is_healthy(
+        &entry,
+        std::path::Path::new("/fake/agent"),
+        &probe
+    ));
+    Ok(())
+}
+
+#[test]
 fn command_lookup_is_literal_and_preserves_symlink_invocation()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
@@ -1113,6 +1230,209 @@ fn init_fixture_repository(
 }
 
 #[test]
+fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
+    for adapter in ["codex", "cursor", "opencode"] {
+        assert!(super::preparation::login_check_can_clear(adapter, false));
+        assert!(!super::preparation::login_check_can_clear(adapter, true));
+    }
+    assert!(super::preparation::login_check_can_clear("agy", true));
+}
+
+#[test]
+fn opencode_stale_auth_prepares_with_an_unverified_warning()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId};
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::{
+        os::unix::fs::{DirBuilderExt, PermissionsExt},
+        time::Duration,
+    };
+    const CHILD: &str = "PROVENANT_TEST_OPENCODE_AUTH_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let argv = [
+            std::env::current_exe()?.into_os_string(),
+            "--exact".into(),
+            "run::provider::tests::opencode_stale_auth_prepares_with_an_unverified_warning".into(),
+            "--nocapture".into(),
+        ];
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.to_str(),
+                    Some(
+                        "XDG_CONFIG_HOME"
+                            | "XDG_DATA_HOME"
+                            | "XDG_CACHE_HOME"
+                            | "XDG_STATE_HOME"
+                            | "OPENCODE_DB"
+                            | "OPENCODE_CONFIG"
+                            | "OPENCODE_CONFIG_DIR"
+                            | "OPENCODE_CONFIG_CONTENT"
+                    )
+                ) && key != provenant_core::RUN_STATE_DIRECTORY_ENV
+                    && key != CHILD
+            })
+            .collect();
+        env.push((CHILD.into(), "1".into()));
+        let cwd = std::env::current_dir()?;
+        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
+        options.env = Some(&env);
+        options.stdout = StreamPolicy::Capture { limit: 65536 };
+        options.stderr = StreamPolicy::Capture { limit: 65536 };
+        let out = SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        assert!(!out.timed_out, "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr.bytes)
+                .contains("OpenCode login status is unverified")
+        );
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let assets = base.join("release");
+    let git_home = base.join("git-home");
+    for path in [&home, &state, &project, &assets, &git_home] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let executor = SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let cancel = CancelToken::new();
+    let repo = utility.open_repo(
+        &executor,
+        &project,
+        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+        &cancel,
+    )?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let executable = assets.join("opencode/bin/opencode");
+    std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
+    std::fs::write(&executable, b"#!/bin/sh\nprintf 'opencode 2.2.0\\n'\n")?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+    let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    let account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope {
+        adapter: "opencode".into(),
+        account_key: "go".into(),
+        label: "go".into(),
+    });
+    let mut readiness = provenant_quota::ReadinessFile::default();
+    readiness.sync_probe_result(
+        &account,
+        provenant_quota::LOCAL_HOST,
+        now - 1,
+        300,
+        Some(provenant_quota::ReadinessReason::SignedOut),
+    )?;
+    let readiness_dir = state.join("readiness/go");
+    std::fs::create_dir_all(&readiness_dir)?;
+    for dir in [state.join("readiness"), readiness_dir.clone()] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let readiness_path = readiness_dir.join("opencode.json");
+    std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
+    std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
+    let run_id = RunId::from_bytes([2; 16]);
+    let attempt_id = AttemptId::from_bytes([1; 16]);
+    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let paths = run::LaunchPaths {
+        attempt_id,
+        operation_id: OperationId::parse("opencode-auth-fixture")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id,
+        deadline_unix_ms: u64::MAX,
+        scratch: attempt.join("scratch"),
+        provider_state: attempt.join("provider-state"),
+        temporary: attempt.join("tmp"),
+        temporary_alias: None,
+    };
+    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+    }
+    let prompt = "fake OpenCode login recovery";
+    let task = run::TaskRequest {
+        context: None,
+        extra: Default::default(),
+        build_heavy: false,
+        title: None,
+        base: None,
+        head: None,
+        base_ref: None,
+        task_id: TaskId::from_bytes([3; 16]),
+        profile: Default::default(),
+        prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
+        route: run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "opencode".into(),
+            model: "opencode/opencode-go/deepseek-v4.1-flash".into(),
+            effort: None,
+        },
+        account: Some("go".into()),
+        fallback: vec![],
+        authority_digest: Digest::from_bytes([4; 32]),
+        writer: None,
+        deliver: None,
+        provider_timeout_seconds: 20,
+        delivery_id: None,
+        access: Default::default(),
+    };
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        assets: Some(&assets),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: Some(binding.project_id()),
+        host: None,
+        cancel: Some(&cancel),
+    };
+    let prepared = prepare_with(
+        &registry,
+        &task,
+        prompt,
+        &paths,
+        None,
+        |name| {
+            if name == "opencode" {
+                Ok(executable.clone())
+            } else {
+                Err("fixture provider unavailable".into())
+            }
+        },
+        None,
+    )?;
+    assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
+    assert_eq!(prepared.route.account_key.as_deref(), Some("go"));
+    // Readiness remains recorded; only the current launch treats it as unknown.
+    let scope = provenant_quota::ReadinessScope {
+        host: provenant_quota::LOCAL_HOST.into(),
+        adapter: "opencode".into(),
+        account_key: "go".into(),
+        route: "opencode/opencode-go/deepseek-v4.1-flash".into(),
+    };
+    assert_eq!(
+        crate::quota::read_readiness(&state, &scope, now).reason,
+        Some(provenant_quota::ReadinessReason::SignedOut)
+    );
+    Ok(())
+}
+
+#[test]
 fn writer_plan_stages_scratch_in_private_temporary_directory()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
@@ -1187,7 +1507,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     // inside the fixture assets, independent of host packages and PATH.
     let executable = assets.join("cursor/bin/agent");
     std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
-    std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture-cursor 1.0\\n'\n")?;
+    std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = status ]; then printf 'Logged in successfully\\n'; else printf 'fixture-cursor 1.0\\n'; fi\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
@@ -1259,6 +1579,70 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         host: None,
         cancel: Some(&cancel),
     };
+    // A recorded sign-out followed by a healthy account-scoped status probe
+    // must permit preparation without waiting for the quota backoff.
+    let now = clock.unix_seconds();
+    let stale_scope = provenant_quota::AccountScope {
+        adapter: "cursor".into(),
+        account_key: "local".into(),
+        label: "default".into(),
+    };
+    let stale_account = provenant_quota::AccountRecord::empty(stale_scope);
+    let mut readiness = provenant_quota::ReadinessFile::default();
+    readiness.sync_probe_result(
+        &stale_account,
+        provenant_quota::LOCAL_HOST,
+        now - 1,
+        300,
+        Some(provenant_quota::ReadinessReason::SignedOut),
+    )?;
+    let readiness_dir = state.join("readiness/local");
+    std::fs::create_dir_all(&readiness_dir)?;
+    for dir in [state.join("readiness"), readiness_dir.clone()] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let readiness_path = readiness_dir.join("cursor.json");
+    std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
+    std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
+    let auth_paths = run::LaunchPaths {
+        scratch: attempt.join("auth-scratch"),
+        provider_state: attempt.join("auth-state"),
+        temporary: attempt.join("auth-tmp"),
+        attempt_id: paths.attempt_id,
+        operation_id: paths.operation_id.clone(),
+        task_index: paths.task_index,
+        lane_depth: paths.lane_depth,
+        run_id: paths.run_id,
+        deadline_unix_ms: paths.deadline_unix_ms,
+        temporary_alias: None,
+    };
+    for path in [
+        &auth_paths.scratch,
+        &auth_paths.provider_state,
+        &auth_paths.temporary,
+    ] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let recovered = prepare_with(
+        &registry,
+        &task,
+        "login recovery fixture",
+        &auth_paths,
+        None,
+        |name| {
+            if name == "cursor" {
+                Ok(executable.clone())
+            } else {
+                Err("fixture provider unavailable".into())
+            }
+        },
+        None,
+    )?;
+    assert_eq!(recovered.route.provider.as_deref(), Some("cursor"));
+    drop(recovered);
+    std::fs::remove_file(readiness_path)?;
+    std::fs::remove_file(attempt.join("availability.json"))?;
+
     // A clean writer that moved after graph source preparation must be
     // refused before provider probing or any launch artefact is written.
     let mut stale_source = task.clone();
@@ -2051,6 +2435,11 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             .contains("fixture executable disappeared")
     );
     assert_eq!(calls.get(), 3);
+    let PrepareError::Candidates { skipped_routes, .. } = &refusal else {
+        panic!("budget refusal must retain the skipped candidate")
+    };
+    assert_eq!(skipped_routes.len(), 1);
+    assert_eq!(skipped_routes[0].kind, SkipKind::Unavailable);
     std::fs::write(state.join("config.toml"), saved_config)?;
 
     let mut review_task = task.clone();
@@ -3574,6 +3963,25 @@ fn a_task_may_read_only_its_own_nodes_graph_inputs() -> Result<(), Box<dyn std::
 fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::{ProviderError, accounts::Registration};
+    assert!(!violates_account_pin(None, None, Some("other"), "codex"));
+    assert!(!violates_account_pin(
+        Some("key"),
+        Some("codex"),
+        Some("key"),
+        "codex"
+    ));
+    assert!(violates_account_pin(
+        Some("key"),
+        Some("codex"),
+        Some("other"),
+        "codex"
+    ));
+    assert!(violates_account_pin(
+        Some("key"),
+        Some("codex"),
+        Some("key"),
+        "claude"
+    ));
     let entries: Vec<Registration> = ["work", "personal"].into_iter().map(|label| {
         serde_json::from_value(serde_json::json!({"adapter": "codex", "label": label, "key": label, "directory": format!("/fixture/{label}")}))
     }).collect::<Result<_, _>>()?;
@@ -3594,6 +4002,7 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
             panic!("login failure lost its type")
         };
         assert!(detail.contains("codex login"));
+        assert!(detail.contains(&format!("CODEX_HOME='/fixture/{}'", entry.label)));
         failures.insert((entry.adapter.clone(), entry.key.clone()), detail);
     }
     assert!(unavailable_auth_detail(&route, None, &entries, &failures).is_some());
@@ -3602,6 +4011,10 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
     assert!(unavailable_auth_detail(&route, Some("work"), &entries, &failures).is_some());
     assert!(matches!(
         account_observation_error(&entries[0], &ProviderError::IdentityMismatch),
+        AccountObservationError::Other(_)
+    ));
+    assert!(matches!(
+        account_observation_error(&entries[0], &ProviderError::CredentialUnavailable),
         AccountObservationError::Other(_)
     ));
     Ok(())
