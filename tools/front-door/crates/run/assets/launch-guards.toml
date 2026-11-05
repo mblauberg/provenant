@@ -375,12 +375,17 @@ reason = "A process policy must identify exact executables and the Fabric socket
 [[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
 boundary = "credentials"
-reason = "Discovery reads are limited to exact adapter marker names rather than arbitrary host paths."
+reason = "Valid discovery marker anchors reject links or identity changes that could redirect a read into credential material."
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#render_profile_with_limit"
 boundary = "warning"
 reason = "Malformed provider endpoints are omitted before SBPL rendering; valid endpoints and open-network policy remain in force."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#render_profile_with_limit"
+boundary = "warning"
+reason = "Malformed or unrepresentable discovery-only reads are omitted before anchor collection and rendering."
 
 [[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"

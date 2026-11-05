@@ -189,7 +189,14 @@ fn compile_sbpl_impl(
     }
     let grants = GrantSet::build(plan, profile, anchors.home, worktree_grants)?;
     let read_grants = &grants.reads;
-    let all_reads = || read_grants.iter().chain(&profile.spec.discovery_reads);
+    let discovery = || {
+        profile
+            .spec
+            .discovery_reads
+            .iter()
+            .filter(|grant| super::validation::valid_discovery_read(grant))
+    };
+    let all_reads = || read_grants.iter().chain(discovery());
     let credential_writes = &grants.credential_writes;
     let worktree_grants = grants.worktree.as_ref();
 
@@ -215,7 +222,7 @@ fn compile_sbpl_impl(
     for grant in read_grants {
         anchors.verify_read_held(grant)?;
     }
-    for grant in &profile.spec.discovery_reads {
+    for grant in discovery() {
         anchors.verify_discovery_grant(grant)?;
     }
     for executable in &profile.spec.process_executables {
@@ -357,7 +364,7 @@ fn compile_sbpl_impl(
         )?;
     }
     anchors.verify_all()?;
-    for grant in &profile.spec.discovery_reads {
+    for grant in discovery() {
         anchors.verify_discovery_grant(grant)?;
     }
     // Avoid retaining a second mutable representation of the profile.
@@ -661,8 +668,23 @@ fn render_profile_with_limit(
         source.push_str(SYSV_CREATE_DENY_RULES);
     }
     source.push_str(SYSV_QUEUE_DENY_RULES);
-    for grant in reads.iter().chain(&profile.spec.discovery_reads) {
+    for grant in reads {
         push_rule(&mut source, "allow", "file-read*", &grant.path, grant.scope)?;
+    }
+    let mut omitted_discovery = false;
+    for grant in &profile.spec.discovery_reads {
+        if super::validation::valid_discovery_read(grant) {
+            push_rule(&mut source, "allow", "file-read*", &grant.path, grant.scope)?;
+        } else {
+            omitted_discovery = true;
+        }
+    }
+    if omitted_discovery {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: invalid discovery paths were omitted"
+        );
     }
     for executable in &profile.spec.process_executables {
         push_rule(

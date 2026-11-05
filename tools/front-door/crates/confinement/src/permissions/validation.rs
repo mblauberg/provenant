@@ -208,7 +208,14 @@ fn validate_profile_spec_impl(
             grant_limit,
         ),
         ("runtime reads", spec.runtime_reads.len(), grant_limit),
-        ("discovery reads", spec.discovery_reads.len(), grant_limit),
+        (
+            "discovery reads",
+            spec.discovery_reads
+                .iter()
+                .filter(|grant| valid_discovery_read(grant))
+                .count(),
+            grant_limit,
+        ),
         (
             "authentication profiles",
             spec.authentication.len(),
@@ -272,17 +279,6 @@ fn validate_profile_spec_impl(
                 error
             }
         })?;
-    }
-    for grant in &spec.discovery_reads {
-        grant.validate()?;
-        if grant.scope != PathScope::Exact
-            || !matches!(
-                grant.path.file_name().and_then(OsStr::to_str),
-                Some(".agents" | ".claude" | ".codex")
-            )
-        {
-            return Err(PermissionError::InvalidPath(grant.path.clone()));
-        }
     }
     for auth in &spec.authentication {
         if auth.mechanism.is_empty()
@@ -379,6 +375,16 @@ pub(super) fn valid_native_control(control: &str) -> bool {
         && control
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+pub(super) fn valid_discovery_read(grant: &PathGrant) -> bool {
+    grant.validate().is_ok()
+        && grant.scope == PathScope::Exact
+        && profile_path_representable(&grant.path)
+        && matches!(
+            grant.path.file_name().and_then(OsStr::to_str),
+            Some(".agents" | ".claude" | ".codex")
+        )
 }
 
 pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), PermissionError> {

@@ -732,3 +732,46 @@ fn invalid_provider_endpoints_warn_and_preserve_open_network() -> Result<(), Per
     assert!(!source.contains("remote tcp \"*:0\""));
     Ok(())
 }
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn invalid_discovery_reads_are_omitted_before_anchoring_and_rendering()
+-> Result<(), PermissionError> {
+    use std::os::unix::ffi::OsStringExt;
+    let (plan, mut profile) = write_grants_fixture();
+    profile.spec.process_executables.push(PathGrant {
+        path: "/fixture/provider".into(),
+        scope: PathScope::Exact,
+    });
+    let invalid_native = PathBuf::from(std::ffi::OsString::from_vec(
+        b"/fixture/invalid-\xff/.agents".to_vec(),
+    ));
+    profile.spec.discovery_reads = vec![
+        PathGrant {
+            path: "/fixture/repo/.agents".into(),
+            scope: PathScope::Exact,
+        },
+        PathGrant {
+            path: "/fixture/home/.config/gh/hosts.yml".into(),
+            scope: PathScope::Exact,
+        },
+        PathGrant {
+            path: invalid_native.clone(),
+            scope: PathScope::Exact,
+        },
+        PathGrant {
+            path: "/fixture/unsafe/.codex".into(),
+            scope: PathScope::Subtree,
+        },
+    ];
+    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    let anchors = required_anchors(&plan, &profile, None);
+    assert!(!anchors.contains(Path::new("/fixture/home/.config/gh")));
+    assert!(!anchors.contains(invalid_native.parent().expect("fixture parent")));
+    let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
+    let source = render(&grants)?;
+    assert!(source.contains("(allow file-read* (literal \"/fixture/repo/.agents\"))"));
+    assert!(!source.contains("hosts.yml"));
+    assert!(!source.contains("/fixture/unsafe/.codex"));
+    Ok(())
+}
