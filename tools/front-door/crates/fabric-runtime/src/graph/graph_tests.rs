@@ -94,7 +94,6 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
 
-<<<<<<< HEAD
     fn retry_allowance(
         &self,
         _: &provenant_records::ExtraFields,
@@ -106,7 +105,6 @@ impl AttemptOwner for FakeOwner {
         Ok(self.retry_used)
     }
 
-=======
     fn preparation_fallback_evidence(
         &mut self,
         _key: &AttemptKey,
@@ -131,7 +129,6 @@ impl AttemptOwner for FakeOwner {
             .filter_map(|attempt| self.models.get(attempt).cloned())
             .collect())
     }
->>>>>>> origin/main
     fn stop_cancelled_attempt(&mut self, _attempt: &GraphAttempt) -> Result<(), Self::Error> {
         self.cancellation_stops += 1;
         Ok(())
@@ -6688,7 +6685,6 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
 }
 
 #[test]
-<<<<<<< HEAD
 fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
     for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
@@ -6712,7 +6708,133 @@ fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
             .find(|n| n.id == "scout--synthesis")
             .unwrap();
         assert_eq!(scout.attempts[0].outcome, Some(outcome));
-=======
+        assert_eq!(
+            run.checkpoint
+                .nodes
+                .iter()
+                .find(|n| n.id == "lane")
+                .unwrap()
+                .state,
+            NodeState::Succeeded
+        );
+        assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
+    }
+}
+
+#[test]
+fn cumulative_allowance_counts_run_successors_and_survives_observation_replay() {
+    let mut lane = node("lane", route("first"));
+    lane.route = None;
+    lane.routes = Some(vec![route("first"), route("second"), route("third")]);
+    let document = graph(vec![lane]);
+    let mut owner = FakeOwner {
+        retry_limit: Some(2),
+        observations: [AttemptObservation::Pending {
+            attempt_ref: Some("first".into()),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.retry_budgets, vec![Some(2)]);
+    owner.retry_limit = Some(9); // Host changes cannot renew an admitted node.
+    owner.retry_used = 2;
+    let mut refused = terminal(AttemptOutcome::UsageLimited);
+    if let AttemptObservation::Terminal { attempt_ref, .. } = &mut refused {
+        *attempt_ref = Some("first".into());
+    }
+    owner.observations.push_back(refused);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(run.checkpoint.nodes[0].extra["retry"]["retries"], 2);
+    assert_eq!(owner.calls.len(), 2); // Same-key observation, no second route.
+    assert_eq!(owner.calls[0].0, owner.calls[1].0);
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.len(), 2);
+}
+
+#[test]
+fn configured_route_and_run_retries_share_the_remaining_allowance() {
+    let mut lane = node("lane", route("first"));
+    lane.route = None;
+    lane.routes = Some(vec![route("first"), route("second"), route("third")]);
+    let mut owner = FakeOwner {
+        retry_limit: Some(2),
+        observations: [
+            terminal(AttemptOutcome::UsageLimited),
+            terminal(AttemptOutcome::UsageLimited),
+            terminal(AttemptOutcome::Succeeded),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![lane]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.retry_budgets, vec![Some(2), Some(1), Some(0)]);
+}
+
+#[test]
+fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
+    let node_source = "0".repeat(40);
+    let head_2 = "2".repeat(40);
+
+    let mut write = node("writer", route("first"));
+    write.access = AccessMode::WorktreeWrite;
+    write.worktree = Some(".worktrees/write".into());
+    write.source = Some(SourceBinding::Commit {
+        commit: node_source.clone(),
+    });
+
+    let mut lens = node("lens", route("first"));
+    lens.access = AccessMode::ReadOnly;
+    lens.depends_on = vec!["writer".into()];
+    lens.source = Some(SourceBinding::Commit {
+        commit: node_source.clone(),
+    });
+
+    // Writer predecessor committed and hit quota; its continuation succeeded with head_2.
+    let writer_done = AttemptObservation::Terminal {
+        attempt_ref: Some("host/writer-cont".into()),
+        outcome: AttemptOutcome::Succeeded,
+        launched: true,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: Some("writer".into()),
+        commit: Some(head_2.clone()),
+    };
+    let lens_done = terminal(AttemptOutcome::Succeeded);
+
+    let mut owner = FakeOwner {
+        observations: [writer_done, lens_done].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&graph(vec![write, lens]), &mut owner, &mut journal).unwrap();
+
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .and_then(|o| o.commit.as_ref()),
+        Some(&head_2)
+    );
+    // Writer launched pinned to node_source.
+    assert_eq!(owner.source_commits[0], Some(node_source.clone()));
+    // Lens diff base stays the original node_source, not advancing to writer's intermediate/final head.
+    assert_eq!(owner.source_commits[1], Some(node_source));
+}
+
+#[test]
 fn composite_truncates_over_cap_findings_and_reaches_downstream() {
     for long in [false, true] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
@@ -6778,23 +6900,15 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
                 && outputs.warnings[0].contains("fixture/a")
                 && outputs.warnings[0].contains("fixture/b")
         );
->>>>>>> origin/main
         assert_eq!(
             run.checkpoint
                 .nodes
                 .iter()
-<<<<<<< HEAD
-                .find(|n| n.id == "lane")
-=======
                 .find(|n| n.id == "verify")
->>>>>>> origin/main
                 .unwrap()
                 .state,
             NodeState::Succeeded
         );
-<<<<<<< HEAD
-        assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
-=======
         assert!(owner.prompts[2].contains("composite findings truncated"));
         if !long {
             let (plan, positions) = validate_plan(&document).unwrap();
@@ -6823,56 +6937,10 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
                 .checkpoint,
             run.checkpoint
         );
->>>>>>> origin/main
     }
 }
 
 #[test]
-<<<<<<< HEAD
-fn cumulative_allowance_counts_run_successors_and_survives_observation_replay() {
-    let mut lane = node("lane", route("first"));
-    lane.route = None;
-    lane.routes = Some(vec![route("first"), route("second"), route("third")]);
-    let document = graph(vec![lane]);
-    let mut owner = FakeOwner {
-        retry_limit: Some(2),
-        observations: [AttemptObservation::Pending {
-            attempt_ref: Some("first".into()),
-        }]
-        .into(),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.retry_budgets, vec![Some(2)]);
-    owner.retry_limit = Some(9); // Host changes cannot renew an admitted node.
-    owner.retry_used = 2;
-    let mut refused = terminal(AttemptOutcome::UsageLimited);
-    if let AttemptObservation::Terminal { attempt_ref, .. } = &mut refused {
-        *attempt_ref = Some("first".into());
-    }
-    owner.observations.push_back(refused);
-    let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
-    assert_eq!(run.checkpoint.nodes[0].extra["retry"]["retries"], 2);
-    assert_eq!(owner.calls.len(), 2); // Same-key observation, no second route.
-    assert_eq!(owner.calls[0].0, owner.calls[1].0);
-    advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), 2);
-}
-
-#[test]
-fn configured_route_and_run_retries_share_the_remaining_allowance() {
-    let mut lane = node("lane", route("first"));
-    lane.route = None;
-    lane.routes = Some(vec![route("first"), route("second"), route("third")]);
-    let mut owner = FakeOwner {
-        retry_limit: Some(2),
-        observations: [
-            terminal(AttemptOutcome::UsageLimited),
-            terminal(AttemptOutcome::UsageLimited),
-=======
 fn nested_composite_propagates_its_members_truncation_notice() {
     let doc: GraphDocument = serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"nested-cap","nodes":[
         {"id":"outer","kind":"composite","access":"read_only","composite":{"nodes":[
@@ -6892,16 +6960,11 @@ fn nested_composite_propagates_its_members_truncation_notice() {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, &text),
             terminal_with_result(AttemptOutcome::Succeeded, &text),
->>>>>>> origin/main
             terminal(AttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
     };
-<<<<<<< HEAD
-    let run = advance(
-        &graph(vec![lane]),
-=======
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     let outer = run
         .checkpoint
@@ -7036,39 +7099,10 @@ fn identity_dispositions_preserve_large_inherited_fields() {
     };
     let run = advance(
         &graph(vec![node("review", route("first")), synthesis]),
->>>>>>> origin/main
         &mut owner,
         &mut MemoryJournal::default(),
     )
     .unwrap();
-<<<<<<< HEAD
-    assert!(run.checkpoint.successful());
-    assert_eq!(owner.retry_budgets, vec![Some(2), Some(1), Some(0)]);
-}
-
-#[test]
-fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
-    let node_source = "0".repeat(40);
-    let head_2 = "2".repeat(40);
-
-    let mut write = node("writer", route("first"));
-    write.access = AccessMode::WorktreeWrite;
-    write.worktree = Some(".worktrees/write".into());
-    write.source = Some(SourceBinding::Commit {
-        commit: node_source.clone(),
-    });
-
-    let mut lens = node("lens", route("first"));
-    lens.access = AccessMode::ReadOnly;
-    lens.depends_on = vec!["writer".into()];
-    lens.source = Some(SourceBinding::Commit {
-        commit: node_source.clone(),
-    });
-
-    // Writer predecessor committed and hit quota; its continuation succeeded with head_2.
-    let writer_done = AttemptObservation::Terminal {
-        attempt_ref: Some("host/writer-cont".into()),
-=======
     let result = &run.checkpoint.nodes[1];
     assert_eq!(
         result.state,
@@ -7250,39 +7284,12 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
     };
     let writer_done = AttemptObservation::Terminal {
         attempt_ref: Some("host/7".into()),
->>>>>>> origin/main
         outcome: AttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: Some("writer".into()),
-<<<<<<< HEAD
-        commit: Some(head_2.clone()),
-    };
-    let lens_done = terminal(AttemptOutcome::Succeeded);
-
-    let mut owner = FakeOwner {
-        observations: [writer_done, lens_done].into(),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    let run = advance(&graph(vec![write, lens]), &mut owner, &mut journal).unwrap();
-
-    assert!(run.checkpoint.successful());
-    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
-    assert_eq!(
-        run.checkpoint.nodes[0]
-            .outputs
-            .as_ref()
-            .and_then(|o| o.commit.as_ref()),
-        Some(&head_2)
-    );
-    // Writer launched pinned to node_source.
-    assert_eq!(owner.source_commits[0], Some(node_source.clone()));
-    // Lens diff base stays the original node_source, not advancing to writer's intermediate/final head.
-    assert_eq!(owner.source_commits[1], Some(node_source));
-=======
         commit: Some(oid.clone()),
     };
     let mut owner = FakeOwner {
@@ -7391,5 +7398,4 @@ fn launch_projection_omits_untrusted_error_sources() {
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(!reason.contains("/private/host"));
     assert!(!reason.chars().any(char::is_control));
->>>>>>> origin/main
 }
