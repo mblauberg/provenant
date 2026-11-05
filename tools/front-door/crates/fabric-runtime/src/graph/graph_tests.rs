@@ -8537,6 +8537,37 @@ fn launch_wake_is_capped_by_the_original_deadline() {
 }
 
 #[test]
+fn starting_attempt_transition_records_identity_without_io() {
+    let mut progress: NodeProgress = serde_json::from_value(serde_json::json!({
+        "id":"one", "state":"pending", "worktree":null, "attempts":[]
+    }))
+    .unwrap();
+    let key = AttemptKey {
+        extra: Default::default(),
+        graph_id: "g".into(),
+        node_id: "one".into(),
+        route_index: 1,
+    };
+    let selected = route("second");
+    apply_starting_attempt(
+        &mut progress,
+        key.clone(),
+        selected.clone(),
+        false,
+        "actor".into(),
+        Some(42),
+    );
+    assert_eq!(progress.state, NodeState::Running);
+    assert_eq!(progress.attempts.len(), 1);
+    let attempt = &progress.attempts[0];
+    assert_eq!(attempt.key, key);
+    assert_eq!(attempt.route, selected);
+    assert_eq!(attempt.state, AttemptState::Starting);
+    assert_eq!(attempt.launch_actor, "actor");
+    assert_eq!(attempt.input_cap, Some(42));
+}
+
+#[test]
 fn nonterminal_observation_transitions_need_no_owner_or_journal() {
     let mut attempt = GraphAttempt {
         extra: Default::default(),

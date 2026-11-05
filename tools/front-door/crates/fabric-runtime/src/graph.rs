@@ -910,6 +910,34 @@ fn apply_launch_deadline_block(progress: &mut NodeProgress, reason: &str) {
     progress.launch_retry = None;
 }
 
+/// Record the identity and route selected for a new attempt without I/O.
+fn apply_starting_attempt(
+    progress: &mut NodeProgress,
+    key: AttemptKey,
+    route: GraphRoute,
+    review_substitution: bool,
+    launch_actor: String,
+    input_cap: Option<usize>,
+) {
+    progress.attempts.push(GraphAttempt {
+        extra: Default::default(),
+        review_substitution,
+        key,
+        route,
+        state: AttemptState::Starting,
+        attempt_ref: None,
+        outcome: None,
+        launched: true,
+        launch_actor,
+        settled: 0,
+        input_cap,
+        usage: None,
+    });
+    progress.state = NodeState::Running;
+    // A retry must not replay the preceding attempt's family snapshot.
+    progress.separation = None;
+}
+
 /// Apply an accepted, nonterminal attempt observation without I/O.
 fn apply_pending_observation(
     attempt: &mut GraphAttempt,
@@ -2207,21 +2235,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             }
                         }
                     }
-                    checkpoint.nodes[node_index].attempts.push(GraphAttempt {
-                        extra: Default::default(),
+                    apply_starting_attempt(
+                        &mut checkpoint.nodes[node_index],
+                        key.clone(),
+                        route.clone(),
                         review_substitution,
-                        key: key.clone(),
-                        route: route.clone(),
-                        state: AttemptState::Starting,
-                        attempt_ref: None,
-                        outcome: None,
-                        launched: true,
-                        launch_actor: owner.actor(),
-                        settled: 0,
-                        input_cap: (!node.inputs.is_empty()).then_some(cap),
-                        usage: None,
-                    });
-                    checkpoint.nodes[node_index].state = NodeState::Running;
+                        owner.actor(),
+                        (!node.inputs.is_empty()).then_some(cap),
+                    );
                     if let Some(seconds) = owner.admission_timeout_seconds() {
                         let deadline = owner.wall_now().and_then(|now| {
                             DurationMicros::from_seconds(seconds)
@@ -2238,8 +2259,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             }),
                         });
                     }
-                    // A retry must not replay the preceding attempt's family snapshot.
-                    checkpoint.nodes[node_index].separation = None;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
 
