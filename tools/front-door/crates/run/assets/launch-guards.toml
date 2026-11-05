@@ -55,3 +55,53 @@ reason = "Invalid paths or a fixed wire-size limit refuse launch while recording
 site = "run/src/launch.rs#start_inner"
 boundary = "unclassified"
 reason = "Stored prompt, priority, policy, provider preparation and handoff can refuse; enumerate their originating guards."
+
+[[guard]]
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "unclassified"
+reason = "Rejects unconfined read-only extensions, nested confinement and invalid or overlapping roots; classify each case separately."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "unclassified"
+reason = "Rejects missing anchors, protected overlaps, invalid paths and unsupported nested confinement; classify each case separately."
+
+[[guard]]
+site = "confinement/src/permissions/probe.rs#system_backend"
+boundary = "unclassified"
+reason = "Unavailable or failed sandbox backend refuses preparation."
+
+[[guard]]
+site = "confinement/src/repo.rs#RepoError"
+boundary = "unclassified"
+reason = "Repository opening and revalidation can reject Git registration, identity, metadata and filesystem failures; map each caller and boundary."
+
+[[guard]]
+site = "providers/src/command.rs#prepare"
+boundary = "unclassified"
+reason = "Unsupported access, session, route, authentication or command invocation refuses preparation; capability eligibility is tracked separately."
+
+[[guard]]
+site = "providers/src/cursor.rs#prepare"
+boundary = "unclassified"
+reason = "Unsupported selected authentication or missing private state refuses preparation."
+
+[[guard]]
+site = "providers/src/agy.rs#prepare"
+boundary = "unclassified"
+reason = "Unsupported selected authentication or missing private state refuses preparation."
+
+[[guard]]
+site = "providers/src/codex.rs#prepare"
+boundary = "unclassified"
+reason = "Unsupported selected authentication or missing private state refuses preparation."
+
+[[guard]]
+site = "providers/src/claude.rs#prepare"
+boundary = "unclassified"
+reason = "Authentication, token identity, continuation and private-state checks can refuse preparation; classify each case separately."
+
+[[guard]]
+site = "run/src/launch.rs#Service::start_inner"
+boundary = "authority"
+reason = "Request digest and host-owned retry checks bind launch to the validated request and caller."
