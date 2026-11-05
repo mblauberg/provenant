@@ -271,7 +271,7 @@ impl RunStore {
             launched_tasks: Default::default(),
             _owner: PhantomData,
         };
-        if schema_version < 7 {
+        if schema_version < SCHEMA_VERSION {
             // Read legacy paths once, outside the migration transaction. The
             // initialisation lock serialises migrations. Unreadable paths and
             // in-flight attempts keep the conservative retained default.
@@ -282,7 +282,7 @@ impl RunStore {
             };
             store.write(request, |tx| {
                 let current = version(tx)?;
-                if current > 0 && current < 8 {
+                if current > 0 && current < SCHEMA_VERSION {
                     // The write reservation excludes other commits until both the
                     // WAL-aware snapshot and the migration are complete.
                     let stamp = request
@@ -318,17 +318,7 @@ impl RunStore {
                     store.root.sync()?;
                 }
                 let start = usize::try_from(current).map_err(|_| RunError::Version(current))?;
-                let steps = [
-                    include_str!("schema.sql"),
-                    include_str!("schema_v2.sql"),
-                    include_str!("schema_v3.sql"),
-                    include_str!("schema_v4.sql"),
-                    include_str!("schema_v5.sql"),
-                    include_str!("schema_v6.sql"),
-                    include_str!("schema_v7.sql"),
-                    include_str!("schema_v8.sql"),
-                ];
-                provenant_sqlite::apply_migrations(tx, &steps, start, |index, db| {
+                provenant_sqlite::apply_migrations(tx, &SCHEMA_STEPS, start, |index, db| {
                     if index == 3 {
                         for id in &absent_temporary {
                             db.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
@@ -451,8 +441,23 @@ pub(crate) fn open_database(
     }
     Ok((root, db, initialisation))
 }
+/// Ordered run-store migrations. A step's index is the version it upgrades from,
+/// so the current version follows from this list and a new step cannot be missed
+/// when an existing store opens.
+const SCHEMA_STEPS: [&str; 8] = [
+    include_str!("schema.sql"),
+    include_str!("schema_v2.sql"),
+    include_str!("schema_v3.sql"),
+    include_str!("schema_v4.sql"),
+    include_str!("schema_v5.sql"),
+    include_str!("schema_v6.sql"),
+    include_str!("schema_v7.sql"),
+    include_str!("schema_v8.sql"),
+];
+const SCHEMA_VERSION: i64 = SCHEMA_STEPS.len() as i64;
+
 fn version(db: &Connection) -> Result<i64> {
-    match provenant_sqlite::read_version(db, 8) {
+    match provenant_sqlite::read_version(db, SCHEMA_STEPS.len()) {
         Ok(version) => Ok(version as i64),
         Err(provenant_sqlite::VersionError::Unsupported(version)) => {
             Err(RunError::Version(version))

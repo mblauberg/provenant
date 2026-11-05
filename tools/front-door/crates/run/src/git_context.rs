@@ -896,16 +896,7 @@ mod tests {
             Ok(())
         };
         git(&["init", "-q"])?;
-        git(&[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.org",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ])?;
+        git(&["commit", "--allow-empty", "-qm", "base"])?;
         let oid = || -> std::result::Result<String, Box<dyn std::error::Error>> {
             Ok(String::from_utf8(
                 provenant_os::fixture::git_command()
@@ -920,16 +911,7 @@ mod tests {
         let base = oid()?;
         std::fs::write(temp.path().join("changed.txt"), "lane change\n")?;
         git(&["add", "changed.txt"])?;
-        git(&[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.org",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "reviewed",
-        ])?;
+        git(&["commit", "--allow-empty", "-qm", "reviewed"])?;
         let head = oid()?;
         git(&["checkout", "-q", "--detach", &base])?;
         let binary = provenant_os::git::git_executable().ok_or("Git unavailable")?;

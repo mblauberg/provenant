@@ -2,7 +2,7 @@
 use crate::{
     GitRead, UtilityBudget, UtilityRuntime,
     repo::{GitRefName, ReadOnlyRepo},
-    utility::{advertised_remote_head, run_release_read_utility},
+    utility::{advertised_remote_branch, advertised_remote_head, run_release_read_utility},
 };
 use provenant_core::{CancelToken, GitOid};
 use provenant_os::exec::{Executor, Termination};
@@ -86,7 +86,34 @@ impl PushContext<'_> {
         }
         let default = GitRefName::branch(branch).map_err(|_| PushRefusal::Evidence)?;
         for update in updates {
-            if update.remote_ref == default.as_str() {
+            let mut is_default = update.remote_ref == default.as_str();
+            if !is_default && update.remote_ref.starts_with("refs/heads/") {
+                let branch =
+                    GitRefName::new(&update.remote_ref).map_err(|_| PushRefusal::Evidence)?;
+                let advertised = advertised_remote_branch(
+                    self.executor,
+                    self.repo,
+                    self.runtime,
+                    remote,
+                    &branch,
+                    self.budget,
+                    self.cancel,
+                )
+                .map_err(|_| PushRefusal::Evidence)?;
+                if advertised.termination != Termination::Exit(0) {
+                    return Err(PushRefusal::Evidence);
+                }
+                let text = std::str::from_utf8(&advertised.stdout.bytes)
+                    .map_err(|_| PushRefusal::Evidence)?;
+                is_default = text.lines().any(|line| {
+                    line.strip_prefix("ref: ")
+                        .and_then(|line| line.split_once('\t'))
+                        .is_some_and(|(target, name)| {
+                            name == branch.as_str() && target == default.as_str()
+                        })
+                });
+            }
+            if is_default {
                 if is_zero(update.local) {
                     return Err(PushRefusal::DefaultDeletion);
                 }
@@ -97,7 +124,7 @@ impl PushContext<'_> {
             if is_zero(update.local) {
                 continue;
             }
-            if update.remote_ref == default.as_str() && !is_zero(update.remote) {
+            if is_default && !is_zero(update.remote) {
                 let ancestor = self.read(GitRead::MergeBaseIsAncestor {
                     ancestor: update.remote,
                     tip: update.local,

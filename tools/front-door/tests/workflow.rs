@@ -640,20 +640,7 @@ fn session_save_accepts_same_project_across_linked_worktrees() -> Result {
     let project = rig.project.clone();
     let git = provenant_os::git::git_executable().ok_or("git")?;
     assert_eq!(
-        code(&rig.execute(
-            &git,
-            &[
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.test",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "initial",
-            ],
-            None
-        )?),
+        code(&rig.execute(&git, &["commit", "--allow-empty", "-m", "initial",], None)?),
         0
     );
     let linked = rig.root.join("linked");

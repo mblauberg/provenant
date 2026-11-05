@@ -446,16 +446,7 @@ fn linked_worktrees_share_projects_and_ignore_git_redirects() -> Result {
     let mut rig = TestRig::new()?;
     let output = rig.execute(
         &provenant_os::git::git_executable().ok_or("Git unavailable")?,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "fixture",
-        ],
+        &["commit", "--allow-empty", "-qm", "fixture"],
         None,
     )?;
     assert_eq!(code(&output), 0);

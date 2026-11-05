@@ -62,7 +62,8 @@ needed. Treat findings and unavailable checks as advice, never a filing gate.
    about to be worked.
 4. Dedupe a batch against itself. Cap Ready issues near two to three times the
    writer lanes; pause filing at the cap, not delivery.
-5. Never file only to record evidence on delivered work. Agents never approve their
+5. After a failed, timed-out or slow create, search for the exact title before any retry; use an existing match instead of filing again. If the result is uncertain, reconcile it before retrying.
+6. Never file only to record evidence on delivered work. Agents never approve their
    own filings. Workers report follow-ups; only the chair or steward writes.
 
 ## Link and close
