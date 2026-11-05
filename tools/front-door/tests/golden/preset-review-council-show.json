@@ -7,6 +7,7 @@
       "parameters.base.default": "bundled",
       "parameters.base.doc": "bundled",
       "parameters.base.type": "bundled",
+      "parameters.kind.bind": "bundled",
       "parameters.kind.default": "bundled",
       "parameters.kind.doc": "bundled",
       "parameters.kind.type": "bundled",
@@ -14,6 +15,7 @@
       "parameters.local_check_policy": "bundled",
       "parameters.local_check_policy.default": "bundled",
       "parameters.local_check_policy.doc": "bundled",
+      "parameters.local_check_policy.inherit": "bundled",
       "parameters.local_check_policy.type": "bundled",
       "parameters.min_reviews.default": "bundled",
       "parameters.min_reviews.doc": "bundled",
@@ -26,8 +28,10 @@
       "parameters.risk_tags.default": "bundled",
       "parameters.risk_tags.doc": "bundled",
       "parameters.risk_tags.type": "bundled",
+      "parameters.risk_tier.bind": "bundled",
       "parameters.risk_tier.default": "bundled",
       "parameters.risk_tier.doc": "bundled",
+      "parameters.risk_tier.inherit": "bundled",
       "parameters.risk_tier.type": "bundled",
       "parameters.size.default": "bundled",
       "parameters.size.doc": "bundled",
@@ -43,6 +47,7 @@
       "parameters.subject.default.commit": "bundled",
       "parameters.subject.default.type": "bundled",
       "parameters.subject.doc": "bundled",
+      "parameters.subject.inherit": "bundled",
       "parameters.subject.type": "bundled",
       "parameters.verifier_tier.default": "bundled",
       "parameters.verifier_tier.doc": "bundled",
@@ -99,6 +104,7 @@
           "type": "string"
         },
         "kind": {
+          "bind": "kind",
           "default": "",
           "doc": "Change kind, for example refactor, integration, or docs.",
           "type": "string"
@@ -163,6 +169,7 @@
         "local_check_policy": {
           "default": "",
           "doc": "Local check policy inherited by nested presets; empty uses the layered roles library.",
+          "inherit": true,
           "type": "string"
         },
         "min_reviews": {
@@ -183,8 +190,10 @@
           "type": "list"
         },
         "risk_tier": {
+          "bind": "risk_tier",
           "default": "",
           "doc": "Risk tier that selects the review shape.",
+          "inherit": true,
           "type": "string"
         },
         "size": {
@@ -210,6 +219,7 @@
             "type": "commit"
           },
           "doc": "Immutable review subject: a commit, a node or the integration head.",
+          "inherit": true,
           "type": "table"
         },
         "verifier_tier": {
@@ -307,6 +317,7 @@
               "for_each": "${lenses}",
               "id": "lens",
               "require_findings": true,
+              "review_lenses": true,
               "role": "lens.${item.name}"
             }
           ],

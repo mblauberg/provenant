@@ -343,7 +343,7 @@ impl StageBuilder<'_> {
         let caller_supplied = self
             .origins
             .get("parameters.lenses")
-            .is_some_and(|origin| !self.layers.is_initial_origin(self.name, origin));
+            .is_some_and(|origin| !self.layers.is_initial_origin(self.name, "lenses", origin));
         if let Some(plan) = plan {
             // A caller's own list keeps its lenses and order; only what the
             // change itself triggers (test paths and markers) is added to it.
@@ -639,7 +639,7 @@ impl StageBuilder<'_> {
         let caller_supplied = self
             .origins
             .get("parameters.lenses")
-            .is_none_or(|origin| !self.layers.is_initial_origin(self.name, origin));
+            .is_none_or(|origin| !self.layers.is_initial_origin(self.name, "lenses", origin));
         for lens in self
             .parameters
             .get("lenses")

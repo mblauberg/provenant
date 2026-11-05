@@ -207,7 +207,7 @@ fn explicit(
                 .find(|(origin, _)| origin.starts_with(&format!("{path}.")))
                 .map(|(_, origin)| origin)
         })
-        .is_some_and(|origin| !layers.is_initial_origin(name, origin))
+        .is_some_and(|origin| !layers.is_initial_origin(name, parameter, origin))
 }
 
 /// The `auto` rule. Explicit shape wins; then any large or underspecified

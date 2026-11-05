@@ -22,6 +22,7 @@
         "type": "string"
       },
       {
+        "bind": "kind",
         "default": "",
         "doc": "Change kind, for example refactor, integration, or docs.",
         "name": "kind",
@@ -92,6 +93,7 @@
       {
         "default": "",
         "doc": "Local check policy inherited by nested presets; empty uses the layered roles library.",
+        "inherit": true,
         "name": "local_check_policy",
         "origin": "bundled",
         "type": "string"
@@ -120,8 +122,10 @@
         "type": "list"
       },
       {
+        "bind": "risk_tier",
         "default": "",
         "doc": "Risk tier that selects the review shape.",
+        "inherit": true,
         "name": "risk_tier",
         "origin": "bundled",
         "type": "string"
@@ -155,6 +159,7 @@
           "type": "commit"
         },
         "doc": "Immutable review subject: a commit, a node or the integration head.",
+        "inherit": true,
         "name": "subject",
         "origin": "bundled",
         "type": "table"
