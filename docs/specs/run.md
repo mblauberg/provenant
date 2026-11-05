@@ -1226,8 +1226,8 @@ observes lane cancellation while waiting.
 
 Git's inventory and verified common-directory/backlink membership admit
 existing linked checkouts without an adoption step. Canonical paths locate
-persistent exclusion slots; neither old `identity.json` nor registry reservation
-records gate admission. Ownership metadata only controls lane lifecycle cleanup.
+persistent exclusion slots; registry reservation records do not gate admission.
+Ownership metadata only controls lane lifecycle cleanup.
 Per-attempt supervisor evidence still controls recovery of launched work.
 
 Owned lane settlement may prune its own clean checkout only after success
