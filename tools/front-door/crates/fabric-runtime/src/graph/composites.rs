@@ -24,7 +24,7 @@ pub(super) fn expand(
     limits: &crate::config::GraphLimits,
 ) -> Result<GraphDocument, String> {
     let mut expanded = document.clone();
-    let depth_bound = crate::config::GraphLimits::composite_depth_bound(limits.expansion_depth);
+    let depth_bound = limits.expansion_depth_bound();
     let nodes_bound = crate::config::GraphLimits::composite_nodes_bound(limits.nodes);
     expanded.nodes = children(
         &document.nodes,

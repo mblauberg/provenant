@@ -337,15 +337,6 @@ impl GraphLimits {
         Self::composite_bound("nodes", maximum)
     }
 
-    /// Configured nesting limit applied by composite expansion.
-    pub fn composite_depth_bound(maximum: usize) -> GraphBound<'static> {
-        GraphBound {
-            name: "expansion_depth",
-            maximum,
-            owner: "domains.fabric.graph.limits",
-        }
-    }
-
     pub fn composite_safety_nodes_bound(&self) -> GraphBound<'static> {
         Self::composite_nodes_bound(self.composite_expansion_safety_nodes())
     }
