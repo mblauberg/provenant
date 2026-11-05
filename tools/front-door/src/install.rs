@@ -762,28 +762,31 @@ fn detected_batches(
             batches.push(selected_targets(globals, &[spec.id])?.1);
         }
     }
-    let mut directories: Vec<_> = std::fs::read_dir(&environment.home)
+    let mut directories = Vec::new();
+    for entry in std::fs::read_dir(&environment.home)
         .map_err(|source| EdgeError::Install(InstallError::Smoke(source)))?
         .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .as_encoded_bytes()
-                .starts_with(b".claude-")
-                && entry.file_type().is_ok_and(|kind| kind.is_dir())
-        })
-        .map(|entry| entry.path())
-        .collect();
-    directories.sort();
-    for directory in directories {
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+    {
+        let name = entry.file_name();
+        for spec in provenant_records::ADAPTER_SPECS
+            .iter()
+            .filter(|spec| spec.account_config_dir && !spec.binary.is_empty())
+        {
+            if spec
+                .account_directory_prefix
+                .is_some_and(|prefix| name.as_encoded_bytes().starts_with(prefix.as_bytes()))
+            {
+                directories.push((entry.path(), spec.id));
+            }
+        }
+    }
+    directories.sort_by(|left, right| left.0.cmp(&right.0));
+    for (directory, harness) in directories {
         let mut batch = base.clone();
-        let mut defaults = Targets::new(
-            environment.roots.clone(),
-            &environment.home,
-            &[Harness::Claude],
-        );
+        let mut defaults = Targets::new(environment.roots.clone(), &environment.home, &[harness]);
         defaults
-            .apply_environment(Some(&directory), None)
+            .apply_account_environment(harness, &directory)
             .map_err(EdgeError::Install)?;
         batch.harnesses = defaults.harnesses;
         if !batches

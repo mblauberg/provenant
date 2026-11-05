@@ -799,6 +799,17 @@ fn bare_install_detects_clis_and_claude_directories_then_replays_receipt() -> Re
     )?;
     assert_eq!(before.harnesses.len(), 5);
     assert_eq!(before.harness_targets.len(), 7);
+    for label in ["work", "personal"] {
+        let expected = rig.home.join(format!(".claude-{label}/skills"));
+        assert!(
+            before.harness_targets.iter().any(|target| target
+                .skills_dir
+                .to_path_buf()
+                .ok()
+                .as_deref()
+                == Some(expected.as_path()))
+        );
+    }
     fs::create_dir(rig.home.join(".claude-added-later"))?;
     let upgraded = install(&second, false)?;
     assert_eq!(code(&upgraded), 0, "{upgraded:?}");
