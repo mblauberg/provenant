@@ -2396,7 +2396,17 @@ impl WriterLaunch {
         {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
-        worktrees::check_writer_terminal(self.worktree.repo())?;
+        if !merge_objects.is_empty() {
+            let source = source
+                .as_ref()
+                .ok_or(RunError::Validation("merge source missing"))?;
+            worktrees::check_writer_terminal_with_merge(
+                self.worktree.repo(),
+                &crate::objects::merge_head(source)?,
+            )?;
+        } else {
+            worktrees::check_writer_terminal(self.worktree.repo())?;
+        }
         crate::artifacts::seal(
             attempt,
             "writer-terminal.json",

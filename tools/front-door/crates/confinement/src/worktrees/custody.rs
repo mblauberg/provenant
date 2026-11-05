@@ -4,6 +4,22 @@ use super::*;
 /// A writer must pass this check before its terminal result is accepted.
 /// Index and working-tree cleanliness do not prove a Git operation has ended.
 pub fn check_writer_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {
+    check_writer_terminal_with_expected_merge(repo, None)
+}
+
+/// Accept only the merge metadata restored from a verified private writer
+/// view. Other Git operations remain terminal refusals.
+pub fn check_writer_terminal_with_merge(
+    repo: &VerifiedRepo,
+    merge_head: &[u8],
+) -> Result<(), WorktreeError> {
+    check_writer_terminal_with_expected_merge(repo, Some(merge_head))
+}
+
+fn check_writer_terminal_with_expected_merge(
+    repo: &VerifiedRepo,
+    expected_merge: Option<&[u8]>,
+) -> Result<(), WorktreeError> {
     repo.revalidate()?;
     for marker in [
         "CHERRY_PICK_HEAD",
@@ -14,6 +30,17 @@ pub fn check_writer_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {
         "MERGE_HEAD",
         "sequencer",
     ] {
+        if marker == "MERGE_HEAD"
+            && let Some(expected) = expected_merge
+        {
+            let actual = repo
+                .private_dir()
+                .read_stable(OsStr::new(marker), 1024 * 1024)?;
+            if actual != expected {
+                return Err(WorktreeError::GitOperationInProgress);
+            }
+            continue;
+        }
         match repo.private_dir().metadata_at(OsStr::new(marker), false) {
             Ok(_) => return Err(WorktreeError::GitOperationInProgress),
             Err(error) if error.is_not_found() => {}

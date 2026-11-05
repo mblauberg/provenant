@@ -17,7 +17,9 @@ mod view;
 use view::object_binding;
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};
-pub(crate) use view::{bound_source, merge_objects, prepare_bound, private_tip, restore_index};
+pub(crate) use view::{
+    bound_source, merge_head, merge_objects, prepare_bound, private_tip, restore_index,
+};
 
 fn invalid() -> RunError {
     RunError::Validation("lane Git import failed")

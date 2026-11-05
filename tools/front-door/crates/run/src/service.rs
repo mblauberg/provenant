@@ -467,7 +467,7 @@ impl<'a> Service<'a> {
                     marker.schema_version == 1 && marker.scope == crate::RunStore::scope(&record)
                 });
             if restored && let AttemptState::Terminal { reason, .. } = &mut record.state {
-                let note = "merge index, parents and working files retained in the worktree";
+                let note = "merge index, parents and working files were retained in the worktree";
                 *reason = Some(
                     reason
                         .take()

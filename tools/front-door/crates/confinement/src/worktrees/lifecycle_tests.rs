@@ -4210,6 +4210,21 @@ fn clean_linked_worktree_reports_and_retains_in_progress_git_operations()
             ),
             "{marker}"
         );
+        if marker == "MERGE_HEAD" {
+            let expected = fs::read(&marker_path)?;
+            check_writer_terminal_with_merge(verified.repo(), &expected)?;
+            assert!(matches!(
+                check_writer_terminal_with_merge(verified.repo(), b"different"),
+                Err(WorktreeError::GitOperationInProgress)
+            ));
+            let other = verified.repo().private_git_dir().join("CHERRY_PICK_HEAD");
+            fs::write(&other, &expected)?;
+            assert!(matches!(
+                check_writer_terminal_with_merge(verified.repo(), &expected),
+                Err(WorktreeError::GitOperationInProgress)
+            ));
+            fs::remove_file(other)?;
+        }
         check_writer_terminal(&fixture.repo)?;
         let listed = list(&context, &cancellation)?;
         let entry = listed

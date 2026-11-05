@@ -3261,6 +3261,122 @@ fn terminal_ignores_protected_changes_present_at_lane_start()
 }
 
 #[test]
+fn terminal_imports_a_stopped_merge_into_the_worktree()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    use provenant_core::CancelToken;
+    let fixture = PrepareFixture::new()?;
+    std::fs::write(fixture.writer.worktree.join("conflict.txt"), "ours\n")?;
+    fixture.lane_git(&["add", "conflict.txt"])?;
+    fixture.commit(&fixture.writer.worktree, "ours")?;
+    fixture.git(&["update-ref", "refs/remotes/origin/main", "refs/heads/lane"])?;
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
+    std::fs::write(fixture.writer.project.join("conflict.txt"), "theirs\n")?;
+    fixture.git(&["add", "conflict.txt"])?;
+    fixture.commit(&fixture.writer.project, "theirs")?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let output = provenant_os::fixture::git_command_at(&git)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .current_dir(&fixture.writer.project)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    assert!(output.status.success());
+    let theirs = String::from_utf8(output.stdout)?.trim().to_owned();
+    let prepare_private =
+        || -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+            let attempt_path = fixture.root.join("attempt");
+            let scratch = attempt_path.join("tmp/candidate-0");
+            std::fs::create_dir_all(&scratch)?;
+            let utility = UtilityRuntime::new(&git, fixture.root.join("home"))?;
+            let executor = SystemExecutor::new(1)?;
+            let cancel = CancelToken::new();
+            let repo = utility.open_repo(
+                &executor,
+                &fixture.writer.project,
+                UtilityBudget::bounded(Duration::from_secs(5))?,
+                &cancel,
+            )?;
+            let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+            let base = crate::objects::resolve_ref(&git, worktree.repo(), "refs/heads/lane")?;
+            crate::objects::prepare_bound(
+                &git,
+                worktree.repo(),
+                &Directory::open_anchor(&attempt_path)?,
+                &scratch,
+                "refs/heads/lane",
+                base,
+            )?;
+            Ok(scratch)
+        };
+    fixture.terminal(|| {
+        let scratch = prepare_private()?;
+        let output = provenant_os::fixture::git_command_at(&git)
+            .env_clear()
+            .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+            .env("GIT_DIR", scratch.join("git-common"))
+            .env("GIT_COMMON_DIR", scratch.join("git-common"))
+            .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
+            .env("GIT_WORK_TREE", &fixture.writer.worktree)
+            .current_dir(&fixture.writer.worktree)
+            .args(["merge", "--no-edit", &theirs])
+            .output()?;
+        assert!(!output.status.success(), "fixture merge must conflict");
+        Ok(())
+    })?;
+    assert!(fixture.root.join("attempt/merge-restored.json").is_file());
+    let output = provenant_os::fixture::git_command_at(&git)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .current_dir(&fixture.writer.worktree)
+        .args(["ls-files", "--unmerged"])
+        .output()?;
+    assert!(output.status.success());
+    assert!(!output.stdout.is_empty());
+    assert!(
+        std::fs::read_to_string(fixture.writer.worktree.join("conflict.txt"))?.contains("<<<<<<<")
+    );
+    // A fresh writer starts from the restored index and finishes the merge.
+    std::fs::rename(fixture.root.join("state"), fixture.root.join("first-state"))?;
+    std::fs::rename(
+        fixture.root.join("attempt"),
+        fixture.root.join("first-attempt"),
+    )?;
+    fixture.terminal(|| {
+        let scratch = prepare_private()?;
+        let run = |args: &[&str]| -> std::result::Result<std::process::Output, Box<dyn std::error::Error>> {
+            Ok(provenant_os::fixture::git_command_at(&git)
+                .env_clear()
+                .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+                .env("GIT_DIR", scratch.join("git-common"))
+                .env("GIT_COMMON_DIR", scratch.join("git-common"))
+                .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
+                .env("GIT_WORK_TREE", &fixture.writer.worktree)
+                .current_dir(&fixture.writer.worktree)
+                .args(args)
+                .output()?)
+        };
+        let unmerged = run(&["ls-files", "--unmerged"])?;
+        assert!(unmerged.status.success() && !unmerged.stdout.is_empty());
+        std::fs::write(fixture.writer.worktree.join("conflict.txt"), "resolved\n")?;
+        assert!(run(&["add", "conflict.txt"])?.status.success());
+        let commit = run(&["commit", "--no-edit"])?;
+        assert!(commit.status.success(), "{}", String::from_utf8_lossy(&commit.stderr));
+        Ok(())
+    })?;
+    let merge_head = fixture
+        .writer
+        .project
+        .join(".git/worktrees/lane/MERGE_HEAD");
+    assert!(!merge_head.exists());
+    Ok(())
+}
+
+#[test]
 fn terminal_falls_back_when_delivery_target_cannot_be_resolved()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     for target in ["missing_head", "dangling_head", "unrelated"] {

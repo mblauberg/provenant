@@ -93,6 +93,12 @@ pub(crate) struct ObjectSource {
     refs: Directory,
 }
 
+pub(crate) fn merge_head(source: &ObjectSource) -> Result<Vec<u8>> {
+    Ok(source
+        .refs
+        .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)?)
+}
+
 /// Objects needed by an in-progress merge, including staged blobs that may
 /// never have appeared in a commit. Git parses the index; paths stay opaque.
 struct MergeState {

@@ -62,7 +62,7 @@ fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult
     assert!(matches!(
         &service.lanes(&query, &call)?.lanes[0].state,
         AttemptState::Terminal { reason: Some(reason), .. }
-            if reason.contains("merge index, parents and working files retained")
+            if reason.contains("merge index, parents and working files were retained")
     ));
     drop(custody);
     let observed = service.status_for_wait(id, &call)?;
