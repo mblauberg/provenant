@@ -30,6 +30,10 @@ pub enum JournalError {
         "graph checkpoint topology is incomplete or invalid; finish or cancel it with the previous release, or cancel it here to retire the record"
     )]
     InvalidTopology,
+    #[error(
+        "graph checkpoint contains retired launched-route fallback history; finish or cancel it with the previous release, or cancel it here to retire the record"
+    )]
+    RetiredFallbackCheckpoint,
 }
 
 impl JournalError {
@@ -43,6 +47,7 @@ impl JournalError {
                 | Self::Canonical(_)
                 | Self::RetiredLoopCheckpoint
                 | Self::InvalidTopology
+                | Self::RetiredFallbackCheckpoint
         )
     }
 
@@ -61,6 +66,7 @@ impl JournalError {
             Self::BadDigest => "bad_digest",
             Self::RetiredLoopCheckpoint => "retired_loop_checkpoint",
             Self::InvalidTopology => "invalid_topology",
+            Self::RetiredFallbackCheckpoint => "retired_fallback_checkpoint",
         }
     }
 }
@@ -631,6 +637,27 @@ pub(super) fn decode_checkpoint(
             .any(|field| node.extra.contains_key(*field))
     }) {
         return Err(JournalError::RetiredLoopCheckpoint);
+    }
+    if stored.checkpoint.nodes.iter().any(|node| {
+        node.attempts
+            .iter()
+            .take(node.attempts.len().saturating_sub(1))
+            .any(|attempt| attempt.launched)
+            || (node.state == NodeState::Running
+                && node.attempts.last().is_some_and(|attempt| {
+                    attempt.state == AttemptState::Terminal
+                        && attempt.launched
+                        && attempt.outcome.is_some_and(|outcome| {
+                            matches!(
+                                outcome,
+                                AttemptOutcome::AuthRequired
+                                    | AttemptOutcome::UsageLimited
+                                    | AttemptOutcome::AdapterUnavailable
+                            )
+                        })
+                }))
+    }) {
+        return Err(JournalError::RetiredFallbackCheckpoint);
     }
     let limits = crate::config::GraphLimits {
         nodes: usize::MAX,

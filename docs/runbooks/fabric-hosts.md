@@ -46,9 +46,10 @@ Before upgrading across the prepared-operation replay change, finish or cancel
 active graphs with the old binary and wait for their attempts to settle. A
 prepared graph operation from the older binary may otherwise need a new graph
 ID after the upgrade; inspect the existing attempts and their custody first.
-Checkpoints with pre-node-ask loop state or incomplete expansion topology are
-unreadable after the upgrade. If one remains, use `provenant fabric graph status <id>`
-to see the remedy and `provenant fabric graph cancel <id>` to retire its record.
+Checkpoints with pre-node-ask loop state, incomplete expansion topology or old
+fallback history that switched after a launch are unreadable after the upgrade.
+If one remains, use `provenant fabric graph status <id>` to see the remedy and
+`provenant fabric graph cancel <id>` to retire its record.
 Retirement does not cancel its attempts or close old inbox requests; inspect
 and settle those first.
 

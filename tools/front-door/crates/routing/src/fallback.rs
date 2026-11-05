@@ -61,21 +61,6 @@ impl FallbackPolicy {
     }
 }
 
-/// Validate pre-existing graph history under the rule that wrote it. This is
-/// for interpreting stored checkpoints only and must not authorise a launch.
-pub fn historical_fallback_admissible(
-    outcome: FallbackOutcome,
-    writer: bool,
-    launched: bool,
-) -> bool {
-    matches!(
-        outcome,
-        FallbackOutcome::AuthRequired
-            | FallbackOutcome::UsageLimited
-            | FallbackOutcome::AdapterUnavailable
-    ) && (!launched || !writer)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

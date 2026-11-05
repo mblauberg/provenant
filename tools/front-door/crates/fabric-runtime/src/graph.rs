@@ -1708,9 +1708,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         usize::from(last.key.route_index)
                     }
                     Some(last)
-                        if last.outcome.is_some_and(|outcome| {
-                            historical_fallback_admissible(outcome, node.access, last.launched)
-                        }) =>
+                        if last
+                            .outcome
+                            .is_some_and(|outcome| fallback_candidate(outcome, last.launched)) =>
                     {
                         let Some(outcome) = last.outcome else { break };
                         let evidence = last.attempt_ref.as_deref().and_then(|reference| {

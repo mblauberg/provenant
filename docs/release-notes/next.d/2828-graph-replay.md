@@ -11,3 +11,6 @@
 - Checkpoints missing expansion topology are no longer reconstructed. Finish
   those graphs before upgrading; cancel an unreadable record and start a new
   graph after its attempts and custody have been settled (#2828).
+- Graph fallback history that switched routes after a launch is no longer read.
+  Finish those graphs before upgrading; a new route still requires evidence of
+  local preparation and released custody (#2828).

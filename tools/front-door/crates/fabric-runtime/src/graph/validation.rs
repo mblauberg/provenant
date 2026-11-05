@@ -1063,9 +1063,9 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 || (attempt.state == AttemptState::Terminal) != attempt.outcome.is_some()
                 || (index + 1 < progress.attempts.len()
                     && (attempt.state != AttemptState::Terminal
-                        || !attempt.outcome.is_some_and(|outcome| {
-                            historical_fallback_admissible(outcome, node.access, attempt.launched)
-                        })))
+                        || !attempt
+                            .outcome
+                            .is_some_and(|outcome| fallback_candidate(outcome, attempt.launched))))
             {
                 return Err(bad(
                     "attempt key, route, terminal outcome and fallback order must match plan",
@@ -1087,9 +1087,10 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             NodeState::Running => match last {
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,
                 Some(attempt) => {
-                    attempt.outcome.is_some_and(|outcome| {
-                        historical_fallback_admissible(outcome, node.access, attempt.launched)
-                    }) && progress.attempts.len() < node.routes.len()
+                    attempt
+                        .outcome
+                        .is_some_and(|outcome| fallback_candidate(outcome, attempt.launched))
+                        && progress.attempts.len() < node.routes.len()
                 }
                 None => false,
             },
@@ -1125,7 +1126,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                             | AttemptOutcome::ReviewRequired,
                         ) => true,
                         Some(outcome) if outcome != AttemptOutcome::Succeeded => {
-                            !historical_fallback_admissible(outcome, node.access, attempt.launched)
+                            !fallback_candidate(outcome, attempt.launched)
                                 || progress.attempts.len() == node.routes.len()
                         }
                         _ => false,
