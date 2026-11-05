@@ -950,7 +950,10 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         "ff".repeat(16),
         lane["attempt_id"].as_str().ok_or("attempt")?
     );
-    assert_ne!(code(&rig.command(&["output", &wrong_run, "--json"])?), 0);
+    let wrong_output = rig.command(&["output", &wrong_run, "--json"])?;
+    assert_ne!(code(&wrong_output), 0);
+    let wrong_output: serde_json::Value = serde_json::from_slice(&wrong_output.stdout.bytes)?;
+    assert_eq!(wrong_output["error"]["code"], "NOT_FOUND");
 
     let trace = rig.command(&["output", &attempt, "--trace", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&trace.stdout.bytes)?;
