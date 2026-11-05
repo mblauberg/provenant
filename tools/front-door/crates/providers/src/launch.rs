@@ -460,6 +460,26 @@ pub(crate) fn admit(
 /// into the same directory. Repository-specific Git object configuration
 /// belongs to the private directory.
 /// Callers append provider keys.
+/// Preserve native tool paths and omit an optional entry that PATH cannot encode.
+pub(crate) fn tool_search_path(home: &Path, include_cargo: bool) -> OsString {
+    let cargo = home.join(".cargo/bin");
+    let mut path = OsString::new();
+    if include_cargo {
+        if std::env::join_paths([&cargo]).is_ok() {
+            path.push(cargo);
+            path.push(":");
+        } else {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: cannot include the Cargo bin directory in PATH; continuing without it"
+            );
+        }
+    }
+    path.push("/usr/bin:/bin");
+    path
+}
+
 pub(crate) fn base_env(
     input: &PrepareInput<'_>,
     scratch: &Path,

@@ -632,12 +632,8 @@ fn prepare(
     let mut setup = input.provenant.claude(scratch, &mut argv, &allowed_tools)?;
 
     let toolchain = shell || web;
-    let path = if toolchain {
-        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
-    } else {
-        "/usr/bin:/bin".into()
-    };
-    let mut env = base_env(input, scratch, &path);
+    let path = crate::launch::tool_search_path(input.home, toolchain);
+    let mut env = base_env(input, scratch, path);
     input
         .provenant
         .environment(scratch, &mut env, &mut setup, true)?;

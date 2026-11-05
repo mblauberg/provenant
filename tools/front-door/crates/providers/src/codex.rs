@@ -114,8 +114,8 @@ fn prepare(
             target: skills.clone(),
         });
     }
-    let path = format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display());
-    let mut env = base_env(input, &plan.scratch.path, &path);
+    let path = crate::launch::tool_search_path(input.home, true);
+    let mut env = base_env(input, &plan.scratch.path, path);
     input
         .provenant
         .environment(&plan.scratch.path, &mut env, &mut setup, false)?;

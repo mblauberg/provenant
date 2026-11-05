@@ -7831,3 +7831,25 @@ fn opencode_starts_each_completed_text_part_on_a_new_message() -> Result<(), Pro
     assert_eq!(boundary, Some(&ProviderEvent::MessageStart));
     Ok(())
 }
+
+#[test]
+fn tool_search_path_preserves_native_home_and_omits_unusable_entry() {
+    use std::os::unix::ffi::OsStringExt;
+    use std::path::PathBuf;
+    let home = PathBuf::from(OsString::from_vec(b"/fixture/home-\xff".to_vec()));
+    let path = crate::launch::tool_search_path(&home, true);
+    assert_eq!(
+        std::env::split_paths(&path).next(),
+        Some(home.join(".cargo/bin"))
+    );
+    let path = crate::launch::tool_search_path(Path::new("/fixture/home:with-separator"), true);
+    assert_eq!(
+        std::env::split_paths(&path).collect::<Vec<_>>(),
+        [PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
+    );
+    let path = crate::launch::tool_search_path(&home, false);
+    assert_eq!(
+        std::env::split_paths(&path).next(),
+        Some(PathBuf::from("/usr/bin"))
+    );
+}

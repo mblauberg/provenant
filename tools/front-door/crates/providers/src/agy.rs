@@ -392,12 +392,8 @@ fn prepare(
     argv.extend(["--print".into(), input.prompt.text().into()]);
 
     let shell = access == Access::WorktreeWrite;
-    let path = if shell {
-        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
-    } else {
-        "/usr/bin:/bin".into()
-    };
-    let mut env = base_env(input, &plan.scratch.path, &path);
+    let path = crate::launch::tool_search_path(input.home, shell);
+    let mut env = base_env(input, &plan.scratch.path, path);
     for (key, value) in &mut env {
         if key == "HOME" {
             *value = home.into();
