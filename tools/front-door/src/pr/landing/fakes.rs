@@ -185,15 +185,19 @@ pub struct FakeRepo {
     pub lose_push_response: bool,
     pub refuse_delete: bool,
     pub fail_local: bool,
+    pub fail_local_at: Option<u64>,
+    pub refuse_local: bool,
     pub local_followed: Vec<u64>,
 }
 impl Repo for FakeRepo {
-    fn follow_local(&mut self, pr: &EligiblePr) -> Result<(), LandingError> {
+    fn follow_local(&mut self, pr: &EligiblePr) -> Result<bool, LandingError> {
         self.local_followed.push(pr.number);
-        if self.fail_local {
-            Err(LandingError::Failed("local follow-up unavailable".into()))
+        if self.fail_local || self.fail_local_at == Some(pr.number) {
+            Err(LandingError::LocalFollowUp(
+                "local follow-up unavailable".into(),
+            ))
         } else {
-            Ok(())
+            Ok(!self.refuse_local)
         }
     }
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {

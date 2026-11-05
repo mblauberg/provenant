@@ -1551,6 +1551,7 @@ mod tests {
             let attempts = receipt::pending(state.path(), "fake-repository", "main")?;
             assert_eq!(attempts.len(), 1);
             assert!(attempts[0].settled.is_none());
+            assert!(repo.local_followed.is_empty());
             assert!(forge.merges.is_empty());
         }
         Ok(())
@@ -2071,6 +2072,7 @@ mod tests {
             [1]
         );
         assert_eq!(recovered[0].pull_requests.len(), 1);
+        assert!(repo.local_followed.is_empty());
         assert_eq!(recovered[0].outcomes[&2], Outcome::PendingUnknown);
         assert_eq!(
             receipt::pending(state.path(), "fake-repository", "main")?.len(),
@@ -2160,6 +2162,7 @@ mod tests {
             panic!("expected pending second attempt")
         };
         assert!(matches!(*cause, LandingError::PublicationUnknownAt { .. }));
+        assert!(!repo.local_followed.contains(&2));
         assert_eq!(report.outcomes[&1], Outcome::Landed);
         assert_eq!(report.outcomes[&2], Outcome::PendingUnknown);
         assert_eq!(report.receipts.len(), 1);
@@ -2300,6 +2303,7 @@ mod tests {
             panic!("expected unresolved second merge")
         };
         assert!(matches!(*cause, LandingError::PublicationUnknownAt { .. }));
+        assert!(!repo.local_followed.contains(&2));
         assert_eq!(report.outcomes[&1], Outcome::Landed);
         assert_eq!(report.outcomes[&2], Outcome::PendingUnknown);
         assert_eq!(
@@ -2706,6 +2710,177 @@ mod tests {
         assert_eq!(repo.local_followed, vec![1, 1]);
         assert_eq!(repo.push_attempts, pushes);
         assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn refused_local_cleanup_does_not_stop_later_batches_or_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(3);
+        settings.batch_size = 1;
+        repo.refuse_local = true;
+        let state = tempfile::tempdir()?;
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1, 2],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(report.outcomes[&2], Outcome::Landed);
+        assert_eq!(report.receipts.len(), 2);
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            2
+        );
+        let later = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[3],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(later.outcomes[&3], Outcome::Landed);
+        assert_eq!(later.receipts.len(), 3);
+        repo.refuse_local = false;
+        exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[3],
+            false,
+            state.path(),
+        )?;
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn retained_partial_refusal_does_not_block_later_landings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(3);
+        forge.direct_push = false;
+        forge.valid_merge_ids = true;
+        forge.refuse_merge = Some(2);
+        repo.refuse_local = true;
+        let landed = format!("{:040x}", 2001);
+        repo.parents.insert(landed.clone(), vec!["a".repeat(40)]);
+        repo.fetches = ["a".repeat(40), "a".repeat(40), "a".repeat(40), landed].into();
+        let state = tempfile::tempdir()?;
+        assert!(matches!(
+            exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1, 2],
+                false,
+                state.path()
+            ),
+            Err(LandingError::Refused(_))
+        ));
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
+        forge.direct_push = true;
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[3],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(report.outcomes[&3], Outcome::Landed);
+        Ok(())
+    }
+
+    #[test]
+    fn local_io_failure_does_not_skip_other_prs_in_a_settled_batch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(3);
+        let state = tempfile::tempdir()?;
+        repo.fail_local_at = Some(1);
+        assert!(matches!(
+            exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1, 2],
+                false,
+                state.path()
+            ),
+            Err(LandingError::LocalFollowUp(_))
+        ));
+        assert_eq!(repo.local_followed, vec![1, 2]);
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[3],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(report.outcomes[&3], Outcome::Landed);
+        assert_eq!(repo.local_followed, vec![1, 2, 1, 2, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_local_io_failure_does_not_block_a_later_landing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
+        let state = tempfile::tempdir()?;
+        repo.fail_local = true;
+        assert!(
+            exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1],
+                false,
+                state.path()
+            )
+            .is_err()
+        );
+        let result = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[2],
+            false,
+            state.path(),
+        );
+        assert!(matches!(result, Err(LandingError::LocalFollowUp(_))));
+        assert!(repo.local_followed.contains(&2));
+        assert_eq!(
+            repo.push_attempts
+                .iter()
+                .filter(|name| *name == "main")
+                .count(),
+            2
+        );
         Ok(())
     }
 

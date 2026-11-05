@@ -383,8 +383,11 @@ such as a transport error, timeout or 5xx, keeps it. Recovery checks ancestry an
 forge state before any retry. Once the outcome is definite, the marker becomes
 settled: it records each outcome and the remaining receipt, follow, tree comparison
 and candidate-ref cleanup steps. A settled marker never authorises publication.
-Recovery completes those steps and deletes the marker last; a follow-up failure
-leaves it in place for the next run.
+Recovery completes those steps and deletes the marker last. A refused local
+cleanup reports `cleanup_pending` and its steps, leaves the marker for an
+opportunistic retry, and does not block later landings. A transport or I/O
+failure during local cleanup also leaves the marker for retry without blocking
+recovery of later pull requests.
 The error gives the marker path: inspect its JSON under the project state
 `landing/pending/`, and compare its candidate and PR heads with the target's
 ancestry and forge PR state. Do not remove it just to force a retry. If the

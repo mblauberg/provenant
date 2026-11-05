@@ -173,12 +173,14 @@ pub fn finish_settled(
             .receipt_pending = false;
         receipt::record_pending(state, attempt)?;
     }
+    let mut local_error = None;
     if attempt
         .settled
         .as_ref()
         .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
         .local_follow_pending
     {
+        let mut complete = true;
         for pr in &attempt
             .settled
             .as_ref()
@@ -188,13 +190,22 @@ pub fn finish_settled(
         {
             let result = repo.follow_local(pr);
             super::ports::sync_project(repo, forge, runner, alarms);
-            result?;
+            match result {
+                Ok(done) => complete &= done,
+                Err(error @ LandingError::LocalFollowUp(_)) => {
+                    complete = false;
+                    if local_error.is_none() {
+                        local_error = Some(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
         attempt
             .settled
             .as_mut()
             .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
-            .local_follow_pending = false;
+            .local_follow_pending = !complete;
         receipt::record_pending(state, attempt)?;
     }
     if attempt
@@ -217,7 +228,16 @@ pub fn finish_settled(
         .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
         .record
         .clone();
-    receipt::clear_pending(state, &attempt.repository, &attempt.candidate)?;
+    if !attempt
+        .settled
+        .as_ref()
+        .is_some_and(|settled| settled.local_follow_pending)
+    {
+        receipt::clear_pending(state, &attempt.repository, &attempt.candidate)?;
+    }
+    if let Some(error) = local_error {
+        return Err(error);
+    }
     Ok(record)
 }
 #[allow(
@@ -250,7 +270,17 @@ fn finish_recovery(
         .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
         .record
         .clone();
-    result.map(|_| ())
+    match result {
+        Err(LandingError::LocalFollowUp(_)) => Ok(()),
+        other => other.map(|_| ()),
+    }
+}
+fn local_cleanup_only(settled: &SettledAttempt) -> bool {
+    settled.local_follow_pending
+        && !settled.receipt_pending
+        && !settled.tree_pending
+        && !settled.follow_pending
+        && !settled.cleanup_pending
 }
 /// Recover pending publications before selection, retaining unprovable outcomes.
 /// In shadow mode, refuse when recovery would mutate a ref.
@@ -302,12 +332,23 @@ pub(crate) fn recover_pending_with(
 ) -> Result<(), LandingError> {
     for mut attempt in receipt::pending(state, repository, target)? {
         if shadow {
+            if attempt.settled.as_ref().is_some_and(local_cleanup_only) {
+                continue;
+            }
             return Err(LandingError::RecoveryRequired {
                 marker: receipt::pending_path(state, repository, &attempt.candidate)?,
             });
         }
         if attempt.settled.is_some() {
-            let refusal = attempt.settled.as_ref().and_then(|s| s.refusal.clone());
+            // A previously reported partial refusal must not make a retained
+            // local-cleanup marker refuse every later landing.
+            let refusal = attempt.settled.as_ref().and_then(|s| {
+                if local_cleanup_only(s) {
+                    None
+                } else {
+                    s.refusal.clone()
+                }
+            });
             finish_recovery(forge, repo, runner, alarms, state, &mut attempt, recovered)?;
             if let Some(reason) = refusal {
                 return Err(LandingError::Refused(reason));

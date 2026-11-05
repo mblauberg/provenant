@@ -187,6 +187,7 @@ fn batch_response(
         value["merged"] = landed.into();
         if let Some(error) = &cleanup_error {
             value["cleanup_pending"] = true.into();
+            value["reason"] = "cleanup_pending".into();
             value["cleanup_error"] = error.clone().into();
         }
         if let Some(local) = report.local_steps.get(&number) {
@@ -200,6 +201,9 @@ fn batch_response(
                     .as_array()
                     .is_some_and(|steps| steps.iter().any(|step| step["status"] == "refused")))
             .into();
+            if value["cleanup_pending"] == true {
+                value["reason"] = "cleanup_pending".into();
+            }
         }
     }
     let mut response = CommandResult::new("land", status, value);
@@ -368,14 +372,18 @@ fn run_inner(
     if options.head.is_some() || options.wait.is_some() {
         return Err("--head and --wait apply only to single-pull-request landing".into());
     }
+    let mut tracking = std::collections::BTreeMap::new();
     if !options.shadow {
         for number in &options.numbers {
-            super::land::batch_track(&resolved.project, *number, globals)?;
+            tracking.insert(
+                *number,
+                super::land::batch_track(&resolved.project, *number, globals)?,
+            );
         }
     }
     let definition = gate_definition(&effective.gate)?;
     let (mut forge, mut repo, mut runner, mut alarms) =
-        adapters::connect(&resolved.project, globals, workers)?;
+        adapters::connect(&resolved.project, globals, workers, tracking)?;
     let target = forge.target_branch()?;
     let result = driver::run(
         &mut *forge,
@@ -414,6 +422,12 @@ fn run_inner(
                 response.data["number"],
                 response.data["head"].as_str().unwrap_or("unknown")
             );
+            if response.data["cleanup_pending"] == true {
+                text.push_str("cleanup pending\n");
+                if let Some(error) = response.data["cleanup_error"].as_str() {
+                    text.push_str(&format!("cleanup: {error}\n"));
+                }
+            }
             if let Some(steps) = response.data["steps"].as_array() {
                 for step in steps {
                     text.push_str(&format!(

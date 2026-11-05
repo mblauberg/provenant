@@ -37,7 +37,7 @@ pub fn lock(state: &Path) -> Result<provenant_os::fs::LockGuard, LandingError> {
             "publication.lock".as_ref(),
             provenant_os::fs::LockMode::Exclusive,
         )
-        .map_err(|e| failed("another landing may be running", e))
+        .map_err(|e| failed("acquire landing publication lock", e))
 }
 
 fn receipt_dir(state: &Path) -> PathBuf {

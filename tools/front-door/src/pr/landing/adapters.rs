@@ -24,14 +24,17 @@ pub type Adapters<'a> = (
 );
 
 /// Construct the real forge, repository, gate and alarm adapters for a project.
-pub fn connect<'a>(
+pub(super) fn connect<'a>(
     project: &Path,
     globals: &provenant_cli::Globals,
     workers: &'a dyn provenant_confinement::worktrees::WorkerObserver,
+    tracking: std::collections::BTreeMap<u64, crate::pr::land::BatchTracking>,
 ) -> Result<Adapters<'a>, LandingError> {
     Ok((
         Box::new(GhForge::new(project)),
-        Box::new(GitRepo::with_follow_up(project, globals, workers)?),
+        Box::new(GitRepo::with_follow_up(
+            project, globals, workers, tracking,
+        )?),
         Box::new(CheckGate::new(project)),
         Box::new(ChairAlarms::new(project)),
     ))
@@ -498,6 +501,7 @@ struct LocalFollowUp<'a> {
     globals: provenant_cli::Globals,
     workers: &'a dyn provenant_confinement::worktrees::WorkerObserver,
     reports: std::collections::BTreeMap<u64, serde_json::Value>,
+    tracking: std::collections::BTreeMap<u64, crate::pr::land::BatchTracking>,
 }
 impl<'a> GitRepo<'a> {
     pub fn new(project: &Path) -> Result<Self, LandingError> {
@@ -512,6 +516,7 @@ impl<'a> GitRepo<'a> {
         project: &Path,
         globals: &provenant_cli::Globals,
         workers: &'a dyn provenant_confinement::worktrees::WorkerObserver,
+        tracking: std::collections::BTreeMap<u64, crate::pr::land::BatchTracking>,
     ) -> Result<Self, LandingError> {
         let mut repo = Self::new(project)?;
         repo.local = Some(LocalFollowUp {
@@ -523,6 +528,7 @@ impl<'a> GitRepo<'a> {
             },
             workers,
             reports: Default::default(),
+            tracking,
         });
         Ok(repo)
     }
@@ -618,7 +624,7 @@ impl Repo for GitRepo<'_> {
     fn project_path(&self) -> Option<&Path> {
         self.local.as_ref().map(|_| self.project.as_path())
     }
-    fn follow_local(&mut self, pr: &EligiblePr) -> Result<(), LandingError> {
+    fn follow_local(&mut self, pr: &EligiblePr) -> Result<bool, LandingError> {
         if let Some(local) = &mut self.local {
             let head = provenant_core::GitOid::parse(&pr.head)
                 .map_err(|error| LandingError::Failed(error.to_string()))?;
@@ -628,6 +634,7 @@ impl Repo for GitRepo<'_> {
                 head,
                 &mut local.globals,
                 local.workers,
+                local.tracking.get(&pr.number),
             );
             if let Some(project) = &local.globals.project {
                 self.project = project.clone();
@@ -648,16 +655,11 @@ impl Repo for GitRepo<'_> {
                 .is_some_and(|steps| steps.iter().any(|step| step["status"] == "refused"));
             local.reports.insert(
                 pr.number,
-                serde_json::json!({"head": pr.head, "steps": steps}),
+                serde_json::json!({"head": pr.head, "steps": steps, "cleanup_pending": refused, "reason": if refused { "cleanup_pending" } else { "landed" }}),
             );
-            if refused {
-                return Err(LandingError::LocalFollowUp(format!(
-                    "cleanup for pull request #{} was refused; resolve the reported steps and rerun land",
-                    pr.number
-                )));
-            }
+            return Ok(!refused);
         }
-        Ok(())
+        Ok(true)
     }
 
     fn take_local_reports(&mut self) -> std::collections::BTreeMap<u64, serde_json::Value> {

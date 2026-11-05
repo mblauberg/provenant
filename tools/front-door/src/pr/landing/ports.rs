@@ -78,9 +78,10 @@ pub trait Repo {
     fn project_path(&self) -> Option<&std::path::Path> {
         None
     }
-    /// Complete local follow-up only after a landing is proven.
-    fn follow_local(&mut self, _pr: &EligiblePr) -> Result<(), LandingError> {
-        Ok(())
+    /// Complete local follow-up only after a landing is proven. Return false for
+    /// a reported refusal that should be retried without blocking other work.
+    fn follow_local(&mut self, _pr: &EligiblePr) -> Result<bool, LandingError> {
+        Ok(true)
     }
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError>;
     fn take_local_reports(&mut self) -> std::collections::BTreeMap<u64, serde_json::Value> {

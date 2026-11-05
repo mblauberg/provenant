@@ -128,12 +128,9 @@ pub struct SettledAttempt {
     pub receipt_pending: bool,
     pub tree_pending: bool,
     pub follow_pending: bool,
-    #[serde(default = "pending_local_follow_up")]
+    #[serde(default)]
     pub local_follow_pending: bool,
     pub cleanup_pending: bool,
-}
-fn pending_local_follow_up() -> bool {
-    true
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
