@@ -1102,6 +1102,170 @@ mod tests {
     }
 
     #[test]
+    fn legacy_panel_selection_matrix() {
+        // Capture both selection paths before unifying them. Refactor additions
+        // arrive in configured addition order in panel(), but in catalogue order
+        // in resolve_panel(); preserve or explicitly decide that difference.
+        let review = ReviewConfig::default();
+        for (shape, kind, paths, tags, old, resolved) in [
+            (
+                "quick",
+                None,
+                vec![],
+                vec![],
+                vec!["correctness-spec"],
+                vec!["correctness-spec"],
+            ),
+            (
+                "standard",
+                None,
+                vec![],
+                vec![],
+                vec![
+                    "correctness-spec",
+                    "tests",
+                    "design-fit-reuse",
+                    "simplicity",
+                    "reliability",
+                ],
+                vec![
+                    "correctness-spec",
+                    "tests",
+                    "design-fit-reuse",
+                    "simplicity",
+                    "reliability",
+                ],
+            ),
+            (
+                "deep",
+                None,
+                vec![],
+                vec![],
+                vec![
+                    "correctness-spec",
+                    "tests",
+                    "design-fit-reuse",
+                    "simplicity",
+                    "reliability",
+                    "conventions-readability",
+                    "refactor-cleanup",
+                    "flexibility",
+                ],
+                vec![
+                    "correctness-spec",
+                    "tests",
+                    "design-fit-reuse",
+                    "simplicity",
+                    "reliability",
+                    "conventions-readability",
+                    "refactor-cleanup",
+                    "flexibility",
+                ],
+            ),
+            (
+                "quick",
+                Some("docs"),
+                vec![],
+                vec![],
+                vec!["conventions-readability"],
+                vec!["conventions-readability"],
+            ),
+            (
+                "quick",
+                Some("refactor"),
+                vec![],
+                vec![],
+                vec!["correctness-spec", "refactor-cleanup", "design-fit-reuse"],
+                vec!["correctness-spec", "design-fit-reuse", "refactor-cleanup"],
+            ),
+            (
+                "quick",
+                None,
+                vec!["src/tests/change.rs"],
+                vec![],
+                vec!["correctness-spec", "tests"],
+                vec!["correctness-spec", "tests"],
+            ),
+            (
+                "quick",
+                None,
+                vec![],
+                vec!["security", "concurrency", "terminal"],
+                vec![
+                    "correctness-spec",
+                    "security-privacy",
+                    "concurrency-data-errors",
+                    "adversarial",
+                ],
+                vec![
+                    "correctness-spec",
+                    "security-privacy",
+                    "concurrency-data-errors",
+                    "adversarial",
+                ],
+            ),
+        ] {
+            let paths: Vec<String> = paths.into_iter().map(str::to_owned).collect();
+            let extra = risk_lenses(&tags, None);
+            let panel = review.panel(&review.shapes[shape], kind, &paths, false, &extra);
+            assert_eq!(
+                lens_names(&panel),
+                old,
+                "old panel: {shape} {kind:?} {paths:?} {tags:?}"
+            );
+            let request = ReviewRequest {
+                shape: Some(shape.into()),
+                kind: kind.map(str::to_owned),
+                risk_tags: tags.into_iter().map(str::to_owned).collect(),
+                ..Default::default()
+            };
+            let panel = review.resolve_panel(&request, None, &paths, false).unwrap();
+            assert_eq!(
+                panel
+                    .slots
+                    .iter()
+                    .map(|slot| slot.lens.as_str())
+                    .collect::<Vec<_>>(),
+                resolved,
+                "resolved panel: {shape} {kind:?} {paths:?}"
+            );
+        }
+        let request = ReviewRequest {
+            shape: Some("quick".into()),
+            lenses: ["reliability", "simplicity"]
+                .into_iter()
+                .map(|name| ReviewLens {
+                    name: name.into(),
+                    when: None,
+                    tier: serde_json::Value::Null,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let panel = review.resolve_panel(&request, None, &[], false).unwrap();
+        assert_eq!(
+            panel
+                .slots
+                .iter()
+                .map(|slot| slot.lens.as_str())
+                .collect::<Vec<_>>(),
+            ["reliability"]
+        );
+        let panel = review
+            .resolve_panel(
+                &ReviewRequest {
+                    risk_tier: Some("crucial".into()),
+                    ..request
+                },
+                None,
+                &[],
+                false,
+            )
+            .unwrap();
+        assert_eq!(panel.shape, "deep");
+    }
+
+    #[test]
     fn standard_panel_covers_five_default_lenses() {
         let review = ReviewConfig::default();
         let shape = &review.shapes["standard"];
