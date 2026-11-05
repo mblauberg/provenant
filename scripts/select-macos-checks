@@ -1,9 +1,11 @@
 #!/bin/sh
 set -eu
 
+# set_output MACOS [RUST]: Rust defaults to true so every conservative path
+# keeps the full gate; only the docs-only allowlist below turns it off.
 set_output() {
-  printf 'run_macos=%s\n' "$1" >> "$GITHUB_OUTPUT"
-  printf 'Selected run_macos=%s\n' "$1"
+  printf 'run_macos=%s\nrun_rust=%s\n' "$1" "${2:-true}" >> "$GITHUB_OUTPUT"
+  printf 'Selected run_macos=%s run_rust=%s\n' "$1" "${2:-true}"
 }
 
 run_conservatively() {
@@ -33,6 +35,14 @@ fi
 
 changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
 printf 'Changed paths since merge base:\n%s\n' "$changed"
+# Rust jobs may be skipped only when every changed path is prose that no Rust
+# test, build script or embedded asset reads. skills/ and roles/ are embedded by
+# build.rs, and docs/specs and docs/runbooks are read by tests, so they run Rust.
+docs_only='^(docs/(release-notes|adr|evals|telemetry|research)/|docs/(glossary|model-dossier)\.md$)'
+if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Evq "$docs_only"; then
+  set_output false false
+  exit 0
+fi
 if printf '%s\n' "$changed" | grep -Eq '^(tools/front-door/|apps/|\.github/workflows/ci\.yml$|docs/runbooks/ci\.md$|scripts/(check-native-inventory|run-native-test-group|test-check-native-inventory)$)'; then
   set_output true
 else

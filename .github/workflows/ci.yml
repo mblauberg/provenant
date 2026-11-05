@@ -35,6 +35,7 @@ jobs:
       contents: read
     outputs:
       run_macos: ${{ steps.paths.outputs.run_macos }}
+      run_rust: ${{ steps.paths.outputs.run_rust }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,10 +96,12 @@ jobs:
           cat "$RUNNER_TEMP/doc-truth.txt" >> "$GITHUB_STEP_SUMMARY"
 
   # Lint and test run as separate jobs so they overlap; the tests are further
-  # split into two hash partitions. `ci-status` gates on both jobs, and a
+  # split into three hash partitions. `ci-status` gates on both jobs, and a
   # matrix job reports success only when every partition succeeds.
   rust-lint:
     name: Rust lint
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -146,13 +149,15 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   rust:
-    name: Rust front door (${{ matrix.partition }}/2)
+    name: Rust front door (${{ matrix.partition }}/3)
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2]
+        partition: [1, 2, 3]
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
       CARGO_INCREMENTAL: "0"
@@ -221,9 +226,9 @@ jobs:
             fi
           fi
           if [ -n "$filter" ]; then
-            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2 -E "$filter"
+            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/3 -E "$filter"
           else
-            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2
+            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/3
           fi
       - name: Report slowest tests
         if: always()
@@ -258,6 +263,8 @@ jobs:
 
   rust-dependencies:
     name: Rust dependency policy
+    needs: macos-scope
+    if: needs.macos-scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -596,4 +603,5 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
           RUN_MACOS: ${{ needs.macos-scope.outputs.run_macos }}
+          RUN_RUST: ${{ needs.macos-scope.outputs.run_rust }}
         run: scripts/check-ci-status
