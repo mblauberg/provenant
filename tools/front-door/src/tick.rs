@@ -157,6 +157,15 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
                 &provenant_cli::domains::SECTIONS,
             )
             .map_err(|error| error.to_string())?;
+            for binding in provenant_config::registered_projects(&resolved.roots)
+                .map_err(|error| error.to_string())?
+            {
+                provenant_fabric_runtime::graph::FileJournal::rebuild_pending(
+                    &resolved.roots.state,
+                    binding.project_id(),
+                )
+                .map_err(|error| error.to_string())?;
+            }
             crate::worktrees::scheduled_gc(globals, config.gc.idle_days, workers)
         })();
         write_gc_result(

@@ -230,6 +230,85 @@ impl FileJournal {
         Ok(ids)
     }
 
+    /// Discover the derived pending set, rebuilding it when its sentinel is absent.
+    pub fn pending_graph_ids(
+        root: &StateRoot,
+        project: ProjectId,
+    ) -> Result<Vec<String>, JournalError> {
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let markers = open_or_create(&directory, OsStr::new("pending"))?;
+        match markers.open_read(OsStr::new("complete")) {
+            Ok(_) => {}
+            Err(error) if error.is_not_found() => {
+                Self::rebuild_pending_in(root, project, &directory, &markers)?
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let mut ids = Vec::new();
+        for entry in markers.entries()? {
+            let name = entry?;
+            if let Some(id) = name.to_str().and_then(|s| s.strip_suffix(".pending"))
+                && valid_identifier(id)
+            {
+                ids.push(id.to_owned());
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Rebuild by adding markers only. Concurrent saves own removals under their graph lock.
+    pub fn rebuild_pending(root: &StateRoot, project: ProjectId) -> Result<(), JournalError> {
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let markers = open_or_create(&directory, OsStr::new("pending"))?;
+        Self::rebuild_pending_in(root, project, &directory, &markers)
+    }
+
+    fn rebuild_pending_in(
+        root: &StateRoot,
+        project: ProjectId,
+        directory: &Directory,
+        markers: &Directory,
+    ) -> Result<(), JournalError> {
+        for id in Self::graph_ids(root, project)? {
+            match load_checkpoint(directory, &id) {
+                Ok(Some(stored)) if stored_pending(&stored) => write_pending_marker(markers, &id)?,
+                Err(error) if error.is_unreadable() => write_pending_marker(markers, &id)?,
+                Err(error) => return Err(error),
+                _ => {}
+            }
+        }
+        markers
+            .atomic_write(
+                OsStr::new("complete"),
+                ".sentinel.",
+                b"1",
+                PublishMode::Replace,
+            )?
+            .require_durable()
+            .map_err(JournalError::DurabilityUnconfirmed)
+    }
+
+    /// Remove a stale marker only while holding the graph's writer lock.
+    pub fn clear_stale_pending(&mut self) -> Result<(), JournalError> {
+        if load_checkpoint(&self.directory, &self.graph_id)?
+            .as_ref()
+            .is_none_or(|stored| !stored_pending(stored))
+        {
+            let markers = open_or_create(&self.directory, OsStr::new("pending"))?;
+            remove_pending_marker(&markers, &self.graph_id)?;
+        }
+        Ok(())
+    }
+
     /// The execution bound to a graph in any state, without taking the lock.
     pub fn execution(
         root: &StateRoot,
@@ -257,24 +336,8 @@ impl FileJournal {
             return Err(JournalError::InvalidGraphId);
         }
         let directory = graph_directory(root, project)?;
-        Ok(load_checkpoint(&directory, graph_id)?.and_then(|stored| {
-            (stored
-                .checkpoint
-                .nodes
-                .iter()
-                .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
-                || !stored.checkpoint.cancelled
-                    && !stored.checkpoint.delivered
-                    && stored.execution.document.delivery
-                        == Some(provenant_records::run::DeliveryMode::Pr)
-                    && stored.checkpoint.successful()
-                || stored
-                    .checkpoint
-                    .asks
-                    .iter()
-                    .any(|ask| !ask.closed && (ask.resolved || stored.checkpoint.cancelled)))
-            .then_some(stored.execution)
-        }))
+        Ok(load_checkpoint(&directory, graph_id)?
+            .and_then(|stored| stored_pending(&stored).then_some(stored.execution)))
     }
 
     /// Read an atomic checkpoint snapshot without creating directories or
@@ -499,6 +562,11 @@ impl GraphJournal for FileJournal {
         if bytes.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
             return Err(JournalError::TooLarge);
         }
+        let markers = open_or_create(&self.directory, OsStr::new("pending"))?;
+        let pending = stored_pending(&stored);
+        if pending {
+            write_pending_marker(&markers, &self.graph_id)?;
+        }
         self.directory
             .atomic_write(
                 &self.checkpoint_name(),
@@ -507,7 +575,51 @@ impl GraphJournal for FileJournal {
                 PublishMode::Replace,
             )?
             .require_durable()
-            .map_err(JournalError::DurabilityUnconfirmed)
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        if !pending {
+            remove_pending_marker(&markers, &self.graph_id)?;
+        }
+        Ok(())
+    }
+}
+
+fn stored_pending(stored: &StoredCheckpoint) -> bool {
+    let checkpoint = &stored.checkpoint;
+    checkpoint
+        .nodes
+        .iter()
+        .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
+        || !checkpoint.cancelled
+            && !checkpoint.delivered
+            && stored.execution.document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
+            && checkpoint.successful()
+        || checkpoint
+            .asks
+            .iter()
+            .any(|ask| !ask.closed && (ask.resolved || checkpoint.cancelled))
+}
+
+fn pending_marker_name(graph_id: &str) -> OsString {
+    format!("{graph_id}.pending").into()
+}
+
+fn write_pending_marker(markers: &Directory, graph_id: &str) -> Result<(), JournalError> {
+    markers
+        .atomic_write(
+            &pending_marker_name(graph_id),
+            ".pending.",
+            b"1",
+            PublishMode::Replace,
+        )?
+        .require_durable()
+        .map_err(JournalError::DurabilityUnconfirmed)
+}
+
+fn remove_pending_marker(markers: &Directory, graph_id: &str) -> Result<(), JournalError> {
+    match markers.unlink(&pending_marker_name(graph_id)) {
+        Ok(()) => markers.sync().map_err(JournalError::DurabilityUnconfirmed),
+        Err(error) if error.is_not_found() => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 

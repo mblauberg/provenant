@@ -1013,7 +1013,7 @@ pub(crate) fn tick_graphs(
     let mut report = crate::tick::Graphs::default();
     for binding in provenant_config::registered_projects(&resolved.roots)? {
         let project = binding.project_id();
-        let ids = match FileJournal::graph_ids(&resolved.roots.state, project) {
+        let ids = match FileJournal::pending_graph_ids(&resolved.roots.state, project) {
             Ok(ids) => ids,
             Err(error) => {
                 report.errors.push(format!("{project}: {error}"));
@@ -1022,12 +1022,34 @@ pub(crate) fn tick_graphs(
         };
         for id in ids {
             let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
-                let Some(checkpoint) =
-                    FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?
-                else {
+                let checkpoint =
+                    FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?;
+                let Some(checkpoint) = checkpoint else {
+                    // An already reported unreadable checkpoint must stay marked.
+                    if matches!(
+                        FileJournal::read_checkpoint(&resolved.roots.state, project, &id),
+                        Ok(None)
+                    ) {
+                        let clock = SystemClock::new();
+                        let cancel = CancelToken::new();
+                        match FileJournal::open(
+                            &resolved.roots.state,
+                            project,
+                            &id,
+                            WaitBudget::nonblocking(clock.mono_now()),
+                            &cancel,
+                            &clock,
+                        ) {
+                            Ok(mut journal) => journal.clear_stale_pending()?,
+                            Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+                                provenant_os::fs::FsError::LockTimeout { .. },
+                            )) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
                     return Ok(false);
                 };
-                if !graph_wake_due(&checkpoint, now) {
+                if !checkpoint.cancelled && !graph_wake_due(&checkpoint, now) {
                     return Ok(false);
                 }
                 let clock = SystemClock::new();
@@ -1050,16 +1072,17 @@ pub(crate) fn tick_graphs(
                 let Some(checkpoint) = journal.load(&id)? else {
                     return Ok(false);
                 };
-                if !graph_wake_due(&checkpoint, clock.wall_now()?) {
-                    return Ok(false);
-                }
                 // Execution can be rebound to another worktree by a manual
                 // resume, so resolve it only after acquiring journal custody.
                 let Some(execution) =
                     FileJournal::pending_execution(&resolved.roots.state, project, &id)?
                 else {
+                    journal.clear_stale_pending()?;
                     return Ok(false);
                 };
+                if !graph_wake_due(&checkpoint, clock.wall_now()?) {
+                    return Ok(false);
+                }
                 let context =
                     Context::open(resolved.roots.clone(), &resolved.home, &execution.directory)?;
                 if context.identity.project != project || context.in_lane {

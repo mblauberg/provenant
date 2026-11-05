@@ -3,6 +3,71 @@ use provenant_core::{Clock, ProjectId};
 use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
 use std::{convert::Infallible, os::unix::fs::PermissionsExt};
 struct Owner;
+
+#[test]
+fn pending_markers_follow_saves_and_rebuild_after_loss() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    assert!(
+        FileJournal::pending_graph_ids(&root, project)
+            .unwrap()
+            .is_empty()
+    );
+    fixture.checkpoint.nodes[0].state = NodeState::Running;
+    journal.save(&fixture.checkpoint).unwrap();
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).unwrap(),
+        ["g-test"]
+    );
+    let markers = base
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("pending");
+    std::fs::remove_dir_all(&markers).unwrap();
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).unwrap(),
+        ["g-test"]
+    );
+    fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
+    journal.save(&fixture.checkpoint).unwrap();
+    assert!(
+        FileJournal::pending_graph_ids(&root, project)
+            .unwrap()
+            .is_empty()
+    );
+    drop(journal);
+    std::fs::remove_file(markers.join("complete")).unwrap();
+    std::fs::write(
+        base.join("fabric/graphs")
+            .join(project.to_string())
+            .join("graph-g-test.json"),
+        b"invalid",
+    )
+    .unwrap();
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).unwrap(),
+        ["g-test"]
+    );
+    assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
+    assert!(
+        FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+            .unwrap()
+            .is_none()
+    );
+}
 impl AttemptOwner for Owner {
     type Error = Infallible;
     fn actor(&self) -> String {
