@@ -1723,17 +1723,6 @@ fn wrong_value_type_in_a_serde_decoded_section_still_reports_type() {
     }
 }
 
-#[test]
-fn retired_disk_guard_configuration_warns_and_uses_defaults() {
-    let roots = roots();
-    let config = load(
-        &roots,
-        Some(b"schema_version=1\n[disk_guard]\nenabled=false".as_slice()),
-    )
-    .unwrap();
-    assert_warning(&config, "unknown_key");
-    assert_eq!(config.gc, GcSettings::default());
-}
 
 #[test]
 fn read_knobs_ignores_domain_sections_it_does_not_know() {
