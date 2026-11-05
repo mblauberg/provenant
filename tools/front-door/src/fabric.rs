@@ -5537,16 +5537,18 @@ fn graph_retry_allowance(
                     let retries = retry
                         .get("retries")
                         .and_then(serde_json::Value::as_u64)
-                        .ok_or(FacadeError::InvalidInput)?;
+                        .ok_or(FacadeError::InvalidInput { detail: None })?;
                     u8::try_from(retries)
                         .ok()
                         .filter(|value| *value <= provenant_routing::MAX_SETTLEMENT_RETRIES)
-                        .ok_or(FacadeError::InvalidInput)
+                        .ok_or(FacadeError::InvalidInput { detail: None })
                 })
                 .transpose()
         };
     let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
         .map_err(|error| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
             reason: error.to_string(),
         })?;
     let host = matches!(

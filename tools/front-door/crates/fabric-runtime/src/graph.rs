@@ -639,12 +639,21 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     let retrying = launch_retry_kind(error);
     if retrying {
         let Some(now) = clock else {
-            // Like a decide timeout, a launch wait needs a real clock: refuse
-            // the advance with the attempt still starting, so no wait is lost.
-            return Err(GraphError::Refused(format!(
-                "node {}: no wall clock to schedule the launch retry; retry the advance",
-                checkpoint.nodes[index].id
-            )));
+            let retry = checkpoint.nodes[index]
+                .launch_retry
+                .get_or_insert_with(|| LaunchRetry {
+                    extra: Default::default(),
+                    failures: 0,
+                    deadline: None,
+                    wake_at: None,
+                    reason: None,
+                });
+            retry.failures = retry.failures.saturating_add(1);
+            retry.wake_at = None;
+            retry.reason =
+                Some("wall clock unavailable; launch retry timing is unavailable".into());
+            asks::refresh_wake(checkpoint);
+            return journal.save(checkpoint).map_err(GraphError::Journal);
         };
         let retry = checkpoint.nodes[index]
             .launch_retry
@@ -1606,22 +1615,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 // on every advance, tick or manual, so a failing host that
                 // cannot launch is not hammered with new submissions.
                 let launch_clock = owner.wall_now();
-                if launch_clock.is_none()
-                    && checkpoint.nodes[node_index]
-                        .launch_retry
-                        .as_ref()
-                        .is_some_and(|retry| retry.deadline.is_some())
-                {
-                    return Err(GraphError::Refused(format!(
-                        "node {}: no wall clock to check the launch deadline; retry the advance",
-                        node.id
-                    )));
-                }
                 if checkpoint.nodes[node_index]
                     .launch_retry
                     .as_ref()
                     .and_then(|retry| retry.wake_at)
-                    .is_some_and(|wake| launch_clock.is_none_or(|now| now < wake))
+                    .is_some_and(|wake| launch_clock.is_some_and(|now| now < wake))
                 {
                     break;
                 }
@@ -1644,10 +1642,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             "node {}: the launch failed: {}; {}",
                             progress.id,
                             reason,
-                            launch_remedy(
-                                &crate::coordination::facade::FacadeError::Busy,
-                                &checkpoint.graph_id
-                            )
+                            launch_diagnostic(&crate::coordination::facade::FacadeError::Busy)
+                                .next
+                                .as_deref()
+                                .unwrap_or("retry the graph advance")
                         ));
                         progress.state = NodeState::Blocked;
                         progress.launch_retry = None;
@@ -1944,24 +1942,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     });
                     checkpoint.nodes[node_index].state = NodeState::Running;
                     if let Some(seconds) = owner.admission_timeout_seconds() {
-                        let now = owner.wall_now().ok_or_else(|| {
-                            GraphError::Refused(format!(
-                                "node {}: no wall clock to start the launch deadline; retry the advance",
-                                node.id
-                            ))
-                        })?;
-                        let deadline = DurationMicros::from_seconds(seconds)
-                            .ok()
-                            .and_then(|duration| now.checked_add(duration).ok())
-                            .ok_or_else(|| {
-                                GraphError::Refused("invalid admission deadline".into())
-                            })?;
+                        let deadline = owner.wall_now().and_then(|now| {
+                            DurationMicros::from_seconds(seconds)
+                                .ok()
+                                .and_then(|duration| now.checked_add(duration).ok())
+                        });
                         checkpoint.nodes[node_index].launch_retry = Some(LaunchRetry {
                             extra: Default::default(),
                             failures: 0,
-                            deadline: Some(deadline),
+                            deadline,
                             wake_at: None,
-                            reason: None,
+                            reason: deadline.is_none().then(|| {
+                                "wall clock unavailable; launch retry timing is unavailable".into()
+                            }),
                         });
                     }
                     // A retry must not replay the preceding attempt's family snapshot.

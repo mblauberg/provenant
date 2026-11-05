@@ -6542,13 +6542,13 @@ fn launch_wake_is_capped_by_the_original_deadline() {
 }
 
 #[test]
-fn launch_with_an_admission_window_requires_a_wall_clock() {
+fn launch_with_an_admission_window_continues_without_a_wall_clock() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher::default();
     let mut journal = MemoryJournal::default();
-    let error = advance(&document, &mut owner, &mut journal).unwrap_err();
-    assert!(error.to_string().contains("no wall clock"));
-    assert!(owner.calls.is_empty());
+    let result = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(result.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(owner.calls.len(), 1);
 }
 
 #[test]

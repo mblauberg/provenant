@@ -1599,6 +1599,7 @@ mod land_log_tests {
                                 super::ObservedProcess {
                                     pid: 42,
                                     command: Some("worker".into()),
+                                    kind: provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
                                     cwd: Some(root),
                                 },
                             )

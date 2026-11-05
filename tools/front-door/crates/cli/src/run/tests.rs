@@ -2280,18 +2280,21 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
                             ObservedProcess {
                                 pid: 54321,
                                 command: Some("foreign-writer".into()),
+                                kind: provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
                                 cwd: Some(self.0.clone()),
                             },
                         )
                     })
                     .collect(),
                 details: Default::default(),
+                ..Default::default()
             }
         }
         fn live_process(&self, _root: &Path) -> Option<ObservedProcess> {
             Some(ObservedProcess {
                 pid: 54321,
                 command: Some("foreign-writer".into()),
+                kind: provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
                 cwd: Some(self.0.clone()),
             })
         }
@@ -2547,6 +2550,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
             (root == self.target).then(|| ObservedProcess {
                 pid: 24680,
                 command: Some("ancestor-shell".into()),
+                kind: provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
                 cwd: Some(self.target.clone()),
             })
         }
