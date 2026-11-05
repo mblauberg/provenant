@@ -1,6 +1,7 @@
 //! Custody-specific native process operations.
 pub(crate) mod census;
 pub(crate) mod handoff;
+pub(crate) mod live_census;
 pub(crate) mod process_tree;
 #[cfg(target_os = "macos")]
 pub(crate) mod provider;

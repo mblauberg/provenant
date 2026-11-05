@@ -135,6 +135,15 @@ impl ProcessObserver for SystemProcessObserver {
     fn census(&self, max_entries: usize) -> Result<Census, CensusError> {
         system_census(max_entries)
     }
+
+    fn live_census(
+        &self,
+        root: &ProcessIdentity,
+        known: &[ProcessIdentity],
+        max_entries: usize,
+    ) -> Result<Option<Census>, CensusError> {
+        super::live_census::observe(self, root, known, max_entries)
+    }
 }
 
 impl SystemProcessObserver {

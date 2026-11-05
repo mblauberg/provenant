@@ -96,6 +96,29 @@ impl ProcessObserver for CensusGateObserver {
         fixture::RecordedBootObserver.observe(pid)
     }
 
+    fn live_census(
+        &self,
+        root: &ProcessIdentity,
+        known: &[ProcessIdentity],
+        limit: usize,
+    ) -> std::result::Result<Option<Census>, CensusError> {
+        let state = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from);
+        if !state
+            .as_ref()
+            .is_some_and(|path| path.join("s2-live-tree").is_file())
+        {
+            return Ok(None);
+        }
+        let result = fixture::RecordedBootObserver.live_census(root, known, limit)?;
+        if result.is_some()
+            && let Some(state) = state
+        {
+            std::fs::write(state.join("s2-live-tree-seen"), b"observed")
+                .map_err(CensusError::ProcessList)?;
+        }
+        Ok(result)
+    }
+
     fn census(&self, max_entries: usize) -> std::result::Result<Census, CensusError> {
         if let Some(root) = std::env::var_os("PROVENANT_STATE_DIR") {
             let counter = PathBuf::from(root).join("s2-census-errors-left");
@@ -1187,24 +1210,50 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
     Ok(())
 }
 fn descendant_stays_attributed_after_parent_exit_and_session_change(root: &Path) -> Result<()> {
+    descendant_session_after_parent(root, false)
+}
+
+fn descendant_of_100ms_parent_stays_attributed(root: &Path) -> Result<()> {
+    descendant_session_after_parent(root, true)
+}
+
+fn descendant_session_after_parent(root: &Path, timed: bool) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    std::fs::write(state.join("s2-live-tree"), b"enabled")?;
     let descendant_listener = UnixListener::bind(root.join("short-descendant.sock"))?;
     let parent_listener = UnixListener::bind(root.join("short-parent.sock"))?;
     let provider_listener = UnixListener::bind(root.join("short-provider.sock"))?;
+    let warm_listener = if timed {
+        Some(UnixListener::bind(root.join("short-warm.sock"))?)
+    } else {
+        None
+    };
+    let mut paths = vec![
+        root.join("short-descendant.sock").into_os_string(),
+        root.join("short-parent.sock").into_os_string(),
+        root.join("short-provider.sock").into_os_string(),
+    ];
+    if timed {
+        paths.push(root.join("short-warm.sock").into_os_string());
+    }
     let (_writer, handle) = start(
         root,
         "short",
         "s2-short-parent-provider",
-        &[
-            root.join("short-descendant.sock").into_os_string(),
-            root.join("short-parent.sock").into_os_string(),
-            root.join("short-provider.sock").into_os_string(),
-        ],
+        &paths,
         CapturePlan {
             root_flush_ms: 30,
             descendant_grace_ms: 10,
             ..CapturePlan::default()
         },
     )?;
+    if let Some(listener) = warm_listener {
+        let mut warm = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+        byte(&mut warm, b'R')?;
+        wait_for_file(&state.join("s2-live-tree-seen"))?;
+        warm.write_all(b"S")?;
+    }
     let mut descendant_stream =
         fixture::fixture_accept(&descendant_listener, Duration::from_secs(5))?;
     byte(&mut descendant_stream, b'R')?;
@@ -1212,14 +1261,22 @@ fn descendant_stays_attributed_after_parent_exit_and_session_change(root: &Path)
     let mut parent_stream = fixture::fixture_accept(&parent_listener, Duration::from_secs(5))?;
     byte(&mut parent_stream, b'R')?;
     let parent = process_identity(read_pid_line(&mut parent_stream)?)?;
+    let parent_deadline = Instant::now() + Duration::from_millis(100);
     let mut provider_stream = fixture::fixture_accept(&provider_listener, Duration::from_secs(5))?;
     byte(&mut provider_stream, b'R')?;
     let reservation = root
         .join("short-writer")
         .join(scope().attempt.to_string())
         .join("reservation.json");
-    wait_for_descendant(&reservation, &parent)?;
-    wait_for_descendant(&reservation, &descendant)?;
+    if timed {
+        while Instant::now() < parent_deadline {
+            std::thread::park_timeout(parent_deadline.saturating_duration_since(Instant::now()));
+        }
+    } else {
+        wait_for_descendant(&reservation, &parent)?;
+        wait_for_descendant(&reservation, &descendant)?;
+        wait_for_file(&state.join("s2-live-tree-seen"))?;
+    }
     drop(parent_stream);
     wait_for_zombie(&parent)?;
     descendant_stream.write_all(b"S")?;
@@ -2549,6 +2606,10 @@ const CASES: &[Case] = &[
     (
         "descendant_stays_attributed_after_parent_exit_and_session_change",
         descendant_stays_attributed_after_parent_exit_and_session_change,
+    ),
+    (
+        "descendant_of_100ms_parent_stays_attributed",
+        descendant_of_100ms_parent_stays_attributed,
     ),
     #[cfg(target_os = "macos")]
     (

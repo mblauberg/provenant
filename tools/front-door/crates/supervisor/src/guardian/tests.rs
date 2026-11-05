@@ -2,6 +2,23 @@ use super::*;
 use crate::census::{Census, ProcessFact};
 use std::collections::BTreeSet;
 
+#[test]
+fn census_fallback_is_recorded_once_even_if_the_source_keeps_failing() {
+    let mut recorded = false;
+    assert_eq!(super::census_fallback_notice(false, &mut recorded), None);
+    assert!(super::census_fallback_notice(true, &mut recorded).is_some());
+    assert_eq!(super::census_fallback_notice(true, &mut recorded), None);
+}
+
+#[test]
+fn census_event_failure_requires_an_immediate_full_scan() {
+    assert!(!super::census_full_due(101, Some(100), false));
+    // This flag carries both an unavailable process filter and a saturated
+    // event drain. Neither waits for the periodic backstop.
+    assert!(super::census_full_due(101, Some(100), true));
+    assert!(super::census_full_due(5_100, Some(100), false));
+}
+
 #[cfg(all(feature = "fixture", target_os = "macos"))]
 #[test]
 #[allow(clippy::disallowed_methods)]

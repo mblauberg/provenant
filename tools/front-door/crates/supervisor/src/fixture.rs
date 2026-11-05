@@ -886,6 +886,15 @@ pub fn dispatch() -> io::Result<bool> {
         }
         "s2-short-parent-provider" => {
             let root = std::env::current_dir()?;
+            if let Ok(path) = fixture_path(&args, 6) {
+                let mut ready = std::os::unix::net::UnixStream::connect(path)?;
+                ready.write_all(b"R")?;
+                let mut command = [0_u8; 1];
+                ready.read_exact(&mut command)?;
+                if command != *b"S" {
+                    return Err(io::Error::other("unexpected fixture command"));
+                }
+            }
             let extra = [
                 fixture_path(&args, 3)?.into_os_string(),
                 fixture_path(&args, 4)?.into_os_string(),
@@ -1109,6 +1118,14 @@ impl crate::census::ProcessObserver for RecordedBootObserver {
     fn census(&self, limit: usize) -> Result<crate::census::Census, crate::census::CensusError> {
         crate::process_os::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1")?
             .census(limit)
+    }
+    fn live_census(
+        &self,
+        root: &crate::census::ProcessIdentity,
+        known: &[crate::census::ProcessIdentity],
+        limit: usize,
+    ) -> Result<Option<crate::census::Census>, crate::census::CensusError> {
+        crate::process_os::live_census::observe(self, root, known, limit)
     }
 }
 

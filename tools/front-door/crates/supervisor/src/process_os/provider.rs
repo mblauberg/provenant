@@ -56,6 +56,8 @@ impl<'a> Watch<'a> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReactorEvent {
     pub(crate) supervisor_signal: bool,
+    pub(crate) process_changed: bool,
+    pub(crate) process_overflow: bool,
 }
 
 /// Guardian-only signal/event source. Install before spawning a provider.
@@ -64,6 +66,7 @@ pub(crate) struct ReactorEvent {
 pub(crate) struct GuardianReactor {
     queue: std::fs::File,
     _mask: SignalMask,
+    processes: BTreeSet<i64>,
 }
 impl GuardianReactor {
     pub(crate) fn install() -> io::Result<Self> {
@@ -101,7 +104,52 @@ impl GuardianReactor {
                 return Err(io::Error::last_os_error());
             }
         }
-        Ok(Self { queue, _mask: mask })
+        Ok(Self {
+            queue,
+            _mask: mask,
+            processes: BTreeSet::new(),
+        })
+    }
+
+    /// Watch known processes for fork and exit. A failure requires a full
+    /// scan; kqueue does not expose the new PID in a fork event.
+    pub(crate) fn watch_processes(&mut self, pids: &BTreeSet<i64>) -> io::Result<bool> {
+        if pids.len() > MAX_CENSUS_ENTRIES {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.processes.retain(|pid| pids.contains(pid));
+        let mut added = false;
+        for &pid in pids {
+            if self.processes.contains(&pid) {
+                continue;
+            }
+            let ident = usize::try_from(pid).map_err(|_| io::ErrorKind::InvalidInput)?;
+            // SAFETY: zero is a valid empty kevent; fields below describe one
+            // process filter and no pointers are retained.
+            let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+            change.ident = ident;
+            change.filter = libc::EVFILT_PROC;
+            change.flags = libc::EV_ADD | libc::EV_CLEAR;
+            change.fflags = libc::NOTE_FORK | libc::NOTE_EXIT;
+            // SAFETY: the queue and single change record are live; the kernel
+            // borrows the record only for this call.
+            let result = unsafe {
+                libc::kevent(
+                    self.queue.as_raw_fd(),
+                    &change,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            if result < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.processes.insert(pid);
+            added = true;
+        }
+        Ok(added)
     }
 
     /// Waits for at most the requested duration, capped to one second per
@@ -166,7 +214,7 @@ impl GuardianReactor {
         }
     }
 
-    fn read_kqueue(&self, event: &mut ReactorEvent) -> io::Result<()> {
+    fn read_kqueue(&mut self, event: &mut ReactorEvent) -> io::Result<()> {
         let timeout = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
@@ -198,6 +246,18 @@ impl GuardianReactor {
                 return Ok(());
             }
             for item in events.iter().take(result as usize) {
+                if item.filter == libc::EVFILT_PROC {
+                    event.process_changed = true;
+                    if item.flags & libc::EV_ERROR != 0 {
+                        event.process_overflow = true;
+                    }
+                    if item.fflags & libc::NOTE_EXIT != 0 {
+                        if let Ok(pid) = i64::try_from(item.ident) {
+                            self.processes.remove(&pid);
+                        }
+                    }
+                    continue;
+                }
                 if item.filter != libc::EVFILT_SIGNAL {
                     continue;
                 }
@@ -211,6 +271,8 @@ impl GuardianReactor {
                 return Ok(());
             }
         }
+        // More events may remain; do not assume the bounded drain kept up.
+        event.process_overflow = true;
         Ok(())
     }
 }

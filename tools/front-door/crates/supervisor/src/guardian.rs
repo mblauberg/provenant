@@ -37,6 +37,19 @@ fn retry_terminal(terminal: impl FnMut() -> bool, wait: impl FnMut(Duration)) ->
     retry_terminal_with(TERMINAL_RETRY_MS, terminal, wait)
 }
 
+fn census_fallback_notice(fallback: bool, recorded: &mut bool) -> Option<&'static str> {
+    if fallback && !*recorded {
+        *recorded = true;
+        Some("process events or scoped census unavailable; using full scan")
+    } else {
+        None
+    }
+}
+
+fn census_full_due(now: u64, last_full: Option<u64>, event_failure: bool) -> bool {
+    event_failure || last_full.is_none_or(|last| now.saturating_sub(last) >= 5_000)
+}
+
 fn retry_terminal_with(
     schedule: [u64; 4],
     mut terminal: impl FnMut() -> bool,
@@ -770,6 +783,11 @@ impl Driver<'_> {
         let mut previous_cpu_micros = None;
         let mut last_cpu_progress_ms = None;
         let mut census_warning_active = false;
+        let mut last_full_census_ms: Option<u64> = None;
+        let mut scoped_fallback_recorded = false;
+        let mut census_event_pending = false;
+        let mut census_event_failed = false;
+        let mut process_watch_unavailable = false;
         let cleanup_complete;
         let mut drain_deadline = None;
         let mut cleanup_pending = false;
@@ -889,8 +907,13 @@ impl Driver<'_> {
                 None
             };
             let polled_signal = match self.reactor.wait(&[], Duration::ZERO) {
-                Ok(event) => event.supervisor_signal,
+                Ok(event) => {
+                    census_event_pending |= event.process_changed;
+                    census_event_failed |= event.process_overflow;
+                    event.supervisor_signal
+                }
                 Err(_) => {
+                    census_event_failed = true;
                     warn(
                         &mut warnings,
                         &mut omitted_warnings,
@@ -1081,11 +1104,62 @@ impl Driver<'_> {
             if !disk_paused || exit.is_some() || stop_reason.is_some() {
                 child.resume_builds();
             }
-            // Keep safety history at 100 ms; slowing census can miss a short
-            // lived parent before an escaped descendant changes session/group.
-            if cpu_sample_due {
-                if let Some(census) = self.refresh_census(&mut child) {
-                    census_warning_active = false;
+            // Process events wake the scoped tree and provider-group walk;
+            // a 100 ms timer also samples when no event arrives. A full scan
+            // backs it up every five seconds and is mandatory for cleanup.
+            // Failed events, overflow or a racing walk require a full scan.
+            if cpu_sample_due || census_event_pending || census_event_failed {
+                census_event_pending = false;
+                let event_fallback =
+                    std::mem::take(&mut census_event_failed) || process_watch_unavailable;
+                let full_due = census_full_due(now, last_full_census_ms, event_fallback);
+                let (mut census, mut fallback) = if full_due {
+                    (self.refresh_census(&mut child), false)
+                } else {
+                    self.refresh_live_census(&mut child)
+                };
+                fallback |= event_fallback;
+                if census.is_some() {
+                    let mut pids = std::collections::BTreeSet::from([child.id()]);
+                    pids.extend(self.history.iter().map(|identity| identity.pid));
+                    pids.extend(self.tracked.iter().map(|identity| identity.pid));
+                    pids.extend(self.protected.iter().map(|identity| identity.pid));
+                    pids.extend(self.spared.spared_identities().map(|identity| identity.pid));
+                    match self.reactor.watch_processes(&pids) {
+                        Ok(added) => {
+                            process_watch_unavailable = false;
+                            // Close the gap between observing a new process
+                            // and registering its fork filter.
+                            census_event_pending |= added;
+                        }
+                        Err(_) => process_watch_unavailable = true,
+                    }
+                    if process_watch_unavailable {
+                        if !full_due && !fallback {
+                            census = self.refresh_census(&mut child);
+                        }
+                        fallback = true;
+                    }
+                }
+                if let Some(notice) =
+                    census_fallback_notice(fallback, &mut scoped_fallback_recorded)
+                {
+                    warn(&mut warnings, &mut omitted_warnings, notice);
+                }
+                if census.is_some() && (full_due || fallback) {
+                    last_full_census_ms = Some(now);
+                }
+                if let Some(census) = census {
+                    if full_due || fallback {
+                        if !census.is_complete() && !census_warning_active {
+                            warn(
+                                &mut warnings,
+                                &mut omitted_warnings,
+                                "live process census incomplete",
+                            );
+                        }
+                        census_warning_active = !census.is_complete();
+                    }
                     if disk_paused
                         && exit.is_none()
                         && stop_reason.is_none()
@@ -1210,9 +1284,19 @@ impl Driver<'_> {
             if cleanup_pending && let Some(deadline) = drain_deadline {
                 wait_ms = wait_ms.min(deadline.saturating_sub(wait_now));
             }
+            if census_event_pending || census_event_failed {
+                wait_ms = 0;
+            }
             match self.reactor.wait(&watches, Duration::from_millis(wait_ms)) {
-                Ok(event) => signal_pending |= event.supervisor_signal,
-                Err(_) => warn(&mut warnings, &mut omitted_warnings, "guardian wait failed"),
+                Ok(event) => {
+                    signal_pending |= event.supervisor_signal;
+                    census_event_pending |= event.process_changed;
+                    census_event_failed |= event.process_overflow;
+                }
+                Err(_) => {
+                    census_event_failed = true;
+                    warn(&mut warnings, &mut omitted_warnings, "guardian wait failed");
+                }
             }
         }
         let mut settled =
