@@ -1033,7 +1033,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     }
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let (base, _) = if stored.is_some() {
-        validate_replay_plan(document, &unbounded).map_err(GraphError::Invalid)?
+        validate_replay_plan(document, &unbounded)
+            .map_err(|error| GraphError::Invalid(error.to_string()))?
     } else {
         validate_plan_with_limits(document, &unbounded).map_err(GraphError::Admission)?
     };
@@ -1714,7 +1715,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         plans::append(&mut preview, &addition);
                         let (next_plan, next_positions) =
                             validate_flat_plan(&preview, &plans::generous())
-                                .map_err(str::to_owned)?;
+                                .map_err(|error| error.to_string())?;
                         if let Some(reason) = structural_limit_reason(&preview, &next_plan, limits)
                         {
                             return Err(reason);

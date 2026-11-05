@@ -19,7 +19,7 @@ pub struct CompositeSpec {
 pub(super) fn expand(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
-) -> Result<GraphDocument, String> {
+) -> Result<GraphDocument, AdmissionError> {
     let mut expanded = document.clone();
     let (max_depth, max_nodes) = (limits.expansion_depth, limits.nodes);
     expanded.nodes = children(
@@ -38,7 +38,9 @@ pub(super) fn expand(
     if expanded.nodes.iter().any(|node| node.composite.is_some())
         && expanded.nodes.len() > max_nodes
     {
-        return Err(format!("composite expansion exceeds {max_nodes} nodes"));
+        return Err(AdmissionError::Composite(format!(
+            "composite expansion exceeds {max_nodes} nodes"
+        )));
     }
     Ok(expanded)
 }
@@ -85,17 +87,19 @@ fn children(
     depth: usize,
     max_depth: usize,
     max_nodes: usize,
-) -> Result<Vec<GraphNode>, String> {
+) -> Result<Vec<GraphNode>, AdmissionError> {
     if depth > max_depth {
-        return Err("composite expansion depth exceeds the limit".into());
+        return Err(AdmissionError::Composite(
+            "composite expansion depth exceeds the limit".into(),
+        ));
     }
     let mut locals = BTreeSet::new();
     for node in nodes {
         if !locals.insert(node.id.as_str()) {
-            return Err(format!(
+            return Err(AdmissionError::Composite(format!(
                 "expanded node id {:?} is duplicated; use distinct node names",
                 bounded(&scoped(prefix, &node.id), 256)
-            ));
+            )));
         }
     }
     let mut visible_names = inherited_names.clone();
@@ -111,13 +115,14 @@ fn children(
         node.require_skill_location |= require_skill_location;
         node.id = scoped(prefix, &node.id);
         if !valid_identifier(&node.id) {
-            return Err(format!(
+            return Err(AdmissionError::Composite(format!(
                 "expanded node id {:?} is invalid; use at most 64 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or node name",
                 bounded(&node.id, 256)
-            ));
+            )));
         }
         for parent in &mut node.depends_on {
-            *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
+            *parent = reference(prefix, parent, &locals, incoming)
+                .ok_or_else(|| AdmissionError::Composite("dependency".into()))?;
         }
         for input in &mut node.inputs {
             if !input.node.starts_with("previous.") {
@@ -210,7 +215,9 @@ fn children(
         if let Some(spec) = &mut node.loop_body {
             for child in &spec.body {
                 if child.id.starts_with("previous.") {
-                    return Err("previous. is reserved for prior round inputs".into());
+                    return Err(AdmissionError::Composite(
+                        "previous. is reserved for prior round inputs".into(),
+                    ));
                 }
                 if child.loop_body.is_some()
                     || child.kind == Some(NodeKind::Loop)
@@ -219,7 +226,7 @@ fn children(
                         !matches!(mode, provenant_records::run::DeliveryMode::Integrate(_))
                     })
                 {
-                    return Err("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into());
+                    return Err(AdmissionError::Composite("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into()));
                 }
             }
             spec.body = children(
@@ -237,7 +244,9 @@ fn children(
             )?;
         }
         if (node.kind == Some(NodeKind::Composite)) != node.composite.is_some() {
-            return Err("composite requires nodes and exports".into());
+            return Err(AdmissionError::Composite(
+                "composite requires nodes and exports".into(),
+            ));
         }
         if let Some(spec) = node.composite.take() {
             if spec.nodes.is_empty()
@@ -255,7 +264,9 @@ fn children(
                 || !node.write_scope.is_empty()
                 || !node.acceptance_checks.is_empty()
             {
-                return Err("composite cannot carry agent configuration".into());
+                return Err(AdmissionError::Composite(
+                    "composite cannot carry agent configuration".into(),
+                ));
             }
             let member_ids: BTreeSet<_> =
                 spec.nodes.iter().map(|child| child.id.as_str()).collect();
@@ -266,12 +277,16 @@ fn children(
                     || export.outputs.is_empty()
                     || !selected.insert(&export.node)
                 {
-                    return Err("composite export must select a unique direct child".into());
+                    return Err(AdmissionError::Composite(
+                        "composite export must select a unique direct child".into(),
+                    ));
                 }
                 let mut kinds = Vec::new();
                 for kind in &export.outputs {
                     if kinds.contains(kind) {
-                        return Err("duplicate composite export output".into());
+                        return Err(AdmissionError::Composite(
+                            "duplicate composite export output".into(),
+                        ));
                     }
                     kinds.push(*kind);
                     if matches!(
@@ -282,7 +297,9 @@ fn children(
                             | OutputKind::Remaining
                     ) {
                         if scalar.contains(kind) {
-                            return Err("composite scalar output has multiple sources".into());
+                            return Err(AdmissionError::Composite(
+                                "composite scalar output has multiple sources".into(),
+                            ));
                         }
                         scalar.push(*kind);
                     }
@@ -326,7 +343,9 @@ fn children(
         }
         expanded.push(node);
         if composite_bound && expanded.len() > max_nodes {
-            return Err(format!("composite expansion exceeds {max_nodes} nodes"));
+            return Err(AdmissionError::Composite(format!(
+                "composite expansion exceeds {max_nodes} nodes"
+            )));
         }
     }
     Ok(expanded)

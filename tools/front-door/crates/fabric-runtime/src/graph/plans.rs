@@ -383,7 +383,8 @@ pub(super) fn expand(
     expansions: &[Expansion],
     limits: &crate::config::GraphLimits,
 ) -> Result<GraphDocument, String> {
-    let mut expanded = loops::expand(document, extensions, limits)?;
+    let mut expanded =
+        loops::expand(document, extensions, limits).map_err(|error| error.to_string())?;
     let mut sources = std::collections::BTreeSet::new();
     let mut review_base = None;
     for addition in expansions {
@@ -1108,9 +1109,9 @@ fn fragment(
     };
     // Pattern wrappers are ordinary static composites. Expand them before the
     // fragment is validated so the host limits see every child.
-    let local = composites::expand(&local, &generous())?;
+    let local = composites::expand(&local, &generous()).map_err(|error| error.to_string())?;
     validate_schema(&local).map_err(|error| error.to_string())?;
-    let (plan, _) = validate_flat_plan(&local, &generous()).map_err(str::to_owned)?;
+    let (plan, _) = validate_flat_plan(&local, &generous()).map_err(|error| error.to_string())?;
     validate_output_kinds(&local).map_err(|error| error.to_string())?;
     let mut nodes: Vec<GraphNode> = plan
         .nodes
@@ -1488,7 +1489,7 @@ pub(super) fn settle(
             let mut preview = document.clone();
             append(&mut preview, &addition);
             let (plan, positions) =
-                validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
+                validate_flat_plan(&preview, &generous()).map_err(|error| error.to_string())?;
             if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
                 return Err(reason);
             }
@@ -1588,7 +1589,8 @@ pub(super) fn settle(
             }
         }
         validate_schema(&preview).map_err(|error| error.to_string())?;
-        let (plan, positions) = validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
+        let (plan, positions) =
+            validate_flat_plan(&preview, &generous()).map_err(|error| error.to_string())?;
         validate_output_kinds(&preview).map_err(|error| error.to_string())?;
         if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
             return Err(reason);
@@ -1642,8 +1644,8 @@ pub(super) fn settle(
                     let mut preview = document.clone();
                     append(&mut preview, &addition);
                     validate_schema(&preview).map_err(|error| error.to_string())?;
-                    let (plan, positions) =
-                        validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
+                    let (plan, positions) = validate_flat_plan(&preview, &generous())
+                        .map_err(|error| error.to_string())?;
                     validate_output_kinds(&preview).map_err(|error| error.to_string())?;
                     if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
                         return Err(reason);

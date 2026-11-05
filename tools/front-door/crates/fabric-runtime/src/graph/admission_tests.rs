@@ -19,6 +19,28 @@ fn admission_returns_typed_cause_with_original_text() {
 }
 
 #[test]
+fn admission_expansion_returns_typed_cause_with_original_text() {
+    let graph = document(2, json!([{"id":"loop","kind":"loop","access":"read_only"}]));
+    let error = loops::expand(&graph, &[], &Default::default()).unwrap_err();
+    assert!(matches!(error, AdmissionError::Composite(_)));
+    assert_eq!(error.to_string(), "loop requires a body");
+    let error = graph.admit(&Default::default()).unwrap_err();
+    assert!(matches!(error, AdmissionError::Composite(_)));
+    assert_eq!(error.to_string(), "loop requires a body");
+}
+
+#[test]
+fn flat_plan_returns_typed_cause_with_original_text() {
+    let graph = document(1, json!([{"id":"n","access":"read_only","prompt":"x"}]));
+    let error = validate_flat_plan(&graph, &Default::default()).unwrap_err();
+    assert!(matches!(error, AdmissionError::Plan(_)));
+    assert_eq!(error.to_string(), "route list is empty");
+    let error = graph.admit(&Default::default()).unwrap_err();
+    assert!(matches!(error, AdmissionError::Plan(_)));
+    assert_eq!(error.to_string(), "route list is empty");
+}
+
+#[test]
 fn admission_schema_matrix() {
     let plain = json!([{"id":"n","prompt":"x","access":"read_only"}]);
     assert!(validate_schema(&document(1, plain.clone())).is_ok());

@@ -3337,11 +3337,15 @@ fn composite_expansion_identifies_duplicate_and_invalid_child_ids() {
     .unwrap();
     let limits = crate::config::GraphLimits::default();
     let error = composites::expand(&document, &limits).unwrap_err();
+    assert!(matches!(error, AdmissionError::Composite(_)));
+    let error = error.to_string();
     assert!(error.contains("group--same"), "{error}");
     assert!(error.contains("duplicated"), "{error}");
     let children = &mut document.nodes[0].composite.as_mut().unwrap().nodes;
     children[1].id = "bad name".into();
     let error = composites::expand(&document, &limits).unwrap_err();
+    assert!(matches!(error, AdmissionError::Composite(_)));
+    let error = error.to_string();
     assert!(error.contains("group--bad name"), "{error}");
     assert!(error.contains("ASCII"), "{error}");
     assert!(error.contains("shorten"), "{error}");

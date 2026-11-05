@@ -390,7 +390,7 @@ impl GraphDocument {
     /// the size, rather than stopping mid-run on an oversized checkpoint.
     pub fn expanded(&self, limits: &crate::config::GraphLimits) -> Result<Self, String> {
         self.admit(limits).map_err(|error| error.to_string())?;
-        loops::expand(self, &[], limits)
+        loops::expand(self, &[], limits).map_err(|error| error.to_string())
     }
 
     /// The checks admission applies to a submitted document, without running
@@ -414,10 +414,8 @@ impl GraphDocument {
             graph_prompt_bytes: usize::MAX,
             ..limits.clone()
         };
-        let expanded =
-            loops::expand(self, &[], &expansion_limits).map_err(AdmissionError::Composite)?;
-        let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)
-            .map_err(|reason| AdmissionError::Plan(reason.into()))?;
+        let expanded = loops::expand(self, &[], &expansion_limits)?;
+        let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)?;
         if let Some(reason) = structural_limit(&expanded, &plan, limits) {
             return Err(AdmissionError::StructuralLimit(reason));
         }
@@ -438,7 +436,8 @@ impl GraphDocument {
             graph_prompt_bytes: usize::MAX,
             ..limits.clone()
         };
-        let expanded = loops::expand(self, &[], &inspect_limits)?;
+        let expanded =
+            loops::expand(self, &[], &inspect_limits).map_err(|error| error.to_string())?;
         let generous = crate::config::GraphLimits {
             nodes: usize::MAX,
             edges: usize::MAX,
@@ -447,7 +446,8 @@ impl GraphDocument {
             graph_prompt_bytes: usize::MAX,
             ..limits.clone()
         };
-        let (plan, _) = validate_flat_plan(&expanded, &generous)?;
+        let (plan, _) =
+            validate_flat_plan(&expanded, &generous).map_err(|error| error.to_string())?;
         let mut depths = std::collections::BTreeMap::<&str, usize>::new();
         let mut dependency_depth = 0;
         for node in &plan.nodes {
