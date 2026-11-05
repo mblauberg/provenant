@@ -144,6 +144,9 @@ pub(super) fn own_worktree(
                         owner_refused = true;
                         return Err(worktrees::WorktreeError::UnknownWriter);
                     }
+                    let same_operation = owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.operation_id.as_ref() == Some(operation_id));
                     let census_detail = || {
                         context
                             .workers
@@ -162,6 +165,7 @@ pub(super) fn own_worktree(
                         }
                         WriterState::Live => {
                             let settled = owner.is_none()
+                                || same_operation
                                 || owner
                                     .as_ref()
                                     .and_then(|owner| owner.attempt_id)
@@ -181,6 +185,7 @@ pub(super) fn own_worktree(
                         }
                         WriterState::Unknown => {
                             let settled = owner.is_none()
+                                || same_operation
                                 || owner
                                     .as_ref()
                                     .and_then(|owner| owner.attempt_id)

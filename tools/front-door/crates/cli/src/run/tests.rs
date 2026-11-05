@@ -2993,6 +2993,23 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         census_admitted.branch.as_deref(),
         Some("refs/heads/census-refusal-branch")
     );
+    let (replay, _) = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: census_branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("census-op")?,
+        &edge,
+        &session,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+        None,
+    )?;
+    assert_eq!(replay.path, census_admitted.path);
     assert_eq!(counted.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     let census_unknown = worktrees::WorktreeError::CensusUnknown {
         path: path.clone(),
@@ -3286,6 +3303,19 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
     )?;
     assert_eq!(admitted.0.path, path);
     assert_eq!(admitted.0.head, head);
+    let held = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        worktrees::cache_writer_guard(context.project_state, &path)
+            .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+    })?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::WriterBusy { .. }
+        )))
+    ));
+    drop(held);
+    let replay_with_bystander = attempt_claim()?;
+    assert_eq!(replay_with_bystander.0.path, path);
     let run_policy = CensusPolicyWorkers::for_run(&observer, &roots)?;
     let replay = super::own_worktree(
         &super::OwnedWorktree {

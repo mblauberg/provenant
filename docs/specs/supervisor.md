@@ -51,7 +51,8 @@ the census observes a bystander or cannot complete. Admission warns with the
 observation, and the claim checks the Git registration, HEAD, cleanliness and
 in-progress Git operations under repository and writer custody. A different
 operation cannot replace a nonterminal lane owner, including a reservation that
-has not yet acquired an attempt ID.
+has not yet acquired an attempt ID. A replay of that same operation can use
+its reservation despite advisory census evidence, after reacquiring custody.
 
 A lane owner whose recorded attempt is confirmed terminal may be reassigned
 when the writer lock is free even if the census sees a process in the tree.
