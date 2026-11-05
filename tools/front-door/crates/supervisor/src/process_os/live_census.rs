@@ -1,6 +1,7 @@
 //! Bounded live-history walk. This is not a complete host census.
 #[cfg(target_os = "macos")]
 use crate::census::ProcessObserver;
+#[cfg(any(target_os = "macos", test))]
 use crate::census::{Census, CensusError, ProcessIdentity};
 #[cfg(any(target_os = "macos", test))]
 use crate::census::{ProcessFact, ProcessObservation};
