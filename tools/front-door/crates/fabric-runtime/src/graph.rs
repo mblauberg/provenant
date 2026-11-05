@@ -35,8 +35,9 @@ mod loops;
 mod model;
 mod observation;
 mod outputs;
-mod pattern_plan;
+pub mod patch;
 mod plans;
+pub mod template;
 mod validation;
 mod wait_view;
 #[doc(hidden)]
@@ -64,10 +65,11 @@ pub use asks::{
 pub use composites::CompositeSpec;
 pub use land::{LandAuthority, LandObservation, LandRecord, LandRequest, LandSpec};
 pub use loops::{InvalidLoopDecision, LoopDecision, LoopRound, LoopSpec};
-pub use plans::{
-    Expansion, PatternInstantiation, PatternParameter, PatternParameterKind, PatternSpec, PlanSpec,
-    RemainingBudgets,
+pub use patch::{
+    Admitted, LiveGraph, Patch, PatchContext, PatchError, PatchRecord, TemplateUse, admit_patch,
 };
+pub use plans::{Expansion, PlanSpec, RemainingBudgets};
+pub use template::{Compiler, Layer, Template, TemplateLibrary, TemplateParameter};
 
 /// Review range resolved for an immutable attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]

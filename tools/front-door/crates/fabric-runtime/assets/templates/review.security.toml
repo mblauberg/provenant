@@ -1,0 +1,5 @@
+doc = "Security lens."
+
+[parameters.lens]
+type = "string"
+default = "security"
