@@ -96,13 +96,33 @@ reason = "Stored prompt, policy, provider preparation and handoff can refuse; en
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "authority"
+reason = "Read-only execution cannot enable unconfined extensions or inherited hooks that exceed its selected policy."
+
+[[guard]]
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "credentials"
+reason = "Secret roots and provider-private state must not overlap grants that expose credential material."
+
+[[guard]]
+site = "confinement/src/plan.rs#ConfinedPlan::new"
 boundary = "unclassified"
-reason = "Rejects unconfined read-only extensions, nested confinement and invalid or overlapping roots; classify each case separately."
+reason = "Nested confinement, invalid path shapes and remaining overlapping roots need classification or a tolerant fallback."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "lane_git"
+reason = "Writer grants must match held worktree authority and keep real Git metadata outside writable scratch."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "credentials"
+reason = "Credential, secret and private-state exclusions must hold after anchors and grants are resolved."
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#compile_sbpl"
 boundary = "unclassified"
-reason = "Rejects missing anchors, protected overlaps, invalid paths and unsupported nested confinement; classify each case separately."
+reason = "Remaining missing anchors, path and unsupported nested confinement failures need classification or a tolerant fallback."
 
 [[guard]]
 site = "confinement/src/permissions/probe.rs#system_backend"
@@ -121,8 +141,18 @@ reason = "Repository opening and revalidation can reject Git registration, ident
 
 [[guard]]
 site = "providers/src/opencode.rs#prepare"
+boundary = "credentials"
+reason = "The selected authentication policy and private provider state must match OpenCode's credential isolation."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
+boundary = "authority"
+reason = "A resumed invocation requires its validated continuation identity."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
 boundary = "unclassified"
-reason = "Authentication selection, private state, continuation and path conversion can refuse adapter preparation; classify each branch."
+reason = "JSON path conversion and search-path construction still need a tolerant fallback."
 
 [[guard]]
 site = "providers/src/command.rs#prepare"
