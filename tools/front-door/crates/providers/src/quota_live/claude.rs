@@ -74,7 +74,7 @@ fn status_fingerprint(result: Result<ExecOutcome, ProbeFailure>) -> Result<Strin
         return Err(ProbeFailure::Network);
     }
     let state: Value =
-        serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProbeFailure::Network)?;
+        serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProbeFailure::Malformed)?;
     if state.get("loggedIn").and_then(Value::as_bool) == Some(false) {
         return Err(ProbeFailure::Auth);
     }
@@ -101,7 +101,7 @@ fn parse_credentials(raw: &[u8]) -> Result<Value, ProbeFailure> {
     if raw.is_empty() {
         return Err(ProbeFailure::Auth);
     }
-    let value: Value = serde_json::from_slice(raw).map_err(|_| ProbeFailure::Network)?;
+    let value: Value = serde_json::from_slice(raw).map_err(|_| ProbeFailure::Malformed)?;
     if value.get("claudeAiOauth").is_none() {
         return Err(ProbeFailure::Auth);
     }
@@ -508,12 +508,31 @@ mod tests {
     }
 
     #[test]
-    fn absent_credentials_are_auth_and_invalid_json_is_transient() {
+    fn absent_credentials_are_auth_and_invalid_json_is_malformed() {
         use super::*;
         assert_eq!(parse_credentials(b""), Err(ProbeFailure::Auth));
         assert_eq!(parse_credentials(b"{}"), Err(ProbeFailure::Auth));
-        assert_eq!(parse_credentials(b"invalid"), Err(ProbeFailure::Network));
+        assert_eq!(parse_credentials(b"invalid"), Err(ProbeFailure::Malformed));
         assert!(parse_credentials(br#"{"claudeAiOauth":{}}"#).is_ok());
+    }
+
+    #[test]
+    fn malformed_status_output_is_not_a_network_failure() {
+        use super::*;
+        let out = ExecOutcome {
+            termination: Termination::Exit(0),
+            stdout: provenant_os::exec::CapturedStream {
+                bytes: b"invalid".to_vec(),
+                ..Default::default()
+            },
+            stderr: Default::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        };
+        assert_eq!(status_fingerprint(Ok(out)), Err(ProbeFailure::Malformed));
     }
 
     #[test]
