@@ -1663,6 +1663,11 @@ pub fn prove_unreserved(
         clock,
     )?;
     carry_forward_slot_reservation(directory)?;
+    match ensure_no_exclusive_reservation(directory) {
+        Ok(()) => {}
+        Err(CustodyError::Fenced) => return Ok(None),
+        Err(error) => return Err(error),
+    }
     for name in ["launch.json", "process-exit.json"] {
         match directory.metadata_at(OsStr::new(name), false) {
             Ok(_) => return Ok(None),

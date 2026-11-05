@@ -57,6 +57,16 @@ fn slot_reservation_cutover_preserves_anchor_and_unknown_fields() -> TestResult 
         ),
         Err(CustodyError::Fenced)
     ));
+    assert!(
+        prove_unreserved(
+            &slot,
+            successor,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &CancelToken::new(),
+            &clock,
+        )?
+        .is_none()
+    );
     let recovery = acquire_recovery(
         slot.try_clone()?,
         scope(),
