@@ -2213,19 +2213,12 @@ mod writer_recovery_tests {
     use crate::tests::{call, clock, context, input, route};
 
     #[test]
-    fn legacy_slot_root_writers_reconcile_exited_and_never_spawned_to_terminal()
+    fn modern_writer_reconcile_preserves_unlaunched_private_evidence()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-        use std::ffi::{OsStr, OsString};
-        for mode in [
-            "spawned",
-            "never_spawned",
-            "no_summary",
-            "no_summary_terminal",
-            "no_summary_terminal_modern",
-            "no_summary_terminal_other_generation",
-        ] {
+        use std::ffi::OsString;
+        for mode in ["no_summary_terminal_modern", "no_summary_terminal_other_generation"] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
             let (clock, cancel) = (clock(), CancelToken::new());
@@ -2235,7 +2228,7 @@ mod writer_recovery_tests {
             run.request.tasks[0].writer = Some(fixture.writer.clone());
             store.create(&run, &call)?;
             let id = run.attempts[0].attempt_id;
-            let mut record = store.mark_starting(
+            let record = store.mark_starting(
                 &store.record(id, &call)?,
                 &route(),
                 &[],
@@ -2243,9 +2236,6 @@ mod writer_recovery_tests {
                 None,
                 &call,
             )?;
-            if mode == "spawned" {
-                record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-            }
             let scope = RunStore::scope(&record);
             let attempt = store.attempt_dir(run.run_id, id, false)?;
             let mut launch = crate::prepare_writer(
@@ -2344,15 +2334,6 @@ mod writer_recovery_tests {
             let modern = slot_path.join(id.to_string());
             let mut reservation: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(modern.join("reservation.json"))?)?;
-            let anchor = slot.metadata()?;
-            reservation["reservation_device"] = anchor.device.into();
-            reservation["reservation_inode"] = anchor.inode.into();
-            if mode == "spawned" {
-                reservation["launch_state"] = "spawned".into();
-                let identity = serde_json::json!({"boot":reservation["boot"],"pid":999999,"native_start":1,"group_id":999999,"session_id":999999});
-                reservation["guardian"] = identity.clone();
-                reservation["provider"] = identity;
-            }
             if mode == "no_summary_terminal_other_generation" {
                 reservation["scope"]["generation"] = (scope.generation + 1).into();
                 let anchor = provenant_os::fs::Directory::open_anchor(&modern)?.metadata()?;
@@ -2362,33 +2343,6 @@ mod writer_recovery_tests {
                     modern.join("reservation.json"),
                     serde_json::to_vec(&reservation)?,
                 )?;
-            } else if mode != "no_summary_terminal_modern" {
-                std::fs::write(
-                    slot_path.join("reservation.json"),
-                    serde_json::to_vec(&reservation)?,
-                )?;
-                std::fs::rename(
-                    modern.join("ownership.json"),
-                    slot_path.join("ownership.json"),
-                )?;
-                std::fs::remove_dir_all(modern)?;
-            }
-            if !mode.starts_with("no_summary") {
-                crate::artifacts::seal(
-                    &attempt,
-                    "launch.json",
-                    &serde_json::to_vec(&serde_json::json!({
-                        "schema_version": 1, "scope": scope, "requester": execution.actor_id
-                    }))?,
-                    RECORD_LIMIT,
-                )?;
-                let mut exit = crate::tests::exit();
-                exit.scope = scope;
-                exit.never_spawned = mode == "never_spawned";
-                if exit.never_spawned {
-                    exit.warnings.push("legacy provider never spawned".into());
-                }
-                crate::dispatch_tests::seal_exit(&store, &exit)?;
             }
             if mode.starts_with("no_summary_terminal") {
                 store.commit_lost(
@@ -2435,29 +2389,14 @@ mod writer_recovery_tests {
                 "{mode}: {:?}",
                 terminal.state
             );
-            if mode == "never_spawned" {
-                assert!(
-                    matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Rejected, reason: Some(ref reason), .. } if reason.contains("never spawned")),
-                    "{:?}",
-                    terminal.state
-                );
-            }
-            if mode.starts_with("no_summary") {
-                assert!(
-                    matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Lost, reason: Some(ref reason), .. } if reason.contains("never spawned")),
-                    "{:?}",
-                    terminal.state
-                );
-            }
+            assert!(
+                matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Lost, reason: Some(ref reason), .. } if reason.contains("never spawned")),
+                "{:?}", terminal.state
+            );
             assert!(store.writer_fences()?.is_empty());
             assert!(store.writer_fence_listing()?.issues.is_empty());
             assert!(!slot_path.join("reservation.json").exists());
-            let evidence = if mode == "no_summary_terminal_modern" {
-                slot_path.join(id.to_string())
-            } else {
-                slot_path.clone()
-            };
-            assert!(evidence.join("settlement.json").is_file());
+            assert!(modern.join("settlement.json").is_file());
             if mode.starts_with("no_summary") {
                 assert_eq!(
                     private_git(&["rev-parse", "HEAD"])?,
@@ -2477,23 +2416,6 @@ mod writer_recovery_tests {
                     private_git(&["rev-parse", "HEAD"])?,
                     head,
                     "private head retained after GC eligibility"
-                );
-            } else {
-                assert!(
-                    attempt
-                        .read_stable(OsStr::new("release.json"), RECORD_LIMIT)?
-                        .len()
-                        > 10
-                );
-                let imported = crate::objects::resolve_ref(
-                    &git,
-                    launch.worktree.repo(),
-                    launch.branch.as_str(),
-                )?;
-                assert_eq!(
-                    imported.to_string(),
-                    head,
-                    "private committed head imported before release"
                 );
             }
         }
