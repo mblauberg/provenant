@@ -1059,6 +1059,44 @@ mod cargo_setup_tests {
     use provenant_os::fs::LockMode;
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // Exercise a real process and wall-clock deadline.
+    fn setup_lock_recovers_after_holder_dies() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        const CHILD_DIR: &str = "PROVENANT_TEST_SETUP_LOCK_CHILD_DIR";
+        let name = OsStr::new("provenant-lane-setup.lock");
+        if let Some(path) = std::env::var_os(CHILD_DIR) {
+            let directory = Directory::open_anchor(Path::new(&path))?;
+            let _held = directory.try_lock(name, LockMode::Exclusive)?;
+            std::fs::write(Path::new(&path).join("ready"), b"ready")?;
+            loop {
+                std::thread::park();
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg("writer::cargo_setup_tests::setup_lock_recovers_after_holder_dies")
+            .env(CHILD_DIR, temp.path())
+            .spawn()?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !temp.path().join("ready").exists() {
+            if child.try_wait()?.is_some() || std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("holder did not acquire the setup lock".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let directory = Directory::open_anchor(temp.path())?;
+        let held = directory.try_lock_existing(name, LockMode::Exclusive);
+        child.kill()?;
+        child.wait()?;
+        assert!(matches!(held, Err(FsError::LockTimeout { .. })));
+        let _recovered = directory.try_lock_existing(name, LockMode::Exclusive)?;
+        Ok(())
+    }
+
+    #[test]
     fn packed_writer_ref_and_upstream_are_prepared_with_fresh_handles()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
