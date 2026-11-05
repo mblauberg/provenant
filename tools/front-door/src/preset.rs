@@ -2139,6 +2139,63 @@ impl StageBuilder<'_> {
             return Err(format!("preset composition depth exceeds {DEPTH}"));
         }
         let object = entry.as_object().ok_or("stage entries must be tables")?;
+        // A list can replace a counted stage when it contains explicit items.
+        if let Some(list) = object.get("for_each_if_nonempty") {
+            let values = interpolate(list, &self.parameters, self.prompt, 1)?;
+            let values = values
+                .as_array()
+                .ok_or("for_each_if_nonempty must name a list parameter")?;
+            let mut selected = object.clone();
+            selected.remove("for_each_if_nonempty");
+            let item_fields = selected.remove("item_fields");
+            if !values.is_empty() {
+                if let Some(field) = selected.remove("item_route_field") {
+                    let field = field.as_str().ok_or("item_route_field must be a string")?;
+                    if let Some(routes) = &self.layers.known_routes {
+                        for item in values {
+                            let tier = item
+                                .get(field)
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| format!("{list}: item needs {field}"))?;
+                            if !routes.contains(tier) {
+                                return Err(format!(
+                                    "{list}: unknown route {tier}; configured routes: {}",
+                                    routes.iter().cloned().collect::<Vec<_>>().join(", ")
+                                ));
+                            }
+                        }
+                    }
+                }
+                if let Some(count) = selected.remove("count")
+                    && let Some(parameter) = count
+                        .as_str()
+                        .and_then(|text| text.strip_prefix("${"))
+                        .and_then(|text| text.strip_suffix('}'))
+                {
+                    let current = self.parameters.get(parameter);
+                    let default = self.layers.resolve(self.name).ok().and_then(|(config, _)| {
+                        config
+                            .pointer(&format!("/parameters/{parameter}/default"))
+                            .cloned()
+                    });
+                    if current != default.as_ref() {
+                        self.layers.warnings.borrow_mut().push(format!(
+                            "{list} replaces {parameter}={}",
+                            current.map(scalar_text).unwrap_or_default()
+                        ));
+                    }
+                }
+                selected.insert("for_each".into(), list.clone());
+                if let Some(fields) = item_fields {
+                    for (key, value) in fields.as_object().ok_or("item_fields must be a table")? {
+                        selected.insert(key.clone(), value.clone());
+                    }
+                }
+            } else {
+                selected.remove("item_route_field");
+            }
+            return self.entry(&Value::Object(selected), default_id, deps, nodes, depth);
+        }
         if (object.contains_key("count") || object.contains_key("for_each"))
             && let Some(minimum) = object.get("min_successful")
             && !interpolate(minimum, &self.parameters, self.prompt, 1)?.is_null()
@@ -2244,8 +2301,8 @@ impl StageBuilder<'_> {
             let index = position as u64 + 1;
             let id = match item {
                 Some(item) => {
-                    let name = item["name"].as_str().filter(|n| valid_name(n)).ok_or(
-                        "for_each items need a name of lowercase letters, digits and dashes",
+                    let name = item.get("name").or_else(|| item.get("id")).and_then(Value::as_str).filter(|n| valid_name(n)).ok_or(
+                        "for_each items need an id or name of lowercase letters, digits and dashes",
                     )?;
                     format!("{base}-{name}")
                 }
@@ -2253,7 +2310,13 @@ impl StageBuilder<'_> {
                 None => format!("{base}-{index}"),
             };
             if nodes.iter().any(|node| node["id"] == id) {
-                return Err(format!("duplicate stage node ID: {id}"));
+                return Err(format!(
+                    "duplicate stage node ID: {id} in {}",
+                    object
+                        .get("for_each")
+                        .and_then(Value::as_str)
+                        .unwrap_or("stage")
+                ));
             }
             if let Some(item) = item {
                 self.parameters["item"] = item.clone();
@@ -2268,6 +2331,12 @@ impl StageBuilder<'_> {
                 object.remove("min_successful");
             }
             object.remove("id");
+            if object.get("tier").is_some_and(|value| {
+                interpolate(value, &self.parameters, self.prompt, index as usize)
+                    .is_ok_and(|value| value.is_null())
+            }) {
+                object.remove("tier");
+            }
             let fallback_stage = object.remove("fallback_stage");
             let distinct_families = object.remove("distinct_families");
             let outputs = interpolate(

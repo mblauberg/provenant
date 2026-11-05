@@ -133,6 +133,88 @@ fn fan_out_minimum_is_optional_and_bounded_by_width() {
 }
 
 #[test]
+fn fan_out_branches_bind_individual_briefs_and_routes() {
+    let mut layers = Layers::empty();
+    layers.known_routes = Some(["junior".to_owned(), "senior".to_owned()].into());
+    let branches = json!([{ "id":"one", "brief":"first question", "tier":"junior" }, { "id":"two", "brief":"second question", "tier":"senior" }]);
+    let expanded = super::preset::expand_with(
+        &layers,
+        "fan-out-synthesise",
+        "brief",
+        &[("branches".into(), branches)],
+        &[],
+    )
+    .unwrap();
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/presets/fixtures/fan-out-synthesise.branches.expansion.json");
+    let actual = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&expanded.document).unwrap()
+    );
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
+    assert_eq!(actual, std::fs::read_to_string(path).unwrap());
+    let nodes = expanded.document["nodes"].as_array().unwrap();
+    assert_eq!(nodes[0]["id"], "branch-one");
+    assert_eq!(nodes[1]["id"], "branch-two");
+    assert_eq!(nodes[0]["prompt"], "first question");
+    assert_eq!(nodes[1]["prompt"], "second question");
+    assert_eq!(nodes[0]["routes"][0]["alias"], "junior");
+    assert_eq!(nodes[1]["routes"][0]["alias"], "senior");
+    assert_eq!(nodes[2]["depends_on"], json!(["branch-one", "branch-two"]));
+    assert_eq!(nodes[2]["inputs"].as_array().unwrap().len(), 2);
+    let warned = super::preset::expand_with(
+        &layers,
+        "fan-out-synthesise",
+        "brief",
+        &[
+            (
+                "branches".into(),
+                json!([{ "id":"one", "brief":"first", "tier":"junior" }]),
+            ),
+            ("width".into(), json!(4)),
+        ],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        warned
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("width=4")),
+        "{:?}",
+        warned.warnings
+    );
+    let grouped = super::preset::expand_with(&layers, "fan-out-synthesise", "brief", &[("branches".into(), json!([{ "id":"one", "brief":"first", "tier":"junior" }, { "id":"two", "brief":"second", "tier":"senior" }])), ("min_branches".into(), json!(1))], &[]).unwrap();
+    assert_eq!(
+        grouped.document["nodes"][0]["composite"]["min_successful"],
+        1
+    );
+    assert_eq!(
+        grouped.document["nodes"][0]["composite"]["exports"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        grouped.document["nodes"][1]["depends_on"],
+        json!(["branch"])
+    );
+    let default = expand(&layers, "fan-out-synthesise", "brief", &[]).unwrap();
+    let empty = super::preset::expand_with(
+        &layers,
+        "fan-out-synthesise",
+        "brief",
+        &[("branches".into(), json!([]))],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(default.document["nodes"], empty.document["nodes"]);
+}
+
+#[test]
 fn node_titles_default_to_node_ids() {
     let mut layers = Layers::empty();
     layers
@@ -3967,6 +4049,34 @@ mod planner_front_end {
         let document: provenant_fabric_runtime::graph::GraphDocument =
             serde_json::from_value(expansion.document.clone()).unwrap();
         document.inspect(&Default::default()).unwrap();
+    }
+
+    #[test]
+    fn planned_fan_out_uses_configured_routes_and_no_fallback_minimum() {
+        let mut layers = layers(PlanMode::On, None);
+        layers.known_routes = Some(["senior".to_owned(), "bespoke".to_owned()].into());
+        for name in ["fan-out", "fan-out-synthesise"] {
+            let expansion = run(
+                &layers,
+                name,
+                "brief",
+                vec![
+                    ("width".into(), json!(3)),
+                    ("min_branches".into(), json!(2)),
+                ],
+            );
+            let plan = &expansion.document["nodes"][0];
+            assert_eq!(plan["id"], "plan");
+            assert_eq!(
+                plan["plan"]["patterns"][0]["parameters"]["route"]["enum"],
+                json!(["bespoke", "senior"])
+            );
+            assert!(
+                !plan["plan"]["fallback"]
+                    .to_string()
+                    .contains("min_successful")
+            );
+        }
     }
 
     #[test]

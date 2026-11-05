@@ -478,6 +478,13 @@ pub fn apply(
         "",
         origins,
     )?;
+    plan_values["plan_route_names"] = json!(
+        layers
+            .known_routes
+            .as_ref()
+            .map(|routes| routes.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
     // Catalogue leaves bypass build_stages, so bind the same policy fallback
     // before lowering their role prompts.
     plan_values["local_check_policy"] = json!(layers.local_check_policy(&plan_values, origins)?.1);

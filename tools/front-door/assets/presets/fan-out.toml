@@ -23,7 +23,7 @@ nodes = [
 
 [plan.patterns.parameters]
 question = { type = "string", doc = "The one question this worker answers." }
-route = { type = "string", default = "senior", enum = ["junior", "senior", "principal"], doc = "Route alias for the worker." }
+route = { type = "string", default = "${route}", enum = "${plan_route_names}", doc = "Route alias for the worker." }
 
 [parameters]
 route = { type = "string", default = "senior", doc = "Routing pool for every branch." }

@@ -5,6 +5,72 @@
 use std::{path::PathBuf, process::Command};
 
 #[test]
+fn fan_out_branch_parameters_validate_and_route_synthesis() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "study")?;
+    let run = |branches: &str, extra: &[&str]| -> std::io::Result<std::process::Output> {
+        fixture_cli()
+            .current_dir(&root)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args([
+                "--json",
+                "run",
+                "--preset",
+                "fan-out-synthesise",
+                "--prompt-file",
+            ])
+            .arg(&prompt)
+            .args(["--explain", "--plan", "off", "--set", branches])
+            .args(extra)
+            .output()
+    };
+    let branches = "parameters.branches=[{id='a',brief='first',tier='junior'},{id='b',brief='second',tier='senior'}]";
+    let output = run(branches, &["--set", "parameters.synthesis_route='junior'"])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let nodes = result["data"]["graph"]["nodes"].as_array().ok_or("nodes")?;
+    assert_eq!(nodes[0]["routes"][0]["alias"], "junior");
+    assert_eq!(nodes[1]["routes"][0]["alias"], "senior");
+    assert_eq!(nodes[2]["routes"][0]["alias"], "junior");
+    let baseline = run(branches, &[])?;
+    assert!(baseline.status.success());
+    let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout)?;
+    let baseline_nodes = baseline["data"]["graph"]["nodes"]
+        .as_array()
+        .ok_or("baseline nodes")?;
+    assert_eq!(nodes[0]["routes"], baseline_nodes[0]["routes"]);
+    assert_eq!(nodes[1]["routes"], baseline_nodes[1]["routes"]);
+    assert_eq!(baseline_nodes[2]["routes"][0]["alias"], "senior");
+    let duplicate = run(
+        "parameters.branches=[{id='a',brief='first',tier='junior'},{id='a',brief='second',tier='senior'}]",
+        &[],
+    )?;
+    let duplicate = String::from_utf8(duplicate.stdout)?;
+    assert!(
+        duplicate.contains("branch-a") && duplicate.contains("branches"),
+        "{duplicate}"
+    );
+    let invalid = run(
+        "parameters.branches=[{id='a',brief='first',tier='not-a-route'}]",
+        &[],
+    )?;
+    let invalid = String::from_utf8(invalid.stdout)?;
+    assert!(
+        invalid.contains("not-a-route") && invalid.contains("senior"),
+        "{invalid}"
+    );
+    Ok(())
+}
+
+#[test]
 fn preset_explain_warns_about_every_omitted_lens() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
