@@ -974,6 +974,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
             child = parent;
         }
     }
+    let mut excused_gap_detail = None;
     // An incomplete census must not hide positively observed live workers.
     for fact in census.facts() {
         // A zombie holds no cwd, executable or descriptor.
@@ -1257,12 +1258,25 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
             }
         }
         if let Some(gap) = occupancy_gap {
-            // Only refused descriptor queries are excusable, and only for a
-            // sealed system image that is known not to be in a candidate root:
-            // by its known cwd, or because it is a setuid transition.
-            let excused = gap == provenant_os::pid::OccupancyGap::DescriptorsDenied
-                && (setuid_excused
-                    || (cwd_outside && cwd_observer.sealed_system_image(pid).is_some()));
+            use provenant_os::pid::OccupancyGap;
+            let descriptor_gap = matches!(
+                gap,
+                OccupancyGap::DescriptorsDenied
+                    | OccupancyGap::DescriptorsUnavailable
+                    | OccupancyGap::Churn
+                    | OccupancyGap::LimitExceeded
+            );
+            let excused = (cwd_outside && descriptor_gap)
+                || (setuid_excused && gap == OccupancyGap::DescriptorsDenied);
+            if excused {
+                excused_gap_detail.get_or_insert_with(|| {
+                    process_detail(
+                        cwd_observer,
+                        pid,
+                        &format!("occupancy incomplete (excused): {}", gap.describe()),
+                    )
+                });
+            }
             if !excused {
                 record_unknown_all_with_taint(
                     &mut states,
@@ -1287,6 +1301,13 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
             "process listing truncated or incomplete",
             TaintCause::Uncertainty(UncertaintyReason::ListingIncomplete),
         );
+    }
+    if let Some(detail) = excused_gap_detail {
+        for root in states.keys() {
+            details
+                .entry(root.clone())
+                .or_insert_with(|| detail.clone());
+        }
     }
     (states, holders, details, taints)
 }
