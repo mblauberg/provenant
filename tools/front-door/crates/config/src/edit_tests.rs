@@ -27,7 +27,7 @@ fn schema_lists_bounds_defaults_values_and_layers() {
     let temp = tempfile::tempdir().unwrap();
     let roots = roots(temp.path());
     let (fresh, _) = show(&roots, &NO_DOMAINS).unwrap();
-    let default = serde_json::to_value(fresh).unwrap()["chair"]["switch_threshold"].clone();
+    let default = fresh.knobs["chair.switch_threshold"].value.clone();
     patch(
         &roots,
         json!({"chair.switch_threshold": 80}),
