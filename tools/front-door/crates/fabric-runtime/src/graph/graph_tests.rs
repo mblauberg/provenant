@@ -5823,7 +5823,11 @@ fn writer_limit_after_launch_never_tries_a_second_route() {
 
 #[test]
 fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
-    let document = graph(vec![node("task", route("senior"))]);
+    let mut pool = route("senior");
+    pool.adapter = None;
+    pool.model = None;
+    pool.alias = Some("senior".into());
+    let document = graph(vec![node("task", pool)]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([terminal_with_result(AttemptOutcome::UsageLimited, "")]),
         ..FakeOwner::default()

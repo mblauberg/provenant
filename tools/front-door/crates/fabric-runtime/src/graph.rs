@@ -2754,7 +2754,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                             ));
                                         }
                                         if route_index + 1 == node.routes.len()
-                                            && outcome != AttemptOutcome::UsageLimited
                                             && launched
                                             && node.access == AccessMode::ReadOnly
                                             && (route.account.is_some() || route.model.is_some())
