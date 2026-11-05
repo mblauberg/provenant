@@ -848,6 +848,31 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
+    fn dirty_writer_projection_preserves_edits_without_source_text() {
+        use provenant_confinement::worktrees::WorktreeError;
+        let error = RunError::Writer(WorktreeError::Dirty("TOKEN_SENTINEL\u{1b}".into()));
+        let diagnostic = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert_eq!(diagnostic.code, "WRITER_SCOPE");
+        assert!(
+            diagnostic
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("uncommitted")
+        );
+        let action = diagnostic.next.as_deref().unwrap();
+        assert!(action.contains("commit") || action.contains("preserve"));
+        assert!(
+            !serde_json::to_string(&diagnostic)
+                .unwrap()
+                .contains("TOKEN_SENTINEL")
+        );
+    }
+
+    #[test]
     fn raw_io_source_is_not_a_safe_fact() {
         let error = RunError::Io(std::io::Error::other("TOKEN_SENTINEL\u{1b}[31m"));
         let projection = error.diagnostic(Destination::Remote {
