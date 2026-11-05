@@ -360,15 +360,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
             for key in keys {
                 let mut row = table.remove(&key);
                 let prefix = format!("providers.{key}");
-                if provenant_records::AdapterSpec::get(&key).is_none() {
-                    issues.push(Issue {
-                        location: site(&user_sites, &prefix, &user_origin, false),
-                        rule: "provider_id",
-                        source: None,
-                        rejected: String::new(),
-                    });
-                    continue;
-                }
                 let settings = recover_settings::<crate::ProviderSettings>(
                     &mut row,
                     &prefix,

@@ -14,6 +14,8 @@ pub(super) struct ManifestTask {
     pub(super) context: Option<provenant_records::run::WorkContext>,
     #[serde(default)]
     pub(super) build_heavy: bool,
+    #[serde(default)]
+    pub(super) require_skill_location: bool,
     pub(super) title: Option<String>,
     pub(super) base: Option<String>,
     pub(super) task_id: Option<TaskId>,
@@ -296,6 +298,8 @@ pub(super) fn lane_access_checked(
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
+    /// Require the selected adapter to have its own skill location.
+    pub require_skill_location: bool,
     pub settlement_retry_limit: Option<u8>,
     pub context: Option<provenant_records::run::WorkContext>,
     pub build_heavy: bool,
@@ -563,6 +567,7 @@ pub(super) fn submit_with_host_and_wait(
         .into_iter()
         .map(|task| {
             let mut task_profile = profile.clone();
+            task_profile.require_skill_location = task.require_skill_location;
             task_profile.settlement_retry_limit = task
                 .settlement_retry_limit
                 .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));

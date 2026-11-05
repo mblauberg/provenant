@@ -6775,7 +6775,7 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
     use provenant_os::exec::{
         CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
     };
-    struct SignedOut<'a>(&'a [u8], bool);
+    struct SignedOut<'a>(&'a [u8], bool, bool, bool);
     impl Executor for SignedOut<'_> {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
             assert!(matches!(
@@ -6790,10 +6790,10 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
                     truncated: self.1,
                     ..Default::default()
                 },
-                timed_out: false,
+                timed_out: self.2,
                 drain_truncated: false,
                 overflow_stopped: false,
-                cancelled: false,
+                cancelled: self.3,
                 elapsed_micros: 0,
             })
         }
@@ -6806,9 +6806,14 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
         ),
         ("claude", b"Not logged in".as_slice()),
     ] {
-        for truncated in [false, true] {
+        for (truncated, timed_out, cancelled) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
             let result = accounts::detect(
-                &SignedOut(capture, truncated),
+                &SignedOut(capture, truncated, timed_out, cancelled),
                 adapter,
                 Path::new("/fixture/agy"),
                 scratch.path(),
@@ -6816,7 +6821,7 @@ fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
                 scratch.path(),
                 scratch.path(),
             );
-            if truncated {
+            if truncated || timed_out || cancelled {
                 assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
             } else {
                 assert!(matches!(result, Err(ProviderError::CredentialUnavailable)));

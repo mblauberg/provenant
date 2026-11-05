@@ -669,6 +669,7 @@ pub(super) fn validate_flat_plan(
             on_fail: node.on_fail.clone(),
             delivery: node.delivery.clone(),
             access: node.access,
+            require_skill_location: node.require_skill_location,
             worktree: node.worktree.clone(),
             id: node.id.clone(),
             title: node.title.clone(),
@@ -1322,7 +1323,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     && (attempt.state != AttemptState::Terminal
                         || !(review_substitution(node, attempt)
                             || attempt.outcome.is_some_and(|outcome| {
-                                fallback_candidate(outcome, attempt.launched)
+                                fallback_candidate(outcome, node.access, attempt.launched)
                             }))))
             {
                 return Err(bad(
@@ -1346,9 +1347,9 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,
                 Some(attempt) => {
                     (review_substitution(node, attempt)
-                        || attempt
-                            .outcome
-                            .is_some_and(|outcome| fallback_candidate(outcome, attempt.launched)))
+                        || attempt.outcome.is_some_and(|outcome| {
+                            fallback_candidate(outcome, node.access, attempt.launched)
+                        }))
                         && progress.attempts.len() < node.routes.len()
                 }
                 None => false,
@@ -1385,7 +1386,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                             | AttemptOutcome::ReviewRequired,
                         ) => true,
                         Some(outcome) if outcome != AttemptOutcome::Succeeded => {
-                            !fallback_candidate(outcome, attempt.launched)
+                            !fallback_candidate(outcome, node.access, attempt.launched)
                                 || progress.attempts.len() == node.routes.len()
                         }
                         _ => false,
@@ -1441,10 +1442,11 @@ fn fallback_settled(
         .outputs
         .as_ref()
         .is_some_and(|outputs| outputs.plan.is_some())
-        && plans::fallback_expansion(&node.id, spec, document).is_ok_and(|derived| {
-            checkpoint
-                .expansions
-                .iter()
-                .any(|expansion| expansion.source == node.id && *expansion == derived)
-        })
+        && plans::fallback_expansion(&node.id, spec, document, node.require_skill_location)
+            .is_ok_and(|derived| {
+                checkpoint
+                    .expansions
+                    .iter()
+                    .any(|expansion| expansion.source == node.id && *expansion == derived)
+            })
 }

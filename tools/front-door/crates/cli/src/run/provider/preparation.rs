@@ -15,6 +15,21 @@ pub(super) fn violates_account_pin(
     })
 }
 
+/// A provider's typed login refusal can be retried before handoff. Policy,
+/// identity and path errors remain unclassified and stop route switching.
+pub(super) fn provider_preparation_fallback(
+    error: &provenant_providers::ProviderError,
+) -> provenant_routing::FallbackOutcome {
+    use provenant_providers::ProviderError;
+    match error {
+        ProviderError::LoginRequired
+        | ProviderError::CredentialUnavailable
+        | ProviderError::CredentialNotFound
+        | ProviderError::CredentialExpired => provenant_routing::FallbackOutcome::AuthRequired,
+        _ => provenant_routing::FallbackOutcome::Other,
+    }
+}
+
 // Resolve only PATH, leaving the rest of the daemon environment intact. The
 // login shell runs from the account home, never the writer's checkout.
 fn host_dependency_path(
@@ -219,10 +234,10 @@ pub(crate) fn prepare(
         paths,
         resume,
         |name| match registry.host {
-            Some(host) if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if provider == "command") => {
+            Some(host) if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if AdapterSpec::get(provider).is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)) => {
                 find_command_on_path(name, &host.executable_search_path)
             }
-            None if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if provider == "command") =>
+            None if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if AdapterSpec::get(provider).is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)) =>
             {
                 let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
                 find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
@@ -382,7 +397,8 @@ pub(super) fn prepare_with_wait(
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
-        && provider == "host-native"
+        && AdapterSpec::get(provider)
+            .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::DelegatedAgent)
     {
         AdapterSpec::get(provider)
             .ok_or("unknown adapter")?
@@ -390,6 +406,7 @@ pub(super) fn prepare_with_wait(
                 resume: resume.is_some(),
                 write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
                 network: task.access.network,
+                skill_location: task.profile.require_skill_location,
                 ..Default::default()
             })
             .map_err(|error| error.to_string())?;
@@ -414,15 +431,20 @@ pub(super) fn prepare_with_wait(
             description,
             prompt,
         } = native;
+        let provider = model
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .ok_or("host-native model has no provider")?;
         let mut delegated = task.clone();
         delegated.route = run::RequestedRoute::Model {
             extra: Default::default(),
-            provider: provenant_records::Harness::Claude.spec().name.into(),
+            provider: provider.into(),
             model: model.clone(),
             effort: effort.clone(),
         };
         let mut launch = prepare_candidates(
             registry,
+            REGISTRY,
             &delegated,
             prompt_text,
             paths,
@@ -451,6 +473,7 @@ pub(super) fn prepare_with_wait(
     }
     prepare_candidates(
         registry,
+        REGISTRY,
         task,
         prompt_text,
         paths,
@@ -471,6 +494,7 @@ pub(super) fn login_check_can_clear(adapter: &str, mismatch: bool) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_candidates(
     registry: &Registry<'_>,
+    provider_registry: &[provenant_providers::Registration],
     task: &run::TaskRequest,
     prompt_text: &str,
     paths: &run::LaunchPaths,
@@ -612,34 +636,40 @@ pub(super) fn prepare_candidates(
     };
     request.intent = route_request(task)?.intent;
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
-    let eligible = provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing)
-        .map_err(|e| e.to_string())?;
+    let eligible = provenant_routing::probe_adapters(
+        &request,
+        &catalogue,
+        &config.domains.routing,
+        provider_registry,
+    )
+    .map_err(|e| e.to_string())?;
     // Exclude updates during preparation when the bounded wait succeeds.
     let clock = provenant_os::clock::SystemClock::new();
     use provenant_core::Clock;
     let fallback_cancel = provenant_core::CancelToken::new();
     let cancel = registry.cancel.unwrap_or(&fallback_cancel);
-    let provider_leases = available_provider_leases(
-        roots.state.as_path(),
-        &eligible.iter().map(|spec| spec.name).collect::<Vec<_>>(),
-        wait,
-        &clock,
-        cancel,
-    )
-    .map_err(|error| error.to_string())?;
+    let provider_leases =
+        available_provider_leases(roots.state.as_path(), &eligible, wait, &clock, cancel)
+            .map_err(|error| error.to_string())?;
     let eligible = |name: &str| provider_leases.is_empty() || provider_leases.contains_key(name);
     let settings = config.domains.accounts.with_derived_accounts();
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
-    if eligible("codex") && !entries.iter().any(|e| e.adapter == "codex") {
+    for spec in ADAPTER_SPECS.iter().filter(|spec| eligible(spec.name)) {
+        let Some((environment, fallback)) = spec.default_account_directory else {
+            continue;
+        };
+        if entries.iter().any(|entry| entry.adapter == spec.name) {
+            continue;
+        }
         let directory = registry
             .host
-            .and_then(|host| host.codex_home.clone())
-            .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
-            .unwrap_or_else(|| home.join(".codex"));
+            .and_then(|host| host.default_account_directories.get(spec.name).cloned())
+            .or_else(|| std::env::var_os(environment).map(PathBuf::from))
+            .unwrap_or_else(|| home.join(fallback));
         let mut entry = provenant_providers::accounts::Registration {
-            adapter: "codex".into(),
+            adapter: spec.name.into(),
             label: "default".into(),
             key: String::new(),
             org_fingerprint: None,
@@ -658,12 +688,12 @@ pub(super) fn prepare_candidates(
         };
         let discovered = (|| -> Result<(), AccountObservationError> {
             let executable =
-                locate("codex").map_err(AccountObservationError::VersionUnavailable)?;
+                locate(spec.name).map_err(AccountObservationError::VersionUnavailable)?;
             entry.directory = canonical(&directory)
-                .map_err(|detail| default_directory_error(&directory, detail))?;
+                .map_err(|detail| default_directory_error(spec, &directory, detail))?;
             entry.key = provenant_providers::accounts::detect(
                 &executor,
-                "codex",
+                spec.name,
                 &executable,
                 &home,
                 &user,
@@ -676,7 +706,8 @@ pub(super) fn prepare_candidates(
         match discovered {
             Ok(()) => entries.push(entry),
             Err(error) => {
-                default_failures.insert("codex".to_owned(), (error.skip_kind(), error.to_string()));
+                default_failures
+                    .insert(spec.name.to_owned(), (error.skip_kind(), error.to_string()));
             }
         }
     }
@@ -840,7 +871,7 @@ pub(super) fn prepare_candidates(
     let mut access = Vec::new();
     let mut plan_errors = std::collections::BTreeMap::new();
     let mut reported_plan_errors = std::collections::BTreeSet::new();
-    for adapter in REGISTRY
+    for adapter in provider_registry
         .iter()
         .map(|entry| entry.adapter.id())
         .filter(|adapter| eligible(adapter))
@@ -949,6 +980,7 @@ pub(super) fn prepare_candidates(
         crate::route::resolve_dispatch_rejecting(
             &request,
             roots,
+            provider_registry,
             selected,
             (paths.operation_id.as_str(), paths.task_index),
             &availability,
@@ -959,18 +991,7 @@ pub(super) fn prepare_candidates(
             rejected,
         )
     };
-    let resolved = crate::route::resolve_dispatch(
-        &request,
-        roots,
-        selected,
-        (paths.operation_id.as_str(), paths.task_index),
-        &availability,
-        &access,
-        &host,
-        family_constraints,
-        &rules,
-    )
-    .map_err(|error| error.to_string())?;
+    let resolved = resolve(&[]).map_err(|error| error.to_string())?;
     let named_pool = resolved.pool_selection.is_some() && resume.is_none();
     if let Some(selection) = &resolved.pool_selection {
         for redraw in &selection.redraws {
@@ -995,6 +1016,7 @@ pub(super) fn prepare_candidates(
                 outcome: previous_outcome,
                 handoff: provenant_routing::FallbackHandoff::Local,
                 custody_released: true,
+                read_only: false,
                 budget_remaining: named_pool && redraws < config.domains.routing.settlement_retries,
                 pinned: false,
             }
@@ -1042,6 +1064,7 @@ pub(super) fn prepare_candidates(
                 outcome: previous_outcome,
                 handoff: provenant_routing::FallbackHandoff::Local,
                 custody_released: true,
+                read_only: false,
                 budget_remaining: true,
                 pinned,
             })
@@ -1110,6 +1133,7 @@ pub(super) fn prepare_candidates(
             let fallback = nested_policy_fallback(task, &route, &model_policy)?;
             let mut prepared = prepare_candidates(
                 registry,
+                provider_registry,
                 &fallback,
                 prompt_text,
                 paths,
@@ -1129,7 +1153,7 @@ pub(super) fn prepare_candidates(
             );
             return Ok(prepared);
         }
-        let Some(registration) = REGISTRY
+        let Some(registration) = provider_registry
             .iter()
             .find(|registration| registration.adapter.id() == route.adapter)
         else {
@@ -1223,7 +1247,8 @@ pub(super) fn prepare_candidates(
             reasons.push(skip(&label, SkipKind::Unavailable, detail));
             continue;
         }
-        if let Err(error) = crate::route::check_dispatch_candidate(roots, &route) {
+        if let Err(error) = crate::route::check_dispatch_candidate(roots, &route, provider_registry)
+        {
             reasons.push(skip(&label, SkipKind::Unavailable, error));
             continue;
         }
@@ -1232,7 +1257,7 @@ pub(super) fn prepare_candidates(
             .find(|e| e.adapter == route.adapter && Some(&e.key) == route.account_key.as_ref());
         let account = match entry
             .filter(|entry| {
-                AdapterSpec::get(&entry.adapter).is_some_and(|spec| {
+                AdapterSpec::get(&entry.adapter).is_none_or(|spec| {
                     spec.registered_account && !spec.is_unregistered_local(&entry.key)
                 })
             })
@@ -1401,9 +1426,9 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
-        let refreshed = if adapter.id() == provenant_records::Harness::Claude.spec().name
-            && fixture_token.is_none()
-        {
+        let adapter_spec = AdapterSpec::get(adapter.id());
+        let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh);
+        let refreshed = if refresh_token && fixture_token.is_none() {
             let account = account.as_ref().ok_or("Claude account is not registered")?;
             let login = provenant_providers::claude::Login {
                 executable: &executable,
@@ -1452,7 +1477,7 @@ pub(super) fn prepare_candidates(
         } else {
             None
         };
-        let token = if adapter.id() == provenant_records::Harness::Claude.spec().name {
+        let token = if refresh_token {
             fixture_token.or(refreshed.as_ref())
         } else {
             None
@@ -1516,7 +1541,13 @@ pub(super) fn prepare_candidates(
         let mut spec = match prepare(&provider_route) {
             Ok(spec) => spec,
             Err(error) => {
-                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                previous_outcome = provider_preparation_fallback(&error);
+                let kind = if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired {
+                    SkipKind::AuthRequired
+                } else {
+                    SkipKind::Refused
+                };
+                reasons.push(skip(&label, kind, error.to_string()));
                 continue;
             }
         };
@@ -1530,7 +1561,14 @@ pub(super) fn prepare_candidates(
             spec = match prepare(&without_skills) {
                 Ok(spec) => spec,
                 Err(error) => {
-                    reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                    previous_outcome = provider_preparation_fallback(&error);
+                    let kind =
+                        if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired {
+                            SkipKind::AuthRequired
+                        } else {
+                            SkipKind::Refused
+                        };
+                    reasons.push(skip(&label, kind, error.to_string()));
                     continue;
                 }
             };
@@ -1605,9 +1643,10 @@ pub(super) fn prepare_candidates(
                 .and_then(|host| host.cargo_build_jobs.as_deref()),
             build_settings.jobs(),
         );
-        let adapter_spec = AdapterSpec::get(adapter.id()).ok_or("adapter is not registered")?;
-        spec.configure_shell(scratch, adapter_spec)
-            .map_err(|error| error.to_string())?;
+        if let Some(adapter_spec) = adapter_spec {
+            spec.configure_shell(scratch, adapter_spec)
+                .map_err(|error| error.to_string())?;
+        }
         if let Some(gh) = publishing_gh.as_ref() {
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
@@ -1620,7 +1659,7 @@ pub(super) fn prepare_candidates(
             }
         }
         if git_context.is_some()
-            && let Some(argument) = adapter_spec.context_directory_arg
+            && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)
         {
             // Scratch is already granted by the outer profile. Claude's file
             // tools also need it in their working directories to read context.
@@ -1637,26 +1676,28 @@ pub(super) fn prepare_candidates(
         }
         let transcript_account = account
             .as_ref()
-            .filter(|_| adapter.id() == provenant_records::Harness::Claude.spec().name)
+            .filter(|_| adapter_spec.is_some_and(|spec| spec.transcript_account_root))
             .map(|account| account.directory());
         let mut setup_roots = vec![scratch, private_state, roots.state.as_path()];
         // Only directory creation uses these additional provider state roots;
         // generated files and links remain confined to attempt-owned roots.
-        let opencode_data = spec
+        let xdg_data_home = spec
             .env
             .iter()
             .find(|(key, _)| key == "XDG_DATA_HOME")
             .map(|(_, value)| Path::new(value));
-        if adapter.id() == provenant_records::Harness::Opencode.spec().name {
-            if let Some(data) = opencode_data {
-                let existing = data
-                    .ancestors()
-                    .find(|path| path.is_dir())
-                    .ok_or("OpenCode data directory has no existing ancestor")?;
-                setup_roots.push(existing);
+        match adapter_spec.map_or(provenant_records::SetupRoot::None, |spec| spec.setup_root) {
+            provenant_records::SetupRoot::XdgDataHome => {
+                if let Some(data) = xdg_data_home {
+                    let existing = data
+                        .ancestors()
+                        .find(|path| path.is_dir())
+                        .ok_or("provider data directory has no existing ancestor")?;
+                    setup_roots.push(existing);
+                }
             }
-        } else if adapter.id() == "cursor" {
-            setup_roots.push(&home);
+            provenant_records::SetupRoot::Home => setup_roots.push(&home),
+            provenant_records::SetupRoot::None => {}
         }
         if let Err(error) = apply_setup(&spec.setup, &setup_roots, transcript_account) {
             reasons.push(skip(

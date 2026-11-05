@@ -26,6 +26,8 @@ pub struct SubmittedTask {
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub build_heavy: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_skill_location: bool,
     #[serde(default)]
     pub account: Option<String>,
     #[serde(default)]
