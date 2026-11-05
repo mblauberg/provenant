@@ -5021,7 +5021,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             });
             // A crash can leave an accepted operation without a checkpoint
             // reference. Preserve its immutable labels, including legacy None.
-            let mut prepared_without_request = false;
             let mut accepted_knobs = None;
             let mut accepted_route = None;
             let mut accepted_retry_limit = None;
@@ -5039,7 +5038,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     Err(provenant_run::RunError::NotFound)
                         if operation.state == provenant_run::OperationState::Prepared =>
                     {
-                        prepared_without_request = true;
                         Some(node.context)
                     }
                     Err(error) => return Err(run_error(error)),
@@ -5348,35 +5346,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             )
             .map_err(dispatch_refused)?;
             grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
-            let legacy_input = prepared_without_request.then(|| {
-                let mut legacy = input.clone();
-                let SubmitInput::Submit { tasks, .. } = &mut legacy;
-                for task in tasks {
-                    task.context = None;
-                }
-                legacy
-            });
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
-            let receipt = match owner.submit_with_access(
+            let receipt = owner.submit_with_access(
                 input,
                 self.budget,
                 self.cancel,
-                grants.clone(),
+                grants,
                 retry_limit,
-            ) {
-                Err(FacadeError::OperationConflict) if legacy_input.is_some() => {
-                    // Store admission still requires the reserved digest to match
-                    // exactly. Only legacy metadata is retried, once.
-                    owner.submit_with_access(
-                        legacy_input.ok_or(FacadeError::StateCorrupt)?,
-                        self.budget,
-                        self.cancel,
-                        grants,
-                        retry_limit,
-                    )?
-                }
-                result => result?,
-            };
+            )?;
             owner.actor = None;
             let target = receipt
                 .targets
