@@ -147,6 +147,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                         roots.state.as_path(),
                         &Default::default(),
                         clock.wall_now().ok(),
+                        false,
                     );
                     running += usize::from(active);
                     attention += usize::from(needs_attention);

@@ -4,10 +4,7 @@
 //! host keeps only a placement record under `fabric/remote-runs/`, never a
 //! copy of the peer's run state.
 use super::watch::{self, Scope};
-use super::{
-    Condition, Edge, Fail, Reply, Status, condition_met, render_lanes_with_lineage, reply,
-    state_and_reason,
-};
+use super::{Condition, Edge, Fail, Reply, Status, condition_met, reply, state_and_reason};
 use crate::{
     Cancel, Dispatch, Lanes, Output, Part,
     fabric::{Context, PeerFailure},
@@ -727,7 +724,7 @@ fn render_peer_lanes(
         .iter()
         .filter_map(|lane| lane.superseded_by.map(|id| (lane.attempt_id, id)))
         .collect();
-    render_lanes_with_lineage(lanes, waits, next, state, None, &successors)
+    super::render_lanes_with_view(lanes, waits, next, state, None, &successors, false)
 }
 
 /// Local lane rendering plus each row's owning host. Result paths are the
@@ -1456,6 +1453,7 @@ fn read_output(
         state_root,
         &successors,
         SystemClock::new().wall_now().ok(),
+        false,
     );
     row.host = Some(host.to_string());
     row.stale = None;

@@ -621,6 +621,7 @@ pub(crate) fn project_lane(
     root: &Path,
     successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
     now_wall: Option<WallTime>,
+    observe_host: bool,
 ) -> provenant_records::wire::LaneRow {
     let (state, terminal_reason) = state_and_reason(&lane.state);
     let (exit_code, finished_at) = match &lane.state {
@@ -657,7 +658,9 @@ pub(crate) fn project_lane(
         .zip(lane.session.as_deref())
         .map(|(adapter, session)| {
             let attempt = artifact(root, lane, "");
-            let path = run::locate_transcript(&attempt, session, &lane.write_grants)
+            let path = observe_host
+                .then(|| run::locate_transcript(&attempt, session, &lane.write_grants))
+                .flatten()
                 .map(|path| attempt.join(path));
             provenant_records::wire::LaneTranscript {
                 adapter: adapter.to_owned(),
@@ -703,7 +706,7 @@ pub(crate) fn project_lane(
         last_output_at: json!(lane.last_output_at),
         runtime_deadline: json!(lane.runtime_deadline),
         overdue: now_wall.is_some_and(|now| run::overdue_at(lane, now)),
-        stale: Some(run::holder_absent(root, lane)),
+        stale: observe_host.then(|| run::holder_absent(root, lane)),
         partial_signals: json!(lane.partial_signals),
         delivery_id: lane.delivery_id.map(|id| id.to_string()),
         write_grants: json!(lane.write_grants),
@@ -721,6 +724,7 @@ pub(crate) fn project_lane(
         result_path: json!(
             result
                 .as_deref()
+                .filter(|_| observe_host)
                 .and_then(|path| { provenant_records::AbsolutePathWire::from_path(path).ok() })
         ),
         transcript,
@@ -743,12 +747,24 @@ pub(super) fn render_lanes_with_lineage(
     cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
     successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
 ) -> (Value, String) {
+    render_lanes_with_view(lanes, waits, next, root, cooldowns, successors, true)
+}
+
+pub(super) fn render_lanes_with_view(
+    lanes: &[run::AttemptRecord],
+    waits: &[run::LaneWait],
+    next: Option<u64>,
+    root: &Path,
+    cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
+    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
+    observe_host: bool,
+) -> (Value, String) {
     let mut human = String::new();
     let now_wall = SystemClock::new().wall_now().ok();
     let rows: Vec<Value> = lanes
         .iter()
         .map(|lane| {
-            let projected = project_lane(lane, waits, root, successors, now_wall);
+            let projected = project_lane(lane, waits, root, successors, now_wall, observe_host);
             let state = projected.state.clone();
             let route = lane
                 .applied_route

@@ -381,6 +381,7 @@ fn output_read(
         session.context.state_root.as_path(),
         &successors,
         call.clock.wall_now().ok(),
+        true,
     );
     if let (Some(data), Some(row)) = (data.as_object_mut(), json!(projected).as_object()) {
         data.remove("settlement_reason");
