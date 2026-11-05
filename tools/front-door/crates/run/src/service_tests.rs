@@ -5,6 +5,32 @@ use provenant_core::{CancelToken, OperationId, TaskId};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn cloud_placement_survives_request_reopen() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut request = submission("run a test");
+    let placement = provenant_records::run::CloudPlacement {
+        target: "verify".into(),
+        provider: "fake".into(),
+        environment: "env".into(),
+        repository: "owner/repo".into(),
+        branch: "main".into(),
+        model: "model".into(),
+        effort: None,
+        deadline_seconds: 3600,
+    };
+    request.tasks[0].cloud = Some(placement.clone());
+    let run = Service::new(&store).dispatch(request, temp.path(), &call)?;
+    assert_eq!(
+        store.request(run.run_id, &call)?.tasks[0].cloud,
+        Some(placement)
+    );
+    Ok(())
+}
+
+#[test]
 fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -149,6 +175,7 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
         chair: None,
         operation_id: OperationId::parse("service-dispatch").unwrap(),
         tasks: vec![DispatchTask {
+            cloud: None,
             context: None,
             build_heavy: false,
             title: None,

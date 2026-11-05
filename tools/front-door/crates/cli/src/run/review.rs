@@ -563,6 +563,7 @@ fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>
         slot.lens.as_deref().unwrap_or("general")
     );
     Submitted {
+        cloud: None,
         require_skill_location: false,
         settlement_retry_limit: None,
         context: None,

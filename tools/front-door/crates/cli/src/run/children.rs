@@ -791,6 +791,7 @@ mod tests {
                 lane_depth: 2,
                 parent_attempt: child.request.parent_attempt,
                 tasks: vec![run::DispatchTask {
+                    cloud: None,
                     context: None,
                     build_heavy: false,
                     title: None,
@@ -1715,6 +1716,7 @@ mod tests {
             for index in first..first + 1 {
                 let task_id = TaskId::from_bytes(index.to_be_bytes());
                 child.request.tasks.push(run::TaskRequest {
+                    cloud: None,
                     context: None,
                     title: None,
                     task_id,
@@ -1836,6 +1838,7 @@ mod tests {
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    cloud: None,
                     context: None,
                     extra: Default::default(),
                     build_heavy: false,

@@ -367,7 +367,9 @@ fn output_read(
                 "output has no attempt identity",
             )
         })?;
-    let record = session.service().status(id, call)?;
+    let mut record = session.service().status(id, call)?;
+    cloud_owner::hydrate(&session.store, std::slice::from_mut(&mut record), call)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
     let waits = session
         .store
         .lane_waits(std::slice::from_ref(&record), call);
@@ -441,6 +443,66 @@ fn output_read_part(
             ErrorKind::NotFound,
             "attempt is not in that run/task",
         ));
+    }
+    if !command.trace
+        && matches!(command.part, Part::Result | Part::Receipt)
+        && let Some(placement) = cloud_owner::placement(&session.store, &record, call)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
+    {
+        let job = cloud_owner::load(&session.store, id, call)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+        if command.path {
+            if !matches!(command.part, Part::Result) {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "--path needs --part result, prompt or stderr",
+                ));
+            }
+            if job.is_none() {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::NotFound,
+                    "cloud job has no recorded result path",
+                ));
+            }
+            let path = artifact(
+                session.context.state_root.as_path(),
+                &record,
+                "cloud/cloud-job.json",
+            );
+            return Ok((
+                json!({"attempt_id": id, "part": "result", "path": path.display().to_string()}),
+                format!("{}\n", path.display()),
+            ));
+        }
+        let view = job.as_ref().map(cloud_owner::view).unwrap_or_else(
+            || json!({"target": placement.target, "state": {"state": "submitting"}}),
+        );
+        let encoded = serde_json::to_vec_pretty(&view)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+        let safe = provenant_confinement::redact::known_shapes(&encoded)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+        if command.offset > safe.len() as u64 {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "offset past cloud result",
+            ));
+        }
+        let start = if let Some(lines) = command.tail {
+            let base = safe.len().saturating_sub(command.max_bytes as usize);
+            base + tail_start(&safe[base..], lines.min(TAIL_MAX))
+        } else {
+            command.offset as usize
+        };
+        let end = start
+            .saturating_add(command.max_bytes as usize)
+            .min(safe.len());
+        let bytes = safe[start..end].to_vec();
+        let human = String::from_utf8_lossy(&bytes).into_owned();
+        let data = json!({"attempt_id": id, "cloud": view, "part": "result", "offset": start, "next_offset": end, "length": safe.len(), "eof": end == safe.len(), "clipped": end < safe.len(), "complete": job.as_ref().is_some_and(|job| job.state.is_terminal()), "digest": provenant_records::CanonicalV1::file_digest(&safe), "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(bytes)});
+        return Ok((data, human));
     }
     if command.trace {
         let grants = json!({
