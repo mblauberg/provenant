@@ -2146,19 +2146,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     let base_a = String::from_utf8(run_git(&project, &["rev-parse", "HEAD"])?)?
         .trim()
         .to_owned();
-    run_git(
-        &project,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "middle",
-        ],
-    )?;
+    run_git(&project, &["commit", "--allow-empty", "-qm", "middle"])?;
     let base_b = String::from_utf8(run_git(&project, &["rev-parse", "HEAD"])?)?
         .trim()
         .to_owned();
@@ -2177,20 +2165,8 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 },
                 &cancel,
             )?;
-            run_git(
-                &info.path,
-                &[
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.invalid",
-                    "commit",
-                    "--allow-empty",
-                    "-qm",
-                    "tip",
-                ],
-            )
-            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            run_git(&info.path, &["commit", "--allow-empty", "-qm", "tip"])
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
             let head = String::from_utf8(
                 run_git(&info.path, &["rev-parse", "HEAD"])
                     .map_err(|_| worktrees::WorktreeError::InvalidOutput)?,
@@ -2781,16 +2757,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
     }
     // A relative base is resolved in the source checkout exactly once.
     // The new tree has no HEAD^, so admission must use creation's receipt.
-    run_git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "second",
-    ])?;
+    run_git(&["commit", "--allow-empty", "-qm", "second"])?;
     // Move the named base between early resolution and creation.
     struct MoveBase {
         project: PathBuf,
