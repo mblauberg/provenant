@@ -107,8 +107,8 @@ reason = "At launch the validated attempt record already limits its recorded pro
 
 [[guard]]
 site = "run/src/artifacts.rs#RunStore::artifact_bytes"
-boundary = "unclassified"
-reason = "Filesystem failures while reopening an otherwise valid prompt require a caller-specific fallback or classification."
+boundary = "authority"
+reason = "If the stored prompt cannot be reopened, its bytes cannot be verified against the authorised task and no substitute prompt is launched."
 
 [[guard]]
 site = "run/src/launch.rs#start_inner"
