@@ -509,6 +509,13 @@ push, or set an upstream with `-u`, because shared Git state is read-only. The h
 best-effort refreshes the lane branch's `origin` tracking ref at settlement;
 shared upstream configuration remains read-only.
 
+## Native lane probes
+
+The macOS dispatch confinement test runs the Node/pnpm compatibility probe
+independently of its shell, Git and Cargo probe, and reports both failures when
+both fail. The remaining shell probe still groups several capabilities, so it
+does not yet isolate every missing grant.
+
 ## General guidance
 
 Use the Rust provider source for launch behaviour. Dispatch still requires an

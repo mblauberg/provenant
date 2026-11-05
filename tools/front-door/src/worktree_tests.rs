@@ -3872,7 +3872,7 @@ if (process.argv[2] === 'child') {
 }
 "#,
         )?;
-        let script = [concat!(
+        let script = concat!(
             "set -eu; ",
             // The lane's TMPDIR is the short alias: it must resolve inside the
             // sandbox, take files, and hold a Unix-domain socket (#2661).
@@ -3898,17 +3898,7 @@ if (process.argv[2] === 'child') {
             "test \"$(command -v git)\" = \"$(cd \"$TMPDIR\" && pwd -P)/bin/git\" && ",
             "git --version && git status --porcelain && ",
             "cargo test -j2 --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\"; ",
-
-        ), LANE_NODE_PNPM_PROBE].concat();
-        let argv = [
-            OsString::from("/bin/sh"),
-            OsString::from("-c"),
-            script.into(),
-        ];
-        let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
-        let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
-        options.process_group = true;
-        options.cleanup_process_group = true;
+        );
         let mut tool_env = launch.environment.clone();
         let tools_required = std::env::var("PROVENANT_LANE_TOOLS_REQUIRED").as_deref() == Ok("1");
         tool_env.push((
@@ -3916,36 +3906,47 @@ if (process.argv[2] === 'child') {
             if tools_required { "1" } else { "0" }.into(),
         ));
         tool_env.push(("LANE_FIXTURE".into(), launch.argv[0].clone()));
-        options.env = Some(&tool_env);
-        let output = executor.execute(options)?;
-        assert_eq!(
-            code(&output),
-            0,
-            "shell probe: {}",
-            String::from_utf8_lossy(&output.stderr.bytes)
-        );
-        // The confined child bound a socket through the alias TMPDIR.
-        assert!(
-            String::from_utf8_lossy(&output.stdout.bytes).contains("lane-socket: PASS"),
-            "{}",
-            String::from_utf8_lossy(&output.stdout.bytes)
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stdout.bytes).contains("1 passed"),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout.bytes),
-            String::from_utf8_lossy(&output.stderr.bytes)
-        );
-        if tools_required {
-            assert!(
-                String::from_utf8_lossy(&output.stdout.bytes)
-                    .contains("lane-node-pnpm-compat: PASS")
-            );
-        } else if !String::from_utf8_lossy(&output.stdout.bytes)
-            .contains("lane-node-pnpm-compat: PASS")
-        {
-            provenant_test_support::missing_prerequisite(false, "node/pnpm unavailable in lane")?;
+        let mut failures = Vec::new();
+        for (name, cell) in [
+            ("shell/git/cargo", script),
+            ("node/pnpm", LANE_NODE_PNPM_PROBE),
+        ] {
+            let argv = [OsString::from("/bin/sh"), OsString::from("-c"), cell.into()];
+            let command =
+                compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
+            let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
+            options.process_group = true;
+            options.cleanup_process_group = true;
+            options.env = Some(&tool_env);
+            let output = executor.execute(options)?;
+            let stdout = String::from_utf8_lossy(&output.stdout.bytes);
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+            if code(&output) != 0 {
+                failures.push(format!("{name}: {stderr}\n{stdout}"));
+            } else if name == "shell/git/cargo"
+                && (!stdout.contains("lane-socket: PASS") || !stdout.contains("1 passed"))
+            {
+                failures.push(format!(
+                    "{name}: missing success marker: {stderr}\n{stdout}"
+                ));
+            } else if name == "node/pnpm" && !stdout.contains("lane-node-pnpm-compat: PASS") {
+                if tools_required {
+                    failures.push(format!(
+                        "{name}: missing success marker: {stderr}\n{stdout}"
+                    ));
+                } else {
+                    provenant_test_support::missing_prerequisite(
+                        false,
+                        "node/pnpm unavailable in lane",
+                    )?;
+                }
+            }
         }
+        assert!(
+            failures.is_empty(),
+            "native probe failures: {}",
+            failures.join("; ")
+        );
     }
     // Start the configured MCP inside the compiled profile too: an
     // unconfined fake provider cannot detect ungranted startup writes.
