@@ -765,9 +765,26 @@ impl Registry<'_> {
             _ if auth && outcome.status() != OutcomeStatus::Success => (
                 run::Outcome::AuthRequired,
                 Some(
-                    provenant_records::diagnostic::ProviderFailureFact::AuthRequired
-                        .reason()
-                        .into(),
+                    self.roots
+                        .and_then(|roots| {
+                            let config = provenant_config::read_with_domains(
+                                roots,
+                                &crate::domains::SECTIONS,
+                            )
+                            .ok()?;
+                            Some(crate::quota::account_login_diagnostic(
+                                config.domains.accounts.entries.values(),
+                                &[],
+                                adapter.id(),
+                                route.account_key.as_deref(),
+                                &provenant_records::RouteExclusionReason::AuthRequired,
+                            ))
+                        })
+                        .unwrap_or_else(|| {
+                            provenant_records::diagnostic::ProviderFailureFact::AuthRequired
+                                .reason()
+                                .into()
+                        }),
                 ),
             ),
             OutcomeStatus::Refused => (run::Outcome::Rejected, Some("provider refused".into())),

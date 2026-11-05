@@ -7989,9 +7989,9 @@ fn settled_auth_uses_only_the_selected_registered_account() -> Result<(), Box<dy
     )?;
     assert_eq!(decoded.outcome, run::Outcome::AuthRequired);
     let reason = decoded.reason.unwrap();
-    assert!(reason.contains("selected account"), "{reason}");
-    assert!(reason.contains("provenant quota tick"), "{reason}");
-    assert!(!reason.contains("/fixture/work"), "{reason}");
+    assert!(reason.contains("work [codex]"), "{reason}");
+    assert!(reason.contains("codex login"), "{reason}");
+    assert!(reason.contains("/fixture/work"), "{reason}");
     Ok(())
 }
 
