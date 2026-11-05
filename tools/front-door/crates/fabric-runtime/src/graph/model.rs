@@ -333,7 +333,7 @@ impl GraphDocument {
         if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
             return Err(reason);
         }
-        if let Some(reason) = envelope::reason(self, &[], &[], &plan) {
+        if let Some(reason) = graph_envelope_reason(self, &[], &[], &plan) {
             return Err(reason);
         }
         validate_output_kinds(&expanded)

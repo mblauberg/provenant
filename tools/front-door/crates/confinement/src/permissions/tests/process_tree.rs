@@ -23,8 +23,6 @@ const TREE_HELPER: &str = r#"
 #include <stdio.h>
 #include <sys/wait.h>
 #include <unistd.h>
-static volatile sig_atomic_t stopped;
-static void stop(int signal) { (void)signal; stopped = 1; }
 int main(int argc, char **argv) {
     if (argc != 2) return 90;
     pid_t live = fork();
@@ -35,12 +33,15 @@ int main(int argc, char **argv) {
     if (zombie == 0) _exit(0);
     siginfo_t exited;
     if (waitid(P_PID, zombie, &exited, WEXITED | WNOWAIT)) return 93;
-    signal(SIGTERM, stop); signal(SIGINT, stop);
+    sigset_t signals;
+    sigemptyset(&signals); sigaddset(&signals, SIGTERM); sigaddset(&signals, SIGINT);
+    if (sigprocmask(SIG_BLOCK, &signals, NULL)) return 96;
     FILE *ready = fopen(argv[1], "w");
     if (!ready) return 94;
     fprintf(ready, "%d %d %d\n", getpid(), live, zombie);
     if (fclose(ready)) return 95;
-    while (!stopped) usleep(10000);
+    int received;
+    if (sigwait(&signals, &received)) return 97;
     kill(live, SIGTERM);
     while (waitpid(live, NULL, 0) < 0 && errno == EINTR) {}
     while (waitpid(zombie, NULL, 0) < 0 && errno == EINTR) {}
@@ -56,18 +57,17 @@ impl Drop for Stop<'_> {
 }
 
 fn ready(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(8);
-    loop {
-        if let Ok(text) = std::fs::read_to_string(path)
-            && !text.is_empty()
-        {
-            return Ok(text);
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!("fixture did not become ready: {}", path.display()).into());
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let text = provenant_test_support::wait_for(
+        &format!("fixture {}", path.display()),
+        Duration::from_secs(8),
+        || {
+            std::fs::read_to_string(path)
+                .ok()
+                .filter(|text| !text.is_empty())
+        },
+        Option::is_some,
+    )?;
+    text.ok_or_else(|| "fixture readiness missing".into())
 }
 
 // Independent host oracle. sysctl renders MiB to two decimal places, so the
@@ -107,11 +107,9 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(std::env::var_os(ROOT).ok_or("missing fixture root")?);
     if role == "peer" {
         std::fs::write(root.join("peer.pid"), std::process::id().to_string())?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
+        loop {
+            std::thread::park();
         }
-        return Err("peer was not cancelled after the reader finished".into());
     }
     assert_eq!(role, "reader");
     let host = std::env::var(HOST)?.parse::<u32>()?;

@@ -577,7 +577,7 @@ mod tests {
         use provenant_core::{AttemptId, HostId, ProjectId};
         use std::sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, Ordering},
         };
         use std::time::{Duration, Instant};
 
@@ -588,17 +588,21 @@ mod tests {
         }],"next_cursor":"local-cursor","coverage":{"scope":"local"}});
         let start = Instant::now();
         let budget = Duration::from_millis(300);
-        let started = Arc::new(AtomicUsize::new(0));
-        let counter = started.clone();
+        let released = Arc::new(AtomicBool::new(false));
+        let gate = released.clone();
         let results = super::read_peers(hosts.clone(), start + budget, move |_| {
-            counter.fetch_add(1, Ordering::Relaxed);
-            std::thread::sleep(Duration::from_millis(650));
+            let _ = provenant_test_support::wait_for(
+                "peer release",
+                Duration::from_secs(5),
+                || gate.load(Ordering::Acquire),
+                |released| *released,
+            );
             Ok(provenant_fabric_runtime::hosts::PeerResult::Console {
                 data: serde_json::Value::Null,
                 extra: Default::default(),
             })
         });
-        assert_eq!(started.load(Ordering::Relaxed), 2);
+        released.store(true, Ordering::Release);
         assert!(results.iter().all(|(_, result)| result.is_none()));
         let composed = super::compose_peers(local.clone(), true, results).unwrap();
         assert_eq!(composed["lanes"], local["lanes"]);
@@ -610,6 +614,43 @@ mod tests {
             );
             assert_eq!(composed["coverage"]["peers"][index]["state"], "unreachable");
         }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // The reader receives its real deadline at the edge.
+    fn peer_reads_start_concurrently() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        use std::time::{Duration, Instant};
+        let (started, observed) = mpsc::channel();
+        let released = Arc::new(AtomicBool::new(false));
+        let gate = released.clone();
+        let reader = std::thread::spawn(move || {
+            super::read_peers(
+                vec![1, 2],
+                Instant::now() + Duration::from_secs(5),
+                move |host| {
+                    started.send(host).unwrap();
+                    provenant_test_support::wait_for(
+                        "peer release",
+                        Duration::from_secs(5),
+                        || gate.load(Ordering::Acquire),
+                        |released| *released,
+                    )
+                    .unwrap();
+                    host
+                },
+            )
+        });
+        let first = observed.recv_timeout(Duration::from_secs(5));
+        let second = observed.recv_timeout(Duration::from_secs(5));
+        released.store(true, Ordering::Release);
+        let results = reader.join().unwrap();
+        assert_ne!(first.unwrap(), second.unwrap());
+        assert!(results.iter().all(|(_, value)| value.is_some()));
     }
 
     #[test]

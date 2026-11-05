@@ -277,7 +277,7 @@ fn acquire(
 ) -> Result<provenant_os::build_slots::SlotGuard, SlotError> {
     let acquired = slots.acquire(
         settings.slots,
-        Wait::new(settings.wait.saturating_sub(began.elapsed())),
+        Wait::new(remaining_wait(settings.wait, began.elapsed())),
         &CancelToken::new(),
         &mut |busy, waited| {
             mark_slot(settings, busy, waited);
@@ -286,6 +286,10 @@ fn acquire(
     );
     unmark(settings);
     acquired
+}
+
+fn remaining_wait(budget: Duration, elapsed: Duration) -> Duration {
+    budget.saturating_sub(elapsed)
 }
 
 /// Cargo queues a second build behind the first one's `.cargo-lock`. Waiting
@@ -398,6 +402,23 @@ fn warn(error: &dyn std::fmt::Display) {
     reason = "the custom worktree test driver includes this library without the test harness"
 )]
 mod tests {
+    #[test]
+    fn cargo_lock_time_reduces_slot_budget() {
+        assert_eq!(
+            super::remaining_wait(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(2)
+            ),
+            std::time::Duration::from_secs(3)
+        );
+        assert_eq!(
+            super::remaining_wait(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(6)
+            ),
+            std::time::Duration::ZERO
+        );
+    }
     use super::*;
     use provenant_supervisor::census::{ProcessFact, ProcessIdentity};
     use std::collections::HashMap;

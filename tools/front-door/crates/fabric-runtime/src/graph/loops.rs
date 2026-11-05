@@ -930,7 +930,9 @@ pub(super) fn prepare_decision_extension(
     if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
         return Err(reason);
     }
-    if let Some(reason) = envelope::reason(document, &checkpoint.expansions, &extensions, &plan) {
+    if let Some(reason) =
+        graph_envelope_reason(document, &checkpoint.expansions, &extensions, &plan)
+    {
         return Err(reason);
     }
     Ok(())

@@ -717,11 +717,12 @@ mod tests {
                 .stdin(std::process::Stdio::piped())
                 .spawn()?,
         );
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !ready.exists() {
-            assert!(Instant::now() < deadline, "child never became ready");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        provenant_test_support::wait_for(
+            "child readiness",
+            Duration::from_secs(3),
+            || ready.exists(),
+            |ready| *ready,
+        )?;
         let ProcessObservation::Present(fact) =
             SystemProcessObserver.observe(i64::from(child.0.id()))
         else {
@@ -743,15 +744,28 @@ mod tests {
             &fact.identity,
             libc::SIGSTOP
         )?);
+        let stopped = provenant_test_support::wait_for(
+            "child to stop",
+            Duration::from_secs(3),
+            || provenant_os::pid::process_state(fact.identity.pid),
+            |state| {
+                !matches!(
+                    state,
+                    Ok(provenant_os::pid::ProcessState::Running
+                        | provenant_os::pid::ProcessState::Uninterruptible)
+                )
+            },
+        )??;
+        assert_eq!(stopped, provenant_os::pid::ProcessState::Stopped);
         writeln!(child.0.stdin.as_mut().ok_or("child stdin")?, "continue")?;
-        std::thread::sleep(Duration::from_millis(50));
         assert!(!resumed.exists(), "build should still be stopped");
         resume_orphaned_builds(&Directory::open_anchor(root.path())?, scope())?;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !resumed.exists() {
-            assert!(Instant::now() < deadline, "recovery left a stopped build");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        provenant_test_support::wait_for(
+            "build to resume",
+            Duration::from_secs(3),
+            || resumed.exists(),
+            |resumed| *resumed,
+        )?;
         assert!(!root.path().join(crate::build_pause::PAUSE_FILE).exists());
         Ok(())
     }

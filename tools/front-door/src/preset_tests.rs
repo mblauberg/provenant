@@ -5749,3 +5749,38 @@ fn nested_presets_retain_the_nearest_retry_default() {
     );
     assert_eq!(nodes[1]["preset_retry"]["retries"], 4);
 }
+
+#[test]
+fn five_and_seven_lane_big_batches_fit_the_checkpoint_envelope() {
+    let layers = real_selector("/nonexistent");
+    for n in [5, 7] {
+        let lanes = (0..n)
+            .map(|i| format!("{{name='l{i}',worktree='/repo/w{i}',scope=['p{i}'],spec=''}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut expanded = expand(
+            &layers,
+            "big-batch",
+            "approved brief",
+            &[
+                format!("parameters.lanes=[{lanes}]"),
+                "parameters.batch_worktree='/repo/batch'".into(),
+                "parameters.risk_tier='crucial'".into(),
+            ],
+        )
+        .unwrap();
+        pin_fixture_sources(&mut expanded.document);
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(expanded.document).unwrap();
+        assert!(
+            document
+                .nodes
+                .iter()
+                .find(|node| node.id == "lanes")
+                .unwrap()
+                .plan
+                .is_none()
+        );
+        document.admit(&Default::default()).unwrap();
+    }
+}

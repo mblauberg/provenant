@@ -88,14 +88,22 @@ fn restored_mtime_does_not_hide_a_content_change() {
     std::fs::write(&path, b"data").unwrap();
     let directory = Directory::open_anchor(temp.path()).unwrap();
     let before = directory.metadata_at(OsStr::new("file"), false).unwrap();
-    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
     let modified = file.metadata().unwrap().modified().unwrap();
-    // Separate the inode changes even on filesystems with a coarser clock.
-    std::thread::sleep(Duration::from_millis(10));
-    file.write_all(b"else").unwrap();
-    file.set_times(std::fs::FileTimes::new().set_modified(modified))
-        .unwrap();
-    let after = directory.metadata_at(OsStr::new("file"), false).unwrap();
+    // Repeat the update until the filesystem records a distinct change time.
+    use std::os::unix::fs::FileExt;
+    let after = provenant_test_support::wait_for(
+        "filesystem change time",
+        Duration::from_secs(5),
+        || {
+            assert_eq!(file.write_at(b"else", 0).unwrap(), 4);
+            file.set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            directory.metadata_at(OsStr::new("file"), false).unwrap()
+        },
+        |after| before.changed_ns != after.changed_ns,
+    )
+    .unwrap();
     assert!(before.same_identity(&after));
     assert_eq!(before.size, after.size);
     assert_eq!(before.modified_ns, after.modified_ns);
@@ -1143,7 +1151,7 @@ impl PauseAtAtomicWritePhase {
                 .write_all(b"R")
                 .map_err(error("fixture handshake", &self.socket))?;
             loop {
-                std::thread::park_timeout(Duration::from_secs(60));
+                std::thread::park();
             }
         }
         Ok(())

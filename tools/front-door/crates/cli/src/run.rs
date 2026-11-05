@@ -1182,17 +1182,18 @@ fn graph_quality_rows(
         .collect();
     let mut rows = Vec::new();
     for graph_id in graph_ids {
-        let checkpoint = match FileJournal::read_checkpoint(state_root, project, &graph_id) {
-            Ok(Some(checkpoint)) => checkpoint,
-            Ok(None) => {
-                rows.push(json!({"graph_id": graph_id, "checkpoint": "missing"}));
-                continue;
-            }
-            Err(_) => {
-                rows.push(json!({"graph_id": graph_id, "checkpoint": "unavailable"}));
-                continue;
-            }
-        };
+        let checkpoint =
+            match FileJournal::read_materialised_checkpoint(state_root, project, &graph_id) {
+                Ok(Some(checkpoint)) => checkpoint,
+                Ok(None) => {
+                    rows.push(json!({"graph_id": graph_id, "checkpoint": "missing"}));
+                    continue;
+                }
+                Err(_) => {
+                    rows.push(json!({"graph_id": graph_id, "checkpoint": "unavailable"}));
+                    continue;
+                }
+            };
         let mut verdicts = BTreeMap::<String, u64>::new();
         let (findings, initial_rounds, repair_rounds) = graph_quality_counts(&checkpoint.nodes);
         for node in &checkpoint.nodes {

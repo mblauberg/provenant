@@ -452,18 +452,23 @@ impl Peer {
 /// The one deadline every transport call of a fetch shares. It is fixed when
 /// the fetch starts, so each call sees what the earlier ones left, not the
 /// fetch's whole budget.
-struct Window {
+struct Window<'a> {
     /// Unbounded when the budget is too large to represent.
     deadline: Option<Instant>,
     called: Cell<bool>,
+    now: &'a dyn Fn() -> Instant,
 }
-impl Window {
+impl<'a> Window<'a> {
     // A reader deadline is a real transport boundary.
     #[allow(clippy::disallowed_methods)]
     fn new(remaining: Duration) -> Self {
+        Self::with_clock(remaining, &Instant::now)
+    }
+    fn with_clock(remaining: Duration, now: &'a dyn Fn() -> Instant) -> Self {
         Self {
-            deadline: Instant::now().checked_add(remaining),
+            deadline: now().checked_add(remaining),
             called: Cell::new(false),
+            now,
         }
     }
     /// The time the next transport call may take. The first call of a fetch
@@ -477,7 +482,7 @@ impl Window {
         let Some(deadline) = self.deadline else {
             return Ok(Duration::MAX);
         };
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = deadline.saturating_duration_since((self.now)());
         if left.is_zero() && !first {
             return Err(Fail::new(
                 Status::Error,
@@ -495,7 +500,7 @@ type Call<'a> = dyn FnMut(HostId, PeerAction, Duration) -> Result<PeerResult, Fa
 /// Current owner records, one batched status read per host and per 100 lanes.
 fn read_records(
     selected: &[(HostId, AttemptId)],
-    window: &Window,
+    window: &Window<'_>,
     call: &mut Call<'_>,
 ) -> Result<Vec<run::AttemptRecord>, Fail> {
     let mut by_host: BTreeMap<HostId, Vec<usize>> = BTreeMap::new();
@@ -584,7 +589,7 @@ fn follow_peer_successors(
 /// dropped. The lookup of those draws on the same window as the first read.
 fn read_newest(
     host: HostId,
-    window: &Window,
+    window: &Window<'_>,
     tracked: &mut watch::Tracked,
     keep: &dyn Fn(&run::AttemptRecord) -> bool,
     call: &mut Call<'_>,
@@ -2562,11 +2567,8 @@ mod tests {
     fn attempt(id: u8) -> AttemptId {
         AttemptId::from_bytes([id; 16])
     }
-    /// What a peer answers: a status record for each target, and an empty
-    /// newest page. Each call first takes `delay`, as a slow transport would.
-    #[allow(clippy::disallowed_methods)]
-    fn answer(action: PeerAction, delay: Duration) -> std::result::Result<PeerResult, Fail> {
-        std::thread::sleep(delay);
+    /// What a peer answers: a status record for each target, and an empty page.
+    fn answer(action: PeerAction) -> std::result::Result<PeerResult, Fail> {
         Ok(PeerResult::RunStatuses {
             data: match action {
                 PeerAction::RunStatuses { targets, .. } => targets
@@ -2579,6 +2581,11 @@ mod tests {
         })
     }
 
+    #[allow(clippy::disallowed_methods)] // Only the origin is sampled; tests advance the clock explicitly.
+    fn fixture_instant() -> Instant {
+        Instant::now()
+    }
+
     #[test]
     fn every_read_of_a_fetch_gets_only_the_time_the_earlier_ones_left() {
         // One host with 101 lanes reads in two chunks, then a second host.
@@ -2587,10 +2594,13 @@ mod tests {
             .collect();
         selected.push((HostId::from_bytes([2; 16]), attempt(102)));
         let mut left = Vec::new();
-        let window = Window::new(Duration::from_millis(900));
+        let time = Cell::new(fixture_instant());
+        let now = || time.get();
+        let window = Window::with_clock(Duration::from_millis(900), &now);
         let records = read_records(&selected, &window, &mut |_, action, budget| {
             left.push(budget);
-            answer(action, Duration::from_millis(250))
+            time.set(time.get() + Duration::from_millis(250));
+            answer(action)
         })
         .expect("three reads fit the budget");
         assert_eq!(records.len(), 102);
@@ -2609,10 +2619,13 @@ mod tests {
             (HostId::from_bytes([3; 16]), attempt(3)),
         ];
         let mut starts = 0;
-        let window = Window::new(Duration::from_millis(100));
+        let time = Cell::new(fixture_instant());
+        let now = || time.get();
+        let window = Window::with_clock(Duration::from_millis(100), &now);
         let failure = read_records(&selected, &window, &mut |_, action, _| {
             starts += 1;
-            answer(action, Duration::from_millis(150))
+            time.set(time.get() + Duration::from_millis(150));
+            answer(action)
         })
         .expect_err("the first read used the whole budget");
         assert_eq!(failure.kind.code(), "PEER_UNAVAILABLE");
@@ -2626,7 +2639,7 @@ mod tests {
         let window = Window::new(Duration::ZERO);
         let records = read_records(&selected, &window, &mut |_, action, _| {
             starts += 1;
-            answer(action, Duration::ZERO)
+            answer(action)
         })
         .expect("the initial read runs");
         assert_eq!((records.len(), starts), (1, 1));
@@ -2648,7 +2661,9 @@ mod tests {
         let keep = |_: &run::AttemptRecord| true;
         // The first read leaves time for the lookup, but only what it left.
         let mut left = Vec::new();
-        let window = Window::new(Duration::from_millis(800));
+        let time = Cell::new(fixture_instant());
+        let now = || time.get();
+        let window = Window::with_clock(Duration::from_millis(800), &now);
         let lanes = read_newest(
             host,
             &window,
@@ -2656,7 +2671,8 @@ mod tests {
             &keep,
             &mut |_, action, budget| {
                 left.push(budget);
-                answer(action, Duration::from_millis(300))
+                time.set(time.get() + Duration::from_millis(300));
+                answer(action)
             },
         )
         .expect("both reads fit");
@@ -2666,7 +2682,7 @@ mod tests {
         // The first read used everything: the lookup must not start, even
         // though a zero remainder would round up to a one-second budget.
         let mut starts = 0;
-        let window = Window::new(Duration::from_millis(100));
+        let window = Window::with_clock(Duration::from_millis(100), &now);
         let failure = read_newest(
             host,
             &window,
@@ -2674,7 +2690,8 @@ mod tests {
             &keep,
             &mut |_, action, _| {
                 starts += 1;
-                answer(action, Duration::from_millis(150))
+                time.set(time.get() + Duration::from_millis(150));
+                answer(action)
             },
         )
         .expect_err("the budget ran out before the lookup");

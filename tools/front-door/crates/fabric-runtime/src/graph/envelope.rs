@@ -19,6 +19,84 @@ const LOOP_PAUSE_TEXT_BYTES: usize = 256;
 const UNKNOWN_USAGE_TEXT_BYTES: usize = 64;
 /// Space for each runtime-owned refusal code, including future causes.
 pub(super) const REFUSAL_CODE_BYTES: usize = 64;
+/// Space for a deferred review node's expanded progress and serialized record.
+/// A prospective expansion is also checked against this reservation.
+const REVIEW_NODE_RESERVE: usize = 64 * 1024;
+const REVIEW_RECORD_RESERVE: usize = 256 * 1024;
+
+fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
+    let templates = node.extra.get("lens_templates").map_or(0, canonical_len);
+    let inherited = canonical_len(&(&node.depends_on, &node.inputs, &node.read_roots));
+    // A custom lens can have a disposition projection or CI evidence larger
+    // than an ordinary review leaf. Reserve those declared additions too.
+    let template_extra = node
+        .extra
+        .get("lens_templates")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|templates| templates.values())
+        .fold(0usize, |total, template| {
+            let dispositions = template
+                .get("dispositions")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| !items.is_empty());
+            let composite = template
+                .get("composite")
+                .is_some_and(|value| !value.is_null());
+            let ci = template.get("condition").filter(|condition| {
+                condition.get("type").and_then(serde_json::Value::as_str) == Some("ci")
+            });
+            let ci_bytes = ci.map_or(0, |condition| {
+                let bytes = condition
+                    .get("failed_checks_max_bytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or_else(ci::default_failed_checks_max_bytes);
+                let count = condition
+                    .get("max_failed_checks")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or_else(ci::default_max_failed_checks)
+                    .min(bytes / 32);
+                bytes
+                    .saturating_mul(2)
+                    .saturating_add(count.saturating_mul(256))
+            });
+            total
+                .saturating_add(if dispositions {
+                    DISPOSITION_FINDINGS_BYTES
+                } else {
+                    0
+                })
+                .saturating_add(if composite {
+                    COMPOSITE_EXCERPT_BYTES
+                } else {
+                    0
+                })
+                .saturating_add(ci_bytes)
+        });
+    // Explicit tiers may provide longer route lists than the two ordinary
+    // read-only retries; each extra attempt has its own bounded progress row.
+    let route_extra = review
+        .lenses
+        .iter()
+        .filter_map(|lens| lens.tier.as_array())
+        .fold(0usize, |total, routes| {
+            total.saturating_add(routes.len().saturating_sub(2).saturating_mul(2_048))
+        });
+    review
+        .max_nodes
+        .saturating_sub(1)
+        .saturating_mul(REVIEW_NODE_RESERVE)
+        .saturating_add(REVIEW_RECORD_RESERVE)
+        .saturating_add(templates.saturating_mul(2))
+        .saturating_add(template_extra)
+        .saturating_add(route_extra)
+        // Explicit lens tiers can carry route lists copied into both the
+        // expansion record and the eventual attempt rows.
+        .saturating_add(canonical_len(review).saturating_mul(2))
+        .saturating_add(inherited.saturating_mul(review.max_nodes).saturating_mul(2))
+}
 
 pub(super) fn reason(
     document: &GraphDocument,
@@ -29,7 +107,7 @@ pub(super) fn reason(
     let bound = checkpoint_bound(document, expansions, extensions, plan);
     (bound > MAX_CHECKPOINT_BYTES as usize).then(|| {
         format!(
-            "graph checkpoint could reach {bound} bytes, over its {MAX_CHECKPOINT_BYTES}-byte limit; use fewer nodes, routes, loop rounds or extensions, or smaller prompts"
+            "graph checkpoint could reach {bound} bytes, over its {MAX_CHECKPOINT_BYTES}-byte limit; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts"
         )
     })
 }
@@ -157,6 +235,13 @@ pub(super) fn checkpoint_bound(
                 loop_rounds.get(node.id.as_str()).copied().unwrap_or(0),
                 admitted,
             )
+            .saturating_add(if admitted {
+                0
+            } else {
+                node.review
+                    .as_ref()
+                    .map_or(0, |review| deferred_review_bound(node, review))
+            })
             .saturating_add(1)
         })
         .chain(fixed)

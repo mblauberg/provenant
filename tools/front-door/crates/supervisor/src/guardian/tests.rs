@@ -163,9 +163,14 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         argv: vec![
             b"/bin/sh".to_vec(),
             b"-c".to_vec(),
-            b"/bin/sleep 2 >/dev/null 2>&1 & echo $! > \"$1\"".to_vec(),
+            b"mkfifo \"$2\" || exit 1; /bin/cat \"$2\" >/dev/null 2>&1 & echo $! > \"$1\"".to_vec(),
             b"fixture".to_vec(),
             child_path.as_os_str().as_bytes().to_vec(),
+            root.path()
+                .join("child.fifo")
+                .as_os_str()
+                .as_bytes()
+                .to_vec(),
         ],
         environment: Vec::new(),
         lane_ports: None,
@@ -220,17 +225,15 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     );
     drop(writer);
     drop(publication);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        if let Some(status) = guardian.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "supervise did not return after ENOENT"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let status = provenant_test_support::wait_for(
+        "guardian exit after ENOENT",
+        Duration::from_secs(10),
+        || guardian.try_wait(),
+        |result| !matches!(result, Ok(None)),
+    )
+    .unwrap()
+    .unwrap()
+    .unwrap();
     assert!(status.success(), "supervise fixture failed: {status}");
     assert!(!attempt_path.join("process-exit.json").exists());
     let child_pid: i64 = std::fs::read_to_string(&child_path)
@@ -663,17 +666,15 @@ fn spawn_missing_attempt_guardian(
 #[cfg(all(feature = "fixture", target_os = "macos"))]
 #[allow(clippy::disallowed_methods)]
 fn wait_for_guardian(guardian: &mut crate::fixture::ChildGuard) -> std::process::ExitStatus {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(status) = guardian.try_wait().unwrap() {
-            return status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "supervise did not return after the attempt directory was removed"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    provenant_test_support::wait_for(
+        "guardian exit after removal",
+        Duration::from_secs(10),
+        || guardian.try_wait(),
+        |result| !matches!(result, Ok(None)),
+    )
+    .unwrap()
+    .unwrap()
+    .unwrap()
 }
 
 #[cfg(all(feature = "fixture", target_os = "macos"))]

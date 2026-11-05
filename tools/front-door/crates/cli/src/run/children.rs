@@ -1628,6 +1628,12 @@ mod tests {
         }
         struct Available;
         impl run::Resources for Available {
+            fn observe_process(
+                &self,
+                pid: i64,
+            ) -> provenant_supervisor::census::ProcessObservation {
+                provenant_supervisor::census::SystemProcessObserver.observe(pid)
+            }
             fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
                 Ok(provenant_os::sys::resources::MemorySample {
                     total_bytes: 1,

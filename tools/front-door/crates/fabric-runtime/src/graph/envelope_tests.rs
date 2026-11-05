@@ -398,7 +398,8 @@ fn worst_case_land_checkpoint_fits_its_bound() {
 fn assert_fits(document: GraphDocument) {
     let plan = planned(&document);
     let checkpoint = filled_checkpoint(&document, &plan);
-    let execution = GraphExecution {review_base: None,
+    let execution = GraphExecution {
+        review_base: None,
         extra: Default::default(),
         integration_base: Some("1".repeat(40).parse().unwrap()),
         directory: format!("/{}", "\u{1}".repeat(4095)).into(),
@@ -488,12 +489,36 @@ fn a_loop_extension_past_the_envelope_pauses_instead_of_growing() {
     assert_eq!(first.unwrap().status, GraphStatus::Paused);
     let mut cancelled_journal = MemoryJournal(journal.0.clone());
     cancelled_journal.0.as_mut().unwrap().cancelled = true;
-    let cancelled = advance_with_budget(&document, &mut owner, &mut cancelled_journal, &limits, &Default::default()).unwrap();
+    let cancelled = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut cancelled_journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(cancelled.status, GraphStatus::Cancelled);
-    let refused = resume_with_budget(&document, &mut owner, &mut cancelled_journal, &limits, &Default::default(), &["loop.revise.rounds=25".into()]).unwrap();
+    let refused = resume_with_budget(
+        &document,
+        &mut owner,
+        &mut cancelled_journal,
+        &limits,
+        &Default::default(),
+        &["loop.revise.rounds=25".into()],
+    )
+    .unwrap();
     assert_eq!(refused.status, GraphStatus::Cancelled);
-    assert!(refused.checkpoint.nodes.iter().all(|node| !matches!(node.state, NodeState::Pending | NodeState::Running)));
-    assert_eq!(cancelled_journal.0.as_ref().unwrap().nodes, refused.checkpoint.nodes);
+    assert!(
+        refused
+            .checkpoint
+            .nodes
+            .iter()
+            .all(|node| !matches!(node.state, NodeState::Pending | NodeState::Running))
+    );
+    assert_eq!(
+        cancelled_journal.0.as_ref().unwrap().nodes,
+        refused.checkpoint.nodes
+    );
     let run = resume_with_budget(
         &document,
         &mut owner,
@@ -624,7 +649,8 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
     let mut journal =
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
-        .bind(GraphExecution {review_base: None,
+        .bind(GraphExecution {
+            review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: base.clone(),
@@ -715,7 +741,8 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
         let mut journal =
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
-            .bind(GraphExecution {review_base: None,
+            .bind(GraphExecution {
+                review_base: None,
                 extra: Default::default(),
                 integration_base: None,
                 directory: base.clone(),
@@ -817,7 +844,8 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
                     node.outputs = Some(ci::outputs(false, Some(ci)));
                 }
             }
-            let execution = GraphExecution {review_base: None,
+            let execution = GraphExecution {
+                review_base: None,
                 extra: Default::default(),
                 integration_base: Some("1".repeat(40).parse().unwrap()),
                 directory: "/fixture".into(),
@@ -835,4 +863,341 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
             assert!(canonical_len(&stored) <= bound, "cap={cap} count={count}");
         }
     }
+}
+
+/// The generated big-batch structure, with fixture-sized prompts, expands
+/// every deferred panel at its configured maximum without growing its bound.
+#[test]
+fn five_and_seven_lane_big_batches_reserve_every_deferred_panel() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../assets/presets/fixtures/big-batch-five-lane-checkpoint.json"
+    ))
+    .unwrap();
+    check_big_batch_panels(serde_json::from_value(fixture.clone()).unwrap());
+    let mut larger = fixture;
+    let lanes = larger["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "lanes")
+        .unwrap();
+    for number in 5..7 {
+        let composite = lanes["composite"].as_object_mut().unwrap();
+        let original = composite["nodes"][0].to_string();
+        let extra = original
+            .replace("lane-l0", &format!("lane-l{number}"))
+            .replace("/repo/w0", &format!("/repo/w{number}"));
+        composite
+            .get_mut("nodes")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::from_str(&extra).unwrap());
+        composite
+            .get_mut("exports")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"node":format!("lane-l{number}"),"outputs":["result","findings"]}));
+    }
+    check_big_batch_panels(serde_json::from_value(larger).unwrap());
+}
+
+fn check_big_batch_panels(document: GraphDocument) {
+    let limits = crate::config::GraphLimits::default();
+    document.admit(&limits).unwrap();
+    let mut expanded = loops::expand(&document, &[], &limits).unwrap();
+    let mut plan = validate_flat_plan(&expanded, &limits).unwrap().0;
+    let reviews: Vec<_> = plan
+        .nodes
+        .iter()
+        .filter(|node| node.review.is_some())
+        .map(|node| node.id.clone())
+        .collect();
+    assert!(reviews.len() >= 5);
+    let mut expansions = Vec::new();
+    for id in reviews {
+        let source = expanded
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap()
+            .clone();
+        let addition = fixture_review_expansion(&source, &"1".repeat(40));
+        plans::validate_review_addition(&expanded, &addition).unwrap();
+        let before = graph_envelope_bound(&document, &expansions, &[], &plan);
+        plans::append(&mut expanded, &addition);
+        expansions.push(addition);
+        plan = validate_flat_plan(&expanded, &plans::generous()).unwrap().0;
+        let after = graph_envelope_bound(&document, &expansions, &[], &plan);
+        assert!(after <= before, "review expansion grew {before} to {after}");
+        assert!(graph_envelope_reason(&document, &expansions, &[], &plan).is_none());
+    }
+}
+
+fn fixture_review_expansion(source: &GraphNode, subject: &str) -> Expansion {
+    let id = source.id.clone();
+    let spec = source.review.as_ref().unwrap();
+    let templates = source
+        .extra
+        .get("lens_templates")
+        .and_then(serde_json::Value::as_object)
+        .unwrap();
+    let root_id = format!("{id}--review");
+    let mut members = Vec::new();
+    for template in templates.values().take(spec.max_nodes - 1) {
+        let mut value = template.clone();
+        let object = value.as_object_mut().unwrap();
+        let local = object
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_owned();
+        object.remove("effort");
+        object.insert("id".into(), json!(format!("{root_id}--{local}")));
+        object.insert(
+            "routes".into(),
+            json!([{"alias":"senior"}, {"alias":"senior"}]),
+        );
+        object.insert("depends_on".into(), json!(source.depends_on));
+        if !source.inputs.is_empty() {
+            object.insert("inputs".into(), json!(source.inputs));
+        }
+        if !source.read_roots.is_empty() {
+            object.insert("read_roots".into(), json!(source.read_roots));
+        }
+        object.insert(
+            "source".into(),
+            json!({"type":"commit","commit":subject.to_owned()}),
+        );
+        members.push(serde_json::from_value::<GraphNode>(value).unwrap());
+    }
+    let exports: Vec<_> = members
+        .iter()
+        .map(|member| json!({"node":member.id,"outputs":["result","findings"]}))
+        .collect();
+    let minimum = spec.min_successful.map(|n| {
+        if n == 0 {
+            members.len().saturating_sub(1).max(1)
+        } else {
+            n
+        }
+    });
+    let root: GraphNode = serde_json::from_value(json!({"id":root_id,"kind":"composite","access":"read_only","depends_on":source.depends_on,"composite":{"min_successful":minimum,"nodes":[],"exports":exports}})).unwrap();
+    let mut nodes = vec![root];
+    nodes.extend(members);
+    Expansion {
+        review: Some(ReviewResolution {
+            subject: subject.to_owned().parse().unwrap(),
+            base: subject.to_owned().parse().unwrap(),
+            measured_size: "large".into(),
+            shape: "fixture".into(),
+            source: "fixture".into(),
+        }),
+        extra: Default::default(),
+        source: id,
+        continuation: false,
+        nodes,
+        patterns: vec![],
+    }
+}
+
+#[test]
+fn oversized_deferred_review_is_refused_before_admission() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 2, "graph_id": "oversized-review", "nodes": [{
+            "id": "review", "kind": "plan", "access": "read_only",
+            "prompt": "review", "source": {"type":"commit", "commit":"1".repeat(40)},
+            "review": {"max_nodes": MAX_CHECKPOINT_BYTES as usize / FINDINGS_BYTES + 1}
+        }]
+    }))
+    .unwrap();
+    let limits = crate::config::GraphLimits {
+        nodes: MAX_CHECKPOINT_BYTES as usize / FINDINGS_BYTES + 10,
+        ..Default::default()
+    };
+    let reason = document.admit(&limits).unwrap_err();
+    assert!(reason.contains("graph checkpoint could reach"), "{reason}");
+    assert!(reason.contains("split the graph"), "{reason}");
+}
+
+#[test]
+fn disposition_checkpoint_fits_its_reduced_bound() {
+    let mut document = mixed();
+    document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "review")
+        .unwrap()
+        .dispositions = vec!["accepted".into()];
+    let plan = planned(&document);
+    let mut checkpoint = filled_checkpoint(&document, &plan);
+    let index = plan
+        .nodes
+        .iter()
+        .position(|node| node.id == "review")
+        .unwrap();
+    let finding = Finding {
+        extra: Default::default(),
+        id: "F".into(),
+        severity: "high".into(),
+        file: worst(OUTPUT_FIELD_BYTES),
+        line: Some(u64::MAX),
+        summary: String::new(),
+        status: "open".into(),
+        disposition: Some("accepted".into()),
+        reason: Some("ok".into()),
+    };
+    let outputs = checkpoint.nodes[index].outputs.as_mut().unwrap();
+    outputs.findings.clear();
+    loop {
+        outputs.findings.push(finding.clone());
+        if canonical_len(&outputs.findings) > DISPOSITION_FINDINGS_BYTES - 512 {
+            outputs.findings.pop();
+            break;
+        }
+    }
+    let bound = graph_envelope_bound(&document, &[], &checkpoint.extensions, &plan);
+    let execution = GraphExecution {
+        review_base: None,
+        extra: Default::default(),
+        integration_base: Some("1".repeat(40).parse().unwrap()),
+        directory: format!("/{}", "\u{1}".repeat(4095)).into(),
+        document: document.clone(),
+    };
+    let size = |checkpoint: &GraphCheckpoint| {
+        canonical_len(&StoredCheckpoint {
+            extra: Default::default(),
+            schema_version: 1,
+            digest: "d".repeat(80),
+            checkpoint: checkpoint.clone(),
+            execution: execution.clone(),
+        })
+    };
+    assert!(size(&checkpoint) <= bound);
+    let outputs = checkpoint.nodes[index].outputs.as_mut().unwrap();
+    outputs.findings.clear();
+    outputs.extra.insert(
+        "_compact_disposition_findings".into(),
+        json!("\u{1}".repeat(16 * 1024)),
+    );
+    assert!(size(&checkpoint) <= bound);
+}
+
+#[test]
+fn five_lane_big_batch_expands_through_runtime() {
+    #[derive(Default)]
+    struct FixtureOwner {
+        launches: usize,
+        deliveries: Vec<Option<provenant_records::run::DeliveryMode>>,
+    }
+    impl AttemptOwner for FixtureOwner {
+        type Error = std::convert::Infallible;
+        fn actor(&self) -> String {
+            "fixture".into()
+        }
+        fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
+            Ok(Some("1".repeat(40)))
+        }
+        fn resolve_review(
+            &mut self,
+            node: &GraphNode,
+            subject: &str,
+        ) -> Result<Expansion, ReviewResolveError> {
+            Ok(fixture_review_expansion(node, subject))
+        }
+        fn observe_or_start(
+            &mut self,
+            _key: &AttemptKey,
+            _node: NodeInput<'_>,
+            _route: &GraphRoute,
+            access: AccessMode,
+            _worktree: Option<&str>,
+            replay: Replay<'_>,
+        ) -> Result<AttemptObservation, Self::Error> {
+            self.launches += 1;
+            if access == AccessMode::WorktreeWrite {
+                self.deliveries.push(replay.delivery.cloned());
+            }
+            let mut observation =
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+            if let AttemptObservation::Terminal {
+                attempt_ref,
+                branch,
+                commit,
+                ..
+            } = &mut observation
+            {
+                *attempt_ref = Some(format!("h/{}", self.launches));
+                *branch = Some("batch/graph".into());
+                *commit = Some("1".repeat(40));
+            }
+            Ok(observation)
+        }
+    }
+    let document: GraphDocument = serde_json::from_str(include_str!(
+        "../../../../assets/presets/fixtures/big-batch-five-lane-checkpoint.json"
+    ))
+    .unwrap();
+    document.admit(&Default::default()).unwrap();
+    let mut owner = FixtureOwner::default();
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(
+        run.status,
+        GraphStatus::Complete,
+        "{:?}",
+        run.checkpoint.pause_reason
+    );
+    assert!(run.checkpoint.successful());
+    let errors: Vec<_> = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter_map(|node| node.advance_error.as_ref().map(|error| (&node.id, error)))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(
+        run.checkpoint
+            .expansions
+            .iter()
+            .filter(|expansion| expansion.review.is_some())
+            .count()
+            >= 5
+    );
+    assert!(owner.deliveries.len() >= 5);
+    assert!(owner.deliveries.iter().all(|delivery| matches!(
+        delivery,
+        Some(provenant_records::run::DeliveryMode::Integrate(_))
+    )));
+}
+
+#[test]
+fn review_reservation_includes_declared_large_template_outputs() {
+    let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../assets/presets/fixtures/big-batch-five-lane-checkpoint.json"
+    ))
+    .unwrap();
+    fn add_ci_limit(value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(templates) = map
+                    .get_mut("lens_templates")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    let template = templates.values_mut().next().unwrap();
+                    template["condition"] =
+                        json!({"type":"ci", "failed_checks_max_bytes": MAX_CHECKPOINT_BYTES});
+                    return true;
+                }
+                map.values_mut().any(add_ci_limit)
+            }
+            serde_json::Value::Array(items) => items.iter_mut().any(add_ci_limit),
+            _ => false,
+        }
+    }
+    assert!(add_ci_limit(&mut fixture));
+    let document: GraphDocument = serde_json::from_value(fixture).unwrap();
+    let reason = document.admit(&Default::default()).unwrap_err();
+    assert!(reason.contains("graph checkpoint could reach"), "{reason}");
+    assert!(reason.contains("split the graph"), "{reason}");
 }

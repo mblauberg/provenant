@@ -11,6 +11,99 @@ use provenant_supervisor::custody::{
 use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+/// Synthetic admission facts, including a process table independent of the host.
+pub(super) struct HostFacts {
+    pub(super) available: u64,
+    pub(super) total: u64,
+    pub(super) process_used: u64,
+    pub(super) disk: u64,
+    pub(super) process_limit: u64,
+    pub(super) identity: Option<provenant_supervisor::census::ProcessIdentity>,
+    observations: std::cell::Cell<usize>,
+}
+impl HostFacts {
+    pub(super) fn new(available: u64) -> Self {
+        Self {
+            available,
+            total: 100,
+            process_used: 1,
+            disk: u64::MAX,
+            process_limit: 100,
+            identity: Some(Self::identity()),
+            observations: std::cell::Cell::new(0),
+        }
+    }
+    pub(super) fn observations(&self) -> usize {
+        self.observations.get()
+    }
+    fn identity() -> provenant_supervisor::census::ProcessIdentity {
+        provenant_supervisor::census::ProcessIdentity {
+            boot: "test-boot".into(),
+            pid: 42,
+            native_start: 1,
+            group_id: 42,
+            session_id: 42,
+        }
+    }
+}
+impl Resources for HostFacts {
+    fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
+        Ok(provenant_os::sys::resources::MemorySample {
+            available_bytes: self.available,
+            total_bytes: self.total,
+        })
+    }
+    fn disk(&self, _: &provenant_os::fs::Directory) -> std::io::Result<u64> {
+        Ok(self.disk)
+    }
+    fn process_budget(&self) -> std::io::Result<provenant_os::sys::resources::ProcessBudget> {
+        Ok(provenant_os::sys::resources::ProcessBudget {
+            used: self.process_used,
+            limit: self.process_limit,
+        })
+    }
+    fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+        self.identity.clone()
+    }
+    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+        use provenant_supervisor::census::{ProcessFact, ProcessObservation};
+        self.observations.set(self.observations.get() + 1);
+        if let Some(identity) = self
+            .identity
+            .as_ref()
+            .filter(|identity| pid == identity.pid)
+        {
+            ProcessObservation::Present(ProcessFact {
+                identity: identity.clone(),
+                parent_pid: 1,
+                zombie: false,
+                cpu_micros: None,
+                command: None,
+            })
+        } else {
+            ProcessObservation::Absent
+        }
+    }
+}
+
+#[test]
+fn host_facts_can_override_resource_and_process_observations() {
+    let mut facts = HostFacts::new(23);
+    facts.total = 80;
+    facts.process_used = 7;
+    facts.process_limit = 9;
+    facts.identity = None;
+    let memory = facts.memory().expect("fixture memory");
+    assert_eq!((memory.available_bytes, memory.total_bytes), (23, 80));
+    let budget = facts.process_budget().expect("fixture budget");
+    assert_eq!((budget.used, budget.limit), (7, 9));
+    assert!(facts.guardian_identity().is_none());
+    assert!(matches!(
+        facts.observe_process(42),
+        provenant_supervisor::census::ProcessObservation::Absent
+    ));
+}
+
 #[test]
 fn command_identity_is_verified_without_manufacturing_model_evidence() {
     let route = RouteRecord {

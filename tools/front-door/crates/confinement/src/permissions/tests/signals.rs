@@ -206,19 +206,18 @@ test "$notified" = yes
                 executor.execute(options)
             });
             let _stop = StopPeer(&peer_stop);
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            let peer_pid = loop {
-                if let Ok(text) = std::fs::read_to_string(&peer_pid_file)
-                    && let Ok(pid) = text.parse::<u32>()
-                {
-                    break pid.to_string();
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "peer sandbox did not start"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            };
+            let peer_pid = provenant_test_support::wait_for(
+                "peer sandbox PID",
+                Duration::from_secs(2),
+                || {
+                    std::fs::read_to_string(&peer_pid_file)
+                        .ok()
+                        .and_then(|text| text.parse::<u32>().ok())
+                },
+                Option::is_some,
+            )?
+            .ok_or("missing peer PID")?
+            .to_string();
             let denied_peer = run(&source, "kill -CONT \"$1\"", &peer_pid)?;
             assert!(
                 denied_probe(&denied_peer),

@@ -70,19 +70,42 @@ pub use plans::{
 };
 
 // Reserve the existing family-separation envelope for sibling groups too.
-fn graph_envelope_reason(
-    document: &GraphDocument,
-    expansions: &[Expansion],
-    extensions: &[String],
-    plan: &PlannedGraph,
-) -> Option<String> {
+fn bounded_envelope_plan(plan: &PlannedGraph) -> PlannedGraph {
     let mut bounded = plan.clone();
     for node in &mut bounded.nodes {
         if node.family_group.is_some() && node.distinct_from.is_none() {
             node.distinct_from = Some(DistinctFrom::Dependencies);
         }
     }
-    envelope::reason(document, expansions, extensions, &bounded)
+    bounded
+}
+
+fn graph_envelope_reason(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+) -> Option<String> {
+    envelope::reason(
+        document,
+        expansions,
+        extensions,
+        &bounded_envelope_plan(plan),
+    )
+}
+
+fn graph_envelope_bound(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+) -> usize {
+    envelope::checkpoint_bound(
+        document,
+        expansions,
+        extensions,
+        &bounded_envelope_plan(plan),
+    )
 }
 
 pub const MAX_CANCEL_REASON_BYTES: usize = 256;
@@ -100,9 +123,9 @@ const COMPOSITE_EXCERPT_BYTES: usize = 65_536;
 /// The raw findings block is at most 8 KiB of JSON; canonical form adds at
 /// most a null `line` per finding.
 const FINDINGS_BYTES: usize = 9_216;
-// Each disposition can inherit an entire bounded upstream entry and supply
-// independently bounded, JSON-escaped fields of its own.
-const DISPOSITION_FINDINGS_BYTES: usize = 32 * (FINDINGS_BYTES + 7 * (6 * 1024 + 2) + 512);
+// Oversized disposition projections retain their bounded findings block and
+// reconstruct inherited copies from upstream checkpoint inputs.
+const DISPOSITION_FINDINGS_BYTES: usize = 128 * 1024;
 const WARNING_BYTES: usize = 512;
 /// Output parsing, writer handoff and an empty review range can each add warnings.
 const MAX_WARNINGS: usize = 5;
@@ -1533,6 +1556,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         error.to_string()
                     })
                     .and_then(|mut addition| {
+                        if let Some(review) = &mut addition.review {
+                            let source = bounded(&review.source, MAX_ADVANCE_ERROR_BYTES - 32);
+                            if source.len() < review.source.len() {
+                                review.source = format!("{source} [truncated]");
+                            }
+                        }
                         for child in &mut addition.nodes {
                             if child.composite.is_none() {
                                 child.source = Some(SourceBinding::Commit {
@@ -1562,6 +1591,23 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         {
                             return Err("review expansion subject or source mismatch".into());
                         }
+                        // Flat validation otherwise reports only `node id`.
+                        let mut ids: std::collections::BTreeSet<&str> =
+                            expanded.nodes.iter().map(|item| item.id.as_str()).collect();
+                        for child in &addition.nodes {
+                            if !valid_identifier(&child.id) {
+                                return Err(format!(
+                                    "expanded review node id {:?} is invalid; use at most 64 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or lens name",
+                                    bounded(&child.id, 256)
+                                ));
+                            }
+                            if !ids.insert(child.id.as_str()) {
+                                return Err(format!(
+                                    "expanded review node id {:?} is duplicated; use distinct composite and lens names",
+                                    bounded(&child.id, 256)
+                                ));
+                            }
+                        }
                         let mut preview = expanded.clone();
                         plans::append(&mut preview, &addition);
                         let (next_plan, next_positions) =
@@ -1580,6 +1626,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             &next_plan,
                         ) {
                             return Err(reason);
+                        }
+                        let before = graph_envelope_bound(document, &checkpoint.expansions, &checkpoint.extensions, &plan);
+                        let after = graph_envelope_bound(document, &additions, &checkpoint.extensions, &next_plan);
+                        if after > before {
+                            return Err(format!(
+                                "review {} would project {after} checkpoint bytes, exceeding its reserved allowance of {before} bytes; split the graph into smaller batches or use a smaller review",
+                                node.id
+                            ));
                         }
                         Ok((addition, preview, next_plan, next_positions))
                     });
@@ -2396,6 +2450,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .warnings
                                     .push("equal_base_and_head: review range is empty".into());
                             }
+                            outputs.warnings.truncate(MAX_WARNINGS);
                             if outcome == AttemptOutcome::UsageLimited {
                                 outputs
                                     .warnings
@@ -2490,6 +2545,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 progress.advance_error =
                                     Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
                             }
+                            compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
                             progress.outputs = Some(outputs);
                             match outcome {
                                 AttemptOutcome::Succeeded => {
