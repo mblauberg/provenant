@@ -2311,7 +2311,7 @@ mod writer_recovery_tests {
                 "-p",
                 &launch.base.to_string(),
                 "-m",
-                "legacy private commit",
+                "private commit",
             ])?;
             private_git(&["update-ref", launch.branch.as_str(), &head])?;
             let (slot, binding) = launch.custody.take().ok_or("writer custody")?;
@@ -2347,28 +2347,26 @@ mod writer_recovery_tests {
                     serde_json::to_vec(&reservation)?,
                 )?;
             }
-            if mode.starts_with("no_summary_terminal") {
-                store.commit_lost(
-                    scope,
-                    "launch interrupted: provider never spawned; private evidence retained",
-                    &call,
-                )?;
-                let mut spawned = false;
-                store.queue_reconcile_with(run.run_id, &call, |argv, _| {
-                    assert_eq!(argv[1..3], ["internal", "settle"]);
-                    spawned = true;
-                    Ok(())
-                })?;
-                assert!(spawned, "{mode}: reconcile must queue recovery");
-                let queued = store.run_dir(run.run_id, false)?;
-                assert!(
-                    crate::artifacts::read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
-                        .is_some(),
-                    "{mode}: reconcile must queue recovery"
-                );
-                if mode == "no_summary_terminal_other_generation" {
-                    continue;
-                }
+            store.commit_lost(
+                scope,
+                "launch interrupted: provider never spawned; private evidence retained",
+                &call,
+            )?;
+            let mut spawned = false;
+            store.queue_reconcile_with(run.run_id, &call, |argv, _| {
+                assert_eq!(argv[1..3], ["internal", "settle"]);
+                spawned = true;
+                Ok(())
+            })?;
+            assert!(spawned, "{mode}: reconcile must queue recovery");
+            let queued = store.run_dir(run.run_id, false)?;
+            assert!(
+                crate::artifacts::read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
+                    .is_some(),
+                "{mode}: reconcile must queue recovery"
+            );
+            if mode == "no_summary_terminal_other_generation" {
+                continue;
             }
             let found = store.reconcile_with_observer(
                 run.run_id,
@@ -2401,27 +2399,25 @@ mod writer_recovery_tests {
             assert!(store.writer_fence_listing()?.issues.is_empty());
             assert!(!slot_path.join("reservation.json").exists());
             assert!(modern.join("settlement.json").is_file());
-            if mode.starts_with("no_summary") {
-                assert_eq!(
-                    private_git(&["rev-parse", "HEAD"])?,
-                    head,
-                    "unlaunched private head retained"
-                );
-                store.gc_provider_state(
-                    &Directory::open_anchor(execution.state_root.as_path())?,
-                    7,
-                    clock
-                        .wall_now()?
-                        .checked_add(provenant_core::DurationMicros::from_seconds(2 * 86400)?)?,
-                    false,
-                    &call,
-                )?;
-                assert_eq!(
-                    private_git(&["rev-parse", "HEAD"])?,
-                    head,
-                    "private head retained after GC eligibility"
-                );
-            }
+            assert_eq!(
+                private_git(&["rev-parse", "HEAD"])?,
+                head,
+                "unlaunched private head retained"
+            );
+            store.gc_provider_state(
+                &Directory::open_anchor(execution.state_root.as_path())?,
+                7,
+                clock
+                    .wall_now()?
+                    .checked_add(provenant_core::DurationMicros::from_seconds(2 * 86400)?)?,
+                false,
+                &call,
+            )?;
+            assert_eq!(
+                private_git(&["rev-parse", "HEAD"])?,
+                head,
+                "private head retained after GC eligibility"
+            );
         }
         Ok(())
     }
