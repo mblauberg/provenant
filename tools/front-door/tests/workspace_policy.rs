@@ -1219,7 +1219,7 @@ fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
     let literal = format!(r#""(?:{names})""#);
     let harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*\s*\.\s*spec\s*\(\s*\)\s*\.\s*name";
     regex::Regex::new(&format!(
-        r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness})|(?:{literal}|{harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*=>|matches!\s*\([^,]+,\s*(?:{literal}|{harness})|\.\s*(?:eq|ne)\s*\(\s*(?:{literal}|{harness}))"
+        r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness})|(?:{literal}|{harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*(?:\||=>)|matches!\s*\([^,]+,[^;{{}}\n]*(?:{literal}|{harness})|\.\s*(?:eq|ne)\s*\(\s*(?:{literal}|{harness}))"
     ))
 }
 
@@ -1232,6 +1232,9 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     }
     assert!(comparison.is_match("adapter == Harness::Codex.spec().name"));
     assert!(comparison.is_match("matches!(adapter, \"codex\")"));
+    assert!(comparison.is_match("matches!(adapter, Some(\"codex\"))"));
+    assert!(comparison.is_match("matches!(adapter, None | Some(\"codex\"))"));
+    assert!(comparison.is_match("\"codex\" | other => action()"));
     assert!(comparison.is_match("adapter.eq(\"codex\")"));
     assert!(comparison.is_match("Harness::Agy.spec().name != adapter"));
     assert!(!comparison.is_match("default_value = Harness::Claude.spec().name"));
