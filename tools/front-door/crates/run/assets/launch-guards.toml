@@ -97,7 +97,7 @@ reason = "Stored prompt, policy, provider preparation and handoff can refuse; en
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"
 boundary = "authority"
-reason = "Read-only execution cannot enable unconfined extensions or inherited hooks that exceed its selected policy."
+reason = "Read-only execution cannot enable unconfined extensions or inherited hooks that exceed its selected policy; requested nested confinement cannot be claimed when unsupported."
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"
@@ -107,7 +107,7 @@ reason = "Secret roots and provider-private state must not overlap grants that e
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"
 boundary = "unclassified"
-reason = "Nested confinement, invalid path shapes and remaining overlapping roots need classification or a tolerant fallback."
+reason = "Invalid path shapes and remaining overlapping roots need classification or a tolerant fallback."
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#compile_sbpl"
@@ -121,8 +121,13 @@ reason = "Credential, secret and private-state exclusions must hold after anchor
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "authority"
+reason = "The backend cannot claim a requested nested confinement policy that it cannot enforce."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#compile_sbpl"
 boundary = "unclassified"
-reason = "Remaining missing anchors, path and unsupported nested confinement failures need classification or a tolerant fallback."
+reason = "Remaining missing anchors and path failures need classification or a tolerant fallback."
 
 [[guard]]
 site = "confinement/src/permissions/probe.rs#system_backend"
