@@ -760,10 +760,10 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
     {
         format!(
-            "; after correcting the cause, cancel with `provenant fabric graph cancel {graph_id}` and rerun with a new graph_id"
+            "; after correcting the cause, cancel with `provenant fabric graph cancel {graph_id}` and rerun with a new graph_id (for a preset, use `provenant run --preset <name> --fresh`)"
         )
     } else {
-        "; inspect and cancel the graph before rerunning with a new graph_id".into()
+        "; inspect and cancel the graph before rerunning with a new graph_id (for a preset, use `provenant run --preset <name> --fresh`)".into()
     };
     progress.advance_error = Some(bounded(
         &format!(

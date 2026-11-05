@@ -7344,6 +7344,7 @@ fn a_permanent_refusal_blocks_the_node_at_once_with_reason_and_remedy() {
     assert!(reason.contains("invalid input"));
     assert!(reason.contains("provenant fabric graph cancel g-test"));
     assert!(reason.contains("new graph_id"));
+    assert!(reason.contains("provenant run --preset <name> --fresh"));
     assert_eq!(run.checkpoint.wake_at, None);
 
     // The refusal is durable: the next advance never relaunches the node.

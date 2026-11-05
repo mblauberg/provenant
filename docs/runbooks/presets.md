@@ -434,7 +434,9 @@ still runs.
 `--fresh` makes a preset run a new graph even when its inputs are unchanged,
 for example to rerun after a cancel. A plain rerun of the same inputs resolves
 to the same graph, so it resumes or replays; `--fresh` adds a one-off nonce to
-the graph identity. It requires `--preset`.
+the graph identity. It requires `--preset`. After correcting a launch failure,
+cancel the blocked graph and use `provenant run --preset <name> --fresh` to start
+another.
 
 Every `review-council` lens emits a fenced `findings` block before its single
 verdict line. The block uses `schema_version: 1`, a `findings` array, and at
