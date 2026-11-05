@@ -104,7 +104,7 @@ pub fn write_run_summary(
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
-    let value = serde_json::json!({"shadow": shadow, "outcomes": report.outcomes, "receipts": report.receipts, "warnings": report.warnings, "local_follow_up": report.local_steps});
+    let value = serde_json::json!({"shadow": shadow, "outcomes": report.outcomes, "receipts": report.receipts, "warnings": report.warnings, "head_moves": report.head_moves, "local_follow_up": report.local_steps});
     let bytes = serde_json::to_vec_pretty(&value).map_err(|e| failed("encode run summary", e))?;
     atomic_write(&receipt_dir(state).join(name), &bytes)
 }
@@ -268,6 +268,7 @@ pub(crate) mod tests {
             cost: CostEstimate::Unknown { reason: "x".into() },
             alarms: vec![],
             shadow,
+            head_moves: BTreeMap::new(),
         }
     }
     pub(crate) fn attempt(target: &str, commit: &str) -> PendingAttempt {
@@ -283,7 +284,10 @@ pub(crate) mod tests {
                 reason: "test".into(),
             },
             cost: CostEstimate::Known { micros: 1 },
+            head_moves: Default::default(),
             settled: None,
+            dispatched: None,
+            started_at: None,
         }
     }
 
@@ -335,7 +339,15 @@ pub(crate) mod tests {
     #[test]
     fn receipt_round_trips_with_shadow_flag_and_mapping() -> Result<(), LandingError> {
         let dir = tempfile::tempdir().map_err(|e| failed("tmp", e))?;
-        let real = receipt("c1", false);
+        let mut real = receipt("c1", false);
+        real.head_moves.insert(
+            1,
+            super::super::head_move::HeadMove::C {
+                reviewed_head: "old".into(),
+                reviewed_base: None,
+                reason: "approval-time base unknown".into(),
+            },
+        );
         let shadow = receipt("c1", true);
         write_receipt(dir.path(), &real)?;
         write_receipt(dir.path(), &shadow)?;

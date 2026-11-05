@@ -14,10 +14,12 @@ pub struct FakeForge {
     pub shared_target: Option<std::rc::Rc<std::cell::RefCell<String>>>,
     pub move_after_merge: Option<(u64, String)>,
     pub pull_requests: BTreeMap<u64, PullRequestInfo>,
+    pub stacks: BTreeMap<u64, Vec<StackMember>>,
     pub after_wait_reads: Option<WaitReads>,
     pub heads: BTreeMap<u64, String>,
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
+    pub latest_reviews: BTreeMap<u64, super::head_move::ReviewedHead>,
     pub check_runs: BTreeMap<String, Vec<GateEvidence>>,
     pub check_timeouts: Vec<std::time::Duration>,
     pub labels: BTreeMap<u64, Vec<String>>,
@@ -34,9 +36,16 @@ pub struct FakeForge {
     pub valid_merge_ids: bool,
     pub merges: Vec<(u64, String, MergeMethod)>,
     pub merge_attempts: Vec<u64>,
+    pub stack_merge_attempts: Vec<u64>,
     pub reverts: Vec<(u64, String, String, String)>,
 }
 impl Forge for FakeForge {
+    fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError> {
+        self.stacks
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| LandingError::Failed("missing stack".into()))
+    }
     fn repository_identity(&mut self) -> Result<String, LandingError> {
         Ok("fake-repository".into())
     }
@@ -76,6 +85,13 @@ impl Forge for FakeForge {
             .get(&(number, head.into()))
             .cloned()
             .unwrap_or_default())
+    }
+    fn latest_review(
+        &mut self,
+        number: u64,
+        _author: &str,
+    ) -> Result<Option<super::head_move::ReviewedHead>, LandingError> {
+        Ok(self.latest_reviews.get(&number).cloned())
     }
     #[allow(clippy::disallowed_methods, reason = "simulate a slow forge in tests")]
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
@@ -138,6 +154,36 @@ impl Forge for FakeForge {
         }
         Ok(landed)
     }
+    fn merge_stack(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError> {
+        self.stack_merge_attempts.push(number);
+        let result = self.merge(number, head, method);
+        if let Some(stack) = self
+            .pull_requests
+            .get(&number)
+            .and_then(|pr| pr.stack.clone())
+            && self
+                .pull_requests
+                .get(&number)
+                .is_some_and(|pr| pr.state == PullRequestState::Merged)
+            && let Some(members) = self.stacks.get_mut(&stack.number)
+            && let Some(position) = members.iter().position(|member| member.number == number)
+        {
+            members[position].state = PullRequestState::Merged;
+            if let Some(upper) = members[position + 1..]
+                .iter()
+                .find(|member| member.state == PullRequestState::Open)
+                && let Some(pr) = self.pull_requests.get_mut(&upper.number)
+            {
+                pr.base_branch = stack.base_branch;
+            }
+        }
+        result
+    }
     fn may_push_directly(&mut self, _branch: &str) -> Result<bool, LandingError> {
         Ok(self.direct_push)
     }
@@ -171,6 +217,7 @@ pub struct FakeRepo {
     pub refs: BTreeMap<String, String>,
     pub trees: BTreeMap<String, String>,
     pub parents: BTreeMap<String, Vec<String>>,
+    pub review_deltas: BTreeMap<(String, String), DeltaStats>,
     pub pushes: Vec<(String, String, Option<String>)>,
     pub push_attempts: Vec<String>,
     pub pending_dir_to_observe: Option<std::path::PathBuf>,
@@ -307,6 +354,18 @@ impl Repo for FakeRepo {
             .cloned()
             .ok_or_else(|| LandingError::Failed("missing tree".into()))
     }
+    fn parents(&mut self, commit: &str) -> Result<Vec<String>, LandingError> {
+        self.parents
+            .get(commit)
+            .cloned()
+            .ok_or_else(|| LandingError::Failed("missing parents".into()))
+    }
+    fn review_delta(&mut self, old: &str, new: &str) -> Result<DeltaStats, LandingError> {
+        self.review_deltas
+            .get(&(old.into(), new.into()))
+            .cloned()
+            .ok_or_else(|| LandingError::Failed("missing delta".into()))
+    }
 }
 #[derive(Default)]
 pub struct FakeGate {
@@ -423,6 +482,7 @@ mod tests {
                 author: "author".into(),
                 state: PullRequestState::Open,
                 merged_commit: None,
+                stack: None,
             },
         );
         assert!(forge.merge(7, "head", MergeMethod::Merge).is_err());

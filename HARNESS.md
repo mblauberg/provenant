@@ -173,7 +173,7 @@ family, lens, scope, unavailable legs, reasons, evidence, expiry and substitutio
 Use distinct
 actors in fresh contexts; a repeat reviewer never adds to the count. If a
 required family is unavailable, substitute an independent same-family reviewer
-through a different lens without reducing the count. Counted reviewers at
+for the same lens without reducing the count. Counted reviewers at
 `substantial` and above meet or exceed the highest author tier. Unknown
 provenance leaves coverage incomplete. Evidence decides claims, not votes.
 
@@ -195,8 +195,10 @@ exact-head landing gates in the meantime:
 - C: all other moves get a full re-plan; expanding risk or scope also requires
   re-planning. Candidate CI covers the landing head in every class.
 
-During shadowing, record the classification and compare it with a full review;
-do not use A or B to bypass current exact-head requirements.
+During shadowing, the landing report and receipt record the classification and
+available proof; an approval-time base that was not recorded remains unknown.
+Compare the classification with a full review; do not use A or B to bypass
+current exact-head requirements.
 
 A writer distinct from the reviewers repairs accepted findings. Re-review the delta through the
 lenses that raised them, checking closure and relevant tests. After three repair

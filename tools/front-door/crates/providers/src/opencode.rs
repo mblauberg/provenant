@@ -701,7 +701,12 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         // OpenCode emits completed text parts, but can drop the final
         // step_finish while reconciling at idle. Success still requires exit 0
         // and no errors in StreamState::finish.
-        Event::Text { session, part } => vec![E::Session(session), E::Text(part.text), E::Terminal],
+        Event::Text { session, part } => vec![
+            E::Session(session),
+            E::MessageStart,
+            E::Text(part.text),
+            E::Terminal,
+        ],
         Event::StepFinish { session, part } => {
             let mut events = vec![E::Session(session)];
             if part.reason == "stop" {

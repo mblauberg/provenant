@@ -33,6 +33,14 @@ fn rig() -> Result<TestRig> {
     )?;
     Ok(rig)
 }
+#[path = "support/rest_calls.rs"]
+mod rest_calls;
+use rest_calls::rest_only;
+fn assert_rest_only(rig: &TestRig) -> Result {
+    let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    assert!(!calls.is_empty() && rest_only(&calls), "{calls}");
+    Ok(())
+}
 fn merge(rig: &TestRig) -> Result<provenant_os::exec::ExecOutcome> {
     rig.command(&["land", "1668", "--head", HEAD, "--json"])
 }
@@ -130,6 +138,7 @@ fn land_reports_a_queued_merge_as_pending_with_its_own_exit_code() -> Result {
     assert_eq!(report["status"], "pending", "{report}");
     assert_eq!(report["data"]["result"], "pending");
     assert_eq!(report["data"]["merged"], false);
+    assert_rest_only(&rig)?;
     Ok(())
 }
 
@@ -207,6 +216,7 @@ fn land_retries_a_rate_limited_merge() -> Result {
     assert_eq!(code(&output), 0, "{report}");
     assert_eq!(report["data"]["merged"], true, "{report}");
     assert_eq!(merge_calls(&rig)?, 2);
+    assert_rest_only(&rig)?;
     Ok(())
 }
 
@@ -227,6 +237,7 @@ fn land_reports_reset_and_exact_retry_when_merge_rate_limit_exhausts_budget() ->
     assert_eq!(report["data"]["merged"], false, "{report}");
     assert_eq!(report["data"]["steps"], serde_json::json!([]));
     assert!(!rig.project.join("merged").exists());
+    assert_rest_only(&rig)?;
     Ok(())
 }
 
@@ -467,6 +478,7 @@ fn land_plain_singleton_uses_batch_driver() -> Result {
         "{calls}"
     );
     assert!(!rig.project.join("merge-args").exists());
+    assert_rest_only(&rig)?;
     Ok(())
 }
 
@@ -575,7 +587,15 @@ fn land_guards_head_and_uses_rest_merge() -> Result {
         assert!(args.contains("merge_method=merge"), "{args}");
         assert!(!args.contains("author-email"), "{args}");
         assert!(!rig.project.join("watched").exists());
+        assert_rest_only(&rig)?;
+        let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+        assert!(calls.contains("X-GitHub-Api-Version:2026-03-10"), "{calls}");
     }
+    assert!(!rest_only("pr list --head branch"));
+    assert!(!rest_only("api graphql -f query=x"));
+    assert!(!rest_only(
+        "api repos/{owner}/{repo}/pulls -f query=x graphql"
+    ));
     Ok(())
 }
 
@@ -841,7 +861,9 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             .open("gh-calls")?,
         "{call}"
     )?;
-    let normalised = call.replace("api --include ", "api ");
+    let normalised = call
+        .replace("api --include ", "api ")
+        .replace(" -H X-GitHub-Api-Version:2026-03-10", "");
     match normalised.as_str() {
         "api repos/{owner}/{repo}" => {
             io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","owner":{"login":"owner"}}"#)?;
