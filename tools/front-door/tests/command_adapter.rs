@@ -179,6 +179,54 @@ fn review_preset_launches_read_only_from_detached_head() -> Result {
     assert_eq!(lens["outputs"]["verdict"], "VERDICT: PASS", "{value}");
     let branch = rig.execute(&git, &["symbolic-ref", "-q", "HEAD"], None)?;
     assert_ne!(code(&branch), 0, "review must leave HEAD detached");
+
+    let equal = rig.command(&[
+        "run",
+        "--preset",
+        "review",
+        "--prompt-file",
+        brief.to_str().ok_or("brief")?,
+        "--set",
+        &format!("parameters.subject.commit='{head}'"),
+        "--set",
+        &format!("parameters.base='{head}'"),
+        "--set",
+        "parameters.review_shape='quick'",
+        "--plan",
+        "off",
+        "--wait",
+        "30s",
+        "--json",
+    ])?;
+    let equal: Value = serde_json::from_slice(&equal.stdout.bytes)?;
+    let checkpoint = &equal["data"]["graph"]["checkpoint"];
+    let lens = checkpoint["nodes"]
+        .as_array()
+        .ok_or("equal nodes")?
+        .iter()
+        .find(|n| {
+            n["id"]
+                .as_str()
+                .is_some_and(|id| id.contains("lens-correctness-spec"))
+        })
+        .ok_or("equal lens")?;
+    assert_eq!(
+        lens["outputs"]["verdict"], "VERDICT: INCONCLUSIVE",
+        "{equal}"
+    );
+    let warning = format!("base {head}, head {head}");
+    assert!(
+        lens["outputs"]["warnings"].to_string().contains(&warning),
+        "{equal}"
+    );
+    let id = checkpoint["graph_id"].as_str().ok_or("graph id")?;
+    let status = rig.command(&["fabric", "graph", "status", id, "--json"])?;
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert!(
+        status.to_string().contains("VERDICT: INCONCLUSIVE"),
+        "{status}"
+    );
+    assert!(status.to_string().contains(&warning), "{status}");
     Ok(())
 }
 
