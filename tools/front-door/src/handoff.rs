@@ -1113,6 +1113,7 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
         left.saturating_sub(RESERVE)
     };
     let mut fetched = false;
+    let facts = worktrees::RepoFacts::default();
     branches
         .iter()
         .map(|branch| {
@@ -1146,6 +1147,10 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                 remaining(),
                 target.workers,
                 |context, cancel| {
+                    let context = &worktrees::WorktreeContext {
+                        facts: &facts,
+                        ..*context
+                    };
                     if let Some(info) = worktrees::list(context, cancel)?
                         .into_iter()
                         .find(|w| w.branch.as_deref().map(short_branch).as_ref() == Some(branch))
