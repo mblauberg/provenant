@@ -3382,7 +3382,7 @@ fn visit_nodes(
 ) -> Result<(), String> {
     for node in nodes {
         visitor(node)?;
-        for path in ["/composite/nodes", "/loop/body"] {
+        for path in ["/composite/nodes", "/loop/body", "/plan/fallback/nodes"] {
             if let Some(children) = node.pointer_mut(path).and_then(Value::as_array_mut) {
                 visit_nodes(children, visitor)?;
             }
