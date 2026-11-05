@@ -94,19 +94,32 @@ impl RunStore {
         id: provenant_core::AttemptId,
         create: bool,
         call: &Request<'_>,
-        operation: impl FnOnce(Directory) -> T,
+        operation: impl FnOnce(&Directory) -> T,
     ) -> Result<T> {
         let record = self.record(id, call)?;
         let attempt = self.attempt_dir(record.run_id, id, false)?;
-        let _lock = attempt.lock(
-            OsStr::new("cloud.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-            call.lock_budget(),
-            call.cancel,
-            call.clock,
-        )?;
+        let lock_name = OsStr::new("cloud.lock");
+        let _lock = if create {
+            attempt.lock(
+                lock_name,
+                provenant_os::fs::LockMode::Exclusive,
+                call.lock_budget(),
+                call.cancel,
+                call.clock,
+            )?
+        } else {
+            // A view of a local lane must not create a lock or directory.
+            attempt.metadata_at(OsStr::new("cloud"), false)?;
+            attempt.lock_existing(
+                lock_name,
+                provenant_os::fs::LockMode::Exclusive,
+                call.lock_budget(),
+                call.cancel,
+                call.clock,
+            )?
+        };
         let cloud = subdir(&attempt, OsStr::new("cloud"), create)?;
-        Ok(operation(cloud))
+        Ok(operation(&cloud))
     }
 
     /// Verify the original artifact before returning bounded, redacted evidence.

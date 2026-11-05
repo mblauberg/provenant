@@ -32,25 +32,26 @@ struct Record {
 }
 
 /// A descriptor-bound store in an already-open attempt directory.
-pub struct AttemptCloudStore {
-    directory: Directory,
+pub struct AttemptCloudStore<'a> {
+    directory: &'a Directory,
 }
 
-impl AttemptCloudStore {
+impl<'a> AttemptCloudStore<'a> {
     /// Operate under the run owner's attempt-scoped cloud lock.
     pub fn with_attempt<T>(
         runs: &provenant_run::RunStore,
         id: provenant_core::AttemptId,
         create: bool,
         call: &provenant_run::Request<'_>,
-        operation: impl FnOnce(&mut Self) -> T,
+        operation: impl FnOnce(&mut AttemptCloudStore<'_>) -> T,
     ) -> provenant_run::Result<T> {
         runs.with_cloud_storage(id, create, call, |directory| {
-            operation(&mut Self::new(directory))
+            operation(&mut AttemptCloudStore { directory })
         })
     }
 
-    fn new(directory: Directory) -> Self {
+    #[cfg(test)]
+    fn new(directory: &'a Directory) -> Self {
         Self { directory }
     }
 
@@ -83,7 +84,7 @@ fn validate_result(job: &RemoteJob) -> Result<(), Error> {
     Ok(())
 }
 
-impl CloudJobStore for AttemptCloudStore {
+impl CloudJobStore for AttemptCloudStore<'_> {
     type Error = Error;
 
     fn begin(&mut self, job: &RemoteJob) -> Result<(), Error> {
@@ -195,12 +196,14 @@ mod tests {
     #[test]
     fn cloud_store_reopens_and_preserves_identity() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        let mut store = AttemptCloudStore::new(Directory::open_anchor(temp.path())?);
+        let directory = Directory::open_anchor(temp.path())?;
+        let mut store = AttemptCloudStore::new(&directory);
         assert_eq!(store.load()?, None);
         let mut original = job();
         store.save(&original)?;
         drop(store);
-        let mut reopened = AttemptCloudStore::new(Directory::open_anchor(temp.path())?);
+        let reopened_directory = Directory::open_anchor(temp.path())?;
+        let mut reopened = AttemptCloudStore::new(&reopened_directory);
         assert_eq!(reopened.load()?, Some(original.clone()));
         let mut other = original.clone();
         other.remote_id = "remote-2".into();
@@ -270,14 +273,16 @@ mod tests {
             }
         }
         let temp = tempfile::tempdir()?;
-        let mut store = AttemptCloudStore::new(Directory::open_anchor(temp.path())?);
+        let directory = Directory::open_anchor(temp.path())?;
+        let mut store = AttemptCloudStore::new(&directory);
         let mut request = job();
         request.remote_id.clear();
         let submitted = submit(&mut Fake, &mut store, request.clone(), "run tests")
             .map_err(|e| format!("{e:?}"))?;
         assert!(submit(&mut Fake, &mut store, request, "run tests").is_err());
         drop(store);
-        let mut store = AttemptCloudStore::new(Directory::open_anchor(temp.path())?);
+        let directory = Directory::open_anchor(temp.path())?;
+        let mut store = AttemptCloudStore::new(&directory);
         let mut recovered = store.load()?.ok_or("missing job")?;
         assert_eq!(recovered, submitted);
         reconcile(&mut Fake, &mut store, &mut recovered).map_err(|e| format!("{e:?}"))?;

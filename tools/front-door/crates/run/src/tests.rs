@@ -119,6 +119,13 @@ fn cloud_storage_is_attempt_scoped_and_locked() -> TestResult {
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
+    assert!(store.with_cloud_storage(id, false, &call, |_| ()).is_err());
+    assert!(
+        attempt
+            .metadata_at(OsStr::new("cloud.lock"), false)
+            .unwrap_err()
+            .is_not_found()
+    );
     store.with_cloud_storage(id, true, &call, |cloud| {
         assert!(matches!(
             attempt.try_lock(OsStr::new("cloud.lock"), LockMode::Exclusive),
