@@ -1636,6 +1636,24 @@ fn selected_inputs(deps: &[String], outputs: &Value) -> Value {
     )
 }
 
+fn parse_member_outputs(
+    value: Value,
+) -> Result<Vec<provenant_fabric_runtime::graph::OutputKind>, String> {
+    let outputs: Vec<_> =
+        serde_json::from_value(value).map_err(|error| format!("member_outputs: {error}"))?;
+    if outputs.is_empty() {
+        return Err("member_outputs must not be empty".into());
+    }
+    if outputs
+        .iter()
+        .enumerate()
+        .any(|(index, output)| outputs[..index].contains(output))
+    {
+        return Err("member_outputs must not contain duplicates".into());
+    }
+    Ok(outputs)
+}
+
 fn spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
     let key = json!([
         parameters.get("spec"),
@@ -2779,6 +2797,9 @@ impl StageBuilder<'_> {
         if object.contains_key("export_first") && !object.contains_key("parallel") {
             return Err("export_first requires a parallel group".into());
         }
+        if object.contains_key("member_outputs") && !object.contains_key("parallel") {
+            return Err("member_outputs requires a parallel group".into());
+        }
         if let Some(mode) = object.get("zero_minimum")
             && (mode.as_str() != Some("all_but_one") || !object.contains_key("parallel"))
         {
@@ -3208,6 +3229,7 @@ impl StageBuilder<'_> {
                     object.remove("zero_minimum");
                     object.remove("reduce_verdict");
                     object.remove("export_first");
+                    object.remove("member_outputs");
                     object.remove("exports");
                     (deferred, true)
                 } else {
@@ -3222,13 +3244,27 @@ impl StageBuilder<'_> {
                             depth + 1,
                         )?);
                     }
+                    let member_outputs = object
+                        .remove("member_outputs")
+                        .map(|outputs| {
+                            let value = interpolate(
+                                &outputs,
+                                &self.parameters,
+                                self.prompt,
+                                index as usize,
+                            )?;
+                            parse_member_outputs(value)
+                                .map_err(|error| format!("stage {id}: {error}"))
+                        })
+                        .transpose()?
+                        .map_or_else(|| json!(["result", "findings"]), |outputs| json!(outputs));
                     let mut exports = object
                         .remove("exports")
                         .map(|exports| {
                             interpolate(&exports, &self.parameters, self.prompt, index as usize)
                         })
                         .transpose()?
-                        .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
+                        .unwrap_or_else(|| selected_inputs(&ends, &member_outputs));
                     if let Some(requested) = object.remove("export_first") {
                         let requested =
                             interpolate(&requested, &self.parameters, self.prompt, index as usize)?;

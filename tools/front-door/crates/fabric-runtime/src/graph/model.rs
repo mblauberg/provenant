@@ -181,6 +181,9 @@ pub struct ReviewSpec {
     pub reduce_verdict: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub export_first: Vec<OutputKind>,
+    /// Outputs selected from every member of this review group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_outputs: Option<Vec<OutputKind>>,
     pub max_nodes: usize,
 }
 

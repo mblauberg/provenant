@@ -46,6 +46,9 @@ verdict; missing or invalid verdicts count as inconclusive.
 unavailable if that member fails.
 Static groups may declare `exports` to select member outputs; values interpolate the
 declaring preset's parameters, like other stage fields.
+Parallel groups may instead set `member_outputs` to select outputs from each
+member. Deferred review panels require result and findings for their downstream
+stages and carry this selection into their resolved panel.
 
 `shape_stages` names the frame, parallel panel, verifier and synthesis stages
 controlled by the selected review shape. When a subject is not yet pinned, one

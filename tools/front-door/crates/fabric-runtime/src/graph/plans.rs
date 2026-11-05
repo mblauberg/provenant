@@ -965,8 +965,16 @@ pub(super) fn validate_review_addition(
                 || composite.exports.is_empty()
                 || composite.exports.first().is_none_or(|first| spec.export_first.iter().any(|output| !first.outputs.contains(output)))
                 || (whole_panel && addition.nodes.iter().filter(|member| member.id.starts_with(&format!("{}--", lens_root.id))).count() != composite.exports.len())
-                || composite.exports.iter().any(|export| {
+                || composite.exports.iter().enumerate().any(|(index, export)| {
                     export.outputs.is_empty() || !exported.insert(&export.node)
+                        || spec.member_outputs.as_ref().is_some_and(|requested| {
+                            requested.iter().any(|output| !export.outputs.contains(output))
+                                || export.outputs.iter().any(|output| {
+                                    !requested.contains(output)
+                                        && !(index == 0 && (spec.export_first.contains(output)
+                                            || (whole_panel && composite.reduce_verdict && *output == OutputKind::Commit)))
+                                })
+                        })
                         || !addition.nodes.iter().any(|member| member.id == export.node && member.id != lens_root.id && member.id.starts_with(&format!("{}--", lens_root.id)))
                         || addition.nodes.iter().any(|parent| parent.id != root.id && parent.id != lens_root.id && parent.id != export.node && parent.composite.is_some() && export.node.starts_with(&format!("{}--", parent.id)))
                 })

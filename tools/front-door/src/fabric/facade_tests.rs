@@ -3178,6 +3178,11 @@ pub(crate) mod peer_tests {
         assert_eq!(small.source, "review");
         assert_eq!(small.nodes[0].id, "review--r");
         assert_eq!(small.nodes.len(), 3);
+        let mut selected = deferred(None, serde_json::json!([]))?;
+        selected.review.as_mut().ok_or("review spec missing")?.member_outputs = Some(vec![graph::OutputKind::Findings, graph::OutputKind::Result]);
+        let selected = bound.resolve_review(&selected, &head)?;
+        let group = selected.nodes.iter().find_map(|node| node.composite.as_ref().filter(|group| group.exports.iter().any(|export| export.node.contains("--p--lens-")))).ok_or("lens group missing")?;
+        assert!(group.exports.iter().all(|export| export.outputs.starts_with(&[graph::OutputKind::Findings, graph::OutputKind::Result])));
         let lens = &small.nodes[2];
         assert_eq!(lens.id, "review--r--p--lens-correctness-spec");
         // A read-only alias repeats so a usage-limited first member falls back.

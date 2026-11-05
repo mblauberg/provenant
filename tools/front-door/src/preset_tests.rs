@@ -596,6 +596,102 @@ selected = {{ type = "string", default = "{selected}" }}
 }
 
 #[test]
+fn group_member_outputs_apply_to_static_and_deferred_members() {
+    let mut layers = real_selector("/nonexistent");
+    let review = include_str!("../assets/presets/review.toml").replace(
+        "id = \"lenses\", min_successful",
+        "id = \"lenses\", member_outputs = [\"findings\", \"result\"], min_successful",
+    );
+    layers.insert("test", "review", &review).unwrap();
+    let document = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap()
+    .document;
+    let lens = document["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "lens")
+        .unwrap();
+    assert_eq!(
+        lens["composite"]["nodes"][0]["review"]["member_outputs"],
+        json!(["findings", "result"])
+    );
+    let default_review = review.replace("[\"findings\", \"result\"]", "[\"result\", \"findings\"]");
+    let mut default_layers = real_selector("/nonexistent");
+    default_layers
+        .insert("test", "review", &default_review)
+        .unwrap();
+    let default_graph = expand(
+        &default_layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap()
+    .document;
+    let default_lens = default_graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "lens")
+        .unwrap();
+    assert_eq!(
+        default_lens["composite"]["nodes"][0]["review"]["member_outputs"],
+        json!(["result", "findings"])
+    );
+    let incomplete_review = review.replace("[\"findings\", \"result\"]", "[\"result\"]");
+    let mut incomplete_layers = real_selector("/nonexistent");
+    incomplete_layers
+        .insert("test", "review", &incomplete_review)
+        .unwrap();
+    let error = expand(
+        &incomplete_layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("deferred review member_outputs must include result and findings"),
+        "{error}"
+    );
+    assert!(error.contains("stage lenses"), "{error}");
+
+    layers
+        .insert(
+            "test",
+            "static-group",
+            "stages=[{id='group',member_outputs=['result'],parallel=[{id='one',prompt='work'}]}]",
+        )
+        .unwrap();
+    let static_graph = expand(&layers, "static-group", "brief", &[])
+        .unwrap()
+        .document;
+    assert_eq!(
+        static_graph["nodes"][0]["composite"]["exports"][0]["outputs"],
+        json!(["result"])
+    );
+    layers
+        .insert(
+            "test",
+            "empty-member-outputs",
+            "stages=[{id='group',member_outputs=[],parallel=[{id='one',prompt='work'}]}]",
+        )
+        .unwrap();
+    let error = expand(&layers, "empty-member-outputs", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("member_outputs must not be empty"),
+        "{error}"
+    );
+    assert!(error.contains("stage group"), "{error}");
+}
+
+#[test]
 fn declared_parallel_reduction_keeps_the_worst_verdict() {
     use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
     let mut layers = Layers::empty();

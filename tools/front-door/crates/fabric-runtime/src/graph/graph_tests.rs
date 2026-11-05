@@ -679,6 +679,7 @@ fn admitted_deferred_review_fits_checkpoint_after_expansion() {
         min_successful: Some(1),
         reduce_verdict: false,
         export_first: vec![],
+        member_outputs: None,
         max_nodes: 2,
     });
     let mut nodes = vec![review];
@@ -781,6 +782,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         min_successful: Some(1),
         reduce_verdict: false,
         export_first: vec![],
+        member_outputs: None,
         max_nodes: 3,
     });
     let mut outer = node("outer", route("first"));
@@ -8240,6 +8242,7 @@ fn deferred_lens_substitution_keeps_panel_topology() {
         min_successful: Some(1),
         reduce_verdict: false,
         export_first: vec![],
+        member_outputs: None,
         max_nodes: 2,
     });
     let mut verifier = node("verify", route("first"));
@@ -11086,6 +11089,7 @@ fn review_plan_schema_validation() {
         min_successful: None,
         reduce_verdict: false,
         export_first: vec![],
+        member_outputs: None,
         max_nodes: 4,
     });
     let mut document = graph(vec![reader]);
@@ -11126,6 +11130,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
             min_successful: Some(0),
             reduce_verdict: false,
             export_first: vec![],
+            member_outputs: None,
             max_nodes: 9,
         });
         let mut root = node("review--review", route("first"));
@@ -11285,6 +11290,7 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         min_successful: Some(1),
         reduce_verdict: false,
         export_first: vec![],
+        member_outputs: None,
         max_nodes: 3,
     });
     let mut root = node("review--review", route("first"));
@@ -11371,6 +11377,23 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         .unwrap()
         .reduce_verdict = true;
     assert!(plans::validate_review_addition(&declared_reduction, &changed_reduction).is_ok());
+    let mut declared_outputs = document.clone();
+    declared_outputs.nodes[1]
+        .review
+        .as_mut()
+        .unwrap()
+        .member_outputs = Some(vec![OutputKind::Result]);
+    assert!(plans::validate_review_addition(&declared_outputs, &addition).is_ok());
+    let mut wider_outputs = addition.clone();
+    wider_outputs
+        .nodes
+        .iter_mut()
+        .find_map(|node| node.composite.as_mut())
+        .unwrap()
+        .exports[0]
+        .outputs
+        .push(OutputKind::Findings);
+    assert!(plans::validate_review_addition(&declared_outputs, &wider_outputs).is_err());
     let writer_done = AttemptObservation::Terminal {
         attempt_ref: Some("host/7".into()),
         outcome: AttemptOutcome::Succeeded,

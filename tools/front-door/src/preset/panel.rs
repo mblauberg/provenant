@@ -656,7 +656,13 @@ impl StageBuilder<'_> {
         if !self.review_is_deferred(entries, object, nodes) {
             return Ok(None);
         }
-        let spec = self.review_spec(object)?;
+        let spec = self.review_spec(object).map_err(|error| {
+            if error.contains("member_outputs") {
+                format!("stage {id}: {error}")
+            } else {
+                error
+            }
+        })?;
         let names = self.review_candidates(&spec.lenses)?;
         let items: Vec<Value> = names
             .iter()
@@ -807,6 +813,28 @@ impl StageBuilder<'_> {
         }
         // Bound the composite root and every lens a launch can run.
         let names = self.review_candidates(&lenses)?;
+        let member_outputs = group
+            .get("member_outputs")
+            .map(|value| {
+                let value = super::interpolate(value, &self.parameters, self.prompt, 1)?;
+                super::parse_member_outputs(value)
+            })
+            .transpose()?;
+        if let Some(outputs) = &member_outputs {
+            use provenant_fabric_runtime::graph::OutputKind;
+            if !outputs.contains(&OutputKind::Result) || !outputs.contains(&OutputKind::Findings) {
+                return Err(
+                    "deferred review member_outputs must include result and findings".into(),
+                );
+            }
+            if names.len() > 1
+                && outputs
+                    .iter()
+                    .any(|output| !matches!(output, OutputKind::Result | OutputKind::Findings))
+            {
+                return Err("deferred review member_outputs cannot select scalar outputs from multiple members".into());
+            }
+        }
         Ok(ReviewSpec {
             shape: text("review_shape"),
             risk_tier: text("risk_tier"),
@@ -847,6 +875,7 @@ impl StageBuilder<'_> {
                 })
                 .transpose()?
                 .unwrap_or_default(),
+            member_outputs,
             max_nodes: names.len().saturating_add(1).max(2),
         })
     }

@@ -467,8 +467,8 @@ output kinds. Composites use no provider attempt of their own. An entry can
 declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
 roles and presets inside bounded repair. Existing `loop.body` configuration
 also remains available. Planner fragments do not resolve named presets.
-Parallel groups may declare `min_successful`, `zero_minimum`, `reduce_verdict`
-and `export_first` on the group; the [preset runbook](../runbooks/presets.md#composition-rules)
+Parallel groups may declare `min_successful`, `zero_minimum`, `reduce_verdict`,
+`export_first` and `member_outputs` on the group; the [preset runbook](../runbooks/presets.md#composition-rules)
 describes their accepted values.
 Preset compilation uses the runtime's composite expansion and loop count when
 it checks the host depth and node bounds, so admission checks the same graph.

@@ -4629,7 +4629,10 @@ impl BoundGraphOwner<'_> {
             .iter()
             .enumerate()
             .map(|(index, member)| {
-                let mut outputs = vec![OutputKind::Result, OutputKind::Findings];
+                let mut outputs = spec
+                    .member_outputs
+                    .clone()
+                    .unwrap_or_else(|| vec![OutputKind::Result, OutputKind::Findings]);
                 if index == 0 {
                     if panel.synthesis == provenant_routing::ReviewSynthesis::Reduce {
                         outputs.push(OutputKind::Commit);
