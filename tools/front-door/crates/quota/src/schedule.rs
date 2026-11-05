@@ -11,8 +11,6 @@ pub enum Trigger {
     Manual,
     Wake,
     Power,
-    /// An absent readiness record needs a fresh probe, subject to backoff and custody.
-    Readiness,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,7 +48,7 @@ pub fn interval(
         return None;
     }
     let base = match trigger {
-        Trigger::Manual | Trigger::Readiness => 30,
+        Trigger::Manual => 30,
         Trigger::Panel => policy.panel_seconds,
         _ => policy.timer_seconds,
     };
@@ -107,9 +105,9 @@ pub fn trigger_for_readiness(
         return Ok(trigger);
     };
     let normal = next_due(policies, record, trigger, power)?;
-    let readiness = next_due(policies, record, Trigger::Readiness, power)?;
+    let readiness = next_due(policies, record, Trigger::Panel, power)?;
     Ok(match (normal, readiness) {
-        (Some(normal), Some(readiness)) if readiness < normal => Trigger::Readiness,
+        (Some(normal), Some(readiness)) if readiness < normal => Trigger::Panel,
         _ => trigger,
     })
 }
@@ -625,7 +623,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             next_due(crate::source::TEST_POLICIES, &record, trigger, Power::Ac).unwrap(),
-            Some(130)
+            Some(220)
         );
         record.backoff_until_unix_seconds = Some(250);
         record.claim = Some(RefreshClaim {

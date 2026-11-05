@@ -4496,14 +4496,14 @@ mod tests {
         assert!(row.snapshot.is_some());
 
         // A fresh quota snapshot does not replace missing readiness evidence.
-        // Once the short probe interval has elapsed, a timer tick refreshes it.
+        // Once the configured panel interval has elapsed, a timer tick refreshes it.
         let root = private(roots.state.as_path())?;
         let dir = child(&root, OsStr::new("quota"))?;
         let mut records = read_cache(&roots)?;
         let previous = records.first().ok_or("fixture quota record")?.clone();
         let mut replacement = previous.clone();
         replacement.revision += 1;
-        replacement.last_attempt_unix_seconds = Some(SystemClock::new().unix_seconds() - 60);
+        replacement.last_attempt_unix_seconds = Some(SystemClock::new().unix_seconds() - 180);
         write_intent(
             &dir,
             roots.state.as_path(),

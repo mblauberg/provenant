@@ -7,4 +7,4 @@
 - Route lists and resolution show recorded model-scoped readiness for matching accounts (#2468).
 - Hosts doctor identifies installed adapters without account observations as unknown (#2468).
 - Hosts doctor checks local sign-in status for installed Codex and Cursor adapters without recorded account observations (#2468).
-- Quota ticks refresh missing readiness records without waiting for a fresh quota snapshot to expire (#2468).
+- Quota ticks can refresh missing readiness records before a fresh quota snapshot expires, using the configured panel interval (#2468).
