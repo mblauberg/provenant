@@ -76,16 +76,7 @@ fn dispatch_validates_review_commits() -> TestResult {
         Ok(())
     };
     git(&["init", "-q"])?;
-    git(&[
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.org",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "test",
-    ])?;
+    git(&["commit", "--allow-empty", "-qm", "test"])?;
     let output = provenant_os::fixture::git_command()
         .current_dir(&root)
         .args(["rev-parse", "HEAD"])

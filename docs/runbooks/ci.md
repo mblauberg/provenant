@@ -15,8 +15,8 @@ Tests of native process or filesystem behaviour may still need real host facts.
 guardian fixtures can supply both without changing production admission floors.
 Include process observations as well as the guardian identity when exercising
 lease pruning, so a fixture does not consult the host's process table.
-The worktree test driver supplies synthetic idle memory and process capacity;
-its real disk and process-identity checks still exercise native custody.
+The worktree test driver supplies synthetic idle memory, process capacity and
+disk space; its process-identity checks still exercise native custody.
 `tests/workspace_policy.rs` checks test and fixture Rust sources for direct sleep
 calls and imports. The bounded wait helper owns the polling delay.
 

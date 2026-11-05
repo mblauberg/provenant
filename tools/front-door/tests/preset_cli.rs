@@ -63,28 +63,10 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
         Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     };
     git(&["init", "-q"])?;
-    git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "writer head A",
-    ])?;
+    git(&["commit", "--allow-empty", "-qm", "writer head A"])?;
     let worktree_head = git(&["rev-parse", "HEAD"])?;
     git(&["branch", "writer"])?;
-    git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "invoking head B",
-    ])?;
+    git(&["commit", "--allow-empty", "-qm", "invoking head B"])?;
     let invoking_head = git(&["rev-parse", "HEAD"])?;
     let worktree = invoking.join(".worktrees/writer");
     std::fs::create_dir_all(worktree.parent().ok_or("worktree parent")?)?;
@@ -207,28 +189,10 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
         Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     };
     git(&["init", "-q"])?;
-    git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "subject commit A",
-    ])?;
+    git(&["commit", "--allow-empty", "-qm", "subject commit A"])?;
     let worktree_head = git(&["rev-parse", "HEAD"])?;
     git(&["branch", "subject-branch"])?;
-    git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "invoking head B",
-    ])?;
+    git(&["commit", "--allow-empty", "-qm", "invoking head B"])?;
     let invoking_head = git(&["rev-parse", "HEAD"])?;
     let worktree = invoking.join(".worktrees/review");
     std::fs::create_dir_all(worktree.parent().ok_or("worktree parent")?)?;
@@ -379,12 +343,6 @@ fn review_council_with_a_base_is_admitted_on_submit() -> Result<(), Box<dyn std:
     let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
         let output = provenant_os::fixture::git_command()
             .current_dir(&project)
-            .args([
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-            ])
             .args(args)
             .output()?;
         assert!(
@@ -539,16 +497,7 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
     std::fs::create_dir(&project)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "seed",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
     ] {
         let output = provenant_os::fixture::git_command()
             .current_dir(&project)
@@ -860,16 +809,7 @@ fn fresh_rerun_after_cancel_starts_a_new_graph() -> Result<(), Box<dyn std::erro
     std::fs::create_dir(&project)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "seed",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
     ] {
         let output = provenant_os::fixture::git_command()
             .current_dir(&project)
@@ -960,18 +900,7 @@ fn explain_pins_source_refs_before_hashing_without_creating_state()
         Ok(String::from_utf8(output.stdout)?.trim().into())
     };
     git(&["init", "-q"])?;
-    let commit = || {
-        git(&[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "advance",
-        ])
-    };
+    let commit = || git(&["commit", "--allow-empty", "-qm", "advance"]);
     commit()?;
     let head = git(&["rev-parse", "HEAD"])?;
     let prompt = project.join("brief");
@@ -1435,12 +1364,6 @@ fn integration_sourced_graph_identity_follows_the_integration_head()
     let git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
         let output = provenant_os::fixture::git_command()
             .current_dir(&project)
-            .args([
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=f@example.invalid",
-            ])
             .args(args)
             .output()?;
         assert!(
@@ -1624,17 +1547,7 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
     std::fs::create_dir(&project)?;
     for args in [
         &["init", "-q"][..],
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.com",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "base",
-        ],
+        &["commit", "-q", "--allow-empty", "-m", "base"],
     ] {
         assert!(
             provenant_os::fixture::git_command()
@@ -1648,16 +1561,7 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
     std::fs::write(project.join("change.txt"), "one line\n")?;
     for args in [
         &["add", "change.txt"][..],
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.com",
-            "commit",
-            "-q",
-            "-m",
-            "change",
-        ],
+        &["commit", "-q", "-m", "change"],
     ] {
         assert!(
             provenant_os::fixture::git_command()
@@ -1913,16 +1817,7 @@ fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
     std::fs::create_dir(&project)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "seed",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
     ] {
         let output = provenant_os::fixture::git_command()
             .current_dir(&project)
@@ -2083,16 +1978,7 @@ fn graph_exclusions_are_validated_and_inherited_by_every_node()
     std::fs::create_dir(&project)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "seed",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
     ] {
         let output = provenant_os::fixture::git_command()
             .current_dir(&project)
@@ -2177,16 +2063,7 @@ impl ExperimentProject {
         std::fs::create_dir(&project)?;
         for args in [
             vec!["init", "-q"],
-            vec![
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "seed",
-            ],
+            vec!["commit", "--allow-empty", "-qm", "seed"],
         ] {
             let output = provenant_os::fixture::git_command()
                 .current_dir(&project)
@@ -2479,15 +2356,7 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
         ".worktrees/\n.provenant/\ntarget/\n",
     )?;
     git(&["add", ".gitignore"])?;
-    git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "commit",
-        "-qm",
-        "initial",
-    ])?;
+    git(&["commit", "-qm", "initial"])?;
     let worktree = project.join(".worktrees/bound-lane");
 
     let presets = project.join(".provenant/presets");
@@ -2698,16 +2567,7 @@ fn preset_refuses_readable_state_directories_with_chmod_repair()
     assert!(git.status.success(), "{git:?}");
     let commit = provenant_os::fixture::git_command()
         .current_dir(&project)
-        .args([
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "initial",
-        ])
+        .args(["commit", "--allow-empty", "-qm", "initial"])
         .output()?;
     assert!(commit.status.success(), "{commit:?}");
     let presets = project.join(".provenant/presets");
@@ -2790,16 +2650,7 @@ fn preset_file_spec_resolves_from_checkout_subdirectory() -> Result<(), Box<dyn 
     assert!(
         provenant_os::fixture::git_command()
             .current_dir(&project)
-            .args([
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "initial",
-            ])
+            .args(["commit", "--allow-empty", "-qm", "initial",])
             .status()?
             .success()
     );
@@ -2841,16 +2692,7 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
     std::fs::create_dir(&project)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "initial",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "initial"],
     ] {
         assert!(
             provenant_os::fixture::git_command()

@@ -4289,7 +4289,6 @@ mod planner_front_end {
         let git = |dir: &std::path::Path, args: &[&str]| {
             let output = provenant_os::fixture::git_command()
                 .current_dir(dir)
-                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
                 .args(args)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -5678,7 +5677,6 @@ fn preset_file_spec_resolves_relative_writer_from_launch_and_falls_back_to_main(
     let git = |args: &[&str]| {
         let output = provenant_os::fixture::git_command()
             .current_dir(&main)
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")

@@ -1127,16 +1127,7 @@ mod tests {
             );
         };
         git(&["init", "-q"]);
-        git(&[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "fixture",
-        ]);
+        git(&["commit", "--allow-empty", "-qm", "fixture"]);
         git(&["remote", "add", "origin", "https://example.invalid/repo"]);
         git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
         git(&[
