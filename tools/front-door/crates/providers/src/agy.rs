@@ -329,11 +329,17 @@ fn prepare(
         return Err(ProviderError::UnsupportedPolicy);
     }
     input.prompt.check_argv()?;
-    let home = &plan
-        .private_state
-        .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
-        .path;
+    let home = plan.private_state.as_ref().map_or_else(
+        || {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: Agy private state is unavailable; using the attempt scratch directory"
+            );
+            &plan.scratch.path
+        },
+        |state| &state.path,
+    );
     let keychain = match input.account {
         Some(account) => account_keychain(account.directory(), input.home)?,
         None => None,

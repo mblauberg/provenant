@@ -218,7 +218,12 @@ reason = "A resumed invocation requires its validated continuation identity."
 [[guard]]
 site = "providers/src/agy.rs#prepare"
 boundary = "credentials"
-reason = "The selected keychain and attempt-private home are required to confine Agy's authentication."
+reason = "Agy must select its keychain authentication; its home remains in attempt-private state or scratch."
+
+[[guard]]
+site = "providers/src/agy.rs#prepare"
+boundary = "warning"
+reason = "Absent separate private state warns and uses the already-confined attempt scratch directory as Agy's home."
 
 [[guard]]
 site = "providers/src/agy.rs#prepare"

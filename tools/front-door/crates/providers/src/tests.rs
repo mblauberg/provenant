@@ -7925,3 +7925,41 @@ fn opencode_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderEr
     }
     Ok(())
 }
+
+#[test]
+fn agy_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let mut route = route("agy", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let original = fixture_access_plan(access, Some("keychain"), false);
+        let mut permissions = original.permissions().clone();
+        permissions.private_state = None;
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: original.scope(),
+            permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+        .expect("fixture plan");
+        let launch = agy::Agy.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        let scratch = &plan.permissions().scratch.path;
+        assert!(
+            launch
+                .env
+                .iter()
+                .any(|(name, value)| name == "HOME" && value == scratch.as_os_str())
+        );
+        assert_eq!(launch.profile.spec.authentication.len(), 1);
+        assert_eq!(launch.profile.spec.authentication[0].mechanism, "keychain");
+    }
+    Ok(())
+}
