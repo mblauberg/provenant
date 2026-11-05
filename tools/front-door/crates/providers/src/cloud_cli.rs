@@ -96,9 +96,23 @@ mod tests {
     }
 }
 
+fn result_prompt(request: crate::cloud::CloudSubmission<'_>, claude: bool) -> String {
+    let job = request.job;
+    let channel = if claude {
+        "Commit only the result file as a single commit on top of the tested commit and push your claude working branch to origin."
+    } else {
+        "Include the result file as a new file in your cloud diff."
+    };
+    format!(
+        "{}\n\nTest commit {}. Record your result in .provenant-cloud-result.json as JSON with job_id {:?}, nonce {:?}, commit (the full tested commit), exit_status (integer), tests_run and tests_failed (arrays of strings), log_location (string), tracked_files_changed (boolean, excluding the result file), and observed_model (string or null). Do not include credentials in the result. {channel}",
+        request.task, job.commit, job.job_id, job.nonce
+    )
+}
+
 /// Claude's cloud command does not expose status or cancellation operations.
 pub struct ClaudeCloud<C> {
     pub cli: C,
+    pub pending_cleanup: Option<(String, String)>,
 }
 
 impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
@@ -107,11 +121,12 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
         Ok(())
     }
     fn submit(&mut self, request: crate::cloud::CloudSubmission<'_>) -> Result<String, String> {
+        let prompt = result_prompt(request, true);
         let out = self.cli.run(
             "claude",
             &[
                 "--cloud",
-                request.task,
+                &prompt,
                 "--environment",
                 &request.job.environment,
             ],
@@ -121,9 +136,80 @@ impl<C: CloudCli> crate::cloud::CloudProvider for ClaudeCloud<C> {
     }
     fn observe(
         &mut self,
-        _: &crate::cloud::RemoteJob,
+        job: &crate::cloud::RemoteJob,
     ) -> Result<crate::cloud::RemoteState, String> {
+        self.pending_cleanup = None;
+        let refs = self
+            .cli
+            .run("git", &["ls-remote", "origin", "refs/heads/claude/*"], None)?;
+        for line in refs.lines() {
+            let Some((oid, reference)) = line.split_once('\t') else {
+                return Err(format!("unrecognised git ls-remote output: {line}"));
+            };
+            if !reference.starts_with("refs/heads/claude/")
+                || !matches!(oid.len(), 40 | 64)
+                || !oid.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(format!("unrecognised git ls-remote output: {line}"));
+            }
+            self.cli
+                .run("git", &["fetch", "--no-tags", "origin", reference], None)?;
+            let parents = self.cli.run(
+                "git",
+                &["rev-list", "--parents", "-n", "1", "FETCH_HEAD"],
+                None,
+            )?;
+            let parts: Vec<_> = parents.split_whitespace().collect();
+            if parts.as_slice() != [oid, job.commit.as_str()] {
+                continue;
+            }
+            let diff = self.cli.run(
+                "git",
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-renames",
+                    &job.commit,
+                    "FETCH_HEAD",
+                ],
+                None,
+            )?;
+            let Ok(result) = crate::cloud_result::result_from_diff(&diff) else {
+                continue;
+            };
+            if result
+                .clone()
+                .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
+                .is_err()
+            {
+                continue;
+            }
+            self.pending_cleanup = Some((reference.to_owned(), oid.to_owned()));
+            return Ok(crate::cloud::RemoteState::Finished { result });
+        }
+        let now = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())
+            .map_err(|error| error.to_string())?
+            .unix_seconds();
+        let now = u64::try_from(now).map_err(|error| error.to_string())?;
+        if now >= job.deadline_unix_seconds {
+            return Ok(crate::cloud::RemoteState::Unknown {
+                detail: "Cloud result did not arrive before the deadline".into(),
+            });
+        }
         Ok(crate::cloud::RemoteState::Running)
+    }
+    #[allow(clippy::print_stderr)] // A failed best-effort remote cleanup must be visible.
+    fn after_save(&mut self, _: &crate::cloud::RemoteJob) {
+        if let Some((reference, oid)) = self.pending_cleanup.take() {
+            let lease = format!("--force-with-lease={reference}:{oid}");
+            if let Err(error) = self.cli.run(
+                "git",
+                &["push", &lease, "origin", "--delete", &reference],
+                None,
+            ) {
+                eprintln!("warning: could not delete cloud result branch {reference}: {error}");
+            }
+        }
     }
     fn cancel(&mut self, _: &crate::cloud::RemoteJob) -> Result<bool, String> {
         Ok(false)
@@ -154,7 +240,10 @@ impl<C: CloudCli> CodexCloud<C> {
                     }
                 }
                 serde_json::Value::Object(row) => {
-                    if row.values().any(|value| value.as_str() == Some(marker)) {
+                    if row
+                        .values()
+                        .any(|value| value.as_str().is_some_and(|text| text.contains(marker)))
+                    {
                         if let Some(id) = ["id", "task_id", "session_id"]
                             .iter()
                             .find_map(|key| row.get(*key).and_then(|v| v.as_str()))
@@ -188,6 +277,7 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
         Ok(())
     }
     fn submit(&mut self, request: crate::cloud::CloudSubmission<'_>) -> Result<String, String> {
+        let prompt = result_prompt(request, false);
         let out = self.cli.run(
             "codex",
             &[
@@ -198,9 +288,12 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
                 "--branch",
                 &self.branch,
             ],
-            Some(request.task),
+            Some(&prompt),
         )?;
         parse_identity(&out)
+    }
+    fn recover(&mut self, job: &crate::cloud::RemoteJob) -> Result<Option<String>, String> {
+        CodexCloud::recover(self, &job.nonce)
     }
     fn observe(
         &mut self,
@@ -212,6 +305,21 @@ impl<C: CloudCli> crate::cloud::CloudProvider for CodexCloud<C> {
         let lower = out.to_ascii_lowercase();
         if lower.contains("running") || lower.contains("pending") || lower.contains("queued") {
             Ok(crate::cloud::RemoteState::Running)
+        } else if ["completed", "finished", "succeeded", "failed"]
+            .iter()
+            .any(|state| lower.contains(state))
+        {
+            let diff = self
+                .cli
+                .run("codex", &["cloud", "diff", &job.remote_id], None)?;
+            let mut result = crate::cloud_result::result_from_diff(&diff)?;
+            // Codex cannot honour a requested model; do not infer one from the request.
+            result.observed_model = None;
+            result
+                .clone()
+                .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
+                .map_err(|e| e.to_string())?;
+            Ok(crate::cloud::RemoteState::Finished { result })
         } else {
             Err(format!("unrecognised codex cloud status: {out}"))
         }
@@ -247,6 +355,9 @@ mod adapter_tests {
     }
     fn job() -> RemoteJob {
         RemoteJob {
+            job_id: "job".into(),
+            nonce: "nonce".into(),
+            deadline_unix_seconds: u64::MAX,
             provider: "fake".into(),
             target: "target".into(),
             environment: "env".into(),
@@ -259,9 +370,59 @@ mod adapter_tests {
         }
     }
     #[test]
+    fn cloud_claude_reads_matching_result_and_deletes_after_save() {
+        use std::collections::VecDeque;
+        struct Script {
+            replies: VecDeque<String>,
+            calls: Vec<String>,
+        }
+        impl CloudCli for Script {
+            fn run(
+                &mut self,
+                program: &str,
+                args: &[&str],
+                _: Option<&str>,
+            ) -> Result<String, String> {
+                self.calls.push(format!("{program} {}", args.join(" ")));
+                self.replies
+                    .pop_front()
+                    .ok_or_else(|| "missing response".into())
+            }
+        }
+        let oid = "b".repeat(40);
+        let commit = "a".repeat(40);
+        let diff = format!(
+            "diff --git a/.provenant-cloud-result.json b/.provenant-cloud-result.json\nnew file mode 100644\n--- /dev/null\n+++ b/.provenant-cloud-result.json\n@@ -0,0 +1 @@\n+{{\"job_id\":\"job\",\"nonce\":\"nonce\",\"commit\":\"{commit}\",\"exit_status\":0,\"tests_run\":[],\"tests_failed\":[],\"log_location\":\"log\",\"tracked_files_changed\":false,\"observed_model\":null}}\n"
+        );
+        let script = Script {
+            replies: [
+                format!("{oid}\trefs/heads/claude/result\n"),
+                String::new(),
+                format!("{oid} {commit}"),
+                diff,
+                String::new(),
+            ]
+            .into(),
+            calls: Vec::new(),
+        };
+        let mut adapter = ClaudeCloud {
+            cli: script,
+            pending_cleanup: None,
+        };
+        let job = job();
+        assert!(matches!(
+            adapter.observe(&job).unwrap(),
+            RemoteState::Finished { .. }
+        ));
+        assert_eq!(adapter.cli.calls.len(), 4);
+        adapter.after_save(&job);
+        assert!(adapter.cli.calls[4].contains("--delete"));
+    }
+    #[test]
     fn cloud_adapters_submit_and_cancel_unconfirmed() {
         let job = job();
         let mut claude = ClaudeCloud {
+            pending_cleanup: None,
             cli: FakeCli {
                 response: "Session ID: session-1".into(),
                 ..Default::default()
@@ -276,11 +437,18 @@ mod adapter_tests {
                 .unwrap(),
             "session-1"
         );
-        assert_eq!(
-            claude.cli.calls[0].1,
-            ["--cloud", "test task", "--environment", "env"]
-        );
+        assert_eq!(claude.cli.calls[0].1[0], "--cloud");
+        assert!(claude.cli.calls[0].1[1].contains("test task"));
+        assert!(claude.cli.calls[0].1[1].contains(&job.nonce));
+        assert_eq!(&claude.cli.calls[0].1[2..], ["--environment", "env"]);
+        claude.cli.response.clear();
         assert_eq!(claude.observe(&job).unwrap(), RemoteState::Running);
+        let mut expired = job.clone();
+        expired.deadline_unix_seconds = 0;
+        assert!(matches!(
+            claude.observe(&expired).unwrap(),
+            RemoteState::Unknown { .. }
+        ));
         assert!(!claude.cancel(&job).unwrap());
         let mut codex = CodexCloud {
             cli: FakeCli {
@@ -302,7 +470,20 @@ mod adapter_tests {
             codex.cli.calls[0].1,
             ["cloud", "exec", "--env", "env", "--branch", "main"]
         );
-        assert_eq!(codex.cli.calls[0].2.as_deref(), Some("test task"));
+        assert!(
+            codex.cli.calls[0]
+                .2
+                .as_deref()
+                .unwrap()
+                .contains("test task")
+        );
+        assert!(
+            codex.cli.calls[0]
+                .2
+                .as_deref()
+                .unwrap()
+                .contains(&job.nonce)
+        );
         codex.cli.response = r#"[{"id":"task-1","marker":"unique"}]"#.into();
         assert_eq!(codex.recover("unique").unwrap().as_deref(), Some("task-1"));
         assert_eq!(codex.recover("different").unwrap(), None);

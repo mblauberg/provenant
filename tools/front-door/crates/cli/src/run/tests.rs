@@ -3282,6 +3282,8 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
             }
             Ok(RemoteState::Finished {
                 result: CloudResult {
+                    job_id: "job".into(),
+                    nonce: "nonce".into(),
                     commit: "a".repeat(40),
                     exit_status: 0,
                     tests_run: vec!["targeted".into()],
@@ -3310,6 +3312,9 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
     let job = RemoteJob {
+        job_id: "job".into(),
+        nonce: "nonce".into(),
+        deadline_unix_seconds: u64::MAX,
         provider: "fake".into(),
         target: "target".into(),
         environment: "env".into(),

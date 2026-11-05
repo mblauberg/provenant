@@ -78,7 +78,7 @@ fn validate_result(job: &RemoteJob) -> Result<(), Error> {
     if let RemoteState::Finished { result } = &job.state {
         result
             .clone()
-            .check(&job.commit, &job.requested_model)
+            .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
             .map_err(|_| Error::Identity)?;
     }
     Ok(())
@@ -88,7 +88,11 @@ impl CloudJobStore for AttemptCloudStore<'_> {
     type Error = Error;
 
     fn begin(&mut self, job: &RemoteJob) -> Result<(), Error> {
-        if job.state != RemoteState::Submitting || !job.remote_id.is_empty() {
+        if job.state != RemoteState::Submitting
+            || !job.remote_id.is_empty()
+            || job.job_id.trim().is_empty()
+            || job.nonce.trim().is_empty()
+        {
             return Err(Error::Identity);
         }
         let record = Record {
@@ -123,6 +127,9 @@ impl CloudJobStore for AttemptCloudStore<'_> {
                 return Err(Error::Identity);
             }
             if (
+                &old.job_id,
+                &old.nonce,
+                &old.deadline_unix_seconds,
                 &old.provider,
                 &old.target,
                 &old.environment,
@@ -131,6 +138,9 @@ impl CloudJobStore for AttemptCloudStore<'_> {
                 &old.requested_model,
                 &old.requested_effort,
             ) != (
+                &job.job_id,
+                &job.nonce,
+                &job.deadline_unix_seconds,
                 &job.provider,
                 &job.target,
                 &job.environment,
@@ -184,6 +194,9 @@ mod tests {
 
     fn job() -> RemoteJob {
         RemoteJob {
+            job_id: "job".into(),
+            nonce: "nonce".into(),
+            deadline_unix_seconds: u64::MAX,
             provider: "fake".into(),
             target: "test".into(),
             environment: "env".into(),
@@ -222,6 +235,8 @@ mod tests {
         let mut wrong_result = original.clone();
         wrong_result.state = RemoteState::Finished {
             result: CloudResult {
+                job_id: "job".into(),
+                nonce: "nonce".into(),
                 commit: "b".repeat(40),
                 exit_status: 0,
                 tests_run: vec![],
@@ -268,6 +283,8 @@ mod tests {
                 assert_eq!(job.remote_id, "remote-1");
                 Ok(RemoteState::Finished {
                     result: CloudResult {
+                        job_id: "job".into(),
+                        nonce: "nonce".into(),
                         commit: "a".repeat(40),
                         exit_status: 0,
                         tests_run: vec!["test".into()],

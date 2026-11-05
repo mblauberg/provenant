@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 /// that was tested, not a branch name or the commit requested in the prompt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudResult {
+    pub job_id: String,
+    pub nonce: String,
     pub commit: String,
     pub exit_status: i32,
     pub tests_run: Vec<String>,
@@ -40,6 +42,10 @@ pub struct CheckedCloudResult {
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CloudResultError {
+    #[error("cloud result does not name the expected job")]
+    JobMismatch,
+    #[error("cloud result nonce does not match")]
+    NonceMismatch,
     #[error("cloud result does not name the expected full commit object ID")]
     CommitMismatch,
 }
@@ -51,9 +57,17 @@ fn full_oid(s: &str) -> bool {
 impl CloudResult {
     pub fn check(
         self,
+        expected_job_id: &str,
+        expected_nonce: &str,
         expected_commit: &str,
         requested_model: &str,
     ) -> Result<CheckedCloudResult, CloudResultError> {
+        if expected_job_id.is_empty() || self.job_id != expected_job_id {
+            return Err(CloudResultError::JobMismatch);
+        }
+        if expected_nonce.is_empty() || self.nonce != expected_nonce {
+            return Err(CloudResultError::NonceMismatch);
+        }
         // Git supports SHA-1 and SHA-256 object formats. Do not accept an
         // abbreviated ID, empty value, or a ref as evidence of an exact head.
         if !full_oid(expected_commit)
@@ -90,6 +104,8 @@ mod tests {
 
     fn report() -> CloudResult {
         CloudResult {
+            job_id: "job".into(),
+            nonce: "nonce".into(),
             commit: "a".repeat(40),
             exit_status: 0,
             tests_run: vec!["targeted test".into()],
@@ -101,43 +117,67 @@ mod tests {
     }
 
     #[test]
+    fn cloud_result_rejects_other_job_or_nonce() {
+        let report = report();
+        assert_eq!(
+            report
+                .clone()
+                .check("other", "nonce", &"a".repeat(40), "requested"),
+            Err(CloudResultError::JobMismatch)
+        );
+        assert_eq!(
+            report.check("job", "other", &"a".repeat(40), "requested"),
+            Err(CloudResultError::NonceMismatch)
+        );
+    }
+
+    #[test]
     fn cloud_result_requires_exact_full_commit() {
         let result = report();
         assert!(
             result
                 .clone()
-                .check(&"a".repeat(40), "requested")
+                .check("job", "nonce", &"a".repeat(40), "requested")
                 .unwrap()
                 .passed
         );
         for expected in ["a".repeat(39), "b".repeat(40), "main".into()] {
             assert_eq!(
-                result.clone().check(&expected, "requested"),
+                result.clone().check("job", "nonce", &expected, "requested"),
                 Err(CloudResultError::CommitMismatch)
             );
         }
         let mut sha256 = result;
         sha256.commit = "b".repeat(64);
-        assert!(sha256.check(&"b".repeat(64), "requested").is_ok());
+        assert!(
+            sha256
+                .check("job", "nonce", &"b".repeat(64), "requested")
+                .is_ok()
+        );
     }
 
     #[test]
     fn cloud_result_missing_test_or_log_evidence_cannot_pass() {
         let mut result = report();
         result.tests_run = vec![" ".into()];
-        let checked = result.clone().check(&"a".repeat(40), "requested").unwrap();
+        let checked = result
+            .clone()
+            .check("job", "nonce", &"a".repeat(40), "requested")
+            .unwrap();
         assert!(!checked.evidence_complete);
         assert!(!checked.passed);
         result.tests_run.clear();
         assert!(
             result
                 .clone()
-                .check(&"a".repeat(40), "requested")
+                .check("job", "nonce", &"a".repeat(40), "requested")
                 .unwrap()
                 .passed
         );
         result.log_location = " ".into();
-        let checked = result.check(&"a".repeat(40), "requested").unwrap();
+        let checked = result
+            .check("job", "nonce", &"a".repeat(40), "requested")
+            .unwrap();
         assert!(!checked.evidence_complete);
         assert!(!checked.passed);
     }
@@ -147,25 +187,39 @@ mod tests {
         let mut result = report();
         result.tracked_files_changed = true;
         result.observed_model = None;
-        let checked = result.clone().check(&"a".repeat(40), "requested").unwrap();
+        let checked = result
+            .clone()
+            .check("job", "nonce", &"a".repeat(40), "requested")
+            .unwrap();
         assert!(!checked.passed);
         assert_eq!(checked.model, ModelObservation::Unknown);
         assert_eq!(checked.requested_model, "requested");
         result.tracked_files_changed = false;
         result.tests_failed.push("failed test".into());
         result.observed_model = Some("other".into());
-        let checked = result.clone().check(&"a".repeat(40), "requested").unwrap();
+        let checked = result
+            .clone()
+            .check("job", "nonce", &"a".repeat(40), "requested")
+            .unwrap();
         assert!(!checked.passed);
         assert_eq!(checked.model, ModelObservation::Differs);
         result.tests_failed.clear();
         result.exit_status = 1;
-        assert!(!result.check(&"a".repeat(40), "requested").unwrap().passed);
+        assert!(
+            !result
+                .check("job", "nonce", &"a".repeat(40), "requested")
+                .unwrap()
+                .passed
+        );
     }
 }
 
 /// Provider-independent identity retained by the run owner after submission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteJob {
+    pub job_id: String,
+    pub nonce: String,
+    pub deadline_unix_seconds: u64,
     pub provider: String,
     pub target: String,
     pub environment: String,
@@ -209,6 +263,9 @@ pub enum RemoteState {
     /// Submission was attempted or is about to be attempted; custody is unknown.
     Submitting,
     Running,
+    Unknown {
+        detail: String,
+    },
     Finished {
         result: CloudResult,
     },
@@ -243,8 +300,14 @@ pub trait CloudProvider {
     /// Check the target before a model turn when the provider supports it.
     fn check_environment(&mut self, request: CloudSubmission<'_>) -> Result<(), Self::Error>;
     fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, Self::Error>;
+    /// Recover a submission only when the provider can identify it unambiguously.
+    fn recover(&mut self, _job: &RemoteJob) -> Result<Option<String>, Self::Error> {
+        Ok(None)
+    }
     /// Observe using the durable job context, including its repository and commit.
     fn observe(&mut self, job: &RemoteJob) -> Result<RemoteState, Self::Error>;
+    /// Best-effort cleanup after an observation has been stored durably.
+    fn after_save(&mut self, _job: &RemoteJob) {}
     /// True means the provider confirmed the job stopped.
     fn cancel(&mut self, job: &RemoteJob) -> Result<bool, Self::Error>;
 }
@@ -326,7 +389,16 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
         return Ok(());
     }
     if job.state == RemoteState::Submitting {
-        return Err(CloudJobError::SubmissionUnknown);
+        let id = provider
+            .recover(job)
+            .map_err(CloudJobError::Provider)?
+            .filter(|id| !id.trim().is_empty())
+            .ok_or(CloudJobError::SubmissionUnknown)?;
+        let mut recovered = job.clone();
+        recovered.remote_id = id;
+        recovered.state = RemoteState::Running;
+        store.save(&recovered).map_err(CloudJobError::Store)?;
+        *job = recovered;
     }
     let mut state = provider.observe(job).map_err(CloudJobError::Provider)?;
     // Seeing a running job does not prove whether an earlier cancellation
@@ -337,13 +409,14 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
     if let RemoteState::Finished { result } = &state {
         result
             .clone()
-            .check(&job.commit, &job.requested_model)
+            .check(&job.job_id, &job.nonce, &job.commit, &job.requested_model)
             .map_err(CloudJobError::Result)?;
     }
     let mut updated = job.clone();
     updated.state = state;
     store.save(&updated).map_err(CloudJobError::Store)?;
     *job = updated;
+    provider.after_save(job);
     Ok(())
 }
 
@@ -434,6 +507,9 @@ mod lifecycle_tests {
     }
     fn job() -> RemoteJob {
         RemoteJob {
+            job_id: "job".into(),
+            nonce: "nonce".into(),
+            deadline_unix_seconds: u64::MAX,
             provider: "fake".into(),
             target: "target".into(),
             environment: "env".into(),
@@ -447,6 +523,8 @@ mod lifecycle_tests {
     }
     fn result(commit: &str) -> CloudResult {
         CloudResult {
+            job_id: "job".into(),
+            nonce: "nonce".into(),
             commit: commit.into(),
             exit_status: 0,
             tests_run: vec!["test".into()],
@@ -631,6 +709,36 @@ mod lifecycle_tests {
         reconcile(&mut provider, &mut store, &mut recovered).unwrap();
         cancel(&mut provider, &mut store, &mut recovered).unwrap();
         assert_eq!(store.saved, Some(recovered));
+    }
+
+    #[test]
+    fn cloud_recovery_saves_remote_identity_before_observation() {
+        struct Recovery;
+        impl CloudProvider for Recovery {
+            type Error = ();
+            fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+                Ok(())
+            }
+            fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
+                Err(())
+            }
+            fn recover(&mut self, job: &RemoteJob) -> Result<Option<String>, ()> {
+                assert_eq!(job.nonce, "nonce");
+                Ok(Some("recovered".into()))
+            }
+            fn observe(&mut self, job: &RemoteJob) -> Result<RemoteState, ()> {
+                assert_eq!(job.remote_id, "recovered");
+                Ok(RemoteState::Running)
+            }
+            fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
+                Ok(false)
+            }
+        }
+        let mut store = FakeStore::default();
+        assert!(submit(&mut Recovery, &mut store, job(), "test").is_err());
+        let mut recovered = store.saved.clone().unwrap();
+        reconcile(&mut Recovery, &mut store, &mut recovered).unwrap();
+        assert_eq!(store.saved.unwrap().remote_id, "recovered");
     }
 
     #[test]
