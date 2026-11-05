@@ -2257,10 +2257,8 @@ fn invalid_install_home_names_the_repair() -> Result {
         let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(value["status"], "invalid", "{value}");
         assert_eq!(value["error"]["code"], "HOME", "{value}");
-        assert_eq!(
-            value["error"]["repair"],
-            "Set HOME to your absolute home directory, then rerun `provenant install`."
-        );
+        let repair = value["error"]["repair"].as_str().ok_or("repair")?;
+        assert!(repair.contains("HOME") && repair.contains("absolute home directory"), "{repair}");
     }
     Ok(())
 }

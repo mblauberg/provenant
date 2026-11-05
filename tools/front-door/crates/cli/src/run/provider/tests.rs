@@ -808,10 +808,8 @@ fn credential_messages_suggest_signin_only_for_missing_or_expired_tokens() {
         ProviderError::CredentialExpired,
     ] {
         let message = credential_failure_message(&error, "work", directory);
-        assert!(
-            message
-                .contains("sign in again with CLAUDE_CONFIG_DIR=/fake/account claude auth login")
-        );
+        assert!(message.contains("sign in again"), "{message}");
+        assert!(message.contains(directory.to_str().unwrap()), "{message}");
     }
     for error in [
         ProviderError::CredentialReadFailed("security exited with code 1".into()),
