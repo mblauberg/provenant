@@ -316,7 +316,7 @@ pub(crate) fn run_preset_graph(
                 data["warnings"] = serde_json::json!(warnings);
             }
             human.push_str(&provenant_cli::run::warnings_text(&data));
-            crate::emit(
+            let code = crate::emit(
                 &provenant_records::CommandResult::new(
                     if review { "review" } else { "run" },
                     outcome,
@@ -325,7 +325,12 @@ pub(crate) fn run_preset_graph(
                 globals,
                 &human,
                 false,
-            )
+            );
+            if review && run.status == GraphStatus::Pending {
+                124
+            } else {
+                code
+            }
         }
         Err(error) => crate::fail_with_repair(
             "run",

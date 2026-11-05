@@ -545,8 +545,10 @@ fn fixture() -> Result {
             json!([{"id":"F1","disposition":"rejected","reason":"falsified"}])
         } else if prompt.contains("Verify the lens findings for:") {
             json!([{"id":"lenses--lens-correctness-spec:F1","severity":"high","file":"a.rs","summary":"fixture finding","status":"open","verification":"falsified","propagates":"lenses:lenses--lens-correctness-spec:F1"}])
-        } else {
+        } else if prompt.contains("Lens correctness-spec.") {
             json!([{"id":"F1","severity":"high","file":"a.rs","summary":"fixture finding","status":"open"}])
+        } else {
+            json!([])
         };
         format!(
             "```findings\n{}\n```\nVERDICT: PASS{DONE_FENCE}\n",
@@ -1314,6 +1316,16 @@ fn review_resolves_identity_only_dispositions() -> Result {
                     .is_some_and(|attempts| !attempts.is_empty()),
                 "{status}"
             );
+            let lens_findings: usize = nodes
+                .iter()
+                .filter(|node| {
+                    node["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("lenses--lens-"))
+                })
+                .map(|node| node["outputs"]["findings"].as_array().map_or(0, Vec::len))
+                .sum();
+            assert_eq!(lens_findings, 1, "{status}");
             let synthesis = nodes
                 .iter()
                 .find(|node| node["id"] == "synthesis")
