@@ -298,6 +298,22 @@ mod tests {
             ..Default::default()
         };
         for writer in [false, true] {
+            let mut permissions = plan.permissions().clone();
+            if writer {
+                permissions.mode = AccessMode::WorktreeWrite(Box::new(serde_json::from_value(
+                    json!({
+                        "git_grants_digest": vec![7_u8; 32], "publishing": false,
+                        "common_git_dir": common, "cargo_cache": {"path": root.join("cache"), "scope": "subtree"}
+                    }),
+                )?));
+            }
+            let mode_plan = ConfinedPlan::new(PlanRequest {
+                scope: WorkScope::Project(ProjectId::from_bytes([2; 16])),
+                codex: CodexPolicy::Clean,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+                permissions,
+            })?;
             let mut profile = ProviderProfile {
                 spec: ProviderProfileSpec::default(),
                 observations: Default::default(),
@@ -306,7 +322,7 @@ mod tests {
             let record = apply_to(
                 &mut env,
                 &mut profile,
-                &plan,
+                &mode_plan,
                 Context {
                     cwd: &cwd,
                     home: &home,
@@ -468,6 +484,22 @@ mod tests {
             ..Default::default()
         };
         for writer in [false, true] {
+            let mut permissions = plan.permissions().clone();
+            if writer {
+                permissions.mode = AccessMode::WorktreeWrite(Box::new(serde_json::from_value(
+                    json!({
+                        "git_grants_digest": vec![7_u8; 32], "publishing": false,
+                        "common_git_dir": common, "cargo_cache": {"path": root.join("cache"), "scope": "subtree"}
+                    }),
+                )?));
+            }
+            let mode_plan = ConfinedPlan::new(PlanRequest {
+                scope: WorkScope::Project(ProjectId::from_bytes([2; 16])),
+                codex: CodexPolicy::Clean,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+                permissions,
+            })?;
             let mut profile = ProviderProfile {
                 spec: ProviderProfileSpec {
                     tool_writes: vec![grant(tool.clone())],
@@ -478,7 +510,7 @@ mod tests {
             let receipt = apply_to(
                 &mut Vec::new(),
                 &mut profile,
-                &plan,
+                &mode_plan,
                 Context {
                     cwd: &primary,
                     home: &home,
