@@ -402,6 +402,25 @@ fn install_error_result(command: &str, error: &InstallError) -> CommandResult<In
     });
     result
 }
+const HOME_REPAIR: &str =
+    "Set HOME to your absolute home directory, then rerun `provenant install`.";
+
+fn home_error_result(command: &str, message: &str) -> CommandResult<()> {
+    let mut result = CommandResult::new(command, Outcome::Invalid, ());
+    result.error = Some(CommandError {
+        diagnostic: None,
+        code: "HOME".into(),
+        message: message.into(),
+        cause: None,
+        repair: Some(HOME_REPAIR.into()),
+    });
+    result
+}
+
+pub(super) fn home_error(command: &str, message: &str, globals: &cli::Globals) -> u8 {
+    super::emit(&home_error_result(command, message), globals, "", false)
+}
+
 fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
     match error {
         EdgeError::Install(error) => install_error(command, &error, globals),
@@ -419,13 +438,7 @@ fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
             &error.to_string(),
             globals,
         ),
-        EdgeError::Home => super::fail(
-            command,
-            Outcome::Invalid,
-            "HOME",
-            "HOME must be an absolute directory",
-            globals,
-        ),
+        EdgeError::Home => home_error(command, "HOME must be an absolute directory", globals),
     }
 }
 
@@ -1619,6 +1632,14 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn home_refusal_has_install_repair() {
+        let result = super::home_error_result("install", "HOME must be absolute");
+        let error = result.error.unwrap();
+        assert_eq!(error.code, "HOME");
+        assert!(error.repair.unwrap().contains("provenant install"));
+    }
+
     #[test]
     fn orphan_detection_keeps_default_environment_and_registered_targets()
     -> Result<(), Box<dyn std::error::Error>> {

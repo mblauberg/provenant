@@ -235,23 +235,7 @@ fn fail_with_repair(
         cause: None,
         repair: repair.map(Into::into),
     });
-    if let Some(error) = &mut result.error {
-        apply_repair(command, error, globals.json);
-    }
     emit(&result, globals, "", false)
-}
-fn apply_repair(command: &str, error: &mut CommandError, json: bool) {
-    if error.repair.is_some() {
-        return;
-    }
-    error.repair = match (command, error.code.as_str()) {
-        ("install", "HOME") => Some("Set HOME to your absolute home directory, then rerun `provenant install`.".into()),
-        ("gc", "GC") => Some("Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.".into()),
-        _ => None,
-    };
-    if !json && let Some(repair) = &error.repair {
-        error.message.push_str(&format!("; {repair}"));
-    }
 }
 /// Resolve Run's composition paths, then emit the owner's reply.
 fn run_edge(
@@ -269,15 +253,12 @@ fn run_edge_workspace(
 ) -> u8 {
     match roots::resolve(globals, workspace, Product::Required) {
         Ok(resolved) => {
-            let mut reply = action(&provenant_cli::run::Edge {
+            let reply = action(&provenant_cli::run::Edge {
                 roots: &resolved.roots,
                 home: &resolved.home,
                 assets: &resolved.assets,
                 cwd: &resolved.project,
             });
-            if let Some(error) = &mut reply.result.error {
-                apply_repair(leaf, error, globals.json);
-            }
             emit_summarised(
                 &reply.result,
                 globals,
@@ -652,6 +633,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         } else {
             error.code()
         };
+        if matches!(error, roots::RootError::Home) && inv.leaf == "install" {
+            return install::home_error(&inv.leaf, &error.to_string(), globals);
+        }
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
     match command {
