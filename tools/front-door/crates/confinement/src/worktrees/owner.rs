@@ -122,10 +122,11 @@ pub fn save_lane_owner_when_free(
         .get(tree.path())
         .copied()
         .unwrap_or(WorkerState::Unknown);
-    if observed == WorkerState::Busy
-        || matches!(observed, WorkerState::Live | WorkerState::Unknown)
-            && !terminal_prior
-            && expected_prior.is_some_and(|prior| prior.operation_id != owner.operation_id)
+    if matches!(
+        observed,
+        WorkerState::Busy | WorkerState::Live | WorkerState::Unknown
+    ) && !terminal_prior
+        && expected_prior.is_some_and(|prior| prior.operation_id != owner.operation_id)
     {
         return Err(live_refusal(context.workers, tree.path()));
     }

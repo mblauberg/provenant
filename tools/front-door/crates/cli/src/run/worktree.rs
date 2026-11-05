@@ -96,7 +96,8 @@ pub(super) fn own_worktree(
         cancel,
         |context| {
             use provenant_confinement::worktrees::{
-                self, WorktreeCreate, WorktreeOrigin, WorktreeOwner, WriterState,
+                self, Occupancy, OccupancyUnknownSource, WorktreeCreate, WorktreeOrigin,
+                WorktreeOwner,
             };
             let context = &worktrees::WorktreeContext {
                 workers,
@@ -147,68 +148,60 @@ pub(super) fn own_worktree(
                     let same_operation = owner
                         .as_ref()
                         .is_some_and(|owner| owner.operation_id.as_ref() == Some(operation_id));
-                    let census_detail = || {
-                        context
-                            .workers
-                            .observe_evidence(std::slice::from_ref(&info.path), false)
-                            .details
-                            .get(&info.path)
-                            .cloned()
-                            .unwrap_or_else(|| context.workers.incomplete_census_detail())
-                    };
-                    match info.writer {
-                        WriterState::Free => {}
-                        WriterState::Busy => {
+                    let settled = owner.is_none()
+                        || same_operation
+                        || owner
+                            .as_ref()
+                            .and_then(|owner| owner.attempt_id)
+                            .is_some_and(&terminal_attempt);
+                    match observation.occupancy {
+                        Occupancy::Available => {}
+                        Occupancy::Held => {
                             return Err(worktrees::WorktreeError::WriterBusy {
                                 holder: owner.and_then(|owner| owner.attempt_id),
                             });
                         }
-                        WriterState::Live => {
-                            let settled = owner.is_none()
-                                || same_operation
-                                || owner
-                                    .as_ref()
-                                    .and_then(|owner| owner.attempt_id)
-                                    .is_some_and(&terminal_attempt);
+                        Occupancy::Observed { process } => {
                             if !settled
-                                || observation.registration_unknown
                                 || worktrees::cache_writer_probe(context.project_state, &info.path)
                                     .is_err()
                             {
-                                return Err(worktrees::live_refusal(context.workers, &info.path));
+                                return Err(process.map_or(
+                                    worktrees::WorktreeError::LiveWriter,
+                                    worktrees::WorktreeError::LiveProcess,
+                                ));
                             }
-                            let detail = context.workers.live_process(&info.path).map_or_else(
+                            let detail = process.map_or_else(
                                 || "a process was observed".to_owned(),
                                 |process| format!("process {process} ({})", process.kind),
                             );
                             warn_worktree_census(&info.path, &detail);
                         }
-                        WriterState::Unknown => {
-                            let settled = owner.is_none()
-                                || same_operation
-                                || owner
-                                    .as_ref()
-                                    .and_then(|owner| owner.attempt_id)
-                                    .is_some_and(&terminal_attempt);
+                        Occupancy::Unknown {
+                            scope,
+                            evidence,
+                            source,
+                        } => {
                             if !settled
                                 || worktrees::cache_writer_probe(context.project_state, &info.path)
                                     .is_err()
                             {
-                                if observation.observed == worktrees::WorkerState::Unknown
-                                    && !observation.registration_unknown
-                                {
-                                    return Err(worktrees::WorktreeError::CensusUnknown {
-                                        path: info.path.clone(),
-                                        detail: census_detail(),
-                                    });
-                                }
-                                return Err(worktrees::WorktreeError::UnknownWriterAt {
-                                    path: info.path.clone(),
+                                return Err(match source {
+                                    OccupancyUnknownSource::Census => {
+                                        worktrees::WorktreeError::CensusUnknown {
+                                            path: scope,
+                                            detail: evidence,
+                                        }
+                                    }
+                                    OccupancyUnknownSource::Custody => {
+                                        worktrees::WorktreeError::UnknownOccupancy {
+                                            path: scope,
+                                            detail: evidence,
+                                        }
+                                    }
                                 });
                             }
-                            if observation.observed == worktrees::WorkerState::Unknown {
-                                warn_worktree_census(&info.path, &census_detail());
-                            }
+                            warn_worktree_census(&scope, &evidence);
                         }
                     }
                     (info, None)

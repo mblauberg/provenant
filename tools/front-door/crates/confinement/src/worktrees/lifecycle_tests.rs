@@ -1206,6 +1206,102 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
 }
 
 #[test]
+fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<(), Box<dyn Error>> {
+    struct Incomplete;
+    struct Contended;
+    impl WorkerObserver for Contended {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, WorkerState::Busy))
+                .collect()
+        }
+    }
+    impl WorkerObserver for Incomplete {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, WorkerState::Unknown))
+                .collect()
+        }
+        fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+            (
+                self.observe_roots(roots),
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, "fixture census incomplete".into()))
+                    .collect(),
+            )
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "occupancy-evidence".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    context.workers = &Incomplete;
+    let observation = list_with_observation(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.info.path == info.path)
+        .ok_or("missing worktree")?;
+    assert!(matches!(
+        observation.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Census }
+            if scope == info.path && evidence == "fixture census incomplete"
+    ));
+    let _held = cache_writer_guard(context.project_state, &info.path).map_err(|_| "lease")?;
+    let observation = list_with_observation(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.info.path == info.path)
+        .ok_or("missing worktree")?;
+    assert_eq!(observation.occupancy, Occupancy::Held);
+    drop(_held);
+    context.workers = &Contended;
+    let observation = list_with_observation(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.info.path == info.path)
+        .ok_or("missing worktree")?;
+    assert!(matches!(
+        observation.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Census }
+            if scope == info.path && evidence.contains("without a held writer lease")
+    ));
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let owner = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("occupancy-evidence".parse()?),
+        branch: "occupancy-evidence".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
+    assert_eq!(load_owner(&tree)?, Some(owner));
+    fixture.run(&["worktree", "lock", info.path.to_str().ok_or("path")?])?;
+    let observation = list_with_observation(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.info.path == info.path)
+        .ok_or("missing worktree")?;
+    assert!(matches!(
+        observation.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
+            if scope == info.path && evidence.contains("locked")
+    ));
+    Ok(())
+}
+
+#[test]
 fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn Error>> {
     struct Live;
     impl WorkerObserver for Live {

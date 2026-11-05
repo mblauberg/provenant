@@ -729,6 +729,7 @@ impl From<&RunError> for ErrorKind {
                 provenant_confinement::worktrees::WorktreeError::UnknownWriter
                 | provenant_confinement::worktrees::WorktreeError::UnknownWriterAt { .. }
                 | provenant_confinement::worktrees::WorktreeError::CensusUnknown { .. }
+                | provenant_confinement::worktrees::WorktreeError::UnknownOccupancy { .. }
                 | provenant_confinement::worktrees::WorktreeError::IncompleteCensus { .. },
             ) => Self::WriterUnknown,
             RunError::Writer(_) => Self::WriterScope,

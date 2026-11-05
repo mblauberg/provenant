@@ -130,6 +130,8 @@ pub enum WorktreeError {
     /// as `UnknownWriter`; lifecycle consumers get a typed retry cause.
     #[error("worktree writer or registration is unknown")]
     CensusUnknown { detail: String, path: PathBuf },
+    #[error("worktree writer or registration is unknown")]
+    UnknownOccupancy { detail: String, path: PathBuf },
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
     GitEntryHeld { locked: bool },
     #[error("worktree operation was cancelled")]
@@ -195,9 +197,10 @@ impl WorktreeError {
             Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
             Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::CensusUnknown { .. } => Some(AdmissionCause::CensusIncomplete),
-            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::GitEntryHeld { .. } => {
-                Some(AdmissionCause::RegistrationOrCustodyUnknown)
-            }
+            Self::UnknownWriter
+            | Self::UnknownWriterAt { .. }
+            | Self::UnknownOccupancy { .. }
+            | Self::GitEntryHeld { .. } => Some(AdmissionCause::RegistrationOrCustodyUnknown),
             Self::LockBusy | Self::LiveWriter | Self::LiveProcess(_) | Self::WriterBusy { .. } => {
                 Some(AdmissionCause::LiveWriter)
             }
@@ -214,6 +217,7 @@ impl WorktreeError {
             Self::UnknownWriter
                 | Self::UnknownWriterAt { .. }
                 | Self::CensusUnknown { .. }
+                | Self::UnknownOccupancy { .. }
                 | Self::GitEntryHeld { .. }
         )
     }
@@ -241,7 +245,10 @@ impl WorktreeError {
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
             }
-            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::CensusUnknown { .. } => {
+            Self::UnknownWriter
+            | Self::UnknownWriterAt { .. }
+            | Self::CensusUnknown { .. }
+            | Self::UnknownOccupancy { .. } => {
                 "run `provenant worktree list` and inspect the registration and writer state before retrying"
             }
             Self::IncompleteCensus { .. } => {
@@ -424,6 +431,29 @@ pub enum WriterState {
     Busy,
     Live,
     Unknown,
+}
+
+/// A worktree's observed occupancy, including the scope and evidence when it
+/// cannot be determined. Process observations are advisory; held custody is
+/// determined by the writer exclusion slot and retained fences.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Occupancy {
+    Available,
+    Held,
+    Observed {
+        process: Option<ObservedProcess>,
+    },
+    Unknown {
+        scope: PathBuf,
+        evidence: String,
+        source: OccupancyUnknownSource,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OccupancyUnknownSource {
+    Census,
+    Custody,
 }
 
 /// Observed lane-ownership registration; absence does not prove custody is free.

@@ -98,8 +98,7 @@ pub fn list(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeObservation {
     pub info: WorktreeInfo,
-    pub observed: WorkerState,
-    pub registration_unknown: bool,
+    pub occupancy: Occupancy,
 }
 
 /// Like [`list`], preserving the native observation and whether registration
@@ -173,7 +172,7 @@ fn list_impl(
     let total = candidates.len();
     report(total, None);
     let roots: Vec<_> = candidates.iter().map(|(path, _)| path.clone()).collect();
-    let worker_states = context.workers.observe_roots(&roots);
+    let worker_evidence = context.workers.observe_evidence(&roots, false);
     let primary = canonicalize(context.repo.root_path())?;
     let mut result = Vec::with_capacity(candidates.len());
     for (path, entry) in candidates {
@@ -181,12 +180,13 @@ fn list_impl(
             .branch
             .as_ref()
             .map(|branch| branch.as_str().to_owned());
-        let observed = worker_states
+        let observed = worker_evidence
+            .states
             .get(&path)
             .copied()
             .unwrap_or(WorkerState::Unknown);
         let mut owner = OwnerStatus::Unknown;
-        let (dirty, writer, registration_unknown) = if path == primary {
+        let (dirty, writer, disk, registration_unknown) = if path == primary {
             owner = OwnerStatus::Primary;
             (
                 if eager_git {
@@ -196,6 +196,7 @@ fn list_impl(
                     WorktreeCondition::Unknown
                 },
                 combine_worker_state(WorkerState::Unknown, observed),
+                WorkerState::Unknown,
                 true,
             )
         } else {
@@ -231,10 +232,57 @@ fn list_impl(
                         } else {
                             combine_worker_state(disk, observed)
                         },
+                        disk,
                         entry.locked || entry.prunable || disk == WorkerState::Unknown,
                     )
                 }
-                Err(_) => (WorktreeCondition::Unknown, WriterState::Unknown, true),
+                Err(_) => (
+                    WorktreeCondition::Unknown,
+                    WriterState::Unknown,
+                    WorkerState::Unknown,
+                    true,
+                ),
+            }
+        };
+        let occupancy = if disk == WorkerState::Busy {
+            Occupancy::Held
+        } else if registration_unknown {
+            let evidence = if entry.locked {
+                "Git marks the worktree locked"
+            } else if entry.prunable {
+                "Git marks the worktree prunable"
+            } else {
+                "worktree registration or writer custody could not be verified"
+            };
+            Occupancy::Unknown {
+                scope: path.clone(),
+                evidence: evidence.into(),
+                source: OccupancyUnknownSource::Custody,
+            }
+        } else {
+            match observed {
+                WorkerState::Free => Occupancy::Available,
+                WorkerState::Busy => Occupancy::Unknown {
+                    scope: path.clone(),
+                    evidence: "census reported contention without a held writer lease".into(),
+                    source: OccupancyUnknownSource::Census,
+                },
+                WorkerState::Live => Occupancy::Observed {
+                    process: worker_evidence
+                        .holders
+                        .get(&path)
+                        .cloned()
+                        .or_else(|| context.workers.live_process(&path)),
+                },
+                WorkerState::Unknown => Occupancy::Unknown {
+                    scope: path.clone(),
+                    evidence: worker_evidence
+                        .details
+                        .get(&path)
+                        .cloned()
+                        .unwrap_or_else(|| context.workers.incomplete_census_detail()),
+                    source: OccupancyUnknownSource::Census,
+                },
             }
         };
         let observation = WorktreeObservation {
@@ -246,8 +294,7 @@ fn list_impl(
                 writer,
                 owner,
             },
-            observed,
-            registration_unknown,
+            occupancy,
         };
         report(total, Some(&observation.info));
         result.push(observation);
