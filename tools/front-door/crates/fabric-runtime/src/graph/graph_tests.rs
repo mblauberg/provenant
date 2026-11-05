@@ -3238,6 +3238,12 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     assert_eq!(outputs.findings[1].severity, "blocking");
     assert_eq!(outputs.findings[0].status, "open");
     assert!(outputs.warnings.iter().any(|w| w.contains("field status")));
+    assert!(
+        outputs
+            .warnings
+            .iter()
+            .any(|w| w.contains("entry 3") && w.contains("field id"))
+    );
     assert!(outputs.result.is_some());
     let composite = run
         .checkpoint

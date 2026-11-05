@@ -91,8 +91,16 @@ pub(super) fn make_outputs_with_upstream(
                 ));
             }
             let available = MAX_WARNINGS.saturating_sub(warnings.len());
-            for warning in skipped.iter().take(available) {
+            let named = if skipped.len() > available {
+                available.saturating_sub(1)
+            } else {
+                available
+            };
+            for warning in skipped.iter().take(named) {
                 warnings.push(bounded(warning, WARNING_BYTES));
+            }
+            if skipped.len() > named && available > 0 {
+                warnings.push(format!("{} more finding warnings", skipped.len() - named));
             }
             findings
         })
