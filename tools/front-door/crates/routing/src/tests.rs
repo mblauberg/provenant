@@ -1737,7 +1737,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         layered.domains.routing.review.select.by_risk["medium"],
         "deep"
     );
-    let customized = provenant_config::load_with_domains(
+    let customised = provenant_config::load_with_domains(
         &roots,
         Some(
             "schema_version=1\n[domains.routing.review.shapes.quick]\nsynthesis='model'\n[domains.routing.review.floors.security]\ntier='substantial'\n"
@@ -1745,7 +1745,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         ),
         &sections,
     )?;
-    let schema = provenant_config::schema(&customized, &sections, String::new())?;
+    let schema = provenant_config::schema(&customised, &sections, String::new())?;
     let synthesis = schema
         .fields
         .iter()
