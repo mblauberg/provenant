@@ -1,1 +1,1 @@
--- Retired migration slot; schema version numbering remains stable.
+ALTER TABLE imports ADD COLUMN skipped_rows BLOB NOT NULL DEFAULT X'7B7D';

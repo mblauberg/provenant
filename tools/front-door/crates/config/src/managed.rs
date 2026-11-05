@@ -175,6 +175,8 @@ pub struct Targets {
     pub tick_agent: Option<Vec<u8>>,
     /// The systemd service unit the Linux timer activates; `None` on macOS.
     pub tick_service: Option<Vec<u8>>,
+    /// Exact recognised historical rendering, for migration from pre-receipt agents.
+    pub peer_agent_previous: Option<Vec<u8>>,
     pub hook_specs: Vec<HookRegistration>,
     /// Registered account directories, which `check install` expects to be
     /// recorded targets. Supplied only by the process edge.
@@ -250,6 +252,7 @@ impl Targets {
             peer_agent: None,
             tick_agent: None,
             tick_service: None,
+            peer_agent_previous: None,
             hook_specs: Vec::new(),
             accounts: Vec::new(),
             shared_settings: None,
@@ -829,7 +832,7 @@ pub fn tick_service_path(state: &Path) -> Option<PathBuf> {
 
 /// Receipt entries the scheduler owns, whichever platform wrote them.
 fn scheduler_entry(selector: &str) -> bool {
-    matches!(selector, "tick-agent" | "tick-service")
+    matches!(selector, "tick-agent" | "tick-service" | "gc-agent")
 }
 
 fn validate_removal(
@@ -982,10 +985,20 @@ pub fn plan_install(
                 if immutable && complete {
                     return Err(InstallError::Tampered(path.clone()));
                 }
+                let legacy_peer = want.selector == "peer-agent"
+                    && !snapshots.receipt.as_ref().is_some_and(|receipt| {
+                        receipt
+                            .entries
+                            .iter()
+                            .any(|entry| entry.selector == "peer-agent")
+                    })
+                    && matches!(&current.value, Value::File { bytes, mode: 0o600 | 0o644 }
+                        if targets.peer_agent_previous.as_ref() == Some(bytes));
                 if !immutable
                     && !was_owned
                     && !adopt_binary
                     && !adopt_shared
+                    && !legacy_peer
                     && want.selector != "config"
                 {
                     if want.selector == "peer-agent" {
@@ -1054,7 +1067,7 @@ pub fn plan_install(
             }
             if !matches!(
                 entry.selector.as_str(),
-                "binary" | "tick-agent" | "tick-service" | "shared-instruction"
+                "binary" | "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
             ) {
                 let Some(owner) = owner else {
                     continue;
@@ -1075,7 +1088,7 @@ pub fn plan_install(
                 || current.is_none()
                     && matches!(
                         entry.selector.as_str(),
-                        "tick-agent" | "tick-service" | "shared-instruction"
+                        "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
                     )
             {
                 actions.push(Action {
@@ -1089,7 +1102,7 @@ pub fn plan_install(
                 });
             } else if matches!(
                 entry.selector.as_str(),
-                "tick-agent" | "tick-service" | "shared-instruction"
+                "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
             ) {
                 snapshots.harness.findings.push(InstallFinding {
                     rule: "relinquished_modified_entry".into(),
@@ -1166,6 +1179,7 @@ pub fn plan_install(
         harnesses,
         harness_targets: resolved_targets.into_values().collect(),
         entries,
+        legacy: None,
     };
     let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
     let bytes = provenant_records::encode(&receipt)?;
@@ -1758,6 +1772,13 @@ pub struct InstallFinding {
 pub(crate) fn read_receipt(targets: &Targets) -> Result<Option<InstallReceipt>, InstallError> {
     Ok(read_receipt_inspected(targets, None)?.map(|decoded| decoded.receipt))
 }
+/// Validated stable binary path for recognising a historical peer plist.
+pub fn installed_binary(targets: &Targets) -> Result<Option<PathBuf>, InstallError> {
+    read_receipt_inspected(targets, None)?
+        .filter(|decoded| !decoded.stale.iter().any(|entry| entry.selector == "binary"))
+        .map(|decoded| Ok(decoded.receipt.bin_dir.to_path_buf()?.join("provenant")))
+        .transpose()
+}
 /// The recorded targets uninstall of `targets` selects, and every recorded
 /// target. Shared entries go only when the two match.
 fn uninstall_selection(
@@ -1820,6 +1841,9 @@ impl Decoded {
 fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallError> {
     let mut receipt: InstallReceipt =
         provenant_records::decode_v1(bytes, Limits::CONFIG).map_err(InstallError::ReceiptDecode)?;
+    receipt
+        .entries
+        .retain(|entry| entry.selector != "disk-guard-agent");
     let state_root = targets.roots.state.as_path();
     normal_absolute(&receipt.bin_dir.to_path_buf()?)?;
     let mut harnesses = BTreeSet::new();
@@ -2058,7 +2082,7 @@ fn permitted_entry(
         }
         if matches!(
             entry.selector.as_str(),
-            "peer-agent" | "tick-agent" | "tick-service"
+            "peer-agent" | "tick-agent" | "tick-service" | "gc-agent"
         ) {
             let expected_path = match entry.selector.as_str() {
                 "peer-agent" => peer_agent_plist(state_root),
@@ -2070,7 +2094,9 @@ fn permitted_entry(
                         .flatten()
                 }
                 "tick-service" => tick_service_path(state_root),
-                _ => unreachable!(),
+                // Only migration/removal reads this former install receipt entry.
+                _ => peer_agent_plist(state_root)
+                    .map(|path| path.with_file_name("dev.provenant.gc.plist")),
             };
             return Ok(expected_path.as_ref() == Some(&path)
                 && matches!(
@@ -2560,6 +2586,37 @@ pub fn uninstall(
     if selected.is_empty() {
         return not_installed(&receipt_path, findings, reporter);
     }
+    // Older installers wrote this fixed plist without recording it. The
+    // process edge recognises its exact historical rendering, never its label
+    // alone. Unknown bytes still become a preserved-and-reported finding.
+    let recorded_peer_agent = receipt
+        .entries
+        .iter()
+        .any(|entry| entry.selector == "peer-agent");
+    if selected == registered
+        && !recorded_peer_agent
+        && let Some(desired) = &targets.peer_agent
+        && let Some(path) = peer_agent_plist(state_root)
+    {
+        let current = snapshot(&path)?;
+        let mode = match current.as_ref().map(|snapshot| &snapshot.value) {
+            Some(Value::File { mode: 0o644, .. }) => 0o644,
+            _ => 0o600,
+        };
+        receipt.entries.push(OwnedEntry {
+            extra: Default::default(),
+            path: AbsolutePath::new(&path)?,
+            harness: None,
+            selector: "peer-agent".into(),
+            expected: owned(&Value::File {
+                bytes: targets
+                    .peer_agent_previous
+                    .clone()
+                    .unwrap_or_else(|| desired.clone()),
+                mode,
+            })?,
+        });
+    }
     let mut owners = Vec::with_capacity(receipt.entries.len());
     for entry in &receipt.entries {
         owners.push(entry_owner(entry, &receipt, state_root)?);
@@ -2568,7 +2625,7 @@ pub fn uninstall(
         owner.as_ref().is_some_and(|id| selected.contains(id))
             || (matches!(
                 entry.selector.as_str(),
-                "peer-agent" | "tick-agent" | "tick-service" | "shared-instruction"
+                "peer-agent" | "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
             ) && selected == registered)
     };
 

@@ -799,6 +799,14 @@ mod diagnostic_tests {
     }
 
     #[test]
+    fn legacy_mismatch_frame_without_level_is_rejected() {
+        let result = serde_json::from_value::<FacadeError>(serde_json::json!({
+            "code": "peer_protocol_mismatch", "peer": "w", "remote": 1
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn resume_preserves_no_fallback_and_target() -> Result<(), Box<dyn std::error::Error>> {
         let input = serde_json::json!({
             "op": "resume",
@@ -808,6 +816,15 @@ mod diagnostic_tests {
             "expected_generation": 0,
             "no_fallback": true
         });
+        let mut legacy = input.clone();
+        legacy.as_object_mut().unwrap().remove("no_fallback");
+        assert!(matches!(
+            serde_json::from_value::<super::RunInput>(legacy)?,
+            super::RunInput::Resume {
+                no_fallback: false,
+                ..
+            }
+        ));
         let explicit: super::RunInput = serde_json::from_value(input)?;
         assert!(matches!(
             explicit,

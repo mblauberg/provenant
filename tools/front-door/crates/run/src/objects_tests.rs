@@ -45,8 +45,8 @@ fn private_view_binding_refuses_replaced_directories_and_foreign_paths() -> Test
 }
 
 #[test]
-fn private_view_refuses_incomplete_identity_versions() -> TestResult {
-    for version in [2, 3] {
+fn private_view_reads_legacy_bindings_but_refuses_incomplete_identity_versions() -> TestResult {
+    for version in [1, 2, 3] {
         let temp = tempfile::tempdir()?;
         let path = fs::canonicalize(temp.path())?;
         fs::create_dir_all(path.join("tmp/candidate-0/git-common"))?;
@@ -60,7 +60,12 @@ fn private_view_refuses_incomplete_identity_versions() -> TestResult {
             )?,
             crate::RECORD_LIMIT,
         )?;
-        assert!(super::bound_source(&attempt).is_err());
+        let source = super::bound_source(&attempt);
+        if version == 1 {
+            assert!(source?.is_some());
+        } else {
+            assert!(source.is_err());
+        }
     }
     Ok(())
 }

@@ -413,6 +413,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
             .harnesses
             .contains(&Harness::Codex)
     );
+    assert_eq!(installed_binary(&targets).unwrap(), None);
     let release = f.release();
     assert!(matches!(
         Snapshots::capture(&release, &targets),
@@ -524,6 +525,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             let inspection =
                 inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
             assert!(inspection.error.is_none(), "{:?}", inspection.error);
+            assert_eq!(installed_binary(&targets).unwrap(), None);
             let outcome = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
             assert!(
                 outcome
@@ -709,6 +711,10 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
     );
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     assert!(f.plan().findings().is_empty());
+    assert_eq!(
+        installed_binary(&f.targets).unwrap(),
+        Some(f.targets.bin_dir.join("provenant"))
+    );
     assert_eq!(fs::read(&old_binary).unwrap(), b"old release canary\n");
 }
 
@@ -1065,6 +1071,77 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
             crate::hooks::get(&fs::read(&hook).unwrap(), &selector).unwrap(),
             Some(edited)
         );
+    }
+}
+
+#[test]
+fn historical_peer_agent_is_adopted_or_uninstalled_only_for_recognised_bytes() {
+    for (upgrade, recognised) in [(true, true), (true, false), (false, true), (false, false)] {
+        let mut f = Fixture::new();
+        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+            .resolve(&Resolver)
+            .unwrap();
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let context = InstallContext {
+            clock: &clock,
+            cancel: &cancel,
+            budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
+        };
+        install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
+        let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        fs::write(&plist, b"historical plist\n").unwrap();
+        fs::set_permissions(&plist, fs::Permissions::from_mode(0o644)).unwrap();
+        f.targets.peer_agent = Some(b"new plist\n".to_vec());
+        f.targets.peer_agent_previous = recognised.then(|| b"historical plist\n".to_vec());
+        if upgrade {
+            let release = f.release();
+            let plan = Snapshots::capture(&release, &f.targets)
+                .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots));
+            if recognised {
+                install(
+                    &plan.unwrap(),
+                    &context,
+                    &mut Reporter::default(),
+                    &Smoke,
+                    false,
+                )
+                .unwrap();
+                assert_eq!(fs::read(&plist).unwrap(), b"new plist\n");
+                assert_eq!(
+                    fs::metadata(&plist).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+                assert!(
+                    read_receipt(&f.targets)
+                        .unwrap()
+                        .unwrap()
+                        .entries
+                        .iter()
+                        .any(|entry| entry.selector == "peer-agent")
+                );
+            } else {
+                let error = plan.unwrap_err().to_string();
+                assert!(error.contains(plist.to_str().unwrap()), "{error}");
+                assert!(error.contains("move it aside"), "{error}");
+                assert!(
+                    error.contains("launchctl bootout gui/$UID/dev.provenant.peer"),
+                    "{error}"
+                );
+                assert_eq!(fs::read(&plist).unwrap(), b"historical plist\n");
+            }
+        } else {
+            let result = uninstall(&f.targets, &context, &mut Reporter::default()).unwrap();
+            assert_eq!(plist.exists(), !recognised);
+            assert_eq!(
+                result
+                    .findings
+                    .iter()
+                    .any(|finding| finding.rule == "relinquished_modified_entry"),
+                !recognised
+            );
+        }
     }
 }
 
@@ -3949,6 +4026,50 @@ fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
 }
 
 #[test]
+fn reinstall_migrates_the_receipted_gc_agent_to_tick() {
+    let mut f = Fixture::new();
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    f.targets.tick_agent = Some(b"rendered tick plist\n".to_vec());
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let tick = tick_agent_plist(f.targets.roots.state.as_path()).unwrap();
+    let gc = tick.with_file_name("dev.provenant.gc.plist");
+    fs::rename(&tick, &gc).unwrap();
+    let receipt_path = f.targets.roots.state.as_path().join("install/receipt.json");
+    let text = fs::read_to_string(&receipt_path).unwrap();
+    fs::write(
+        &receipt_path,
+        text.replace("tick-agent", "gc-agent")
+            .replace("dev.provenant.tick.plist", "dev.provenant.gc.plist"),
+    )
+    .unwrap();
+    let plan = f.plan();
+    assert!(plan.actions().iter().any(|action| {
+        action.selector == "gc-agent" && action.disposition == Disposition::Remove
+    }));
+    assert!(
+        plan.actions()
+            .iter()
+            .any(|action| action.selector == "tick-agent")
+    );
+    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert!(!gc.exists());
+    assert!(tick.exists());
+    assert!(
+        !read_receipt(&f.targets)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "gc-agent")
+    );
+}
+
+#[test]
 fn missing_tick_agent_is_stopped_only_when_the_last_harness_is_removed() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
@@ -4065,6 +4186,149 @@ fn disabling_tick_agent_reinstall_stops_exact_or_missing_owned_plists() {
                 .any(|entry| entry.selector == "tick-agent")
         );
     }
+}
+
+#[test]
+fn retired_disk_guard_is_not_managed_by_install_or_uninstall() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let mut receipt: InstallReceipt = read_receipt(&f.targets).unwrap().unwrap();
+    let plist = f
+        .home
+        .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
+    fs::create_dir_all(plist.parent().unwrap()).unwrap();
+    fs::write(&plist, b"old plist").unwrap();
+    receipt.entries.push(OwnedEntry {
+        extra: Default::default(),
+        path: AbsolutePath::new(&plist).unwrap(),
+        harness: None,
+        selector: "disk-guard-agent".into(),
+        expected: owned(&Value::File {
+            bytes: b"old plist".to_vec(),
+            mode: 0o600,
+        })
+        .unwrap(),
+    });
+    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let plan = f.plan();
+    assert!(
+        !plan
+            .actions()
+            .iter()
+            .any(|action| action.selector == "disk-guard-agent")
+    );
+    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert!(
+        !read_receipt(&f.targets)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "disk-guard-agent")
+    );
+    let outcome = uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    assert!(
+        !outcome
+            .actions
+            .iter()
+            .any(|action| action.selector == "disk-guard-agent")
+    );
+    assert!(plist.exists(), "retirement belongs to the process edge");
+}
+
+#[test]
+fn receipt_with_null_legacy_upgrades_cleanly() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.receipt()).unwrap()).unwrap();
+    receipt["legacy"] = serde_json::Value::Null;
+    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
+    assert!(inspection.error.is_none(), "{:?}", inspection.error);
+    assert!(inspection.findings.is_empty());
+
+    let release = f.release_variant("upgrade", &["example"]);
+    let plan = f.plan_for(release.clone());
+    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let root = release_root(
+        f.targets.roots.state.as_path(),
+        release.manifest.source_digest,
+    );
+    assert_eq!(
+        fs::read_link(f.targets.bin_dir.join("provenant")).unwrap(),
+        root.join("bin/provenant")
+    );
+    assert_eq!(
+        fs::read_link(f.link()).unwrap(),
+        root.join("skills/example")
+    );
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.receipt()).unwrap()).unwrap();
+    assert!(receipt.get("legacy").is_none());
+    assert_eq!(
+        receipt["source_digest"],
+        release.manifest.source_digest.to_string()
+    );
+    assert!(f.plan_for(release).actions().is_empty());
+
+    receipt["legacy"] = serde_json::Value::Null;
+    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    assert!(fs::symlink_metadata(f.link()).is_err());
+}
+
+#[test]
+fn receipt_with_a_legacy_object_upgrades_and_drops_it() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.receipt()).unwrap()).unwrap();
+    receipt["legacy"] = serde_json::json!({
+        "checkout": "/Users/dev/Repos/agents",
+        "home": "/Users/dev",
+        "manifest_digest": format!("sha256:{}", "ab".repeat(32)),
+        "git_hooks_dir": "/Users/dev/.config/git/hooks",
+    });
+    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
+    assert!(inspection.error.is_none(), "{:?}", inspection.error);
+    assert!(inspection.findings.is_empty());
+
+    let release = f.release_variant("upgrade", &["example"]);
+    let plan = f.plan_for(release.clone());
+    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    let root = release_root(
+        f.targets.roots.state.as_path(),
+        release.manifest.source_digest,
+    );
+    assert_eq!(
+        fs::read_link(f.targets.bin_dir.join("provenant")).unwrap(),
+        root.join("bin/provenant")
+    );
+    assert_eq!(
+        fs::read_link(f.link()).unwrap(),
+        root.join("skills/example")
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.receipt()).unwrap()).unwrap();
+    assert!(receipt.get("legacy").is_none());
+    assert_eq!(
+        receipt["source_digest"],
+        release.manifest.source_digest.to_string()
+    );
+    assert!(f.plan_for(release).actions().is_empty());
 }
 
 #[test]

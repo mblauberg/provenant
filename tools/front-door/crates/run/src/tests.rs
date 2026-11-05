@@ -3094,3 +3094,97 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
     assert!(store.reaction(id, &call)?.is_none());
     Ok(())
 }
+
+#[test]
+fn temporary_tracking_upgrade_preserves_version_one_cancel_binding() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    // Shape the store exactly as version 1 left it.
+    RunStore::open(&context, &call)?
+        .db
+        .execute_batch(
+            "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
+        )?;
+    let store = RunStore::open(&context, &call)?;
+    let op = OperationId::parse("stop")?;
+    store.bind_cancel(&op, "attempt", &call)?;
+    assert!(matches!(
+        store.bind_cancel(&op, "other", &call),
+        Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
+
+#[test]
+fn temporary_tracking_upgrade_drops_version_two_spacing() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    // Shape the store exactly as version 2 left it, with the unused table back.
+    RunStore::open(&context, &call)?.db.execute_batch(
+        "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
+    )?;
+    let store = RunStore::open(&context, &call)?;
+    let remaining: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='spacing'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(remaining, 0);
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 8);
+    Ok(())
+}
+
+#[test]
+fn version_six_upgrades_from_five_and_keeps_existing_attempts() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let input = input();
+    let store = RunStore::open(&context, &call)?;
+    store.create(&input, &call)?;
+    // Shape the store exactly as version 5 left it.
+    store.db.execute_batch(
+        "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; PRAGMA user_version=5;",
+    )?;
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let backup = context.state_root.as_path().join(format!(
+        "run.sqlite3.bak-{}",
+        call.clock.wall_now()?.as_micros()
+    ));
+    let backup = provenant_sqlite::open_connection(&backup, true)?;
+    assert_eq!(
+        backup.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+        5
+    );
+    assert_eq!(
+        backup.query_row("SELECT count(*) FROM attempts", [], |row| row
+            .get::<_, i64>(0))?,
+        1
+    );
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 8);
+    // History is not backfilled: nothing is owed for attempts that predate it.
+    assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
+    store.record(input.attempts[0].attempt_id, &call)?;
+    Ok(())
+}
