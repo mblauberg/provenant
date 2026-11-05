@@ -9,6 +9,53 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 
 const FILE: &str = "pr-contributions.sqlite3";
+const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS links (
+                    attempt TEXT NOT NULL, repository TEXT NOT NULL, number INTEGER NOT NULL,
+                    weight INTEGER, PRIMARY KEY(attempt, repository, number)
+                ) STRICT;
+                CREATE INDEX IF NOT EXISTS links_pr ON links(repository, number, attempt);
+                CREATE TABLE IF NOT EXISTS allocations (attempt TEXT PRIMARY KEY) STRICT;
+                PRAGMA user_version=1;",
+    "CREATE TABLE IF NOT EXISTS branch_attempts (
+                        attempt TEXT PRIMARY KEY, project TEXT NOT NULL,
+                        branch TEXT NOT NULL, role TEXT NOT NULL, model TEXT, account TEXT
+                    ) STRICT;
+                    CREATE INDEX IF NOT EXISTS branch_attempts_branch ON branch_attempts(project, branch);
+                    CREATE TABLE IF NOT EXISTS branch_prs (
+                        project TEXT NOT NULL, branch TEXT NOT NULL,
+                        repository TEXT NOT NULL, number INTEGER NOT NULL, head TEXT NOT NULL,
+                        PRIMARY KEY(project, branch, repository, number)
+                    ) STRICT;
+                    PRAGMA user_version=2;",
+    "ALTER TABLE branch_attempts ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE branch_attempts ADD COLUMN run TEXT;
+                    ALTER TABLE branch_attempts ADD COLUMN queued_at INTEGER;
+                    ALTER TABLE branch_attempts ADD COLUMN outcome TEXT;
+                    ALTER TABLE branch_attempts ADD COLUMN finished_at INTEGER;
+                    ALTER TABLE branch_prs RENAME TO branch_prs_v2;
+                    CREATE TABLE branch_prs (
+                        project TEXT NOT NULL, branch TEXT NOT NULL, repository TEXT NOT NULL,
+                        number INTEGER NOT NULL, head TEXT NOT NULL,
+                        generation INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(project,branch,repository,number,generation)
+                    ) STRICT;
+                    INSERT INTO branch_prs(project,branch,repository,number,head,generation)
+                        SELECT project,branch,repository,number,head,0 FROM branch_prs_v2;
+                    DROP TABLE branch_prs_v2;
+                    CREATE TABLE branch_generations (
+                        project TEXT NOT NULL, branch TEXT NOT NULL, generation INTEGER NOT NULL,
+                        PRIMARY KEY(project,branch)
+                    ) STRICT;
+                    CREATE TABLE truncations (attempt TEXT PRIMARY KEY) STRICT;
+                    UPDATE branch_attempts SET role='read_only' WHERE role='review';
+                    PRAGMA user_version=3;",
+    "CREATE TABLE reassignments (
+                        attempt TEXT NOT NULL, repository TEXT NOT NULL, number INTEGER NOT NULL,
+                        PRIMARY KEY(attempt, repository, number)
+                    ) STRICT;
+                    PRAGMA user_version=4;",
+];
 /// Allocation is represented in millionths for exact validation.
 pub const WEIGHT_ONE: u32 = 1_000_000;
 const MAX_LINKS: usize = 256;
@@ -231,77 +278,26 @@ impl Contributions {
         }
     }
     pub fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
-        let (_, db, _lock) = open_database(host, FILE, call)?;
-        let version = provenant_sqlite::read_version(&db, 4)?;
-        if version == 0 {
+        let (root, db, _lock) = open_database(host, FILE, call)?;
+        let initial_version = provenant_sqlite::read_version(&db, MIGRATIONS.len())?;
+        for version in initial_version..MIGRATIONS.len() {
             immediate(&db, call, |tx| {
-                tx.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS links (
-                    attempt TEXT NOT NULL, repository TEXT NOT NULL, number INTEGER NOT NULL,
-                    weight INTEGER, PRIMARY KEY(attempt, repository, number)
-                ) STRICT;
-                CREATE INDEX IF NOT EXISTS links_pr ON links(repository, number, attempt);
-                CREATE TABLE IF NOT EXISTS allocations (attempt TEXT PRIMARY KEY) STRICT;
-                PRAGMA user_version=1;",
-                )?;
-                Ok(())
-            })?;
-        }
-        if version < 2 {
-            immediate(&db, call, |tx| {
-                tx.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS branch_attempts (
-                        attempt TEXT PRIMARY KEY, project TEXT NOT NULL,
-                        branch TEXT NOT NULL, role TEXT NOT NULL, model TEXT, account TEXT
-                    ) STRICT;
-                    CREATE INDEX IF NOT EXISTS branch_attempts_branch ON branch_attempts(project, branch);
-                    CREATE TABLE IF NOT EXISTS branch_prs (
-                        project TEXT NOT NULL, branch TEXT NOT NULL,
-                        repository TEXT NOT NULL, number INTEGER NOT NULL, head TEXT NOT NULL,
-                        PRIMARY KEY(project, branch, repository, number)
-                    ) STRICT;
-                    PRAGMA user_version=2;",
-                )?;
-                Ok(())
-            })?;
-        }
-        if version < 3 {
-            immediate(&db, call, |tx| {
-                tx.execute_batch(
-                    "ALTER TABLE branch_attempts ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
-                    ALTER TABLE branch_attempts ADD COLUMN run TEXT;
-                    ALTER TABLE branch_attempts ADD COLUMN queued_at INTEGER;
-                    ALTER TABLE branch_attempts ADD COLUMN outcome TEXT;
-                    ALTER TABLE branch_attempts ADD COLUMN finished_at INTEGER;
-                    ALTER TABLE branch_prs RENAME TO branch_prs_v2;
-                    CREATE TABLE branch_prs (
-                        project TEXT NOT NULL, branch TEXT NOT NULL, repository TEXT NOT NULL,
-                        number INTEGER NOT NULL, head TEXT NOT NULL,
-                        generation INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY(project,branch,repository,number,generation)
-                    ) STRICT;
-                    INSERT INTO branch_prs(project,branch,repository,number,head,generation)
-                        SELECT project,branch,repository,number,head,0 FROM branch_prs_v2;
-                    DROP TABLE branch_prs_v2;
-                    CREATE TABLE branch_generations (
-                        project TEXT NOT NULL, branch TEXT NOT NULL, generation INTEGER NOT NULL,
-                        PRIMARY KEY(project,branch)
-                    ) STRICT;
-                    CREATE TABLE truncations (attempt TEXT PRIMARY KEY) STRICT;
-                    UPDATE branch_attempts SET role='read_only' WHERE role='review';
-                    PRAGMA user_version=3;",
-                )?;
-                Ok(())
-            })?;
-        }
-        if version < 4 {
-            immediate(&db, call, |tx| {
-                tx.execute_batch(
-                    "CREATE TABLE reassignments (
-                        attempt TEXT NOT NULL, repository TEXT NOT NULL, number INTEGER NOT NULL,
-                        PRIMARY KEY(attempt, repository, number)
-                    ) STRICT;
-                    PRAGMA user_version=4;",
+                provenant_sqlite::migrate(
+                    tx,
+                    &MIGRATIONS[..=version],
+                    version,
+                    || {
+                        if version == initial_version {
+                            let stamp = call
+                                .clock
+                                .wall_now()
+                                .map_err(|_| RunError::Validation("wall clock"))?
+                                .as_micros();
+                            provenant_sqlite::snapshot_database(&root, host, FILE, stamp)?;
+                        }
+                        Ok::<(), RunError>(())
+                    },
+                    |_, _| Ok(()),
                 )?;
                 Ok(())
             })?;
@@ -1183,6 +1179,20 @@ mod tests {
         drop(v3);
         let db = Contributions::open(context.state_root.as_path(), &call)?;
         assert_eq!(db.for_pr(&old, &call)?.len(), 1);
+        let backup = context
+            .state_root
+            .as_path()
+            .join(format!("{FILE}.bak-{}", call.clock.wall_now()?.as_micros()));
+        let backup = provenant_sqlite::open_connection(&backup, true)?;
+        assert_eq!(
+            backup.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+            3
+        );
+        assert_eq!(
+            backup.query_row("SELECT count(*) FROM branch_prs", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
         let tables: i64 = db.0.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE name='reassignments'",
             [],

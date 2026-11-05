@@ -182,6 +182,19 @@ impl From<provenant_sqlite::VersionError> for RunError {
     }
 }
 
+impl From<provenant_sqlite::SnapshotError> for RunError {
+    fn from(error: provenant_sqlite::SnapshotError) -> Self {
+        match error {
+            provenant_sqlite::SnapshotError::Filesystem(error) => error.into(),
+            provenant_sqlite::SnapshotError::Sqlite(error) => error.into(),
+            provenant_sqlite::SnapshotError::PathEncoding => {
+                Self::Validation("backup path is not UTF-8")
+            }
+            provenant_sqlite::SnapshotError::ExhaustedNames => Self::Conflict,
+        }
+    }
+}
+
 impl From<provenant_sqlite::CompanionFault> for PathCheck {
     fn from(fault: provenant_sqlite::CompanionFault) -> Self {
         use provenant_sqlite::CompanionFault;

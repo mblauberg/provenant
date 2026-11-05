@@ -1211,6 +1211,18 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
     drop(store);
 
     let store = f.open();
+    let backup = f
+        .root
+        .as_path()
+        .join(format!("fabric/fabric.sqlite3.bak-{}", f.now().as_micros()));
+    let backup = provenant_sqlite::open_connection(&backup, true).unwrap();
+    assert_eq!(
+        backup
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        6
+    );
+    assert_ne!(stored_records(&backup), before);
     assert_eq!(
         store
             .db

@@ -271,7 +271,7 @@ impl RunStore {
             launched_tasks: Default::default(),
             _owner: PhantomData,
         };
-        if schema_version < 7 {
+        if schema_version < 8 {
             // Read legacy paths once, outside the migration transaction. The
             // initialisation lock serialises migrations. Unreadable paths and
             // in-flight attempts keep the conservative retained default.
@@ -282,41 +282,6 @@ impl RunStore {
             };
             store.write(request, |tx| {
                 let current = version(tx)?;
-                if current > 0 && current < 8 {
-                    // The write reservation excludes other commits until both the
-                    // WAL-aware snapshot and the migration are complete.
-                    let stamp = request
-                        .clock
-                        .wall_now()
-                        .map_err(|_| RunError::Validation("wall clock"))?
-                        .as_micros();
-                    let source = provenant_sqlite::open_connection(
-                        &context.state_root.as_path().join("run.sqlite3"),
-                        true,
-                    )?;
-                    let mut suffix = 0_u32;
-                    let name = loop {
-                        let candidate = if suffix == 0 {
-                            format!("run.sqlite3.bak-{stamp}")
-                        } else {
-                            format!("run.sqlite3.bak-{stamp}-{suffix}")
-                        };
-                        match store.root.metadata_at(OsStr::new(&candidate), false) {
-                            Err(error) if error.is_not_found() => break candidate,
-                            Ok(_) => suffix = suffix.checked_add(1).ok_or(RunError::Conflict)?,
-                            Err(error) => return Err(error.into()),
-                        }
-                    };
-                    let path = context.state_root.as_path().join(&name);
-                    source.execute(
-                        "VACUUM INTO ?1",
-                        [path
-                            .to_str()
-                            .ok_or(RunError::Validation("backup path is not UTF-8"))?],
-                    )?;
-                    store.root.open_read(OsStr::new(&name))?.sync()?;
-                    store.root.sync()?;
-                }
                 let start = usize::try_from(current).map_err(|_| RunError::Version(current))?;
                 let steps = [
                     include_str!("schema.sql"),
@@ -328,14 +293,34 @@ impl RunStore {
                     include_str!("schema_v7.sql"),
                     include_str!("schema_v8.sql"),
                 ];
-                provenant_sqlite::apply_migrations(tx, &steps, start, |index, db| {
-                    if index == 3 {
-                        for id in &absent_temporary {
-                            db.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
+                provenant_sqlite::migrate(
+                    tx,
+                    &steps,
+                    start,
+                    || {
+                        // The write reservation excludes commits through the snapshot and upgrade.
+                        let stamp = request
+                            .clock
+                            .wall_now()
+                            .map_err(|_| RunError::Validation("wall clock"))?
+                            .as_micros();
+                        provenant_sqlite::snapshot_database(
+                            &store.root,
+                            context.state_root.as_path(),
+                            "run.sqlite3",
+                            stamp,
+                        )?;
+                        Ok::<(), RunError>(())
+                    },
+                    |index, db| {
+                        if index == 3 {
+                            for id in &absent_temporary {
+                                db.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
+                            }
                         }
-                    }
-                    Ok(())
-                })?;
+                        Ok(())
+                    },
+                )?;
                 Ok(())
             })?;
         }

@@ -2665,6 +2665,20 @@ fn version_six_upgrades_from_five_and_keeps_existing_attempts() -> TestResult {
     )?;
     drop(store);
     let store = RunStore::open(&context, &call)?;
+    let backup = context.state_root.as_path().join(format!(
+        "run.sqlite3.bak-{}",
+        call.clock.wall_now()?.as_micros()
+    ));
+    let backup = provenant_sqlite::open_connection(&backup, true)?;
+    assert_eq!(
+        backup.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+        5
+    );
+    assert_eq!(
+        backup.query_row("SELECT count(*) FROM attempts", [], |row| row
+            .get::<_, i64>(0))?,
+        1
+    );
     let version: i64 =
         store
             .db
@@ -2675,6 +2689,40 @@ fn version_six_upgrades_from_five_and_keeps_existing_attempts() -> TestResult {
     // History is not backfilled: nothing is owed for attempts that predate it.
     assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
     store.record(input.attempts[0].attempt_id, &call)?;
+    Ok(())
+}
+
+#[test]
+fn version_seven_is_snapshotted_before_admission_windows_are_added() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    store
+        .db
+        .execute_batch("DROP TABLE admission_windows; PRAGMA user_version=7;")?;
+    drop(store);
+
+    let store = RunStore::open(&context, &call)?;
+    let version: i64 = store
+        .db
+        .pragma_query_value(None, "user_version", |row| row.get(0))?;
+    assert_eq!(version, 8);
+    let backup = context.state_root.as_path().join(format!(
+        "run.sqlite3.bak-{}",
+        call.clock.wall_now()?.as_micros()
+    ));
+    let backup = provenant_sqlite::open_connection(&backup, true)?;
+    let version: i64 = backup.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    assert_eq!(version, 7);
+    let tables: i64 = backup.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name='admission_windows'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(tables, 0);
     Ok(())
 }
 
