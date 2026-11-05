@@ -2816,6 +2816,9 @@ fn preset_node_limit_uses_the_host_admission_bound() {
     )
     .unwrap();
     assert_eq!(error, document.admit(&layers.graph_limits).unwrap_err());
+    layers.graph_limits.nodes = 3;
+    assert!(expand(&layers, "counted-loop", "brief", &[]).is_ok());
+    assert!(document.admit(&layers.graph_limits).is_ok());
 }
 
 #[test]

@@ -1198,10 +1198,6 @@ pub fn expand_with(
     let typed: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document.clone()).map_err(|error| error.to_string())?;
     typed.check_composites(&layers.graph_limits)?;
-    let count = expanded_node_count(&typed.nodes);
-    if let Some(reason) = layers.graph_limits.nodes_bound().refusal(count) {
-        return Err(reason);
-    }
     document["schema_version"] = json!(provenant_fabric_runtime::graph::minimum_schema_version(
         &typed
     ));
@@ -3306,22 +3302,6 @@ fn composite(
         node["inputs"] = selected_inputs(deps, outputs);
     }
     node
-}
-
-fn expanded_node_count(nodes: &[provenant_fabric_runtime::graph::GraphNode]) -> usize {
-    nodes.iter().fold(0usize, |total, node| {
-        let children = node
-            .composite
-            .as_ref()
-            .map_or(0, |spec| expanded_node_count(&spec.nodes));
-        let rounds = node.loop_body.as_ref().map_or(0, |spec| {
-            expanded_node_count(&spec.body).saturating_mul(spec.max_rounds)
-        });
-        total
-            .saturating_add(1)
-            .saturating_add(children)
-            .saturating_add(rounds)
-    })
 }
 
 fn configured(globals: &provenant_cli::Globals) -> Result<Layers, String> {

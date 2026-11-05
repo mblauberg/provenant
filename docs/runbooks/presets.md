@@ -67,8 +67,9 @@ source `parameter`, an `equals_any` list, a `value` and an `otherwise` value.
 Interpolation uses the matching value when the destination parameter is absent;
 an explicitly supplied parameter takes precedence.
 
-Preset expansion checks the configured host graph node limit before launch;
-the refusal names the limit and its configuration owner.
+Preset compilation expands composites and counts loop rounds using the runtime's
+calculation before checking the configured host graph node limit. A refusal names
+the limit and its configuration owner.
 
 Typed parameters without defaults are required. Missing-value errors name the
 parameter; `--set` and parameter files satisfy it and retain type validation.

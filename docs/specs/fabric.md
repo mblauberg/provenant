@@ -463,6 +463,8 @@ output kinds. Composites use no provider attempt of their own. An entry can
 declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
 roles and presets inside bounded repair. Existing `loop.body` configuration
 also remains available. Planner fragments do not resolve named presets.
+Preset compilation uses the runtime's composite expansion and loop count when
+it checks the host node bound, so admission counts the same graph.
 
 Bundled `scout-swarm`, `generator-evaluator`, `review`, `big-batch`,
 `scope-then-run` and `deliver` express scouting, implementation with

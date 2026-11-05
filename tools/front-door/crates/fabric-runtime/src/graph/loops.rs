@@ -95,6 +95,33 @@ fn allowance(node: &GraphNode, extensions: &[String]) -> usize {
         )
 }
 
+/// Count the nodes produced by loop expansion without requiring late-bound
+/// execution context, using the same allowances as the actual expansion.
+pub(super) fn expanded_node_count(
+    document: &GraphDocument,
+    extensions: &[String],
+) -> Result<usize, &'static str> {
+    let count = document.nodes.iter().try_fold(0usize, |total, node| {
+        let count = match &node.loop_body {
+            Some(spec) => spec
+                .body
+                .len()
+                .checked_mul(allowance(node, extensions))?
+                .checked_add(1)?,
+            None => 1,
+        };
+        total.checked_add(count)
+    });
+    match count {
+        Some(count)
+            if count <= 16384 || !document.nodes.iter().any(|node| node.loop_body.is_some()) =>
+        {
+            Ok(count)
+        }
+        _ => Err("loop expansion exceeds safety bound"),
+    }
+}
+
 pub(super) fn validate_extension(
     document: &GraphDocument,
     extension: &str,
@@ -231,22 +258,7 @@ fn expand_loops(
     {
         return Err("dependency");
     }
-    if document.nodes.iter().any(|n| n.loop_body.is_some()) {
-        let count = document.nodes.iter().try_fold(0usize, |total, n| {
-            let count = match &n.loop_body {
-                Some(spec) => spec
-                    .body
-                    .len()
-                    .checked_mul(allowance(n, extensions))?
-                    .checked_add(1)?,
-                None => 1,
-            };
-            total.checked_add(count)
-        });
-        if count.is_none_or(|n| n > 16384) {
-            return Err("loop expansion exceeds safety bound");
-        }
-    }
+    expanded_node_count(document, extensions)?;
     let mut expanded = document.clone();
     expanded.nodes.clear();
     for node in &document.nodes {

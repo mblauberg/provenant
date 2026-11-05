@@ -360,7 +360,12 @@ impl GraphDocument {
     pub fn check_composites(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = composites::expand(self, &expansion_limits)?;
-        loops::check_expanded_ids(&expanded, &[])
+        loops::check_expanded_ids(&expanded, &[])?;
+        let count = loops::expanded_node_count(&expanded, &[])?;
+        if let Some(reason) = limits.nodes_bound().refusal(count) {
+            return Err(reason);
+        }
+        Ok(())
     }
 
     /// Host preflight sees the same bounded static composite/loop expansion as
