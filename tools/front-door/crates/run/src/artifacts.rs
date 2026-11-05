@@ -86,6 +86,29 @@ pub(crate) fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_o
 }
 
 impl RunStore {
+    /// Run a cloud-record operation in the selected attempt's private cloud
+    /// directory, serialized with other cloud operations on that attempt.
+    /// The callback receives no authority over the attempt's other artifacts.
+    pub fn with_cloud_storage<T>(
+        &self,
+        id: provenant_core::AttemptId,
+        create: bool,
+        call: &Request<'_>,
+        operation: impl FnOnce(Directory) -> T,
+    ) -> Result<T> {
+        let record = self.record(id, call)?;
+        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let _lock = attempt.lock(
+            OsStr::new("cloud.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
+        let cloud = subdir(&attempt, OsStr::new("cloud"), create)?;
+        Ok(operation(cloud))
+    }
+
     /// Verify the original artifact before returning bounded, redacted evidence.
     /// The returned digest identifies the original artifact.
     pub fn stream_result(
