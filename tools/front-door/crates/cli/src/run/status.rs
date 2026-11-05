@@ -615,6 +615,125 @@ pub(super) fn render_lanes(
     render_lanes_with_lineage(lanes, waits, next, root, cooldowns, &Default::default())
 }
 
+pub(super) fn project_lane(
+    lane: &run::AttemptRecord,
+    waits: &[run::LaneWait],
+    root: &Path,
+    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
+    now_wall: Option<WallTime>,
+) -> provenant_records::wire::LaneRow {
+    let (state, terminal_reason) = state_and_reason(&lane.state);
+    let (exit_code, finished_at) = match &lane.state {
+        run::AttemptState::Terminal {
+            exit_code,
+            finished_at,
+            ..
+        } => (*exit_code, Some(*finished_at)),
+        _ => (None, None),
+    };
+    let result = lane
+        .result
+        .as_ref()
+        .map(|_| artifact(root, lane, "result.md"));
+    let account = lane
+        .applied_route
+        .as_ref()
+        .and_then(|route| route.account_label.as_deref())
+        .unwrap_or("unknown");
+    let wait = waits.iter().find(|wait| wait.attempt_id == lane.attempt_id);
+    let silence = lane
+        .provider_silent_for_ms
+        .0
+        .map(run::provider_silence_reason);
+    let reason = terminal_reason
+        .clone()
+        .or_else(|| wait.map(|wait| wait.waiting_for.clone()))
+        .or_else(|| silence.clone());
+    let waiting_for = wait.map(|wait| wait.waiting_for.clone()).or(silence);
+    let transcript = lane
+        .applied_route
+        .as_ref()
+        .and_then(|route| route.provider.as_deref())
+        .zip(lane.session.as_deref())
+        .map(|(adapter, session)| {
+            let attempt = artifact(root, lane, "");
+            let path = run::locate_transcript(&attempt, session, &lane.write_grants)
+                .map(|path| attempt.join(path));
+            provenant_records::wire::LaneTranscript {
+                adapter: adapter.to_owned(),
+                session: session.to_owned(),
+                path: path
+                    .and_then(|path| provenant_records::AbsolutePathWire::from_path(&path).ok()),
+            }
+        });
+    let settlement = matches!(lane.state, run::AttemptState::Terminal { .. }).then_some(
+        provenant_records::wire::LaneSettlement {
+            reason: terminal_reason,
+        },
+    );
+    provenant_records::wire::LaneRow {
+        run_id: lane.run_id.to_string(),
+        task_id: lane.task_id.to_string(),
+        attempt_id: lane.attempt_id.to_string(),
+        attempt_number: lane.attempt_number,
+        retry_of: lane.retry_of.map(|id| id.to_string()),
+        superseded_by: successors
+            .get(&lane.attempt_id)
+            .copied()
+            .or(lane.superseded_by)
+            .map(|id| id.to_string()),
+        cause: lane.settlement_reason,
+        state,
+        exit_code,
+        reason,
+        settlement,
+        lane_class: wait.map(|w| w.lane_class.as_str().to_owned()),
+        waiting_for,
+        requested_route: json!(lane.requested_route),
+        resolved_route: Some(json!(lane.resolved_route)),
+        applied_route: json!(lane.applied_route),
+        skipped_routes: json!(lane.skipped_routes),
+        account: json!(account),
+        observed_route: json!(lane.observed_route),
+        queued_at: json!(lane.queued_at),
+        started_at: json!(lane.started_at),
+        priority: lane.priority.map(i64::from),
+        finished_at: json!(finished_at),
+        last_output_at: json!(lane.last_output_at),
+        runtime_deadline: json!(lane.runtime_deadline),
+        overdue: now_wall.is_some_and(|now| run::overdue_at(lane, now)),
+        stale: run::holder_absent(root, lane),
+        partial_signals: json!(lane.partial_signals),
+        delivery_id: lane.delivery_id.map(|id| id.to_string()),
+        write_grants: json!(lane.write_grants),
+        read_only_writable: json!(lane.read_only_writable),
+        git_grants_digest: lane.git_grants_digest.map(|digest| digest.to_string()),
+        head: lane.head.map(|head| head.to_string()),
+        protected_paths: json!(lane.protected_paths),
+        delivery: json!(lane.delivery),
+        continuation: json!(lane.continuation),
+        cache_read_share: provenant_routing::cache_read_share(
+            lane.usage.uncached_input,
+            lane.usage.cache_read,
+            lane.usage.cache_write,
+        ),
+        result_path: json!(
+            result
+                .as_deref()
+                .and_then(|path| { provenant_records::AbsolutePathWire::from_path(path).ok() })
+        ),
+        transcript,
+        title: lane.title.clone(),
+        requested_priority: lane
+            .requested_priority
+            .filter(|priority| Some(i32::from(*priority)) != lane.priority)
+            .map(i64::from),
+        provider_seconds: None,
+        handoff: None,
+        provider_error: None,
+    }
+}
+
 pub(super) fn render_lanes_with_lineage(
     lanes: &[run::AttemptRecord],
     waits: &[run::LaneWait],
@@ -628,21 +747,13 @@ pub(super) fn render_lanes_with_lineage(
     let rows: Vec<Value> = lanes
         .iter()
         .map(|lane| {
-            let state = state_and_reason(&lane.state).0;
+            let projected = project_lane(lane, waits, root, successors, now_wall);
+            let state = projected.state.clone();
             let route = lane
                 .applied_route
                 .as_ref()
                 .and_then(|r| r.model.clone())
                 .unwrap_or_else(|| "unresolved".into());
-            let (exit_code, finished_at, reason) = match &lane.state {
-                run::AttemptState::Terminal {
-                    exit_code,
-                    finished_at,
-                    reason,
-                    ..
-                } => (*exit_code, Some(*finished_at), reason.clone()),
-                _ => (None, None, None),
-            };
             let result = lane
                 .result
                 .as_ref()
@@ -651,21 +762,11 @@ pub(super) fn render_lanes_with_lineage(
                 .applied_route
                 .as_ref()
                 .and_then(|r| r.account_label.as_deref());
-            let account = resolved_account.unwrap_or("unknown");
             let account_field = resolved_account
                 .map(|a| format!(" account={}", plain_text(a, usize::MAX)))
                 .unwrap_or_default();
             let route_text = plain_text(&route, usize::MAX);
-            // A lane that has not started says what it is waiting for.
-            let wait = waits.iter().find(|w| w.attempt_id == lane.attempt_id);
-            let silence_reason = lane
-                .provider_silent_for_ms
-                .0
-                .map(provenant_records::run::provider_silence_reason);
-            let reason = reason
-                .or_else(|| wait.map(|w| w.waiting_for.clone()))
-                .or_else(|| silence_reason.clone());
-            let waiting_for = wait.map(|w| w.waiting_for.clone()).or(silence_reason);
+            let reason = projected.reason.clone();
             let reason_text = reason
                 .as_deref()
                 .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
@@ -820,90 +921,7 @@ pub(super) fn render_lanes_with_lineage(
                         .unwrap_or_else(|| "unknown".into())
                 ));
             }
-            // A pointer to the provider's own transcript; never a copy.
-            let transcript = lane
-                .applied_route
-                .as_ref()
-                .and_then(|r| r.provider.as_deref())
-                .zip(lane.session.as_deref())
-                .map(|(adapter, session)| {
-                    let attempt = artifact(root, lane, "");
-                    let path = run::locate_transcript(&attempt, session, &lane.write_grants)
-                        .map(|path| attempt.join(path));
-                    provenant_records::wire::LaneTranscript {
-                        adapter: adapter.to_owned(),
-                        session: session.to_owned(),
-                        path: path.and_then(|path| {
-                            provenant_records::AbsolutePathWire::from_path(&path).ok()
-                        }),
-                    }
-                });
-            // The settled record's own reason, without a waiting lane's note.
-            let settlement = matches!(lane.state, run::AttemptState::Terminal { .. }).then(|| {
-                provenant_records::wire::LaneSettlement {
-                    reason: state_and_reason(&lane.state).1,
-                }
-            });
-            let row = provenant_records::wire::LaneRow {
-                run_id: lane.run_id.to_string(),
-                task_id: lane.task_id.to_string(),
-                attempt_id: lane.attempt_id.to_string(),
-                attempt_number: lane.attempt_number,
-                retry_of: lane.retry_of.map(|id| id.to_string()),
-                superseded_by: successors
-                    .get(&lane.attempt_id)
-                    .copied()
-                    .or(lane.superseded_by)
-                    .map(|id| id.to_string()),
-                cause: lane.settlement_reason,
-                state,
-                exit_code,
-                reason,
-                settlement,
-                lane_class: wait.map(|w| w.lane_class.as_str().to_owned()),
-                waiting_for,
-                requested_route: json!(lane.requested_route),
-                resolved_route: Some(json!(lane.resolved_route)),
-                applied_route: json!(lane.applied_route),
-                skipped_routes: json!(lane.skipped_routes),
-                account: json!(account),
-                observed_route: json!(lane.observed_route),
-                queued_at: json!(lane.queued_at),
-                started_at: json!(lane.started_at),
-                priority: lane.priority.map(i64::from),
-                finished_at: json!(finished_at),
-                last_output_at: json!(lane.last_output_at),
-                runtime_deadline: json!(lane.runtime_deadline),
-                overdue: now_wall.is_some_and(|now| run::overdue_at(lane, now)),
-                stale: run::holder_absent(root, lane),
-                partial_signals: json!(lane.partial_signals),
-                delivery_id: lane.delivery_id.map(|id| id.to_string()),
-                write_grants: json!(lane.write_grants),
-                read_only_writable: json!(lane.read_only_writable),
-                git_grants_digest: lane.git_grants_digest.map(|digest| digest.to_string()),
-                head: lane.head.map(|head| head.to_string()),
-                protected_paths: json!(lane.protected_paths),
-                delivery: json!(lane.delivery),
-                continuation: json!(lane.continuation),
-                cache_read_share: provenant_routing::cache_read_share(
-                    lane.usage.uncached_input,
-                    lane.usage.cache_read,
-                    lane.usage.cache_write,
-                ),
-                result_path: json!(result.as_deref().and_then(|path| {
-                    provenant_records::AbsolutePathWire::from_path(path).ok()
-                })),
-                transcript,
-                title: lane.title.clone(),
-                requested_priority: lane
-                    .requested_priority
-                    .filter(|priority| Some(i32::from(*priority)) != lane.priority)
-                    .map(i64::from),
-                provider_seconds: None,
-                handoff: None,
-                provider_error: None,
-            };
-            json!(row)
+            json!(projected)
         })
         .collect();
     if rows.is_empty() {
