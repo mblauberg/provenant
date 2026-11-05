@@ -130,6 +130,18 @@ fn blocked_custody_is_reported_without_hiding_a_running_sibling() -> Result<(), 
 }
 
 #[test]
+fn writer_gc_settings_use_defaults_when_configuration_is_unreadable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    std::os::unix::fs::symlink(temp.path().join("missing"), temp.path().join("config.toml"))?;
+    assert_eq!(
+        writer_gc_settings(temp.path()),
+        provenant_config::GcSettings::default()
+    );
+    Ok(())
+}
+
+#[test]
 fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),

@@ -76,7 +76,13 @@ reason = "Writer launch may refuse when available storage remains below the conf
 [[guard]]
 site = "run/src/launch.rs#Providers::check_policy"
 boundary = "unclassified"
-reason = "Provider policy read failures still need classification."
+reason = "Provider-specific policy failures still need classification."
+
+[[guard]]
+site = "cli/src/run.rs#writer_gc_settings"
+boundary = "warning"
+setting = "gc.free_floor"
+reason = "An unreadable GC configuration warns and uses compiled defaults; an unavailable disk policy context warns and skips the check."
 
 [[guard]]
 site = "cli/src/run/submit.rs#check_writer_disk_with_collection"
