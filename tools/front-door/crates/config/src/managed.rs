@@ -2629,7 +2629,7 @@ pub fn uninstall(
         // same locked, retryable removal path as an unchanged recorded plist.
         if before.is_none()
             && !scheduler_entry(&entry.selector)
-            && (entry.selector != "peer-agent" || !recorded_peer_agent)
+            && entry.selector != "peer-agent"
         {
             continue;
         }
