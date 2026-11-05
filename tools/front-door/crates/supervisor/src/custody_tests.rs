@@ -140,6 +140,47 @@ fn slot_reservation_cutover_replays_only_identical_published_evidence() -> TestR
 }
 
 #[test]
+fn slot_reservation_cutover_keeps_reboot_device_proof() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("writer");
+    let attempt_path = root.path().join("attempt");
+    std::fs::create_dir(&path)?;
+    std::fs::create_dir(&attempt_path)?;
+    let slot = Directory::open_anchor(&path)?;
+    let attempt = Directory::open_anchor(&attempt_path)?;
+    let mut record = legacy_reservation(scope(), &slot.metadata()?);
+    record.boot = "darwin:00000000-0000-0000-0000-000000000000".into();
+    record.launch_state = LaunchState::HandingOff;
+    record.reservation_device += 1;
+    record.attempt_device = Some(record.reservation_device);
+    record.attempt_inode = Some(attempt.metadata()?.inode);
+    publish_reservation(&slot, &record)?;
+    let clock = SystemClock;
+    let world = RebootWorld {
+        boot: Some("darwin:11111111-1111-1111-1111-111111111111"),
+    };
+    let recovered = acquire_reboot_recovery_with(
+        slot.try_clone()?,
+        &attempt,
+        scope(),
+        WaitBudget::nonblocking(clock.mono_now()),
+        &CancelToken::new(),
+        &clock,
+        &world,
+    )?;
+    assert_eq!(recovered.scope(), scope());
+    assert!(!path.join("reservation.json").exists());
+    let child = attempt_evidence(&slot, scope())?;
+    let carried: Reservation = read_record(&child, "reservation.json", RECORD_LIMIT)?;
+    assert_eq!(carried.reservation_device, child.metadata()?.device);
+    assert_eq!(
+        carried.extra["slot_original_device"],
+        record.reservation_device
+    );
+    Ok(())
+}
+
+#[test]
 fn slot_reservation_cutover_keeps_conflicting_evidence_fenced() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");
