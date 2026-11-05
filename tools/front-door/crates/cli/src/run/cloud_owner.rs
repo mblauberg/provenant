@@ -480,12 +480,20 @@ pub(super) fn hydrate(
                     | RemoteState::SetupFailed { .. }
             )
         {
-            match std::env::current_dir()
-                .map_err(|error| error.to_string())
-                .and_then(|cwd| observe_for_view(saved, &cwd, budget_end))
-            {
-                Ok(observed) => job = Some(observed),
-                Err(_) => stale = true,
+            // A spent budget starts no more providers. A timed-out call costs its
+            // termination grace on top, so starting each remaining job would still
+            // grow the view with the job count; the overrun stays one call's grace.
+            #[allow(clippy::disallowed_methods)] // This is the real-time provider boundary.
+            if std::time::Instant::now() >= budget_end {
+                stale = true;
+            } else {
+                match std::env::current_dir()
+                    .map_err(|error| error.to_string())
+                    .and_then(|cwd| observe_for_view(saved, &cwd, budget_end))
+                {
+                    Ok(observed) => job = Some(observed),
+                    Err(_) => stale = true,
+                }
             }
         }
         let mut cloud_view = job.as_ref().map(view).unwrap_or_else(
