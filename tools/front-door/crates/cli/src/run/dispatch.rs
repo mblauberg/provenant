@@ -435,6 +435,11 @@ pub(super) fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> 
     let catalogue = provenant_routing::Catalogue::bundled()
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
     let Some(entry) = catalogue.model(&id) else {
+        // A registry-only adapter has no built-in catalogue to consult.
+        // Routing checks that its identity is actually registered.
+        if provenant_records::AdapterSpec::get(id.adapter()).is_none() {
+            return Ok(());
+        }
         let nearest = catalogue.nearest_models(&id);
         let hint = if nearest.is_empty() {
             String::new()

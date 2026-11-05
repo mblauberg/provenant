@@ -1565,6 +1565,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
             .create(path)?;
     }
     let prompt = "fixture prompt";
+    assert!(super::super::catalogued("fixture-provider/test", None).is_ok());
     let task = run::TaskRequest {
         context: None,
         extra: Default::default(),
