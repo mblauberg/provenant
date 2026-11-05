@@ -85,12 +85,7 @@ fn graph_writer_initialisation_error(
     error: provenant_confinement::worktrees::WorktreeError,
 ) -> FacadeError {
     use provenant_confinement::worktrees::WorktreeError;
-    use provenant_os::fs::FsError;
-    if matches!(
-        &error,
-        WorktreeError::Filesystem(FsError::LockTimeout { path, .. })
-            if path.file_name().is_some_and(|name| name == "worktrees.lock")
-    ) {
+    if matches!(&error, WorktreeError::RegistryLockTimeout) {
         FacadeError::Busy
     } else {
         FacadeError::DispatchRefused {

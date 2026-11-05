@@ -6546,8 +6546,7 @@ fn launch_errors_retry_until_the_persisted_deadline() {
     );
     let reason = progress.advance_error.as_deref().expect("blocked reason");
     assert!(reason.contains("service is busy"));
-    assert!(reason.contains("provenant fabric graph cancel g-test"));
-    assert!(reason.contains("new graph_id"));
+    assert!(!reason.contains("new graph_id"));
     assert_eq!(owner.calls.len(), 4);
 
     // A blocked node never launches again.

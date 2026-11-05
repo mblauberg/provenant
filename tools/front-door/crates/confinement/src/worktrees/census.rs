@@ -1031,9 +1031,10 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                             pid,
                             &format!("occupancy path unavailable: {}", path.display()),
                         );
-                        // Unresolved paths may alias any candidate root.
                         for (root, state) in &mut states {
-                            if *state != WorkerState::Live {
+                            if occupancy_path_could_be_under(path, root)
+                                && *state != WorkerState::Live
+                            {
                                 *state = WorkerState::Unknown;
                                 details
                                     .entry(root.clone())
@@ -1244,7 +1245,8 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                     );
                     let detail = process_detail(cwd_observer, pid, "cwd unreadable");
                     for (root, state) in &mut states {
-                        if *state != WorkerState::Live {
+                        if occupancy_path_could_be_under(&path, root) && *state != WorkerState::Live
+                        {
                             *state = WorkerState::Unknown;
                             details
                                 .entry(root.clone())
@@ -1323,6 +1325,34 @@ pub(super) fn canonical_cwd(path: &Path) -> Option<PathBuf> {
         rest.push(existing.file_name()?.to_owned());
         existing = existing.parent()?;
     }
+}
+
+// Resolve as much of the path as possible before ruling out a root. An
+// unresolved ancestor, relative path, or parent traversal cannot disprove it.
+fn occupancy_path_could_be_under(path: &Path, root: &Path) -> bool {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        return true;
+    }
+    if !std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
+        return true;
+    }
+    let Some(root) = canonical_cwd(root) else {
+        return true;
+    };
+    for ancestor in path.ancestors() {
+        if let Ok(resolved) = canonicalize(ancestor) {
+            let suffix = path.strip_prefix(ancestor).unwrap_or(Path::new(""));
+            let candidate = resolved.join(suffix);
+            // If resolution stopped above a root, unresolved components may
+            // include an alias into it.
+            return candidate.starts_with(&root) || root.starts_with(&resolved);
+        }
+    }
+    true
 }
 
 pub(super) enum NativeCwd {
@@ -1442,7 +1472,7 @@ pub(super) fn record_live_path_with_audit(
             Some(false) => {}
             None => {
                 unplaceable();
-                if *state != WorkerState::Live {
+                if occupancy_path_could_be_under(cwd, root) && *state != WorkerState::Live {
                     *state = WorkerState::Unknown;
                 }
             }
