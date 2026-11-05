@@ -1085,6 +1085,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             workers,
             command.dry_run,
             |context, cancel| {
+                let context = &WorktreeContext {
+                    facts: &facts,
+                    ..*context
+                };
                 // A failed fetch cannot grant removal authority. Output pruning
                 // still has its independent terminal-state proof.
                 let (upstream, upstream_error) = if command.pressure {

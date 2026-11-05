@@ -33,7 +33,6 @@ use provenant_cli::fabric::Context;
 /// observations remain advisory; an actual held lease or retained fence refuses.
 fn peer_adoption_custody(
     context: &provenant_confinement::worktrees::WorktreeContext<'_>,
-    facts: &provenant_confinement::worktrees::RepoFacts,
     observation: &provenant_confinement::worktrees::WorktreeObservation,
     cancel: &CancelToken,
 ) -> Result<Option<&'static str>, provenant_confinement::worktrees::WorktreeError> {
@@ -92,7 +91,7 @@ fn peer_adoption_custody(
         .private_dir()
         .read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
     if head != format!("ref: {}\n", reference.as_str()).as_bytes()
-        || facts.resolve_commit(context, reference, cancel)? != observation.info.head
+        || context.facts.resolve_commit(context, reference, cancel)? != observation.info.head
     {
         return Err(WorktreeError::IdentityChanged);
     }
@@ -2458,7 +2457,7 @@ impl BinaryRunOwner<'_> {
                     facts: &facts,
                     ..*context
                 };
-                let existing = worktrees::list_with_observation_and_facts(context, &facts, cancel)?
+                let existing = worktrees::list_with_observation(context, cancel)?
                     .into_iter()
                     .find(|entry| entry.info.branch.as_deref() == Some(branch.as_str()));
                 let Some(base) = base else {
@@ -2470,7 +2469,7 @@ impl BinaryRunOwner<'_> {
                     Some(entry) => {
                         if entry.info.head != base || entry.info.dirty != WorktreeCondition::Clean {
                             if matches!(&entry.occupancy, worktrees::Occupancy::Held) {
-                                let _ = peer_adoption_custody(context, &facts, &entry, cancel)?;
+                                let _ = peer_adoption_custody(context, &entry, cancel)?;
                             }
                             return Err(WorktreeError::BranchExistsWithBase {
                                 branch: spec.branch.clone(),
@@ -2479,7 +2478,7 @@ impl BinaryRunOwner<'_> {
                             }
                             .into());
                         }
-                        let warning = peer_adoption_custody(context, &facts, &entry, cancel)?;
+                        let warning = peer_adoption_custody(context, &entry, cancel)?;
                         Ok((entry.info, warning))
                     }
                     None => {

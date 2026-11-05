@@ -75,7 +75,6 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
                 .map_err(|_| worktrees::WorktreeError::UnknownWriter)
         },
     )?;
-    let facts = worktrees::RepoFacts::default();
     let observe = |state| {
         worktrees::with_context_using_workers(
             &roots,
@@ -85,11 +84,11 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             &cancel,
             &Observer(state),
             |context| {
-                let entry = worktrees::list_with_observation_and_facts(context, &facts, &cancel)?
+                let entry = worktrees::list_with_observation(context, &cancel)?
                     .into_iter()
                     .find(|entry| entry.info.path == info.path)
                     .ok_or(worktrees::WorktreeError::NotFound)?;
-                peer_adoption_custody(context, &facts, &entry, &cancel)
+                peer_adoption_custody(context, &entry, &cancel)
             },
         )
     };
@@ -110,7 +109,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
         &cancel,
         &Observer(WorkerState::Free),
         |context| {
-            worktrees::list_with_observation_and_facts(context, &facts, &cancel)?
+            worktrees::list_with_observation(context, &cancel)?
                 .into_iter()
                 .find(|entry| entry.info.path == info.path)
                 .ok_or(worktrees::WorktreeError::NotFound)
@@ -126,7 +125,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             &clock,
             &cancel,
             &Observer(WorkerState::Free),
-            |context| peer_adoption_custody(context, &facts, &stale_held, &cancel),
+            |context| peer_adoption_custody(context, &stale_held, &cancel),
         )?
         .is_none()
     );
@@ -140,7 +139,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
         &cancel,
         &Observer(WorkerState::Free),
         |context| {
-            worktrees::list_with_observation_and_facts(context, &facts, &cancel)?
+            worktrees::list_with_observation(context, &cancel)?
                 .into_iter()
                 .find(|entry| entry.info.path == info.path)
                 .ok_or(worktrees::WorktreeError::NotFound)
@@ -155,7 +154,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             &clock,
             &cancel,
             &Observer(WorkerState::Free),
-            |context| peer_adoption_custody(context, &facts, &stale, &cancel),
+            |context| peer_adoption_custody(context, &stale, &cancel),
         ),
         Err(worktrees::WorktreeError::Dirty(_))
     ));
@@ -189,7 +188,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             &clock,
             &cancel,
             &Observer(WorkerState::Free),
-            |context| peer_adoption_custody(context, &facts, &stale, &cancel),
+            |context| peer_adoption_custody(context, &stale, &cancel),
         ),
         Err(worktrees::WorktreeError::GitOperationInProgress)
     ));
@@ -204,7 +203,7 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             &clock,
             &cancel,
             &Observer(WorkerState::Free),
-            |context| peer_adoption_custody(context, &facts, &stale, &cancel),
+            |context| peer_adoption_custody(context, &stale, &cancel),
         ),
         Err(worktrees::WorktreeError::IdentityChanged)
     ));
