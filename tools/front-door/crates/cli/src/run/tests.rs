@@ -6576,7 +6576,7 @@ fn admission_window_deadline_is_preserved_on_restart() -> Result<(), Box<dyn std
         &fixture.root,
         &fixture.tree,
         |edge| -> Result<(), Box<dyn std::error::Error>> {
-            std::fs::create_dir_all(edge.roots.state.as_path())?;
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
             provenant_config::bind_project(
                 edge.roots,
                 provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
@@ -6653,7 +6653,7 @@ fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
         &fixture.root,
         &fixture.tree,
         |edge| -> Result<(), Box<dyn std::error::Error>> {
-            std::fs::create_dir_all(edge.roots.state.as_path())?;
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
             provenant_config::bind_project(
                 edge.roots,
                 provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
@@ -6788,7 +6788,7 @@ fn worktrees_lock_held_past_five_seconds_retries_and_admits()
         &fixture.root,
         &fixture.tree,
         |edge| -> Result<(), Box<dyn std::error::Error>> {
-            std::fs::create_dir_all(edge.roots.state.as_path())?;
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
             provenant_config::bind_host(edge.roots)?;
 
             let clock = SystemClock::new();
@@ -6905,7 +6905,7 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
         &fixture.root,
         &fixture.tree,
         |edge| -> Result<(), Box<dyn std::error::Error>> {
-            std::fs::create_dir_all(edge.roots.state.as_path())?;
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
             provenant_config::bind_host(edge.roots)?;
 
             let clock = SystemClock::new();
@@ -7027,7 +7027,7 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
         &fixture.root,
         &fixture.tree,
         |edge| -> Result<(), Box<dyn std::error::Error>> {
-            std::fs::create_dir_all(edge.roots.state.as_path())?;
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
             provenant_config::bind_host(edge.roots)?;
             let clock = SystemClock::new();
             let cancel = CancelToken::new();

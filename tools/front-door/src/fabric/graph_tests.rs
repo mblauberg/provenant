@@ -13,7 +13,7 @@ mod graph_writer_admission_tests {
             timeout: Duration::from_secs(5),
         });
         assert!(matches!(
-            graph_writer_initialisation_error("head", lock("worktrees.lock")),
+            graph_writer_initialisation_error("head", WorktreeError::RegistryLockTimeout),
             FacadeError::Busy
         ));
         for error in [
@@ -139,10 +139,7 @@ mod graph_writer_admission_tests {
         }))
         .unwrap();
 
-        let lock_timeout = WorktreeError::Filesystem(FsError::LockTimeout {
-            path: PathBuf::from("worktrees.lock"),
-            timeout: Duration::from_secs(5),
-        });
+        let lock_timeout = WorktreeError::RegistryLockTimeout;
 
         let mut owner = MockWriterOwner {
             errors: std::collections::VecDeque::from([lock_timeout]),

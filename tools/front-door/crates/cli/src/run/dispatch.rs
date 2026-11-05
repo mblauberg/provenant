@@ -600,31 +600,12 @@ enum WorktreeAdmissionError {
 impl WorktreeAdmissionError {
     fn is_transient(&self) -> bool {
         use provenant_confinement::worktrees::WorktreeError;
-        use provenant_os::fs::FsError;
         match self {
-            Self::Own(worktree::OwnWorktreeError::Other(run::RunError::Writer(err))) => match err {
-                WorktreeError::Filesystem(FsError::LockTimeout { path, .. })
-                    if path
-                        .file_name()
-                        .is_some_and(|name| name == "worktrees.lock") =>
-                {
-                    true
-                }
-                WorktreeError::UnknownWriter => true,
-                _ => false,
-            },
-            Self::Own(worktree::OwnWorktreeError::ForeignOwner) => false,
-            Self::Run(run::RunError::Writer(err)) => match err {
-                WorktreeError::Filesystem(FsError::LockTimeout { path, .. })
-                    if path
-                        .file_name()
-                        .is_some_and(|name| name == "worktrees.lock") =>
-                {
-                    true
-                }
-                WorktreeError::UnknownWriter => true,
-                _ => false,
-            },
+            Self::Own(worktree::OwnWorktreeError::Other(run::RunError::Writer(err)))
+            | Self::Run(run::RunError::Writer(err)) => matches!(
+                err,
+                WorktreeError::RegistryLockTimeout | WorktreeError::UnknownWriter
+            ),
             _ => false,
         }
     }
