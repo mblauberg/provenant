@@ -250,6 +250,19 @@ integrate fast-forward only. If a loop round's delivery fails at the Integrate
 stage, the integration branch moved after the round launched; rerun the graph
 from the new head rather than resuming it.
 
+For recovery, use the existing operation that matches the situation:
+
+- **Resume a graph:** `provenant fabric graph resume` continues its recorded
+  checkpoint. A plain rerun of the same preset inputs reattaches to that graph.
+- **Retry a lane:** `provenant resume ATTEMPT` continues from the recorded
+  attempt. Address the refusal or other recorded cause before retrying.
+- **Fallback:** an eligible route fallback is selected by the graph's routing
+  policy; resuming the graph does not authorise an unsafe second launch.
+- **Repair:** correct the reported condition, then resume the affected graph or
+  lane with its existing command. Do not reset a worktree containing edits.
+- **Fresh start:** cancel the old graph when appropriate, then rerun a preset
+  with `--fresh` to create a new graph ID.
+
 Drain writer lanes before upgrading, as described in the
 [upgrade procedure](install.md#bootstrap-and-upgrade). Upgrading does not
 force-cancel running lanes. An older interrupted settlement with its private
