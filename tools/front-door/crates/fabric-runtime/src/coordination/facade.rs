@@ -210,11 +210,8 @@ pub enum FacadeError {
     PeerProtocolMismatch {
         peer: String,
         remote: u64,
-        /// The requested protocol level. Frames from releases before the field
-        /// existed omit it, and those releases sent feature actions at fences
-        /// 7-10, so no level can be inferred.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expected: Option<u64>,
+        /// The requested protocol level.
+        expected: u64,
     },
     #[error("run launch outcome is unknown for operation {operation_id}")]
     LaunchUnknown { operation_id: OperationId },
@@ -668,7 +665,7 @@ impl From<&crate::hosts::PeerError> for FacadeError {
             } => Self::PeerProtocolMismatch {
                 peer: peer.clone(),
                 remote: *remote,
-                expected: Some(*expected),
+                expected: *expected,
             },
             PeerError::Project | PeerError::SourceHost | PeerError::RequestTooLarge => {
                 Self::invalid(error.to_string())
