@@ -8,6 +8,9 @@ fn row() -> LaneRow {
         task_id: "1".repeat(32),
         attempt_id: "2".repeat(32),
         attempt_number: 1,
+        retry_of: None,
+        superseded_by: None,
+        cause: None,
         state: "running".into(),
         exit_code: None,
         reason: None,
@@ -86,6 +89,9 @@ fn lane_rows_validate_with_and_without_optional_members() {
     }
     let mut full = row();
     full.state = "terminal".into();
+    full.retry_of = Some("3".repeat(32));
+    full.superseded_by = Some("4".repeat(32));
+    full.cause = Some(crate::run::SettlementReason::DeclaredStop);
     full.exit_code = Some(0);
     full.reason = Some("done".into());
     full.settlement = Some(LaneSettlement {
@@ -107,6 +113,9 @@ fn lane_rows_validate_with_and_without_optional_members() {
     let value = serde_json::to_value(&full).unwrap();
     assert_eq!(value["requested_priority"], 10);
     assert_eq!(value["title"], "Review\nchanges");
+    assert_eq!(value["cause"], "declared_stop");
+    assert_eq!(value["retry_of"], "3".repeat(32));
+    assert_eq!(value["superseded_by"], "4".repeat(32));
 }
 
 #[test]

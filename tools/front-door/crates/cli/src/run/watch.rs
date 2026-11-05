@@ -5,7 +5,9 @@
 //! ID always counts, whenever it settled. A wholly settled named selection
 //! returns its terminal rows immediately. Both modes poll a `fetch` of the
 //! candidate lanes, so the local store and peers share one rule.
-use super::{Condition, ErrorKind, Fail, Status, condition_met, settled, silent_lane, state_name};
+use super::{
+    Condition, ErrorKind, Fail, Status, condition_met, settled, silent_lane, state_and_reason,
+};
 use provenant_core::retry::{RetryCause, is_transient};
 use provenant_core::{AttemptId, Clock, HostId, WallTime};
 use provenant_os::clock::SystemClock;
@@ -376,7 +378,7 @@ pub(super) fn watch(
     let mut stale = None;
     loop {
         for lane in &lanes {
-            let state = state_name(&lane.state);
+            let state = state_and_reason(&lane.state).0;
             if seen.get(&lane.attempt_id) != Some(&state) {
                 emit(lane)?;
                 seen.insert(lane.attempt_id, state);
@@ -415,7 +417,7 @@ pub(super) fn line_with_successor(
     host: Option<HostId>,
     successor: Option<AttemptId>,
 ) -> String {
-    let mut state = state_name(&lane.state);
+    let mut state = state_and_reason(&lane.state).0;
     if let Some(id) = successor {
         state.push_str(&format!(" → retrying ({id})"));
     }
@@ -444,7 +446,7 @@ pub(super) fn json_line_with_successor(
 ) -> String {
     json!({
         "event": "lane",
-        "state": state_name(&lane.state),
+        "state": state_and_reason(&lane.state).0,
         "run_id": lane.run_id,
         "task_id": lane.task_id,
         "attempt_id": lane.attempt_id,

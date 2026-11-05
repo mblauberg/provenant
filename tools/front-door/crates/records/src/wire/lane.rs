@@ -1,6 +1,6 @@
 //! The planned shared lane projection for `status` and `lanes`.
 use super::schema::{
-    any, array, boolean, integer, nullable, number, object, open_object, string, unsigned,
+    any, array, boolean, choices, integer, nullable, number, object, open_object, string, unsigned,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -18,6 +18,9 @@ pub struct LaneRow {
     pub task_id: String,
     pub attempt_id: String,
     pub attempt_number: u64,
+    pub retry_of: Option<String>,
+    pub superseded_by: Option<String>,
+    pub cause: Option<crate::run::SettlementReason>,
     /// The state name (`queued`, `running`, `terminal`, ...). Settlement owns
     /// the set, so the schema does not enumerate it.
     pub state: String,
@@ -69,6 +72,36 @@ pub struct LaneRow {
     pub handoff: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_error: Option<String>,
+}
+
+impl LaneRow {
+    /// Project the recorded state without rewriting missing history.
+    pub fn state_and_reason(state: &crate::run::AttemptState) -> (String, Option<String>) {
+        use crate::run::AttemptState;
+        match state {
+            AttemptState::Terminal {
+                outcome, reason, ..
+            } => (
+                serde_json::to_value(outcome)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+                reason.clone(),
+            ),
+            other => (
+                serde_json::to_value(other)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("state")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_default(),
+                None,
+            ),
+        }
+    }
 }
 
 /// The settled record's reason.
@@ -123,6 +156,23 @@ pub fn lane_row_schema() -> Value {
             ("task_id", string()),
             ("attempt_id", string()),
             ("attempt_number", unsigned()),
+            ("retry_of", nullable(string())),
+            ("superseded_by", nullable(string())),
+            (
+                "cause",
+                nullable(choices(&[
+                    "completed",
+                    "handoff_missing",
+                    "declared_stop",
+                    "provider_stop",
+                    "uncommitted_work",
+                    "pre_launch_refusal",
+                    "cancelled",
+                    "lost",
+                    "unsettled",
+                    "failed",
+                ])),
+            ),
             ("state", string()),
             ("exit_code", nullable(integer())),
             ("reason", nullable(string())),

@@ -488,7 +488,7 @@ fn output_read(
             }
             let human = events
                 .iter()
-                .map(|e| format!("{} {}\n", e.revision, state_name(&e.change)))
+                .map(|e| format!("{} {}\n", e.revision, state_and_reason(&e.change).0))
                 .collect();
             return Ok((json!({ "attempt_id": id, "events": events }), human));
         }

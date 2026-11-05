@@ -39,7 +39,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let (exempt, exempt_line) = review_exempt_view(&context);
             let Some(store) = store else {
                 return Ok((
-                    json!({"lanes": [], "review_exempt": exempt}),
+                    json!({"lanes": [], "next_cursor": null, "review_exempt": exempt}),
                     format!("no lanes\n{exempt_line}"),
                 ));
             };
@@ -157,10 +157,20 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             compact.lines.push(exempt_line.trim_end().to_owned());
             summary = Some(compact);
             let human = format!("{human}{exempt_line}");
-            Ok((
-                json!({"lanes": rows, "next_cursor": next, "review_exempt": exempt}),
-                human,
-            ))
+            let successors = policy_successors(&session, &rows, &call)?;
+            let (mut data, _) = render_lanes_with_lineage(
+                &rows,
+                &waits,
+                next,
+                session.context.state_root.as_path(),
+                None,
+                &successors,
+            );
+            data.as_object_mut()
+                .expect("lane projection is an object")
+                .remove("capacity_cooldowns");
+            data["review_exempt"] = exempt;
+            Ok((data, human))
         })(),
     );
     out.summary = summary;
@@ -575,26 +585,9 @@ pub(super) fn artifact(root: &Path, record: &run::AttemptRecord, name: &str) -> 
     ))
 }
 
-pub(super) fn state_name(state: &run::AttemptState) -> String {
-    match state {
-        run::AttemptState::Terminal { outcome, .. } => serde_json::to_value(outcome)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default(),
-        other => serde_json::to_value(other)
-            .ok()
-            .and_then(|v| v.get("state").and_then(Value::as_str).map(str::to_owned))
-            .unwrap_or_default(),
-    }
-}
-
-/// The state name and, for a terminal attempt, its recorded reason.
+/// The projected state and recorded terminal reason.
 pub fn state_and_reason(state: &run::AttemptState) -> (String, Option<String>) {
-    let reason = match state {
-        run::AttemptState::Terminal { reason, .. } => reason.clone(),
-        _ => None,
-    };
-    (state_name(state), reason)
+    provenant_records::wire::LaneRow::state_and_reason(state)
 }
 
 pub(super) fn delivery_state_text(state: &provenant_records::run::WriterDeliveryState) -> String {
@@ -635,7 +628,7 @@ pub(super) fn render_lanes_with_lineage(
     let rows: Vec<Value> = lanes
         .iter()
         .map(|lane| {
-            let state = state_name(&lane.state);
+            let state = state_and_reason(&lane.state).0;
             let route = lane
                 .applied_route
                 .as_ref()
@@ -849,7 +842,8 @@ pub(super) fn render_lanes_with_lineage(
                 "attempt_id": lane.attempt_id,
                 "attempt_number": lane.attempt_number,
                 "retry_of": lane.retry_of,
-                "superseded_by": successors.get(&lane.attempt_id),
+                "superseded_by": successors.get(&lane.attempt_id).copied().or(lane.superseded_by),
+                "cause": lane.settlement_reason,
                 "state": state,
                 "exit_code": exit_code,
                 "reason": reason,
@@ -1159,7 +1153,7 @@ pub(super) fn lanes_inner(
                     || command
                         .states
                         .iter()
-                        .any(|state| state.as_str() == state_name(&lane.state));
+                        .any(|state| state.as_str() == state_and_reason(&lane.state).0);
                 let since_matches = since.is_none_or(|since| lane.queued_at >= since);
                 if state_matches && since_matches && by_session(&lane) {
                     matches.push(lane);

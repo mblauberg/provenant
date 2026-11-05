@@ -6,7 +6,7 @@
 use super::watch::{self, Scope};
 use super::{
     Condition, Edge, Fail, Reply, Status, condition_met, render_lanes_with_lineage, reply,
-    state_name,
+    state_and_reason,
 };
 use crate::{
     Cancel, Dispatch, Lanes, Output, Part,
@@ -1092,7 +1092,7 @@ pub(super) fn lanes(
                 || command
                     .states
                     .iter()
-                    .any(|state| state.as_str() == state_name(&lane.state))
+                    .any(|state| state.as_str() == state_and_reason(&lane.state).0)
         })
         .filter(|lane| since.is_none_or(|since| lane.queued_at >= since))
         .take(usize::try_from(command.limit).unwrap_or(usize::MAX))
@@ -1254,7 +1254,7 @@ pub(super) fn host_lanes(
                 || command
                     .states
                     .iter()
-                    .any(|state| state.as_str() == state_name(&lane.state))
+                    .any(|state| state.as_str() == state_and_reason(&lane.state).0)
         })
         .filter(|lane| since.is_none_or(|since| lane.queued_at >= since))
         .collect();
@@ -1624,7 +1624,7 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                         RunResult::Cancel {
                             attempt: record, ..
                         } if record.attempt_id == *attempt => {
-                            let state = state_name(&record.state);
+                            let state = state_and_reason(&record.state).0;
                             // A live attempt has a stop request, not an exit.
                             let tag = if super::settled(&record.state).0 {
                                 state.as_str()
