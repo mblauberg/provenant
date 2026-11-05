@@ -262,8 +262,6 @@ pub enum GitRead {
     WorktreeList,
     /// List registrations with the verified common repository's bare setting.
     WorktreeListBare,
-    /// Read repository config, excluding the utility's core.bare override.
-    LocalBare,
     /// Read local bare settings with their include origins.
     LocalBareOrigins,
     BranchTips,
@@ -1379,17 +1377,6 @@ fn git_args(
             "--porcelain".into(),
             "-z".into(),
         ],
-        GitRead::LocalBare => [
-            "config",
-            "--local",
-            "--no-includes",
-            "--bool",
-            "--get",
-            "core.bare",
-        ]
-        .into_iter()
-        .map(OsString::from)
-        .collect(),
         GitRead::LocalBareOrigins => [
             "config",
             "--local",
@@ -1941,14 +1928,14 @@ fn scan_configuration(
 
 pub(crate) fn lane_configuration_files(
     executor: &dyn Executor,
-    repo: &ReadOnlyRepo,
+    repo: &VerifiedRepo,
     runtime: &UtilityRuntime,
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<BTreeSet<PathBuf>, UtilityError> {
-    let scan = scan_configuration(executor, &repo.0, runtime, budget, cancel)?;
+    let scan = scan_configuration(executor, repo, runtime, budget, cancel)?;
     let mut files = scan.lane_files;
-    let roots = runtime.lane_roots(&repo.0);
+    let roots = runtime.lane_roots(repo);
     // An include may be named inside a lane even when Git reports the
     // resolved target as its origin. Seed the graph with the declared path.
     for entry in &scan.entries {

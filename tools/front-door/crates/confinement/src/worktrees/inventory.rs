@@ -238,19 +238,17 @@ impl RepoFacts {
         Ok(Some(name.to_owned()))
     }
 
-    /// Read raw worktree registrations from a read-only checkout. The common
-    /// repository's local bare setting controls Git's primary registration;
-    /// the utility's normal override otherwise changes that fact.
-    pub fn read_only_inventory(
+    /// Resolve the trusted local bare setting with the session's scalar cap.
+    pub fn bare_setting(
         &self,
-        repo: &crate::repo::ReadOnlyRepo,
+        repo: &VerifiedRepo,
         executor: &dyn Executor,
         utility: &UtilityRuntime,
         budget: UtilityBudget,
         cancel: &CancelToken,
-    ) -> Result<Vec<u8>, WorktreeError> {
+    ) -> Result<Option<bool>, WorktreeError> {
         let scalar = budget.with_stdout_cap(self.scalar_limit)?;
-        let bare = crate::utility::run_read_utility(
+        let bare = run_utility(
             executor,
             GitRead::LocalBareOrigins,
             repo,
@@ -258,9 +256,9 @@ impl RepoFacts {
             scalar,
             cancel,
         )?;
-        let bare = match exit_code(&bare)? {
+        match exit_code(&bare)? {
             0 => {
-                let roots = utility.lane_roots(&repo.0);
+                let roots = utility.lane_roots(repo);
                 let lane_files = crate::utility::lane_configuration_files(
                     executor, repo, utility, budget, cancel,
                 )?;
@@ -268,7 +266,7 @@ impl RepoFacts {
                     return Err(WorktreeError::InvalidOutput);
                 }
                 let mut fields = bare.stdout.bytes.split(|byte| *byte == 0);
-                let mut selected = false;
+                let mut selected = None;
                 let mut untrusted_bare = false;
                 while let Some(origin) = fields.next() {
                     if origin.is_empty() && fields.clone().next().is_none() {
@@ -295,7 +293,7 @@ impl RepoFacts {
                         _ => return Err(WorktreeError::InvalidOutput),
                     };
                     if !in_lane && !lane_files.contains(&path) {
-                        selected = value;
+                        selected = Some(value);
                     } else {
                         untrusted_bare |= value;
                     }
@@ -303,14 +301,30 @@ impl RepoFacts {
                 // If a bare setting appears only through lane-controlled
                 // provenance, the primary worktree cannot be classified
                 // safely: an alias may hide a trusted occurrence of that file.
-                if !selected && untrusted_bare {
+                if selected != Some(true) && untrusted_bare {
                     return Err(WorktreeError::InvalidOutput);
                 }
-                selected
+                Ok(selected)
             }
-            1 => false,
-            _ => return Err(WorktreeError::InvalidOutput),
-        };
+            1 => Ok(None),
+            _ => Err(WorktreeError::InvalidOutput),
+        }
+    }
+
+    /// Read raw worktree registrations from a read-only checkout. The common
+    /// repository's local bare setting controls Git's primary registration;
+    /// the utility's normal override otherwise changes that fact.
+    pub fn read_only_inventory(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, WorktreeError> {
+        let bare = self
+            .bare_setting(&repo.0, executor, utility, budget, cancel)?
+            .unwrap_or(false);
         let budget = budget.with_stdout_cap(self.inventory_limit)?;
         let operation = if bare {
             GitRead::WorktreeListBare

@@ -691,8 +691,13 @@ fn gc_project(
         read_only,
         |context, cancel| {
             let context = &WorktreeContext { facts, ..*context };
-            if gc_primary_checkout(context.repo, context.executor, context.utility, cancel)?
-                != context.repo.root_path()
+            if gc_primary_checkout(
+                context.repo,
+                context.executor,
+                context.utility,
+                facts,
+                cancel,
+            )? != context.repo.root_path()
             {
                 return Err(Error::GcObservation("GC requires the primary checkout"));
             }
@@ -716,18 +721,16 @@ fn gc_primary_checkout<'a>(
     repo: &'a provenant_confinement::repo::VerifiedRepo,
     executor: &dyn provenant_os::exec::Executor,
     runtime: &UtilityRuntime,
+    facts: &worktrees::RepoFacts,
     cancel: &CancelToken,
 ) -> Result<&'a Path, Error> {
-    let bare = provenant_confinement::utility::run_utility(
-        executor,
-        provenant_confinement::utility::GitRead::LocalBare,
+    if facts.bare_setting(
         repo,
+        executor,
         runtime,
         UtilityBudget::bounded(Duration::from_secs(5))?,
         cancel,
-    )?;
-    if bare.termination != provenant_os::exec::Termination::Exit(0)
-        || bare.stdout.bytes != b"false\n"
+    )? != Some(false)
     {
         return Err(Error::GcObservation(
             "GC cannot select a primary checkout for a bare repository or unknown repository configuration",
@@ -1057,7 +1060,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             });
         }
-        let primary = gc_primary_checkout(&repo, &executor, &runtime, &CancelToken::new())?;
+        let primary = gc_primary_checkout(&repo, &executor, &runtime, &facts, &CancelToken::new())?;
         let selected = gc_project(&roots, &home, primary, workers, &facts, command.dry_run)?;
         project_ids.push(selected.binding.project_id());
         projects.push(selected);

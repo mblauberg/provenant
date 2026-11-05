@@ -40,8 +40,9 @@ and read-only verified checkouts, including when Git uses a separate directory
 or native object alternates. Landing inventory reads the common repository's
 trusted local and included bare settings before listing worktrees, so Git's
 primary bare registration is preserved without accepting lane-writable or
-worktree-level configuration overrides. Batch
-landing passes its facts session into local follow-up and discards verified
+worktree-level configuration overrides. Worktree GC uses the same fact but
+requires an explicit trusted non-bare setting before selecting a primary
+checkout. Batch landing passes its facts session into local follow-up and discards verified
 checkout handles around command-controlled mutations. Landing revalidates those
 handles before reading their common or private Git paths instead of rediscovering
 the paths with separate Git commands. Target-seed builds resolve their pinned

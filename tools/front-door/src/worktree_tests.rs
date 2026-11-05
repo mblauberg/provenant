@@ -1770,7 +1770,38 @@ fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> Result {
                 "--porcelain",
             ],
         )?;
+        // The common configuration may get its bare identity from an
+        // included file rather than from an entry in config itself.
+        let included = rig.root.join("bare-include.conf");
+        fs::write(&included, "[core]\n bare = true\n")?;
+        git(
+            &rig,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("path")?,
+                "config",
+                "--unset",
+                "core.bare",
+            ],
+        )?;
         rig.project = linked.clone();
+        let missing = command(&rig, &["gc", "--apply", "--json"])?;
+        assert_ne!(
+            code(&missing),
+            0,
+            "unknown bare identity accepted as primary: {name}"
+        );
+        git(
+            &rig,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("path")?,
+                "config",
+                "--add",
+                "include.path",
+                included.to_str().ok_or("path")?,
+            ],
+        )?;
         let from_linked = command(&rig, &["gc", "--apply", "--json"])?;
         assert_ne!(
             code(&from_linked),
@@ -1803,6 +1834,18 @@ fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> Result {
             "-q",
             "--separate-git-dir",
             separate.to_str().ok_or("path")?,
+        ],
+    )?;
+    let included = rig.root.join("non-bare-include.conf");
+    fs::write(&included, "[core]\n bare = false\n")?;
+    git(&rig, &["config", "--unset", "core.bare"])?;
+    git(
+        &rig,
+        &[
+            "config",
+            "--add",
+            "include.path",
+            included.to_str().ok_or("path")?,
         ],
     )?;
     ok(&rig, &["gc", "--pressure", "--apply", "--json"])?;
