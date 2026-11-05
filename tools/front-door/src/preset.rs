@@ -133,6 +133,33 @@ fn decode_lowered_node(
     })
 }
 
+/// Raw graph nodes embedded in a leaf are not passed through `lower_leaf`;
+/// reject their undeclared fields at the same boundary.
+fn unknown_embedded_node_field(
+    node: &provenant_fabric_runtime::graph::GraphNode,
+) -> Option<String> {
+    let children = node
+        .composite
+        .iter()
+        .flat_map(|spec| &spec.nodes)
+        .chain(node.loop_body.iter().flat_map(|spec| &spec.body))
+        .chain(
+            node.plan
+                .iter()
+                .filter_map(|spec| spec.fallback.as_ref())
+                .flat_map(|spec| &spec.nodes),
+        );
+    for child in children {
+        if let Some(field) = child.extra.keys().next() {
+            return Some(format!("node {}: unknown leaf field: {field}", child.id));
+        }
+        if let Some(error) = unknown_embedded_node_field(child) {
+            return Some(error);
+        }
+    }
+    None
+}
+
 impl Layers {
     #[allow(
         clippy::expect_used,
@@ -1809,7 +1836,12 @@ fn lower_leaf(
     let unknown = match serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(
         Value::Object(probe.clone()),
     ) {
-        Ok(node) => node.extra.keys().next().cloned(),
+        Ok(node) => {
+            if let Some(error) = unknown_embedded_node_field(&node) {
+                return Err(error);
+            }
+            node.extra.keys().next().cloned()
+        }
         Err(_) => probe.iter().find_map(|(key, value)| {
             if key == "id" || key == "access" {
                 return None;

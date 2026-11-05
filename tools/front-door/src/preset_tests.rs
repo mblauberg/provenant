@@ -2805,6 +2805,38 @@ fn leaf_fields_follow_graph_node_type_and_report_unknown_fields() {
 }
 
 #[test]
+fn embedded_graph_nodes_reject_unknown_fields() {
+    for (name, body) in [
+        (
+            "raw-composite",
+            "kind = 'composite', composite = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', mispelled = true }], exports = [] }",
+        ),
+        (
+            "raw-loop",
+            "kind = 'loop', loop = { max_rounds = 1, until = 'member', body = [{ id = 'member', access = 'read_only', prompt = 'work', mispelled = true }] }",
+        ),
+        (
+            "raw-plan-fallback",
+            "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', mispelled = true }], exports = [] } }",
+        ),
+    ] {
+        let mut layers = Layers::empty();
+        layers
+            .insert(
+                "test",
+                name,
+                &format!("stages = [{{ id = 'group', {body} }}]\n"),
+            )
+            .unwrap();
+        let error = expand(&layers, name, "brief", &[]).unwrap_err();
+        assert!(
+            error.contains("member") && error.contains("mispelled"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn malformed_graph_settings_name_the_field() {
     for key in ["integration_branch", "delivery", "decision_session"] {
         let mut layers = Layers::empty();
