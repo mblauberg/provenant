@@ -158,7 +158,7 @@ distinct model families. Configure them in the selected state's `config.toml`:
 reviewers = [{ pool = "junior", count = 1 }]
 
 [domains.routing.review.shapes.standard]
-reviewers = [{ pool = "junior", count = 3, distinct_families = true }]
+reviewers = [{ pool = "junior", count = 5, distinct_families = true }]
 
 [domains.routing.review.shapes.deep]
 reviewers = [
@@ -216,14 +216,14 @@ and model, and any writer keep a single route. A route table without an alias,
 or without an adapter and a model, is refused by name.
 
 Lenses fill a shape's slots in the order given by `review.lenses.order`, without
-repeats. The standard shape has three slots: `correctness-spec`, `tests`, then one
-more lens in that order (`design-fit-reuse`). A kind can replace the order or add
+repeats. The standard shape has five slots: `correctness-spec`, `tests`,
+`design-fit-reuse`, `simplicity` and `reliability`. A kind can replace the order or add
 lenses outside the slot cap, and risk tags add their conditional lenses:
 
 ```toml
 [domains.routing.review.lenses]
 order = ["correctness-spec", "tests", "design-fit-reuse", "simplicity",
-  "conventions-readability", "refactor-cleanup", "reliability", "flexibility"]
+  "reliability", "conventions-readability", "refactor-cleanup", "flexibility"]
 [domains.routing.review.lenses.by_kind.docs]
 order = ["conventions-readability"]    # one base lens, however many slots
 [domains.routing.review.lenses.by_kind.refactor]

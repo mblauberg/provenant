@@ -2414,15 +2414,15 @@ pub(crate) mod peer_tests {
         let record = floored.review.as_ref().ok_or("review resolution missing")?;
         assert_eq!((record.shape.as_str(), record.measured_size.as_str()), ("deep", "small"));
         assert!(floored.nodes.len() > 2);
-        // Three standard-shape lenses share one family group. The label only
+        // Five standard-shape lenses share one family group. The label only
         // steers routes: every lens is still a member of the panel.
         let mut standard = deferred(None, serde_json::json!([]))?;
         standard.review.as_mut().ok_or("review spec missing")?.shape = Some("standard".into());
         standard.review.as_mut().ok_or("review spec missing")?.min_successful = Some(0);
         let standard = bound.resolve_review(&standard, &head)?;
-        assert_eq!(standard.nodes[0].composite.as_ref().ok_or("composite missing")?.min_successful, Some(2));
+        assert_eq!(standard.nodes[0].composite.as_ref().ok_or("composite missing")?.min_successful, Some(4));
         let members = &standard.nodes[1..];
-        assert_eq!(members.len(), 3);
+        assert_eq!(members.len(), 5);
         let group = members[0].family_group.clone().ok_or("family group missing")?;
         assert!(members.iter().all(|member| member.family_group.as_ref() == Some(&group)));
         // An exact-model lens tier is that model on one route, with no repeat.
