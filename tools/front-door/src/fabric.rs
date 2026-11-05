@@ -2324,6 +2324,7 @@ impl BinaryRunOwner<'_> {
                 }
             }
             submitted.push(Submitted {
+                cloud: None,
                 require_skill_location: task.require_skill_location,
                 settlement_retry_limit,
                 context: task.context,

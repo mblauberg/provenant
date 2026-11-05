@@ -321,6 +321,7 @@ pub(super) fn lane_access_checked(
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
+    pub cloud: Option<provenant_records::run::CloudPlacement>,
     /// Require the selected adapter to have its own skill location.
     pub require_skill_location: bool,
     pub settlement_retry_limit: Option<u8>,
@@ -595,6 +596,7 @@ pub(super) fn submit_with_host_and_wait(
                 .settlement_retry_limit
                 .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));
             Ok(run::DispatchTask {
+                cloud: task.cloud,
                 context: task.context,
                 build_heavy: task.build_heavy,
                 profile: task_profile,

@@ -1377,6 +1377,15 @@ impl RunStore {
             if !matches!(record.state, AttemptState::Queued { .. }) {
                 continue;
             }
+            // Never hand a cloud attempt to the local supervisor, including
+            // during recovery after the submitting process exits.
+            if request
+                .tasks
+                .iter()
+                .any(|task| task.task_id == record.task_id && task.cloud.is_some())
+            {
+                continue;
+            }
             let now = || {
                 call.clock
                     .wall_now()
