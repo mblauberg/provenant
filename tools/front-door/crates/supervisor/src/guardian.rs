@@ -873,6 +873,7 @@ impl Driver<'_> {
             });
             #[cfg(feature = "fixture")]
             let request = if fixture_owner_gone {
+                last_cancel_ms = Some(now);
                 Some(machine::StopReason::ExplicitCancellation)
             } else if cancel_due {
                 last_cancel_ms = Some(now);
@@ -1184,7 +1185,32 @@ impl Driver<'_> {
                 last_observation_ms = Some(now);
             }
             let watches = child.watches();
-            match self.reactor.wait(&watches, Duration::from_millis(5)) {
+            // Pipes and signals wake the reactor. Timer-only work wakes at
+            // its next deadline, including the unchanged 100 ms census.
+            let wait_now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let wall_ms = wall_started.zip(wall_now()).map_or(0, |(began, current)| {
+                u64::try_from(current.as_micros().saturating_sub(began.as_micros()) / 1000)
+                    .unwrap_or(0)
+            });
+            let mut wait_ms = last_cpu_observation_ms
+                .saturating_add(100)
+                .saturating_sub(wait_now);
+            if let Some(last) = last_cancel_ms {
+                wait_ms = wait_ms.min(last.saturating_add(100).saturating_sub(wait_now));
+            }
+            if let Some(deadline) = state.deadline_in_ms(wait_now, wall_ms) {
+                wait_ms = wait_ms.min(deadline);
+            }
+            if let Some(at) = stop_at.filter(|_| !killed) {
+                wait_ms = wait_ms.min(
+                    at.saturating_add(plan.root_flush_ms.max(plan.descendant_grace_ms))
+                        .saturating_sub(wait_now),
+                );
+            }
+            if cleanup_pending && let Some(deadline) = drain_deadline {
+                wait_ms = wait_ms.min(deadline.saturating_sub(wait_now));
+            }
+            match self.reactor.wait(&watches, Duration::from_millis(wait_ms)) {
                 Ok(event) => signal_pending |= event.supervisor_signal,
                 Err(_) => warn(&mut warnings, &mut omitted_warnings, "guardian wait failed"),
             }

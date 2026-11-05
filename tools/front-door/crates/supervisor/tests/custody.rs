@@ -543,6 +543,41 @@ fn cleanup_retries_a_transient_census_failure(root: &Path) -> Result<()> {
     assert_eq!(exit.omitted_warnings, 0);
     Ok(())
 }
+fn live_census_failure_warns_once(root: &Path) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    let counter = state.join("s2-census-errors-left");
+    std::fs::write(&counter, b"3")?;
+    let socket = root.join("live-census.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "live-census",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::fs::read(&counter).map_or(true, |value| value != b"0") {
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("live census failures were not observed").into());
+        }
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
+    drop(held);
+    let exit = exited(&handle)?;
+    assert_eq!(
+        exit.warnings
+            .iter()
+            .filter(|warning| *warning == "live process census incomplete")
+            .count(),
+        1,
+        "{exit:?}"
+    );
+    Ok(())
+}
 fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
     std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
     std::fs::write(
@@ -2306,6 +2341,10 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
 
 type Case = (&'static str, fn(&Path) -> Result<()>);
 const CASES: &[Case] = &[
+    (
+        "live_census_failure_warns_once",
+        live_census_failure_warns_once,
+    ),
     (
         "guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost",
         guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost,
