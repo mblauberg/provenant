@@ -136,6 +136,7 @@ impl ProcessObserver for SystemProcessObserver {
         system_census(max_entries)
     }
 
+    #[cfg(target_os = "macos")]
     fn live_census(
         &self,
         root: &ProcessIdentity,

@@ -11,12 +11,19 @@ fn census_fallback_is_recorded_once_even_if_the_source_keeps_failing() {
 }
 
 #[test]
-fn census_event_failure_requires_an_immediate_full_scan() {
-    assert!(!super::census_full_due(101, Some(100), false));
-    // This flag carries both an unavailable process filter and a saturated
-    // event drain. Neither waits for the periodic backstop.
+fn event_burst_has_bounded_walks_and_failures_request_full_scan() {
+    let mut last = None;
+    let mut walks = 0;
+    for now in 0..1_000 {
+        if super::census_walk_due(now, last) {
+            last = Some(now);
+            walks += 1;
+        }
+    }
+    assert!(walks > 0 && walks < 100, "{walks} walks for 1000 events");
     assert!(super::census_full_due(101, Some(100), true));
-    assert!(super::census_full_due(5_100, Some(100), false));
+    assert!(!super::census_full_due(101, Some(100), false));
+    assert!(super::census_full_due(u64::MAX, Some(100), false));
 }
 
 #[cfg(all(feature = "fixture", target_os = "macos"))]

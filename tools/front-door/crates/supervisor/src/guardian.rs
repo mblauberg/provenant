@@ -46,8 +46,19 @@ fn census_fallback_notice(fallback: bool, recorded: &mut bool) -> Option<&'stati
     }
 }
 
+// Bound live walks to the former 10 Hz census rate, even during fork storms.
+// A five-second backstop finds missed events; wait errors back off by one tick.
+const CENSUS_INTERVAL_MS: u64 = 100;
+const FULL_CENSUS_INTERVAL_MS: u64 = 5_000;
+const EVENT_DRAIN_BACKOFF_MS: u64 = 10;
+
 fn census_full_due(now: u64, last_full: Option<u64>, event_failure: bool) -> bool {
-    event_failure || last_full.is_none_or(|last| now.saturating_sub(last) >= 5_000)
+    event_failure
+        || last_full.is_none_or(|last| now.saturating_sub(last) >= FULL_CENSUS_INTERVAL_MS)
+}
+
+fn census_walk_due(now: u64, last_walk: Option<u64>) -> bool {
+    last_walk.is_none_or(|last| now.saturating_sub(last) >= CENSUS_INTERVAL_MS)
 }
 
 fn retry_terminal_with(
@@ -784,9 +795,12 @@ impl Driver<'_> {
         let mut last_cpu_progress_ms = None;
         let mut census_warning_active = false;
         let mut last_full_census_ms: Option<u64> = None;
+        let mut last_census_ms: Option<u64> = None;
         let mut scoped_fallback_recorded = false;
         let mut census_event_pending = false;
         let mut census_event_failed = false;
+        let mut census_reactor_failed = false;
+        let mut reactor_warning_recorded = false;
         let mut process_watch_unavailable = false;
         let cleanup_complete;
         let mut drain_deadline = None;
@@ -914,11 +928,15 @@ impl Driver<'_> {
                 }
                 Err(_) => {
                     census_event_failed = true;
-                    warn(
-                        &mut warnings,
-                        &mut omitted_warnings,
-                        "signal observation failed",
-                    );
+                    census_reactor_failed = true;
+                    if !reactor_warning_recorded {
+                        warn(
+                            &mut warnings,
+                            &mut omitted_warnings,
+                            "signal observation failed",
+                        );
+                        reactor_warning_recorded = true;
+                    }
                     false
                 }
             };
@@ -1108,7 +1126,8 @@ impl Driver<'_> {
             // a 100 ms timer also samples when no event arrives. A full scan
             // backs it up every five seconds and is mandatory for cleanup.
             // Failed events, overflow or a racing walk require a full scan.
-            if cpu_sample_due || census_event_pending || census_event_failed {
+            if census_walk_due(now, last_census_ms) {
+                last_census_ms = Some(now);
                 census_event_pending = false;
                 let event_fallback =
                     std::mem::take(&mut census_event_failed) || process_watch_unavailable;
@@ -1118,7 +1137,9 @@ impl Driver<'_> {
                 } else {
                     self.refresh_live_census(&mut child)
                 };
-                fallback |= event_fallback;
+                // A saturated drain is normal during a burst; only failed watches
+                // and failed scoped walks produce a fallback warning.
+                fallback |= process_watch_unavailable || std::mem::take(&mut census_reactor_failed);
                 if census.is_some() {
                     let mut pids = std::collections::BTreeSet::from([child.id()]);
                     pids.extend(self.history.iter().map(|identity| identity.pid));
@@ -1126,8 +1147,8 @@ impl Driver<'_> {
                     pids.extend(self.protected.iter().map(|identity| identity.pid));
                     pids.extend(self.spared.spared_identities().map(|identity| identity.pid));
                     match self.reactor.watch_processes(&pids) {
-                        Ok(added) => {
-                            process_watch_unavailable = false;
+                        Ok((added, failures)) => {
+                            process_watch_unavailable = failures != 0;
                             // Close the gap between observing a new process
                             // and registering its fork filter.
                             census_event_pending |= added;
@@ -1285,17 +1306,32 @@ impl Driver<'_> {
                 wait_ms = wait_ms.min(deadline.saturating_sub(wait_now));
             }
             if census_event_pending || census_event_failed {
-                wait_ms = 0;
+                wait_ms = wait_ms.min(
+                    last_census_ms
+                        .unwrap_or(0)
+                        .saturating_add(CENSUS_INTERVAL_MS)
+                        .saturating_sub(wait_now),
+                );
             }
             match self.reactor.wait(&watches, Duration::from_millis(wait_ms)) {
                 Ok(event) => {
                     signal_pending |= event.supervisor_signal;
                     census_event_pending |= event.process_changed;
                     census_event_failed |= event.process_overflow;
+                    if event.process_changed && !census_walk_due(wait_now, last_census_ms) {
+                        provenant_os::sys::wait_pause(Duration::from_millis(
+                            EVENT_DRAIN_BACKOFF_MS,
+                        ));
+                    }
                 }
                 Err(_) => {
                     census_event_failed = true;
-                    warn(&mut warnings, &mut omitted_warnings, "guardian wait failed");
+                    census_reactor_failed = true;
+                    provenant_os::sys::wait_pause(Duration::from_millis(CENSUS_INTERVAL_MS));
+                    if !reactor_warning_recorded {
+                        warn(&mut warnings, &mut omitted_warnings, "guardian wait failed");
+                        reactor_warning_recorded = true;
+                    }
                 }
             }
         }

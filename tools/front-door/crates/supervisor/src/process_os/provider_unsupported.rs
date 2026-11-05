@@ -32,7 +32,7 @@ pub(crate) struct ReactorEvent {
 
 pub(crate) struct GuardianReactor;
 impl GuardianReactor {
-    pub(crate) fn watch_processes(&mut self, _: &BTreeSet<i64>) -> io::Result<bool> {
+    pub(crate) fn watch_processes(&mut self, _: &BTreeSet<i64>) -> io::Result<(bool, usize)> {
         Err(unsupported())
     }
     pub(crate) fn install() -> io::Result<Self> {

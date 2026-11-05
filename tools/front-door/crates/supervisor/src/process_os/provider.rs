@@ -67,6 +67,8 @@ pub(crate) struct GuardianReactor {
     queue: std::fs::File,
     _mask: SignalMask,
     processes: BTreeSet<i64>,
+    #[cfg(feature = "fixture")]
+    injected_watch_failures: usize,
 }
 impl GuardianReactor {
     pub(crate) fn install() -> io::Result<Self> {
@@ -108,17 +110,20 @@ impl GuardianReactor {
             queue,
             _mask: mask,
             processes: BTreeSet::new(),
+            #[cfg(feature = "fixture")]
+            injected_watch_failures: 0,
         })
     }
 
     /// Watch known processes for fork and exit. A failure requires a full
     /// scan; kqueue does not expose the new PID in a fork event.
-    pub(crate) fn watch_processes(&mut self, pids: &BTreeSet<i64>) -> io::Result<bool> {
+    pub(crate) fn watch_processes(&mut self, pids: &BTreeSet<i64>) -> io::Result<(bool, usize)> {
         if pids.len() > MAX_CENSUS_ENTRIES {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         self.processes.retain(|pid| pids.contains(pid));
         let mut added = false;
+        let mut failures = 0;
         for &pid in pids {
             if self.processes.contains(&pid) {
                 continue;
@@ -144,12 +149,35 @@ impl GuardianReactor {
                 )
             };
             if result < 0 {
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                let gone = error.raw_os_error() == Some(libc::ESRCH)
+                    || matches!(
+                        crate::census::SystemProcessObserver.observe(pid),
+                        ProcessObservation::Absent
+                            | ProcessObservation::Present(crate::census::ProcessFact {
+                                zombie: true,
+                                ..
+                            })
+                    );
+                if !gone {
+                    failures += 1;
+                }
+                continue;
             }
             self.processes.insert(pid);
             added = true;
         }
-        Ok(added)
+        #[cfg(feature = "fixture")]
+        if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(std::path::PathBuf::from)
+            && state.join("s2-fail-process-watch").exists()
+        {
+            failures += 1;
+            self.injected_watch_failures += 1;
+            if self.injected_watch_failures >= 2 {
+                let _ = std::fs::write(state.join("s2-process-watch-failed"), b"failed");
+            }
+        }
+        Ok((added, failures))
     }
 
     /// Waits for at most the requested duration, capped to one second per
@@ -250,11 +278,12 @@ impl GuardianReactor {
                     event.process_changed = true;
                     if item.flags & libc::EV_ERROR != 0 {
                         event.process_overflow = true;
+                        self.processes.clear();
                     }
-                    if item.fflags & libc::NOTE_EXIT != 0 {
-                        if let Ok(pid) = i64::try_from(item.ident) {
-                            self.processes.remove(&pid);
-                        }
+                    if item.fflags & libc::NOTE_EXIT != 0
+                        && let Ok(pid) = i64::try_from(item.ident)
+                    {
+                        self.processes.remove(&pid);
                     }
                     continue;
                 }
@@ -273,6 +302,8 @@ impl GuardianReactor {
         }
         // More events may remain; do not assume the bounded drain kept up.
         event.process_overflow = true;
+        // The bounded drain may have left exit notifications behind.
+        self.processes.clear();
         Ok(())
     }
 }

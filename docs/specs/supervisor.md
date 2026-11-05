@@ -120,6 +120,11 @@ is an unknown launch, never permission to launch again.
   The unknown-launch rule has no test (gap).
 - Owner: `crates/supervisor/src/guardian/`, `crates/run/src/launch.rs`
 
+While a provider is live, the guardian walks its scoped process tree at most
+once per 100 ms, coalescing process events. A full census backs up missed
+notifications every five seconds and follows an overflow or observation
+failure on the next walk. Cleanup and lease release always use full censuses.
+
 ### Quiescence before release
 
 A writer stays fenced until three things hold: the provider is reaped; two

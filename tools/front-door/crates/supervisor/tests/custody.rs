@@ -601,6 +601,36 @@ fn live_census_failure_warns_once(root: &Path) -> Result<()> {
     );
     Ok(())
 }
+fn process_watch_failure_records_one_fallback(root: &Path) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    std::fs::write(state.join("s2-fail-process-watch"), b"fail")?;
+    std::fs::write(state.join("s2-live-tree"), b"enabled")?;
+    let socket = root.join("watch-failure.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "watch-failure",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    wait_for_file(&state.join("s2-process-watch-failed"))?;
+    drop(held);
+    let exit = exited(&handle)?;
+    assert_eq!(
+        exit.warnings
+            .iter()
+            .filter(|warning| *warning
+                == "process events or scoped census unavailable; using full scan")
+            .count(),
+        1,
+        "{exit:?}"
+    );
+    Ok(())
+}
 fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
     std::fs::create_dir(root.join("PROVENANT_STATE_DIR"))?;
     std::fs::write(
@@ -2510,6 +2540,10 @@ const CASES: &[Case] = &[
     (
         "live_census_failure_warns_once",
         live_census_failure_warns_once,
+    ),
+    (
+        "process_watch_failure_records_one_fallback",
+        process_watch_failure_records_one_fallback,
     ),
     (
         "guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost",

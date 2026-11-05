@@ -1119,6 +1119,7 @@ impl crate::census::ProcessObserver for RecordedBootObserver {
         crate::process_os::census::NativeProcessObserver::for_boot("fixture-recorded-boot-v1")?
             .census(limit)
     }
+    #[cfg(target_os = "macos")]
     fn live_census(
         &self,
         root: &crate::census::ProcessIdentity,
