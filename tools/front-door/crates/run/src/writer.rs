@@ -584,6 +584,9 @@ fn prepare_writer_git(
     // verification under one project-wide lock; a later launch repairs either
     // key if a process stopped between the two writes.
     let clock = SystemClock::new();
+    let wait_seconds = provenant_config::LaneBuildSettings::read(state)
+        .map_err(error("read Git setup lock settings", None))?
+        .setup_lock_wait_seconds();
     let setup_dir = writer.worktree.repo().common_dir();
     let setup_name = OsStr::new("provenant-lane-setup.lock");
     match setup_dir.create_new(setup_name) {
@@ -606,12 +609,17 @@ fn prepare_writer_git(
         .lock(
             setup_name,
             LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 120)
+            WaitBudget::cli(clock.mono_now(), wait_seconds)
                 .map_err(error("set writer setup lock budget", None))?,
             &cancel,
             &clock,
         )
-        .map_err(|failure| anchored_error(failure, writer.worktree.repo().common_git_dir()))?;
+        .map_err(|failure| match failure {
+            provenant_os::fs::FsError::LockTimeout { .. } => RunError::SetupLockTimeout {
+                seconds: wait_seconds,
+            },
+            failure => anchored_error(failure, writer.worktree.repo().common_git_dir()),
+        })?;
     let old_repo = writer.worktree.repo();
     let project = old_repo
         .common_git_dir()
@@ -1217,6 +1225,29 @@ mod cargo_setup_tests {
                 .map_err(|_| "second preparation panicked".to_owned())??;
             Ok::<(), String>(())
         })?;
+        // A busy repository lock honours the configured bound and identifies
+        // the setting that controls it, without changing the lock's inode.
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version = 1\n[domains.fabric.lanes]\nsetup_lock_wait_seconds = 1\n",
+        )?;
+        let common = provenant_os::fs::Directory::open_anchor(&git_dir)?;
+        let held = common.try_lock_existing(
+            OsStr::new("provenant-lane-setup.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let refused = match prepare_writer_git(&mut writer, &state, &root, None) {
+            Err(error) => error,
+            Ok(_) => panic!("held Git setup lock must block preparation"),
+        };
+        assert!(matches!(refused, RunError::SetupLockTimeout { seconds: 1 }));
+        assert!(
+            refused
+                .to_string()
+                .contains("domains.fabric.lanes.setup_lock_wait_seconds")
+        );
+        drop(held);
+        std::fs::remove_file(state.join("config.toml"))?;
         let repo = utility.open_repo(&executor, &project, budget()?, &cancel)?;
         provenant_confinement::verify_worktree(&repo, &lane)?
             .repo()

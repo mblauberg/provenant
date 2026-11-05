@@ -361,6 +361,10 @@ pub enum RunError {
     WorktreeUnregistered(std::path::PathBuf),
     #[error("writer Git ref lock {} already exists; check for a running Git process, then remove the stale lock before retrying", .0.display())]
     WriterRefLocked(std::path::PathBuf),
+    #[error(
+        "Git setup lock provenant-lane-setup.lock timed out after {seconds}s; increase domains.fabric.lanes.setup_lock_wait_seconds"
+    )]
+    SetupLockTimeout { seconds: u64 },
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
     #[error("invalid run record: attempt reservation retained")]

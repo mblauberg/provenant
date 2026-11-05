@@ -133,6 +133,10 @@ After an unlaunched writer is rejected, reconciliation removes its retained
 Git pin. Status and wait queue recovery. To retry directly, run
 `provenant reconcile --id <run>` after resolving any reported cause.
 
+Writers wait up to 120 seconds for the repository Git setup lock. Set
+`domains.fabric.lanes.setup_lock_wait_seconds` to a value from 1 to 14400 to
+change this bound; the lock continues to serialise setup for the repository.
+
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be
