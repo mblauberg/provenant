@@ -64,6 +64,16 @@ overrides win over configuration. Each sealed task and attempt records the
 profile name, effective knob values and exact dispatch overrides, and
 continuations keep that stamp.
 
+## Graph launch retries
+
+`lanes.launch_retry_limit` sets the number of retries after a transient launch
+failure (default 3, range 0–20). `lanes.launch_retry_first_seconds` sets the
+first delay (default 5, range 1–3600), and `lanes.launch_retry_max_seconds`
+sets the cap (default 600, range 1–86400). Delays double up to the greater of
+the configured cap and first delay. The attempt records its effective policy;
+the admission deadline can end the wait sooner. `config show` and `config
+schema` identify the source layer.
+
 ## Unreadable process census exceptions
 
 The `confinement.census_ignore_unreadable` exception list is host-owned and

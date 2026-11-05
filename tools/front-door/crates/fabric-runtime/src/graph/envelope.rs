@@ -368,6 +368,7 @@ fn node_bound(
         }),
         attempts: Vec::new(),
         launch_retry: None,
+        last_launch_retry: None,
     };
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
@@ -381,7 +382,7 @@ fn node_bound(
     }
     // The node's own bounded launch retry wait, kept while it is running.
     if !boundary && node.composite.is_none() && node.decide.is_none() && node.land.is_none() {
-        bytes += MAX_ADVANCE_ERROR_BYTES + 128; // launch retry reason and deadline
+        bytes += MAX_ADVANCE_ERROR_BYTES + 320; // retry reason, timing and bounded policy
     }
     if expands {
         bytes += MAX_ADVANCE_ERROR_BYTES; // expansion pause

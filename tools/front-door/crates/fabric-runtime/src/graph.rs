@@ -137,11 +137,6 @@ const HOST_ID_BYTES: usize = 256;
 const MAX_UNKNOWN_USAGE: usize = 64;
 const MAX_USAGE_EVENTS: usize = 128;
 
-/// Seconds before the first launch retry; each further failure doubles it.
-const LAUNCH_RETRY_FIRST_SECONDS: u64 = 5;
-/// The longest launch retry wait.
-const LAUNCH_RETRY_MAX_SECONDS: u64 = 600;
-
 /// Entries a prompt lists before referring to the complete input index.
 pub const UPSTREAM_INPUT_LIST_LIMIT: usize = 64;
 
@@ -187,6 +182,11 @@ pub trait AttemptOwner {
     /// Infrastructure successors already published in this run lineage.
     fn retry_successors(&mut self, _attempt_ref: &str) -> Result<u64, Self::Error> {
         Ok(0)
+    }
+
+    /// Effective launch retry budget and timing, sealed before launch.
+    fn launch_retry_policy(&self) -> LaunchRetryPolicy {
+        LaunchRetryPolicy::default()
     }
 
     /// Maximum time to admit a launch, measured from its first submission.
@@ -641,6 +641,11 @@ fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
     is_transient(cause)
 }
 
+fn bounded_launch_retry_policy(mut policy: LaunchRetryPolicy) -> LaunchRetryPolicy {
+    policy.limit_source = bounded(&policy.limit_source, 32);
+    policy
+}
+
 fn launch_diagnostic(error: &(dyn Error + 'static)) -> provenant_records::diagnostic::Diagnostic {
     error
         .downcast_ref::<crate::coordination::facade::FacadeError>()
@@ -658,6 +663,7 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     error: &R::Error,
     clock: Option<provenant_core::WallTime>,
     admission_seconds: u64,
+    policy: LaunchRetryPolicy,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
     let retrying = launch_retry_kind(error);
@@ -671,6 +677,7 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
             .launch_retry
             .get_or_insert_with(|| LaunchRetry {
                 extra: Default::default(),
+                policy: bounded_launch_retry_policy(policy),
                 failures: 0,
                 deadline: None,
                 wake_at: None,
@@ -692,11 +699,18 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                 deadline
             }
         };
-        if now < deadline {
+        let projected = launch_diagnostic(error);
+        retry.reason = Some(bounded(
+            projected.detail.as_deref().unwrap_or(&projected.code),
+            MAX_ADVANCE_ERROR_BYTES,
+        ));
+        if now < deadline && retry.failures <= retry.policy.limit {
             let delay = provenant_core::retry::Backoff::new(
-                std::time::Duration::from_secs(LAUNCH_RETRY_FIRST_SECONDS),
+                std::time::Duration::from_secs(retry.policy.first_seconds),
                 2,
-                std::time::Duration::from_secs(LAUNCH_RETRY_MAX_SECONDS),
+                std::time::Duration::from_secs(
+                    retry.policy.max_seconds.max(retry.policy.first_seconds),
+                ),
             )
             .delay(u64::from(retry.failures) - 1);
             retry.wake_at = Some(
@@ -705,11 +719,6 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                     .and_then(|duration| now.checked_add(duration).ok())
                     .map_or(deadline, |wake| wake.min(deadline)),
             );
-            let projected = launch_diagnostic(error);
-            retry.reason = Some(bounded(
-                projected.detail.as_deref().unwrap_or(&projected.code),
-                MAX_ADVANCE_ERROR_BYTES,
-            ));
             asks::refresh_wake(checkpoint);
             return journal.save(checkpoint).map_err(GraphError::Journal);
         }
@@ -762,7 +771,13 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     progress.state = NodeState::Blocked;
     // Keep the attempt row even when launch handoff is uncertain. A guardian
     // may already exist, and cancellation needs its identity and custody.
-    progress.launch_retry = None;
+    let prior_retry = progress.launch_retry.take();
+    if retrying {
+        progress.last_launch_retry = prior_retry.map(|mut retry| {
+            retry.wake_at = None;
+            retry
+        });
+    }
     asks::refresh_wake(checkpoint);
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
@@ -1020,6 +1035,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         advance_error: None,
                         advance_error_code: None,
                         launch_retry: None,
+                        last_launch_retry: None,
                         outputs: None,
                         attempts: Vec::new(),
                     })
@@ -1695,7 +1711,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 .unwrap_or("retry the graph advance")
                         ));
                         progress.state = NodeState::Blocked;
-                        progress.launch_retry = None;
+                        progress.last_launch_retry =
+                            progress.launch_retry.take().map(|mut retry| {
+                                retry.wake_at = None;
+                                retry
+                            });
                         asks::refresh_wake(&mut checkpoint);
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
@@ -1974,6 +1994,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         });
                         checkpoint.nodes[node_index].launch_retry = Some(LaunchRetry {
                             extra: Default::default(),
+                            policy: bounded_launch_retry_policy(owner.launch_retry_policy()),
                             failures: 0,
                             deadline,
                             wake_at: None,
@@ -2237,6 +2258,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             &error,
                             owner.wall_now(),
                             owner.admission_timeout_seconds().unwrap_or(3600),
+                            owner.launch_retry_policy(),
                             journal,
                         )?;
                         break;

@@ -6924,6 +6924,7 @@ struct ErrorLauncher {
     now: Option<provenant_core::WallTime>,
     now_after_error: Option<provenant_core::WallTime>,
     admission_seconds: Option<u64>,
+    launch_policy: Option<LaunchRetryPolicy>,
     accepted: bool,
 }
 
@@ -6938,6 +6939,14 @@ impl AttemptOwner for ErrorLauncher {
     }
     fn admission_timeout_seconds(&self) -> Option<u64> {
         Some(self.admission_seconds.unwrap_or(3600))
+    }
+    fn launch_retry_policy(&self) -> LaunchRetryPolicy {
+        self.launch_policy
+            .clone()
+            .unwrap_or_else(|| LaunchRetryPolicy {
+                limit: 20,
+                ..Default::default()
+            })
     }
     fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
         Ok(self.accepted)
@@ -6979,6 +6988,105 @@ fn retry_of(checkpoint: &GraphCheckpoint) -> &LaunchRetry {
         .launch_retry
         .as_ref()
         .expect("a pending launch retry")
+}
+
+#[test]
+fn launch_retry_save_failure_keeps_the_prior_checkpoint() {
+    #[derive(Default)]
+    struct FailingJournal {
+        checkpoint: Option<GraphCheckpoint>,
+        before_failure: Option<Vec<u8>>,
+    }
+    impl GraphJournal for FailingJournal {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.checkpoint.clone())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if checkpoint.nodes.iter().any(|node| {
+                node.launch_retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.failures > 0)
+            }) {
+                self.before_failure = Some(serde_json::to_vec(&self.checkpoint).unwrap());
+                return Err(std::io::Error::other("injected retry save failure"));
+            }
+            self.checkpoint = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: busy_times(1),
+        ..Default::default()
+    };
+    let mut journal = FailingJournal::default();
+    let error = advance(&document, &mut owner, &mut journal).unwrap_err();
+    assert!(
+        matches!(error, GraphError::Journal(ref error) if error.to_string().contains("injected retry save"))
+    );
+    assert_eq!(
+        serde_json::to_vec(&journal.checkpoint).unwrap(),
+        journal.before_failure.unwrap()
+    );
+    let saved = journal.checkpoint.as_ref().unwrap();
+    assert_eq!(saved.nodes[0].state, NodeState::Running);
+    assert_eq!(retry_of(saved).failures, 0);
+    assert!(retry_of(saved).wake_at.is_none());
+    assert!(saved.nodes[0].advance_error_code.is_none());
+}
+
+#[test]
+fn launch_retry_policy_limits_failures_and_persists_the_source() {
+    for limit in [0, 1] {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: busy_times(2),
+            launch_policy: Some(LaunchRetryPolicy {
+                limit,
+                limit_source: "override".into(),
+                first_seconds: 5,
+                max_seconds: 2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let first = advance(&document, &mut owner, &mut journal).unwrap();
+        if limit == 1 {
+            let retry = retry_of(&first.checkpoint);
+            assert_eq!(retry.policy.limit_source, "override");
+            assert_eq!(
+                retry.wake_at,
+                Some(at(5)),
+                "cap cannot undercut first delay"
+            );
+            // A configuration change cannot widen the in-flight retry budget.
+            owner.launch_policy = Some(LaunchRetryPolicy {
+                limit: 20,
+                ..Default::default()
+            });
+            owner.now = Some(at(5));
+            advance(&document, &mut owner, &mut journal).unwrap();
+        }
+        let node = &journal.0.as_ref().unwrap().nodes[0];
+        assert_eq!(node.state, NodeState::Blocked);
+        assert_eq!(
+            node.advance_error_code.as_deref(),
+            Some("launch_retry_exhausted")
+        );
+        let last = node
+            .last_launch_retry
+            .as_ref()
+            .expect("exhausted retry evidence");
+        assert_eq!(last.policy.limit, limit);
+        assert_eq!(last.policy.limit_source, "override");
+        assert_eq!(last.failures, limit + 1);
+        assert!(last.wake_at.is_none());
+        assert_eq!(owner.calls.len(), usize::from(limit) + 1);
+    }
 }
 
 #[test]

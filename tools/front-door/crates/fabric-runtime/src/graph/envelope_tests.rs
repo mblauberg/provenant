@@ -264,12 +264,14 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 skip_reason: Some("graph cancelled".into()),
                 advance_error: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
                 advance_error_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
-                launch_retry: (!boundary
+                launch_retry: None,
+                last_launch_retry: (!boundary
                     && node.composite.is_none()
                     && node.decide.is_none()
                     && node.land.is_none())
                 .then(|| LaunchRetry {
                     extra: Default::default(),
+                    policy: LaunchRetryPolicy::default(),
                     failures: u8::MAX,
                     deadline: Some(envelope::latest()),
                     wake_at: Some(envelope::latest()),

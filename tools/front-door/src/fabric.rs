@@ -4427,6 +4427,51 @@ impl BoundGraphOwner<'_> {
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
+        use provenant_config::KnobSource;
+        let mut policy = provenant_fabric_runtime::graph::LaunchRetryPolicy::default();
+        let config = match provenant_config::read_with_domains(
+            &self.factory.context.roots,
+            &provenant_cli::domains::SECTIONS,
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: graph launch retry settings unavailable: {error}; using defaults"
+                );
+                return policy;
+            }
+        };
+        if let Some(knob) = config.knobs.get("lanes.launch_retry_limit") {
+            if let Some(value) = knob.value.as_u64().and_then(|n| u8::try_from(n).ok()) {
+                policy.limit = value;
+            }
+            policy.limit_source = match knob.source {
+                KnobSource::Default => "default",
+                KnobSource::Profile => "profile",
+                KnobSource::Override => "override",
+            }
+            .into();
+        }
+        if let Some(value) = config
+            .knobs
+            .get("lanes.launch_retry_first_seconds")
+            .and_then(|knob| knob.value.as_u64())
+        {
+            policy.first_seconds = value;
+        }
+        if let Some(value) = config
+            .knobs
+            .get("lanes.launch_retry_max_seconds")
+            .and_then(|knob| knob.value.as_u64())
+        {
+            policy.max_seconds = value;
+        }
+        policy
+    }
+
     fn admission_timeout_seconds(&self) -> Option<u64> {
         let configured = provenant_confinement::run_config::RunConfig::read(
             self.factory.context.roots.state.as_path(),

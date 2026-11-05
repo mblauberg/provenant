@@ -353,11 +353,13 @@ prefer different families. Family separation is best effort: every lens runs
 when a suitable route exists, and a shared family is recorded as a substitution.
 
 Graph launch errors use the core transient classifier. Unknown writer custody
-is retryable; an active writer remains a refusal. A launch retry requires a
-wall clock to record its wake: if that clock or the computed deadline is
-unavailable, advancement returns a refusal and leaves the prior checkpoint.
+is retryable; an active writer remains a refusal. The launch retry limit and
+backoff are fixed with the attempt from the configured knobs. A launch retry
+requires a wall clock to record its wake: if that clock or the computed deadline
+is unavailable, advancement returns a refusal and leaves the prior checkpoint.
 - Test: `crates/fabric-runtime/src/graph/graph_tests.rs::launch_retry_without_a_wall_clock_keeps_the_prior_checkpoint`;
-  `::launch_retry_kinds_are_decided_from_the_typed_error_only`
+  `::launch_retry_kinds_are_decided_from_the_typed_error_only`;
+  `::launch_retry_policy_limits_failures_and_persists_the_source`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 

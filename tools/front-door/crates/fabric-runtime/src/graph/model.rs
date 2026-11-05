@@ -4,6 +4,29 @@ pub(super) fn is_false(value: &bool) -> bool {
     !value
 }
 
+/// Host retry policy sealed with the attempt before a launch can fail.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchRetryPolicy {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub limit: u8,
+    pub limit_source: String,
+    pub first_seconds: u64,
+    pub max_seconds: u64,
+}
+
+impl Default for LaunchRetryPolicy {
+    fn default() -> Self {
+        Self {
+            extra: Default::default(),
+            limit: 3,
+            limit_source: "default".into(),
+            first_seconds: 5,
+            max_seconds: 600,
+        }
+    }
+}
+
 /// Persisted retry wait on a node whose launch failed with a transient kind.
 /// The wait belongs to the node's current attempt: it is recorded under the
 /// attempt key, so a later retry observes or relaunches exactly that attempt,
@@ -12,6 +35,8 @@ pub(super) fn is_false(value: &bool) -> bool {
 pub struct LaunchRetry {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    /// Retry limit and timing fixed for this attempt.
+    pub policy: LaunchRetryPolicy,
     /// Failed launches so far, counting the initial launch.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub failures: u8,
@@ -777,6 +802,9 @@ pub struct NodeProgress {
     /// error. Cleared when the attempt is observed again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_retry: Option<LaunchRetry>,
+    /// Final retry budget and cause retained when launch retries are exhausted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_launch_retry: Option<LaunchRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
     /// One durable row per route actually tried, in route order.

@@ -379,6 +379,45 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."` |
 | `type` | `"bool"` |
 
+## `lanes.launch_retry_first_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `5` |
+| `effect` | `"Initial delay in seconds before a graph launch retry; subsequent delays double."` |
+| `max` | `3600` |
+| `min` | `1` |
+| `reader` | `"tools/front-door/src/fabric.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Shorter delays recover sooner but retry the host more often."` |
+| `type` | `"int"` |
+
+## `lanes.launch_retry_limit`
+
+| Field | Value |
+|---|---|
+| `default` | `3` |
+| `effect` | `"Number of transient graph launch retries before blocking the node."` |
+| `max` | `20` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/src/fabric.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"More retries tolerate longer transient failures but delay a visible block."` |
+| `type` | `"int"` |
+
+## `lanes.launch_retry_max_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `600` |
+| `effect` | `"Maximum graph launch retry delay, at least the first delay."` |
+| `max` | `86400` |
+| `min` | `1` |
+| `reader` | `"tools/front-door/src/fabric.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A longer cap reduces repeated load but slows recovery."` |
+| `type` | `"int"` |
+
 ## `lanes.max_concurrency`
 
 | Field | Value |
