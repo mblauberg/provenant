@@ -41,7 +41,7 @@ mod validation;
 mod wait_view;
 #[doc(hidden)]
 pub use plans::prompt as rendered_prompt;
-pub use validation::minimum_schema_version;
+pub use validation::{minimum_schema_version, minimum_schema_version_from_parts};
 #[cfg(test)]
 mod admission_tests;
 use budget::*;

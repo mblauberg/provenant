@@ -1268,8 +1268,19 @@ pub fn expand_with(
     }
     // The structural and schema checks operate on the typed graph, without
     // decoding a second copy of the fully assembled document.
+    let review_base = bases.into_iter().next();
+    let typed_nodes = nodes
+        .iter()
+        .map(decode_lowered_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    let schema_version = u64::from(
+        provenant_fabric_runtime::graph::minimum_schema_version_from_parts(
+            review_base.as_deref(),
+            &typed_nodes,
+        ),
+    );
     let mut typed = provenant_fabric_runtime::graph::GraphDocument {
-        review_base: bases.into_iter().next(),
+        review_base,
         context: Some(provenant_records::run::WorkContext {
             preset: Some(name.into()),
             pattern: Some(name.into()),
@@ -1280,12 +1291,9 @@ pub fn expand_with(
         integration_branch: None,
         delivery: None,
         decision_session: None,
-        schema_version: 1,
+        schema_version,
         graph_id: id,
-        nodes: nodes
-            .iter()
-            .map(decode_lowered_node)
-            .collect::<Result<_, _>>()?,
+        nodes: typed_nodes,
     };
     let parameters = flatten_parameters(
         name,
@@ -1326,9 +1334,6 @@ pub fn expand_with(
         }
     }
     typed.check_composites(&layers.graph_limits)?;
-    typed.schema_version = u64::from(provenant_fabric_runtime::graph::minimum_schema_version(
-        &typed,
-    ));
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
     let substitutions = layers.substitutions.take();
     let mut warnings = layers.warnings.take();

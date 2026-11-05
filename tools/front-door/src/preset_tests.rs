@@ -1164,6 +1164,13 @@ fn admission_preset_version_follows_document() {
     let review_doc: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(review.document.clone()).unwrap();
     assert_eq!(review_doc.schema_version, 2);
+    assert_eq!(
+        provenant_fabric_runtime::graph::minimum_schema_version_from_parts(
+            review_doc.review_base.as_deref(),
+            &review_doc.nodes,
+        ),
+        2
+    );
     review_doc
         .admit(&provenant_fabric_runtime::config::GraphConfig::default().limits)
         .unwrap();
@@ -1179,6 +1186,10 @@ fn admission_preset_version_follows_document() {
     assert_eq!(raw_v2.schema_version, 2);
     assert_eq!(
         provenant_fabric_runtime::graph::minimum_schema_version(&raw_v2),
+        1
+    );
+    assert_eq!(
+        provenant_fabric_runtime::graph::minimum_schema_version_from_parts(None, &raw_v2.nodes),
         1
     );
 }
