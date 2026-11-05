@@ -57,4 +57,4 @@ until an owner splits them.
 | `UNSUPPORTED_OWNER` | specific | The peer does not support inbox operations. |
 | `CONSOLE_APP_UNAVAILABLE` | specific | The console app cannot be opened. |
 | `RECONCILE_INCOMPLETE` | specific | Reconcile could not settle everything it found. |
-| `CLI_FAILED` | specific | A delegated Provenant command failed without a code of its own. |
+| `CLI_FAILED` | umbrella | A delegated Provenant command failed without a code of its own. |

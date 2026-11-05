@@ -122,7 +122,7 @@ pub const EDGE_ERROR_CODES: &[EdgeErrorCode] = &[
     ),
     code(
         "CLI_FAILED",
-        CodeKind::Specific,
+        CodeKind::Umbrella,
         "A delegated Provenant command failed without a code of its own.",
     ),
 ];
