@@ -401,8 +401,8 @@ impl FileJournal {
         for id in Self::graph_ids(root, project)? {
             match load_checkpoint(directory, &id) {
                 Ok(Some(stored)) if stored_pending(&stored) => write_pending_marker(markers, &id)?,
-                Err(error) if error.is_unreadable() => write_pending_marker(markers, &id)?,
-                Err(error) => return Err(error),
+                // Leave load failures for the individual graph tick to report.
+                Err(_) => write_pending_marker(markers, &id)?,
                 _ => {}
             }
         }

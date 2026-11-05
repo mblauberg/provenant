@@ -485,6 +485,49 @@ fn checkpoint_collection_removes_matching_scratch_documents() {
 }
 
 #[test]
+fn rebuild_keeps_healthy_graph_pending_beside_oversized_checkpoint() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    fixture.checkpoint.nodes[0].state = NodeState::Running;
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    let directory = base.join("fabric/graphs").join(project.to_string());
+    std::fs::remove_dir_all(directory.join("pending")).unwrap();
+    std::fs::File::create(directory.join("graph-bad.json"))
+        .unwrap()
+        .set_len(16_777_217)
+        .unwrap();
+
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).unwrap(),
+        ["bad", "g-test"]
+    );
+    assert!(directory.join("pending/complete").is_file());
+    let error = FileJournal::read_checkpoint_for_tick(&root, project, "bad").unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<JournalError>(),
+        Some(JournalError::TooLarge)
+    ));
+    assert!(
+        FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn pending_markers_follow_saves_and_rebuild_after_loss() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
