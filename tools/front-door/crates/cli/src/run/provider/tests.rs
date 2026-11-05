@@ -1373,6 +1373,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         title: None,
         base: None,
         head: None,
+        source_head: None,
         base_ref: None,
         task_id: TaskId::from_bytes([3; 16]),
         profile: Default::default(),
