@@ -154,9 +154,7 @@ fn lanes_and_status_share_one_list_type() {
 
 fn chunk() -> OutputChunk {
     OutputChunk {
-        attempt_id: "2".repeat(32),
-        state: "terminal".into(),
-        reason: None,
+        lane: row(),
         part: "result".into(),
         offset: 0,
         next_offset: 5,
@@ -170,8 +168,6 @@ fn chunk() -> OutputChunk {
         tail_clamped: None,
         changed_files: None,
         changed_files_total: None,
-        provider_error: None,
-        result_path: None,
         selected: None,
     }
 }
@@ -179,26 +175,23 @@ fn chunk() -> OutputChunk {
 #[test]
 fn every_output_mode_matches_exactly_one_variant() {
     let schema = output::output_data_schema();
-    let id = "2".repeat(32);
     let modes = vec![
         OutputData::Trace {
-            attempt_id: id.clone(),
+            lane: row(),
             trace: json!({"x": 1}),
             grants: json!({}),
         },
         OutputData::Path {
-            attempt_id: id.clone(),
+            lane: row(),
             part: "result".into(),
-            path: "/s/result.md".into(),
+            path: crate::AbsolutePathWire::from_path(std::path::Path::new("/s/result.md")).unwrap(),
         },
         OutputData::Events {
-            attempt_id: id.clone(),
+            lane: row(),
             events: vec![json!({"revision": 1})],
         },
         OutputData::Receipt(Box::new(ReviewerReceipt {
-            run_id: id.clone(),
-            task_id: id.clone(),
-            attempt_id: id.clone(),
+            lane: row(),
             adapter: json!("codex"),
             model: json!("m"),
             effort: Value::Null,
@@ -225,8 +218,9 @@ fn chunk_optional_members_and_encodings() {
     full.tail_clamped = Some(true);
     full.changed_files = Some(json!(["a.rs"]));
     full.changed_files_total = Some(json!(1));
-    full.provider_error = Some(None);
-    full.result_path = Some(Some("/s/result.md".into()));
+    full.lane.provider_error = Some("failed".into());
+    full.lane.result_path =
+        json!(crate::AbsolutePathWire::from_path(std::path::Path::new("/s/result.md")).unwrap());
     full.selected = Some(json!({"attempt": "x"}));
     accepted(&schema, &OutputData::Chunk(Box::new(full)));
     let plain = serde_json::to_value(chunk()).unwrap();
