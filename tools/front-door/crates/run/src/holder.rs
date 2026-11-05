@@ -1221,9 +1221,9 @@ impl RunStore {
             .ok_or(RunError::Validation("terminal task missing from request"))?;
         // A stop at the runtime deadline is a typed timeout, whatever partial
         // output the provider left, and the lane stays resumable.
-        if decoded.outcome == Outcome::TimedOut
-            && exit.stop_reason == Some(StopReason::WallDeadline)
-        {
+        let typed_deadline = decoded.outcome == Outcome::TimedOut
+            && exit.stop_reason == Some(StopReason::WallDeadline);
+        if typed_deadline {
             let limit = format!(
                 "runtime deadline exceeded: provider stopped after {}s",
                 task.provider_timeout_seconds
@@ -1553,10 +1553,6 @@ impl RunStore {
             decoded.outcome = Outcome::Cancelled;
             // A typed runtime deadline stays the reason when cancellation also
             // applies, and a legacy scope-only record adds no invented cause.
-            let typed_deadline = decoded
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.starts_with("runtime deadline exceeded"));
             if let Some(reason) = cancellation_reason(cancellation.as_deref())
                 && !typed_deadline
                 && !crate::store::import_cancelled(
