@@ -3,6 +3,15 @@ use super::*;
 #[cfg(test)]
 thread_local! { pub(super) static CHECKPOINT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+#[cfg(feature = "fixture")]
+thread_local! { static READ_GRAPH_IDS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+/// Take the graph IDs read by this thread since the last call.
+#[cfg(feature = "fixture")]
+pub fn take_checkpoint_read_ids() -> Vec<String> {
+    READ_GRAPH_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CrashPoint {
@@ -338,6 +347,7 @@ impl FileJournal {
             if metadata.modified_ns >= before_ns {
                 continue;
             }
+            collect_scratch_documents(&stored.execution)?;
             journal.directory.unlink(&name)?;
             for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
                 match journal.directory.unlink(&sidecar) {
@@ -697,6 +707,69 @@ fn stored_pending(stored: &StoredCheckpoint) -> bool {
             .any(|ask| !ask.closed && (ask.resolved || checkpoint.cancelled))
 }
 
+/// Remove scratch documents equal to this graph's retained document. The
+/// execution directory may already have been removed.
+fn collect_scratch_documents(execution: &GraphExecution) -> Result<(), JournalError> {
+    let directory = match Directory::open_anchor(&execution.directory) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut directory = directory;
+    for component in [".provenant", "scratch", "graphs"] {
+        directory = match directory.open_verified_directory(OsStr::new(component)) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+    }
+    let mut metadata = directory.metadata()?;
+    if metadata.uid == provenant_os::fs::effective_uid() && metadata.mode & 0o077 != 0 {
+        directory.make_private()?;
+        metadata = directory.metadata()?;
+    }
+    if metadata.uid != provenant_os::fs::effective_uid() || metadata.mode & 0o077 != 0 {
+        return Ok(());
+    }
+    let mut removed = false;
+    for entry in directory.entries()? {
+        let name = entry?;
+        let Ok(metadata) = directory.metadata_at(&name, false) else {
+            continue;
+        };
+        if metadata.uid != provenant_os::fs::effective_uid() || metadata.links != 1 {
+            continue;
+        }
+        let Ok(bytes) = directory.read_stable(&name, 8_388_608) else {
+            continue;
+        };
+        if serde_json::from_slice::<GraphDocument>(&bytes)
+            .ok()
+            .as_ref()
+            != Some(&execution.document)
+        {
+            continue;
+        }
+        if !directory
+            .metadata_at(&name, false)
+            .is_ok_and(|current| metadata.unchanged(&current))
+        {
+            continue;
+        }
+        match directory.unlink(&name) {
+            Ok(()) => removed = true,
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if removed {
+        directory
+            .sync()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+    }
+    Ok(())
+}
+
 fn pending_marker_name(graph_id: &str) -> OsString {
     format!("{graph_id}.pending").into()
 }
@@ -751,6 +824,8 @@ pub(super) fn read_checkpoint_bytes(
 ) -> Result<Option<Vec<u8>>, JournalError> {
     #[cfg(test)]
     CHECKPOINT_READS.with(|reads| reads.set(reads.get() + 1));
+    #[cfg(feature = "fixture")]
+    READ_GRAPH_IDS.with(|ids| ids.borrow_mut().push(graph_id.to_owned()));
     let file = match directory.open_read(OsStr::new(&format!("graph-{graph_id}.json"))) {
         Ok(file) => file,
         Err(error) if error.is_not_found() => return Ok(None),

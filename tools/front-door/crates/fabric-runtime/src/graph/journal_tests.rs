@@ -83,6 +83,150 @@ fn interrupted_marker_and_sentinel_publications_converge() {
 }
 
 #[test]
+fn manual_resume_publishes_marker_before_reopened_checkpoint() {
+    use super::journal::{CRASH_POINT, CrashPoint};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"resume-test","nodes":[{"id":"one","prompt":"work",
+            "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+    }))
+    .unwrap();
+    let mut journal =
+        FileJournal::open(&root, project, "resume-test", budget, &cancel, &clock).unwrap();
+    journal
+        .bind(GraphExecution {
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: base.clone(),
+            document: document.clone(),
+        })
+        .unwrap();
+    let mut owner = Owner;
+    let mut run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    run.checkpoint.cancelled = true;
+    run.checkpoint.nodes[0].state = NodeState::Pending;
+    run.checkpoint.nodes[0].attempts.clear();
+    journal.save(&run.checkpoint).unwrap();
+    let stopped = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(stopped.checkpoint.nodes[0].state, NodeState::Skipped);
+    assert!(
+        FileJournal::pending_graph_ids(&root, project)
+            .unwrap()
+            .is_empty()
+    );
+    CRASH_POINT.with(|point| point.set(Some(CrashPoint::PendingMarker)));
+    let interrupted = catch_unwind(AssertUnwindSafe(|| {
+        resume(&document, &mut owner, &mut journal)
+    }));
+    assert!(interrupted.is_err(), "{interrupted:?}");
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).unwrap(),
+        ["resume-test"]
+    );
+    assert!(
+        FileJournal::read_checkpoint(&root, project, "resume-test")
+            .unwrap()
+            .unwrap()
+            .cancelled
+    );
+    let reopened = resume(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(reopened.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).unwrap(),
+        ["resume-test"]
+    );
+}
+
+#[test]
+fn answered_ask_publishes_marker_before_pending_checkpoint() {
+    use super::journal::{CRASH_POINT, CrashPoint};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
+    fixture.checkpoint.asks.push(
+        serde_json::from_value(serde_json::json!({
+            "ask_id":"open","kind":"pause","session":"chair","title":"question","body":"waiting",
+            "options":[],"resolved":false,"closed":false
+        }))
+        .unwrap(),
+    );
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    assert!(
+        FileJournal::pending_graph_ids(&root, project)
+            .unwrap()
+            .is_empty()
+    );
+    fixture.checkpoint.asks[0].resolved = true;
+    fixture.checkpoint.asks[0].answer = Some(
+        serde_json::from_value(serde_json::json!({
+            "source":"answered","actor":"chair","text":"continue"
+        }))
+        .unwrap(),
+    );
+    CRASH_POINT.with(|point| point.set(Some(CrashPoint::PendingMarker)));
+    assert!(catch_unwind(AssertUnwindSafe(|| journal.save(&fixture.checkpoint))).is_err());
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).unwrap(),
+        ["g-test"]
+    );
+    assert!(
+        !FileJournal::read_checkpoint(&root, project, "g-test")
+            .unwrap()
+            .unwrap()
+            .asks[0]
+            .resolved
+    );
+    journal.save(&fixture.checkpoint).unwrap();
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).unwrap(),
+        ["g-test"]
+    );
+    assert!(
+        FileJournal::pending_execution(&root, project, "g-test")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn pending_index_reads_only_pending_checkpoints_after_rebuild() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -218,6 +362,75 @@ fn checkpoint_collection_keeps_pending_and_recent_graphs() {
             .join("graph-g-test.lock")
             .exists()
     );
+}
+
+#[test]
+fn checkpoint_collection_removes_matching_scratch_documents() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    fixture.execution.directory = base.join("checkout");
+    fixture.checkpoint.nodes[0].state = NodeState::Running;
+    let scratch = fixture
+        .execution
+        .directory
+        .join(".provenant/scratch/graphs");
+    std::fs::create_dir_all(&scratch).unwrap();
+    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let bytes = serde_json::to_vec(&fixture.execution.document).unwrap();
+    let digest = CanonicalV1::file_digest(&bytes).to_string();
+    let generated = scratch.join(format!("preset-{}.json", &digest[7..]));
+    std::fs::write(&generated, &bytes).unwrap();
+    std::fs::set_permissions(&generated, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let operator = scratch.join("operator.json");
+    std::fs::write(&operator, &bytes).unwrap();
+    let revised = scratch.join("revised.json");
+    std::fs::write(&revised, b"operator updated this file").unwrap();
+    let mut other = fixture.execution.document.clone();
+    other.graph_id = "another".into();
+    let other_bytes = serde_json::to_vec(&other).unwrap();
+    let other_hash = CanonicalV1::file_digest(&other_bytes).to_string();
+    let other_path = scratch.join(format!("preset-{}.json", &other_hash[7..]));
+    std::fs::write(&other_path, other_bytes).unwrap();
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        0
+    );
+    assert!(generated.exists());
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, 0, &cancel, &clock).unwrap(),
+        0
+    );
+    assert!(generated.exists());
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        1
+    );
+    assert!(!generated.exists());
+    assert_eq!(
+        std::fs::metadata(&scratch).unwrap().permissions().mode() & 0o077,
+        0
+    );
+    assert!(!operator.exists());
+    assert!(revised.exists());
+    assert!(other_path.exists());
 }
 
 #[test]
