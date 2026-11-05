@@ -3408,6 +3408,15 @@ fn decode_graph_document(
     }
 }
 
+fn verify_compiled_graph_bytes(bytes: &[u8], expected: &[u8]) -> Result<(), FacadeError> {
+    if bytes != expected {
+        return Err(FacadeError::invalid(
+            "preset graph document does not match the compiled graph",
+        ));
+    }
+    Ok(())
+}
+
 fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> FacadeError {
     use provenant_fabric_runtime::graph::JournalError;
     match error {
@@ -6462,6 +6471,12 @@ impl Factory {
         ),
         FacadeError,
     > {
+        let (path, bytes) = self.read_graph_bytes(path)?;
+        let document = decode_graph_document(&bytes)?;
+        Ok((document, path, bytes))
+    }
+
+    fn read_graph_bytes(&self, path: &Path) -> Result<(PathBuf, Vec<u8>), FacadeError> {
         let path = provenant_os::fs::canonicalize(path)
             .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
         if !path.starts_with(&self.cwd) {
@@ -6485,8 +6500,7 @@ impl Factory {
                 }
                 _ => FacadeError::io("access graph journal"),
             })?;
-        let document = decode_graph_document(&bytes)?;
-        Ok((document, path, bytes))
+        Ok((path, bytes))
     }
 
     /// The one selector resolver for graph status, cancel and resume: a graph
@@ -6602,7 +6616,7 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
-        self.graph_with_scratch(input, budget, cancel, None)
+        self.graph_with_scratch(input, budget, cancel, None, None)
     }
 
     fn graph_with_scratch(
@@ -6611,6 +6625,7 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
         prepared_scratch: Option<&Path>,
+        compiled: Option<(&provenant_fabric_runtime::graph::GraphDocument, &[u8])>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         use provenant_fabric_runtime::coordination::input::ValidateInput;
         use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
@@ -6661,7 +6676,13 @@ impl Factory {
                     } else {
                         self.cwd.join(document)
                     };
-                    let (document, source, bytes) = self.read_graph_document_bytes(&path)?;
+                    let (document, source, bytes) = if let Some((document, expected)) = compiled {
+                        let (source, bytes) = self.read_graph_bytes(&path)?;
+                        verify_compiled_graph_bytes(&bytes, expected)?;
+                        (document.clone(), source, bytes)
+                    } else {
+                        self.read_graph_document_bytes(&path)?
+                    };
                     if let Ok(graphs) = provenant_os::fs::canonicalize(&scratch.join("graphs"))
                         && source.parent() == Some(graphs.as_path())
                         && let Some(name) = source.file_name()

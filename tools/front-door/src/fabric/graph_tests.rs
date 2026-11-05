@@ -1719,6 +1719,18 @@ mod result_tests {
     }
 
     #[test]
+    fn compiled_preset_requires_matching_retained_bytes() {
+        let original = br#"{"nodes":[]}"#;
+        assert!(super::verify_compiled_graph_bytes(original, original).is_ok());
+        let error = super::verify_compiled_graph_bytes(br#"{"nodes":[1]}"#, original)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            super::FacadeError::invalid("preset graph document does not match the compiled graph")
+        );
+    }
+
+    #[test]
     fn oversized_graph_checkpoint_is_refused_with_size_reason() {
         match super::graph_journal_error(provenant_fabric_runtime::graph::JournalError::TooLarge) {
             super::FacadeError::DispatchRefused { reason, .. } => {

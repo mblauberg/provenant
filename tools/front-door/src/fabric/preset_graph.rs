@@ -141,6 +141,7 @@ fn private_graph_directory_refusal(
 /// Preset waiting advances the retained immutable graph, including CI gates.
 pub(crate) fn run_preset_graph(
     document: serde_json::Value,
+    document_model: Result<provenant_fabric_runtime::graph::GraphDocument, String>,
     wait_seconds: u64,
     warnings: &[String],
     globals: &provenant_cli::Globals,
@@ -155,8 +156,8 @@ pub(crate) fn run_preset_graph(
             return Err(CoordinationError::LaneMutation.into());
         }
         let cancel = CancelToken::new();
-        let document_model: provenant_fabric_runtime::graph::GraphDocument =
-            serde_json::from_value(document.clone())?;
+        let document_model = document_model?;
+        let document_bytes = serde_json::to_vec(&document)?;
         let graph_id = document_model.graph_id.clone();
         let waiting = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
         let mut prepared_scratch = PreparedScratch::default();
@@ -227,6 +228,7 @@ pub(crate) fn run_preset_graph(
                     budget,
                     &cancel,
                     Some(scratch),
+                    Some((&document_model, &document_bytes)),
                 )
             };
             // Collection may retire an old graph after publication but before

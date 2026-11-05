@@ -4454,12 +4454,11 @@ pub(super) fn writer_tier_mix(nodes: &[provenant_fabric_runtime::graph::GraphNod
 // was already bounded by the owner's 8 MiB document limit in expand().
 fn explain(
     expansion: Expansion,
+    document: Result<provenant_fabric_runtime::graph::GraphDocument, String>,
     brief_warnings: Vec<String>,
     globals: &provenant_cli::Globals,
 ) -> u8 {
     use std::io::Write;
-    let document: Result<provenant_fabric_runtime::graph::GraphDocument, String> =
-        serde_json::from_value(expansion.document.clone()).map_err(|error| error.to_string());
     let inspection = (|| -> Result<_, String> {
         let roots = crate::roots::resolve(
             globals,
@@ -5233,8 +5232,12 @@ pub(crate) fn run_with_review(
             }
         }
     }
+    // Both dispatch paths consume the same typed interpretation of the final
+    // bound graph. Keep the wire document for its explicit field presence.
+    let document =
+        serde_json::from_value(expansion.document.clone()).map_err(|error| error.to_string());
     if request.explain {
-        explain(expansion, brief_warnings, globals)
+        explain(expansion, document, brief_warnings, globals)
     } else {
         if !expansion.repo_files.is_empty() {
             use std::io::Write;
@@ -5246,6 +5249,7 @@ pub(crate) fn run_with_review(
         }
         crate::fabric::run_preset_graph(
             expansion.document,
+            document,
             request.wait.unwrap_or(240),
             &brief_warnings,
             globals,
