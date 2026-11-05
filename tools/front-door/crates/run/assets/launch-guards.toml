@@ -329,8 +329,18 @@ reason = "Malformed native-control labels are omitted from the applied result wi
 
 [[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "authority"
+reason = "A process policy must identify exact executables and the Fabric socket must name an exact endpoint before those permissions can be enforced."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "credentials"
+reason = "Discovery reads are limited to exact adapter marker names rather than arbitrary host paths."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
 boundary = "unclassified"
-reason = "Validates profile paths, process policy, fixture observations, endpoints and authentication grants; classify individual refusal branches."
+reason = "Remaining malformed profile paths and network endpoints require caller-specific classification or a tolerant fallback."
 
 [[guard]]
 site = "providers/src/launch.rs#admit"
