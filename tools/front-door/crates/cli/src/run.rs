@@ -545,6 +545,9 @@ impl Registry<'_> {
         else {
             return Ok(failed("route names no registered adapter"));
         };
+        let model_observation = provenant_records::AdapterSpec::get(adapter.id())
+            .map(|spec| spec.model_observation)
+            .unwrap_or(provenant_records::ModelObservation::Stream);
         let Ok(mut state) = adapter.stream(None) else {
             return Ok(failed("provider stream is unavailable"));
         };
@@ -570,25 +573,27 @@ impl Registry<'_> {
         {
             events.push(event);
         }
-        let rollout = (adapter.id() == "codex").then(|| {
-            outcome
-                .session()
-                .ok_or(provenant_providers::ProviderError::UnknownIdentity)
-                .and_then(|thread| provider::observe_codex_rollout(provider_state, thread))
-        });
+        let rollout =
+            (model_observation == provenant_records::ModelObservation::Rollout).then(|| {
+                outcome
+                    .session()
+                    .ok_or(provenant_providers::ProviderError::UnknownIdentity)
+                    .and_then(|thread| provider::observe_codex_rollout(provider_state, thread))
+            });
         // The typed reason survives into the terminal record for diagnosis.
         let mut rollout_error = rollout
             .as_ref()
             .and_then(|observed| observed.as_ref().err())
             .map(|error| format!("Codex rollout identity: {error}"));
         // OpenCode's stream names no model; its session record does.
-        let opencode_model = (adapter.id() == provenant_records::Harness::Opencode.spec().name)
+        let opencode_model = (model_observation
+            == provenant_records::ModelObservation::SessionDatabase)
             .then(|| {
                 let data = std::env::var_os("XDG_DATA_HOME")
                     .map(std::path::PathBuf::from)
                     .filter(|path| path.is_absolute())
                     .or_else(|| self.home.map(|home| home.join(".local/share")))
-                    .map(|data| data.join(provenant_records::Harness::Opencode.spec().name))
+                    .map(|data| data.join(adapter.id()))
                     .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
                 let session = outcome
                     .session()
@@ -604,10 +609,10 @@ impl Registry<'_> {
             None => None,
         };
         let rollout = rollout.and_then(Result::ok);
-        let observed_model = if adapter.id() == "codex" {
+        let observed_model = if model_observation == provenant_records::ModelObservation::Rollout {
             // Missing or invalid rollout evidence cannot fall back to another source.
             rollout.as_ref().map(|turn| turn.model.as_str())
-        } else if adapter.id() == provenant_records::Harness::Opencode.spec().name {
+        } else if model_observation == provenant_records::ModelObservation::SessionDatabase {
             opencode_model.as_deref()
         } else {
             outcome.model()

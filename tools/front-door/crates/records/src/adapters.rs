@@ -61,6 +61,14 @@ pub enum SetupRoot {
     XdgDataHome,
 }
 
+/// Evidence used to identify the model after a provider finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelObservation {
+    Stream,
+    Rollout,
+    SessionDatabase,
+}
+
 /// Location of a provider's user skill tree relative to the host home or an
 /// absolute environment override. The fallback is relative to the home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +140,8 @@ pub struct AdapterSpec {
     pub result_event_usage: bool,
     /// Use the requested route as the observed route when a command exits.
     pub exit_route: bool,
+    /// Source of model identity after a run.
+    pub model_observation: ModelObservation,
     pub user_sessions: bool,
     /// Copy only session files when retaining private state.
     pub copy_sessions_only: bool,
@@ -333,6 +343,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         deduplicate_result: false,
         result_event_usage: true,
         exit_route: false,
+        model_observation: ModelObservation::Stream,
         user_sessions: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
@@ -405,6 +416,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         deduplicate_result: false,
         result_event_usage: false,
         exit_route: false,
+        model_observation: ModelObservation::Rollout,
         user_sessions: false,
         copy_sessions_only: true,
         quota_probe: QuotaProbeKind::Command,
@@ -476,6 +488,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         deduplicate_result: false,
         result_event_usage: false,
         exit_route: false,
+        model_observation: ModelObservation::Stream,
         user_sessions: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
@@ -551,6 +564,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         deduplicate_result: true,
         result_event_usage: false,
         exit_route: false,
+        model_observation: ModelObservation::Stream,
         user_sessions: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::Command,
@@ -624,6 +638,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         deduplicate_result: false,
         result_event_usage: false,
         exit_route: false,
+        model_observation: ModelObservation::SessionDatabase,
         user_sessions: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::LocalLedger,
@@ -688,6 +703,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         deduplicate_result: false,
         result_event_usage: false,
         exit_route: true,
+        model_observation: ModelObservation::Stream,
         user_sessions: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
@@ -754,6 +770,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         deduplicate_result: false,
         result_event_usage: false,
         exit_route: false,
+        model_observation: ModelObservation::Stream,
         user_sessions: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,

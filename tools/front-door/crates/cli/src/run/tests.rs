@@ -6011,6 +6011,7 @@ fn codex_rollout_error_reaches_the_decoded_reason() {
         .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
         .unwrap();
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+    assert_eq!(decoded.result, "OK");
     assert_eq!(
         decoded.session.as_deref(),
         Some("01234567-89ab-cdef-0123-456789abcdef")
@@ -6157,6 +6158,7 @@ fn opencode_without_a_session_record_observes_no_model() {
             Path::new("/nonexistent"),
         )
         .unwrap();
+    assert_eq!(decoded.result, "OK");
     assert!(decoded.observed_route.is_none());
     assert_eq!(
         decoded.reason.as_deref(),
