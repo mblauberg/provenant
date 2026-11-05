@@ -2498,6 +2498,35 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
         Err(error) => Some(error.to_string()),
     }
 }
+fn readiness_text(readiness: &RouteReadiness) -> String {
+    use provenant_records::RouteExclusionReason;
+    match readiness {
+        RouteReadiness::Ready {
+            expires_unix_seconds,
+            ..
+        } => format!("ready (observation expires at {expires_unix_seconds})"),
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::UnknownAvailability,
+            ..
+        } => "unknown (not probed; run `provenant quota tick` to refresh quota)".into(),
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::StaleAvailability,
+            ..
+        } => "unknown (observation expired; run `provenant quota tick` to refresh quota)".into(),
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::UnknownPartialHeadroom,
+            ..
+        } => "unknown (partial headroom is uncalibrated; run `provenant quota tick` to refresh quota)".into(),
+        RouteReadiness::Unavailable { reason, .. } => {
+            let label = serde_json::to_value(reason)
+                .ok()
+                .and_then(|value| value.as_str().map(|text| text.replace('_', " ")))
+                .unwrap_or_else(|| "unknown reason".into());
+            format!("unavailable ({label})")
+        }
+    }
+}
+
 /// The human report for a resolved route preview, naming each exclusion that
 /// removed a pool candidate and where it came from.
 pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
@@ -2516,11 +2545,11 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
         })
         .collect::<String>();
     let mut text = format!(
-        "{}/{} effort={} {:?}{}{}\n",
+        "{}/{} effort={} {}{}{}\n",
         route.adapter,
         route.model,
         route.effort.as_deref().unwrap_or("unspecified"),
-        route.readiness,
+        readiness_text(&route.readiness),
         route
             .pool_selection
             .as_ref()
@@ -2869,6 +2898,37 @@ mod route_tests {
         let roots = inputs.resolve(&Resolver)?;
         std::fs::create_dir_all(roots.state.as_path())?;
         Ok(roots)
+    }
+
+    #[test]
+    fn route_readiness_is_rendered_in_words() {
+        use provenant_records::RouteExclusionReason;
+        let ready = RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 120,
+        };
+        assert!(super::readiness_text(&ready).starts_with("ready "));
+        let unknown = super::readiness_text(&RouteReadiness::unknown());
+        assert!(
+            unknown.contains("unknown (not probed") && unknown.contains("provenant quota tick"),
+            "{unknown}"
+        );
+        let stale = super::readiness_text(&RouteReadiness::stale());
+        assert!(stale.contains("unknown (observation expired"), "{stale}");
+        let partial = RouteReadiness::Unavailable {
+            extra: Default::default(),
+            reason: RouteExclusionReason::UnknownPartialHeadroom,
+        };
+        assert!(super::readiness_text(&partial).starts_with("unknown (partial headroom"));
+        let refused = RouteReadiness::Unavailable {
+            extra: Default::default(),
+            reason: RouteExclusionReason::AuthRequired,
+        };
+        assert_eq!(
+            super::readiness_text(&refused),
+            "unavailable (auth required)"
+        );
     }
 
     #[test]
