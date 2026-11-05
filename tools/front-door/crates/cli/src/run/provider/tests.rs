@@ -54,6 +54,10 @@ fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
         ProviderError::UnknownIdentity,
         ProviderError::InvalidPath,
         ProviderError::IsolatedKeychainUnavailable("fixture".into()),
+        ProviderError::ProbeDirectory("fixture".into()),
+        ProviderError::CredentialReadFailed("fixture".into()),
+        ProviderError::PromptTooLarge,
+        ProviderError::Overflow,
         ProviderError::Malformed,
     ] {
         assert_eq!(
