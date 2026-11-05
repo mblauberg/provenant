@@ -210,6 +210,11 @@ impl RepoFacts {
             .then(|| snapshot.entries.clone())
     }
 
+    /// Discard an advisory inventory before a command-controlled Git mutation.
+    pub fn invalidate_inventory(&self, context: &WorktreeContext<'_>) {
+        let _ = self.take_inventory(context);
+    }
+
     pub(super) fn take_inventory(&self, context: &WorktreeContext<'_>) -> Option<Vec<GitWorktree>> {
         let snapshot = self
             .inventories

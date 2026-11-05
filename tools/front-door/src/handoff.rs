@@ -332,6 +332,7 @@ fn with_wip_custody(
             {
                 return Err(worktrees::WorktreeError::IdentityChanged.into());
             }
+            facts.invalidate_inventory(context);
             Ok(action())
         },
     )
@@ -1625,6 +1626,30 @@ mod tests {
         })
         .map_err(|error| error.message)?;
         assert!(called.get());
+        let current = String::from_utf8(provenant_os::fixture::run_git(
+            &tree.path,
+            &["rev-parse", "HEAD"],
+        )?)?;
+        let cached = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, cancel| {
+                let context = &worktrees::WorktreeContext {
+                    facts: &facts,
+                    ..*context
+                };
+                Ok(worktrees::list_cached(context, cancel)?)
+            },
+        )?;
+        let current_row = cached
+            .iter()
+            .find(|row| row.path == tree.path)
+            .ok_or("missing lane")?;
+        assert_eq!(current_row.head.to_string(), current.trim());
+        assert_ne!(current_row.head.to_string(), tree.head);
         Ok(())
     }
 

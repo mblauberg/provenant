@@ -1591,6 +1591,7 @@ pub(crate) fn remote_base(
         Ok(output.stdout.bytes)
     };
     if fetch {
+        context.facts.invalidate_inventory(context);
         git_output(&["fetch", "--all", "--no-tags", "--no-recurse-submodules"])?;
     }
     let oid = context
