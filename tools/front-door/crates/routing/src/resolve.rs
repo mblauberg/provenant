@@ -1202,7 +1202,9 @@ fn readiness_reason(
                 RouteReadiness::Unavailable {
                     reason:
                         RouteExclusionReason::UnknownAvailability
-                        | RouteExclusionReason::StaleAvailability,
+                        | RouteExclusionReason::StaleAvailability
+                        | RouteExclusionReason::AuthRequired
+                        | RouteExclusionReason::LoginExpired,
                     ..
                 } => None,
                 RouteReadiness::Unavailable { reason, .. } => Some(reason),

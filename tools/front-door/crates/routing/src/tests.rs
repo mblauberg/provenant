@@ -5345,6 +5345,46 @@ fn readiness_access() -> [AccessContext<'static>; 2] {
     })
 }
 
+#[test]
+fn expired_login_observation_warns_and_remains_selectable() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_quota::{
+        ACCOUNT_ROUTE, LOCAL_HOST, LoginObservation, ReadinessFile, ReadinessScope,
+    };
+    let file = ReadinessFile {
+        login: Some(LoginObservation {
+            scope: ReadinessScope {
+                host: LOCAL_HOST.into(),
+                adapter: "codex".into(),
+                account_key: "opaque-account".into(),
+                route: ACCOUNT_ROUTE.into(),
+            },
+            observed_unix_seconds: 80,
+            valid_until_unix_seconds: 100,
+            expires_unix_seconds: Some(85),
+        }),
+        ..Default::default()
+    };
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [availability()];
+    let access = readiness_access();
+    for cached in [false, true] {
+        let lookup = |scope: &ReadinessScope, time| file.get(scope, if cached { 90 } else { time });
+        let context = RoutingContext {
+            availability: &records,
+            access: &access,
+            readiness: Some(&lookup),
+            ..context(&catalogue, &config, now()?)
+        };
+        let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
+        assert!(
+            matches!(selected.readiness, RouteReadiness::Ready { extra, .. } if extra.contains_key("availability_warning"))
+        );
+    }
+    Ok(())
+}
+
 fn agy_account(key: &str) -> AvailabilityRecord {
     AvailabilityRecord {
         adapter: "agy".into(),
