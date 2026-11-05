@@ -85,9 +85,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     std::fs::write(&cargo_credentials, b"token")?;
     let project_locks = root.join("agent-run");
     std::fs::create_dir(&project_locks)?;
-    let shared_locks = root.join("shared-locks");
+    let shared_locks = fixture.repo.root_path().join(".agent-run/locks");
     let configured_tools = root.join("configured-tools");
-    std::fs::create_dir(&shared_locks)?;
+    std::fs::create_dir_all(&shared_locks)?;
     std::fs::create_dir(&configured_tools)?;
     let private = linked.repo().private_git_dir().to_owned();
     let common = linked.repo().common_git_dir().to_owned();
