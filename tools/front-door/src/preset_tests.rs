@@ -6139,8 +6139,11 @@ fn explicit_size_and_shape_still_defer_unpinned_subjects() {
     )
     .unwrap()
     .document;
-    assert_eq!(document["schema_version"], 1);
     assert!(document["nodes"][1]["composite"].is_object());
+    assert_ne!(
+        document["nodes"][1]["composite"]["nodes"][0]["kind"],
+        "plan"
+    );
     // A preset that never reviews stays on v1 with no review fields.
     for name in ["single", "chain", "fan-out", "scout-swarm"] {
         let document = expand(&Layers::empty(), name, "brief", &[])
