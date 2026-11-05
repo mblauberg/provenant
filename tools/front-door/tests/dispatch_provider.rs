@@ -783,8 +783,6 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
     }
     let git = provenant_os::git::git_executable().ok_or("git")?;
     for args in [
-        vec!["config", "user.name", "Fixture"],
-        vec!["config", "user.email", "fixture@example.invalid"],
         vec!["commit", "--allow-empty", "-qm", "base"],
         vec!["branch", "-M", "main"],
     ] {
@@ -1204,20 +1202,7 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
     let commit = rig
-        .execute(
-            &git,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "Initial",
-            ],
-            None,
-        )
+        .execute(&git, &["commit", "--allow-empty", "-qm", "Initial"], None)
         .map_err(|e| format!("git: {e}"))?;
     assert_eq!(code(&commit), 0);
     let brief = rig.root.join("council-brief.txt");
@@ -1309,20 +1294,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
-    let commit = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "Initial",
-        ],
-        None,
-    )?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "Initial"], None)?;
     assert_eq!(code(&commit), 0);
     // Review derives its base from origin's default branch.
     let project = rig.project.to_str().ok_or("project path")?;
@@ -1428,19 +1400,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     fs::write(rig.project.join(".github/workflows/check.yml"), "fixture")?;
     let added = rig.execute(&git, &["add", ".github/workflows/check.yml"], None)?;
     assert_eq!(code(&added), 0);
-    let saved = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "-qm",
-            "workflow",
-        ],
-        None,
-    )?;
+    let saved = rig.execute(&git, &["commit", "-qm", "workflow"], None)?;
     assert_eq!(code(&saved), 0);
     fs::create_dir_all(rig.project.join("docs"))?;
     let moved = rig.execute(
@@ -1449,19 +1409,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         None,
     )?;
     assert_eq!(code(&moved), 0);
-    let saved = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "-qm",
-            "move workflow",
-        ],
-        None,
-    )?;
+    let saved = rig.execute(&git, &["commit", "-qm", "move workflow"], None)?;
     assert_eq!(code(&saved), 0);
     fs::write(&brief, "check renamed path")?;
     let renamed = rig.command(&[
@@ -2383,20 +2331,7 @@ fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
     )?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     assert_eq!(
-        code(&rig.execute(
-            &git,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "Initial",
-            ],
-            None,
-        )?),
+        code(&rig.execute(&git, &["commit", "--allow-empty", "-qm", "Initial",], None,)?),
         0
     );
     let created = rig.command(&[
@@ -3023,20 +2958,7 @@ fn review_council_overcap_runs_through_fake_providers() -> Result {
     )?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     assert_eq!(
-        code(&rig.execute(
-            &git,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "Initial"
-            ],
-            None
-        )?),
+        code(&rig.execute(&git, &["commit", "--allow-empty", "-qm", "Initial"], None)?),
         0
     );
     let prompt = rig.root.join("council-brief.txt");
@@ -3285,20 +3207,7 @@ fn graph_retries_real_registry_lock_and_runs_writer() -> Result {
     let rig = claude_fixture()?;
     let cleanup = rig.process_cleanup();
     let git = provenant_os::git::git_executable().ok_or("git")?;
-    let commit = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
-        None,
-    )?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
     assert_eq!(code(&commit), 0);
     let create = rig.command(&[
         "worktree",
@@ -3405,20 +3314,7 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
-    let commit = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "Initial",
-        ],
-        None,
-    )?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "Initial"], None)?;
     assert_eq!(code(&commit), 0);
     let created = rig.command(&[
         "worktree",
@@ -3718,20 +3614,7 @@ fn persisted_attempt_with(
     let rig = TestRig::new()?;
     if options.stalled_import {
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        let seeded = rig.execute(
-            &git,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "seed",
-            ],
-            None,
-        )?;
+        let seeded = rig.execute(&git, &["commit", "--allow-empty", "-qm", "seed"], None)?;
         assert_eq!(code(&seeded), 0);
         let created = rig.command(&[
             "worktree",
@@ -4730,8 +4613,6 @@ fn owned_dispatch_retains_failed_attempt_and_replays() -> Result {
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     for args in [
-        vec!["config", "user.name", "Fixture"],
-        vec!["config", "user.email", "fixture@example.invalid"],
         vec!["commit", "--allow-empty", "-qm", "base"],
         vec!["branch", "-M", "main"],
     ] {
@@ -4846,8 +4727,6 @@ fn owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation() -> Result 
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     for args in [
-        vec!["config", "user.name", "Fixture"],
-        vec!["config", "user.email", "fixture@example.invalid"],
         vec!["commit", "--allow-empty", "-qm", "base"],
         vec!["branch", "-M", "main"],
     ] {
