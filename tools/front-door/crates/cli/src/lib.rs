@@ -2017,6 +2017,10 @@ mod tests {
             "/fixture/source",
             "--read-root",
             "/fixture/other",
+            "--attach",
+            "/fixture/first.png",
+            "--attach",
+            "/fixture/second.png",
             "--wait",
             "30m",
             "--concurrency",
@@ -2033,6 +2037,13 @@ mod tests {
             Some(std::path::PathBuf::from("/fixture/writer"))
         );
         assert_eq!(request.access.read_root.len(), 2);
+        assert_eq!(
+            request.access.attach,
+            [
+                std::path::PathBuf::from("/fixture/first.png"),
+                std::path::PathBuf::from("/fixture/second.png")
+            ]
+        );
         for concurrency in ["0", "17"] {
             invalid(&[
                 "run",
