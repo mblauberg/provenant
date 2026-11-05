@@ -361,6 +361,8 @@ pub enum RunError {
     },
     #[error("Git executable unavailable")]
     GitUnavailable,
+    #[error("lane Git setup lock acquisition timed out")]
+    LaneSetupLockTimeout,
     #[error("provider evidence could not be committed: {0}")]
     ProviderEvidence(String),
     #[error("confinement refused: {0}")]
