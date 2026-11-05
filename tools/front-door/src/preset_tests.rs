@@ -1,4 +1,4 @@
-use super::preset::{Expansion, Layers, expand, find_prompt};
+use super::preset::{Expansion, Layers, expand, find_prompt, writer_tier_mix};
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 
@@ -1557,6 +1557,71 @@ fn pin_fixture_sources(value: &mut serde_json::Value) {
         }
         _ => {}
     }
+}
+
+#[test]
+fn preset_run_binds_skill_requirement_to_task_nodes() {
+    let args = [
+        "run",
+        "--preset",
+        "single",
+        "--prompt-file",
+        "brief.md",
+        "--require-skill-location",
+    ];
+    let provenant_cli::ParseOutcome::Invocation(invocation) =
+        provenant_cli::parse(args.into_iter().map(Into::into))
+    else {
+        panic!("run arguments")
+    };
+    let provenant_cli::Command::Run(request) = invocation.command else {
+        panic!("run command")
+    };
+    let mut expanded = expand(&Layers::empty(), "single", "brief", &[]).unwrap();
+    expanded.document["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"group", "access":"read_only", "composite":{"nodes":[
+                {"id":"child", "access":"read_only", "prompt":"work"},
+                {"id":"gate", "kind":"gate", "access":"read_only", "prompt":""}
+            ]}
+        }));
+    expanded.document["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"planner", "kind":"plan", "access":"read_only", "prompt":"plan",
+            "plan":{"fallback":{"nodes":[{"id":"fallback", "access":"read_only", "prompt":"work"}]}}
+        }));
+    let directory = tempfile::tempdir().unwrap();
+    let roots = ReadRoots::new(vec![directory.path().into()], &[]);
+    super::preset::bind_run_context(
+        &mut expanded,
+        &request,
+        directory.path(),
+        &roots,
+        "fixture",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        expanded.document["nodes"][0]["require_skill_location"],
+        true
+    );
+    assert_eq!(
+        expanded.document["nodes"][1]["composite"]["nodes"][0]["require_skill_location"],
+        true
+    );
+    assert!(
+        expanded.document["nodes"][1]["composite"]["nodes"][1]
+            .get("require_skill_location")
+            .is_none()
+    );
+    assert_eq!(
+        expanded.document["nodes"][2]["plan"]["fallback"]["nodes"][0]["require_skill_location"],
+        true
+    );
 }
 
 #[test]
@@ -6084,4 +6149,60 @@ fn five_and_seven_lane_big_batches_fit_the_checkpoint_envelope() {
         );
         document.admit(&Default::default()).unwrap();
     }
+}
+
+#[test]
+fn writer_tier_override_and_advisory_mix() {
+    let expanded = expand(
+        &Layers::empty(),
+        "generator-evaluator",
+        "brief",
+        &[
+            "parameters.writer='junior'".into(),
+            "parameters.worktree='/repo/lane'".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(expanded.document["nodes"][0]["route"]["alias"], "junior");
+    let mut layers = Layers::empty();
+    layers
+        .roles
+        .add(
+            ".provenant/roles.toml",
+            "[roles.\"write.implement\"]\ntier = 'principal'\n",
+        )
+        .unwrap();
+    let inherited = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        inherited.document["nodes"][0]["route"]["alias"],
+        "principal"
+    );
+    let explicit = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.writer='junior'".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(explicit.document["nodes"][0]["route"]["alias"], "junior");
+
+    assert_eq!(
+        writer_tier_mix(expanded.document["nodes"].as_array().unwrap()),
+        [1, 0, 0]
+    );
+    let nodes = json!([
+        {"access":"worktree_write","route":{"alias":"senior"}},
+        {"access":"worktree_write","route":{"model":"provider/model"}},
+        {"composite":{"nodes":[{"access":"worktree_write","route":{"alias":"principal"}}]}}
+    ]);
+    assert_eq!(writer_tier_mix(nodes.as_array().unwrap()), [0, 1, 1]);
 }

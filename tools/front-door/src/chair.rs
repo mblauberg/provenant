@@ -107,8 +107,10 @@ fn current<'a>(
     }
     Ok(account)
 }
-fn cached(roots: &Roots, key: &str) -> Option<QuotaSnapshot> {
-    if !provenant_quota::component(key) {
+fn cached(roots: &Roots, account: &RegisteredAccount) -> Option<QuotaSnapshot> {
+    let key = account.key();
+    let adapter = account.adapter();
+    if !provenant_quota::component(key) || !provenant_quota::component(adapter) {
         return None;
     }
     let dir = Directory::open_anchor(roots.state.as_path())
@@ -117,11 +119,12 @@ fn cached(roots: &Roots, key: &str) -> Option<QuotaSnapshot> {
         .ok()?
         .open_verified_directory(OsStr::new(key))
         .ok()?;
+    let name = format!("{adapter}.json");
     let bytes = dir
-        .read_bounded(OsStr::new("claude.json"), provenant_quota::MAX_RECORD_BYTES)
+        .read_bounded(OsStr::new(&name), provenant_quota::MAX_RECORD_BYTES)
         .ok()?;
     let record = AccountRecord::decode(&bytes).ok()?;
-    if record.account.adapter != "claude" || record.account.account_key != key {
+    if record.account.adapter != adapter || record.account.account_key != key {
         return None;
     }
     if record.last_error.is_some() {
@@ -292,7 +295,7 @@ fn switch(
         .ok_or("invalid switch allow-list")?;
     let accounts = crate::registered_claude(&context.roots)?;
     let current = current(&accounts, context)?;
-    let snapshot = cached(&context.roots, current.key());
+    let snapshot = cached(&context.roots, current);
     let mut rotating_target = false;
     let targets = allowed
         .iter()
@@ -307,7 +310,7 @@ fn switch(
         .collect::<Vec<_>>();
     let snapshots = targets
         .iter()
-        .map(|a| cached(&context.roots, a.key()))
+        .map(|a| cached(&context.roots, a))
         .collect::<Vec<_>>();
     let choices = targets
         .iter()

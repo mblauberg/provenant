@@ -1517,9 +1517,16 @@ fn lower_leaf(
         profile = resolved.profile.clone();
         resolved_role = Some(resolved);
     }
+    let mut entry = entry.clone();
+    // An unset writer parameter inherits the role, including project overrides.
+    if entry.get("tier").and_then(Value::as_str) == Some("${writer}")
+        && parameters.get("writer").and_then(Value::as_str) == Some("")
+    {
+        entry.remove("tier");
+    }
     merge(
         &mut profile,
-        &Value::Object(entry.clone()),
+        &Value::Object(entry),
         "",
         "entry",
         &mut BTreeMap::new(),
@@ -2887,7 +2894,7 @@ fn visit_nodes(
 ) -> Result<(), String> {
     for node in nodes {
         visitor(node)?;
-        for path in ["/composite/nodes", "/loop/body"] {
+        for path in ["/composite/nodes", "/loop/body", "/plan/fallback/nodes"] {
             if let Some(children) = node.pointer_mut(path).and_then(Value::as_array_mut) {
                 visit_nodes(children, visitor)?;
             }
@@ -3089,6 +3096,9 @@ pub(crate) fn bind_run_context(
         confine_pattern_roots(node, policy)?;
         let container = node.get("composite").is_some() || node.get("loop").is_some();
         if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {
+            if request.require_skill_location {
+                node["require_skill_location"] = json!(true);
+            }
             let writer = node["access"] == "worktree_write";
             // A deferred review measures in the bound worktree unless it names one.
             if let Some(worktree) = &request.access.worktree
@@ -3563,6 +3573,35 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
     }
 }
 
+/// Count concrete writer nodes by their requested alias, retaining unknown and
+/// exact-model routes outside the advisory mix.
+pub(super) fn writer_tier_mix(nodes: &[Value]) -> [usize; 3] {
+    let mut counts = [0; 3];
+    for node in nodes {
+        if node["access"] == "worktree_write" {
+            let tier = node
+                .pointer("/route/alias")
+                .or_else(|| node.pointer("/routes/0/alias"))
+                .and_then(Value::as_str);
+            if let Some(index) = ["junior", "senior", "principal"]
+                .iter()
+                .position(|name| Some(*name) == tier)
+            {
+                counts[index] += 1;
+            }
+        }
+        for pointer in ["/composite/nodes", "/loop/body"] {
+            if let Some(children) = node.pointer(pointer).and_then(Value::as_array) {
+                let nested = writer_tier_mix(children);
+                for (count, increment) in counts.iter_mut().zip(nested) {
+                    *count += increment;
+                }
+            }
+        }
+    }
+    counts
+}
+
 // Explain is read-only and must not publish an overflow artifact. The graph
 // was already bounded by the owner's 8 MiB document limit in expand().
 fn explain(
@@ -3613,6 +3652,23 @@ fn explain(
         "Graph {}\nLimits: {}\nAdmission: {}\nInspection: {}\n",
         expansion.document["graph_id"], limits, admission, metrics
     );
+    let tier_mix = writer_tier_mix(
+        expansion.document["nodes"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    );
+    let inverted = tier_mix[2] > tier_mix[1] || tier_mix[1] > tier_mix[0];
+    let tier_mix_line = format!(
+        "tier mix: junior {} / senior {} / principal {}",
+        tier_mix[0], tier_mix[1], tier_mix[2]
+    );
+    human.push_str(&format!("{tier_mix_line}\n"));
+    if inverted {
+        human.push_str(
+            "Warning: writer tier mix is inverted; consider whether lower tiers fit the work.\n",
+        );
+    }
     if let Some(context) = expansion.document.get("context") {
         human.push_str(&format!(
             "Preset selection: {} ({})\n",
@@ -3658,6 +3714,7 @@ fn explain(
         human.push_str(&format!("Warning: {warning}\n"));
     }
     let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"admission":admission,"inspection":metrics,"pending":pending,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
+    data["tier_mix"] = json!({"junior":tier_mix[0], "senior":tier_mix[1], "principal":tier_mix[2], "inverted":inverted, "line":tier_mix_line});
     if !brief_warnings.is_empty() {
         data["warnings"] = json!(brief_warnings);
     }

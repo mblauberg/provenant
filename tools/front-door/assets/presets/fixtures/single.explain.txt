@@ -1,6 +1,7 @@
 Graph <id>
 Admission: {"status":"admitted"}
 Inspection: {"dependency_depth":0,"edges":0,"limit_reason":null,"max_attempts":2,"nodes":1,"prompt_bytes":10}
+tier mix: junior 0 / senior 0 / principal 0
 Preset selection: single (override)
 Pending "route_readiness": "Route readiness and quota are checked before launch."
 task  role=- tier=senior family=any kind=- access=read_only worktree=-

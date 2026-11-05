@@ -6,6 +6,81 @@ use provenant_os::{
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+/// A local status command reports sign-in without exposing its output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalSignin {
+    SignedIn,
+    SignedOut,
+    Unknown,
+}
+
+/// Probe only adapters with a declared local status command. A failed or
+/// incomplete probe remains unknown unless it explicitly reports sign-out.
+pub fn local_signin(
+    strategy: provenant_records::LoginReprobe,
+    executor: &dyn Executor,
+    executable: &Path,
+    home: &Path,
+    account_dir: &Path,
+    cwd: &Path,
+) -> Option<LocalSignin> {
+    use provenant_os::exec::{StreamPolicy, Termination};
+    use provenant_records::LoginReprobe;
+    let mut argv = vec![executable.as_os_str().to_owned()];
+    let mut env = vec![
+        ("HOME".into(), home.as_os_str().to_owned()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ];
+    match strategy {
+        LoginReprobe::Codex => {
+            argv.extend(["login".into(), "status".into()]);
+            env.push(("CODEX_HOME".into(), account_dir.as_os_str().to_owned()));
+        }
+        LoginReprobe::Cursor if account_dir == home => argv.push("status".into()),
+        _ => return None,
+    }
+    let mut options = ExecOptions::new(&argv, cwd, std::time::Duration::from_secs(4));
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    options.stderr = StreamPolicy::Capture { limit: 4096 };
+    let Ok(out) = executor.execute(options) else {
+        return Some(LocalSignin::Unknown);
+    };
+    if out.timed_out
+        || out.cancelled
+        || out.drain_truncated
+        || out.overflow_stopped
+        || !matches!(out.termination, Termination::Exit(_))
+        || out.stdout.truncated
+        || out.stdout.read_failed
+        || out.stderr.truncated
+        || out.stderr.read_failed
+    {
+        return Some(LocalSignin::Unknown);
+    }
+    let output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout.bytes),
+        String::from_utf8_lossy(&out.stderr.bytes)
+    )
+    .to_ascii_lowercase();
+    if output.contains("not logged in") || output.contains("not authenticated") {
+        return Some(LocalSignin::SignedOut);
+    }
+    Some(
+        if out.termination == Termination::Exit(0)
+            && (strategy == LoginReprobe::Codex
+                || output.contains("logged in")
+                || output.contains("login successful"))
+        {
+            LocalSignin::SignedIn
+        } else {
+            LocalSignin::Unknown
+        },
+    )
+}
+
 const PREFIX: &str = "probe-";
 const LOCK_SUFFIX: &str = ".lock";
 /// The random part of `temporary_name`, after its fixed staging prefix.
@@ -258,6 +333,48 @@ impl Executor for HostProbeExecutor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_local_signin_probe_is_unknown() {
+        use provenant_os::exec::{CapturedStream, StreamPolicy, Termination};
+        struct Fake(bool);
+        impl Executor for Fake {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                assert!(matches!(options.stdout, StreamPolicy::Capture { .. }));
+                Ok(ExecOutcome {
+                    termination: if self.0 {
+                        Termination::Signal(9)
+                    } else {
+                        Termination::Exit(0)
+                    },
+                    stdout: CapturedStream {
+                        bytes: b"not logged in".to_vec(),
+                        truncated: !self.0,
+                        ..Default::default()
+                    },
+                    stderr: CapturedStream::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        for signal in [false, true] {
+            assert_eq!(
+                local_signin(
+                    provenant_records::LoginReprobe::Cursor,
+                    &Fake(signal),
+                    Path::new("/fixture/cursor"),
+                    Path::new("/fixture/home"),
+                    Path::new("/fixture/home"),
+                    Path::new("/")
+                ),
+                Some(LocalSignin::Unknown)
+            );
+        }
+    }
 
     #[test]
     fn failed_host_commands_remove_their_private_cwd() {

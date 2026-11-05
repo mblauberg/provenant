@@ -30,6 +30,7 @@ pub(super) fn expand(
         &[],
         None,
         &[],
+        false,
         0,
         max_depth,
         max_nodes,
@@ -80,6 +81,7 @@ fn children(
     inputs: &[GraphInput],
     source: Option<&SourceBinding>,
     read_roots: &[String],
+    require_skill_location: bool,
     depth: usize,
     max_depth: usize,
     max_nodes: usize,
@@ -106,6 +108,7 @@ fn children(
     let mut expanded = Vec::new();
     for original in nodes {
         let mut node = original.clone();
+        node.require_skill_location |= require_skill_location;
         node.id = scoped(prefix, &node.id);
         if !valid_identifier(&node.id) {
             return Err(format!(
@@ -227,6 +230,7 @@ fn children(
                 &[],
                 None,
                 &[],
+                node.require_skill_location,
                 depth,
                 max_depth,
                 max_nodes,
@@ -292,6 +296,7 @@ fn children(
                 &node.inputs,
                 node.source.as_ref(),
                 &node.read_roots,
+                node.require_skill_location,
                 depth + 1,
                 max_depth,
                 max_nodes,

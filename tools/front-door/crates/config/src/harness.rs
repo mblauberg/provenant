@@ -890,32 +890,50 @@ impl Targets {
         claude: Option<&Path>,
         codex: Option<&Path>,
     ) -> Result<(), InstallError> {
-        for target in &mut self.harnesses {
-            let selected = match target.harness {
-                Harness::Claude => claude,
-                Harness::Codex => codex,
-                _ => None,
-            };
-            if let Some(base) = selected {
-                managed::normal_absolute(base)?;
-                let default = Targets::new(self.roots.clone(), &self.home, &[target.harness]);
-                if !default.harnesses.is_empty() {
-                    if !self.configured_homes.contains(&target.harness) {
-                        self.environment_homes.insert(target.harness);
-                        let instruction = target
-                            .instruction
-                            .as_ref()
-                            .and_then(|p| p.file_name())
-                            .map(|n| base.join(n));
-                        target.skills_dir = base.join("skills");
-                        target.instruction = instruction;
-                        target.hook_file = default_hooks(target.harness, base);
-                    }
-                    if !self.configured_homes.contains(&target.harness)
-                        && !self.configured_configs.contains(&target.harness)
-                    {
-                        target.mcp_file = default_mcp(target.harness, &self.home, base);
-                    }
+        for (harness, base) in [(Harness::Claude, claude), (Harness::Codex, codex)] {
+            if let Some(base) = base {
+                self.apply_account_environment(harness, base)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply a captured account directory to one selected harness.
+    pub fn apply_account_environment(
+        &mut self,
+        harness: Harness,
+        base: &Path,
+    ) -> Result<(), InstallError> {
+        if !self
+            .harnesses
+            .iter()
+            .any(|target| target.harness == harness)
+        {
+            return Ok(());
+        }
+        managed::normal_absolute(base)?;
+        for target in self
+            .harnesses
+            .iter_mut()
+            .filter(|target| target.harness == harness)
+        {
+            let default = Targets::new(self.roots.clone(), &self.home, &[target.harness]);
+            if !default.harnesses.is_empty() {
+                if !self.configured_homes.contains(&target.harness) {
+                    self.environment_homes.insert(target.harness);
+                    let instruction = target
+                        .instruction
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|n| base.join(n));
+                    target.skills_dir = base.join("skills");
+                    target.instruction = instruction;
+                    target.hook_file = default_hooks(target.harness, base);
+                }
+                if !self.configured_homes.contains(&target.harness)
+                    && !self.configured_configs.contains(&target.harness)
+                {
+                    target.mcp_file = default_mcp(target.harness, &self.home, base);
                 }
             }
         }

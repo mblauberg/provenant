@@ -1210,25 +1210,87 @@ fn adapter_policy_excludes_complete_test_const_arrays() {
     assert!(!scopes[0].contains("production"));
 }
 
+fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
+    let names = provenant_records::ADAPTER_SPECS
+        .iter()
+        .map(|spec| regex::escape(spec.name))
+        .collect::<Vec<_>>()
+        .join("|");
+    let literal = format!(r#""(?:{names})""#);
+    let harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*\s*\.\s*spec\s*\(\s*\)\s*\.\s*name";
+    regex::Regex::new(&format!(
+        r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness})|(?:{literal}|{harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*(?:\||=>|if\b)|matches!\s*\([^,]+,[^;{{}}\n]*(?:{literal}|{harness})|\.\s*(?:eq|ne|eq_ignore_ascii_case)\s*\(\s*(?:{literal}|{harness}))"
+    ))
+}
+
+#[test]
+fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(), Box<dyn Error>> {
+    let comparison = adapter_identity_comparison()?;
+    for spec in provenant_records::ADAPTER_SPECS {
+        assert!(comparison.is_match(&format!("adapter == \"{}\"", spec.name)));
+        assert!(comparison.is_match(&format!("\"{}\" => action()", spec.name)));
+    }
+    assert!(comparison.is_match("adapter == Harness::Codex.spec().name"));
+    assert!(comparison.is_match("matches!(adapter, \"codex\")"));
+    assert!(comparison.is_match("matches!(adapter, Some(\"codex\"))"));
+    assert!(comparison.is_match("matches!(adapter, None | Some(\"codex\"))"));
+    assert!(comparison.is_match("\"codex\" | other => action()"));
+    assert!(comparison.is_match("adapter.eq(\"codex\")"));
+    assert!(comparison.is_match("adapter.eq_ignore_ascii_case(\"codex\")"));
+    assert!(comparison.is_match("\"codex\" if ready => action()"));
+    assert!(comparison.is_match("Harness::Agy.spec().name != adapter"));
+    assert!(!comparison.is_match("default_value = Harness::Claude.spec().name"));
+    Ok(())
+}
+
 /// Adapter policy belongs to the records registry; hooks are declarative
 /// provider command data. Test fixtures may still name their provider.
 #[test]
 fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let literal = regex::Regex::new(r#""(?:claude|opencode|agy)""#)?;
+    let names = provenant_records::ADAPTER_SPECS
+        .iter()
+        .map(|spec| regex::escape(spec.name))
+        .collect::<Vec<_>>()
+        .join("|");
+    let literal = regex::Regex::new(&format!(r#""(?:{names})""#))?;
+    let comparison = adapter_identity_comparison()?;
     let mut sources = Vec::new();
     for name in ["cli", "routing", "quota"] {
         rust_sources(&root.join("crates").join(name).join("src"), &mut sources)?;
     }
+    rust_sources(&root.join("src"), &mut sources)?;
     let mut violations = Vec::new();
     for path in sources {
         // The hook command table is registry data, not adapter policy.
-        if path == root.join("crates/cli/src/hooks.rs") {
+        if path == root.join("crates/cli/src/hooks.rs")
+            || path == root.join("crates/cli/src/run/provider/fixtures.rs")
+        {
             continue;
         }
         let source = fs::read_to_string(&path)?;
         let tests = test_scopes(&source, is_test_source(&path.to_string_lossy()));
-        for found in literal.find_iter(&source) {
+        let checks: Vec<_> = if path.starts_with(root.join("src")) {
+            vec![&comparison]
+        } else {
+            vec![&literal, &comparison]
+        };
+        for found in checks
+            .into_iter()
+            .flat_map(|check| check.find_iter(&source))
+        {
+            let line_text = source[..found.start()].rsplit('\n').next().unwrap_or("");
+            let non_adapter_literal = (path.ends_with("grammar.rs")
+                && line_text.contains("conflicts_with_all"))
+                || (path.ends_with("fabric.rs") && line_text.contains("InvalidField("))
+                || (path.ends_with("run/provider/command.rs") && line_text.contains(".join("))
+                || (path.ends_with("run/status.rs")
+                    && source[found.end()..].starts_with(": cursor"))
+                || (path.ends_with("run/provider/preparation.rs")
+                    && source[found.end()..].starts_with(':'));
+            if non_adapter_literal {
+                continue;
+            }
             let offset = source.as_ptr() as usize + found.start();
             if tests.iter().any(|scope| {
                 let start = scope.as_ptr() as usize;

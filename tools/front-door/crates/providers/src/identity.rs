@@ -93,7 +93,7 @@ impl RegisteredAccount {
         directory: std::path::PathBuf,
     ) -> Result<Self, crate::ProviderError> {
         use std::path::Component;
-        if provenant_records::AdapterSpec::get(adapter).is_none()
+        if !provenant_quota::component(adapter)
             || key == "unknown"
             || key.is_empty()
             || key.len() > 64
@@ -106,7 +106,13 @@ impl RegisteredAccount {
         // Agy's registered directory is a `HOME` holding a keychain, never a
         // config tree that overlaps another account's, so any directory below
         // the root qualifies, including a shallow home such as `/Users/me`.
-        let shallowest = if adapter == "agy" { 2 } else { 4 };
+        let shallowest = if provenant_records::AdapterSpec::get(adapter)
+            .is_some_and(|spec| spec.isolated_login_keychain)
+        {
+            2
+        } else {
+            4
+        };
         if !directory.is_absolute()
             || directory
                 .components()
@@ -121,7 +127,7 @@ impl RegisteredAccount {
             directory,
         })
     }
-    pub(crate) fn adapter(&self) -> &str {
+    pub fn adapter(&self) -> &str {
         &self.adapter
     }
     pub fn key(&self) -> &str {

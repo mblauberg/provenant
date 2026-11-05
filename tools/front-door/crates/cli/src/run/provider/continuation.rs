@@ -67,7 +67,7 @@ pub(super) fn continuation_for(
     match find_session_state(&prior_state, session) {
         // Codex's SQLite index holds absolute rollout paths. Rebuild it from
         // the copied sessions instead of resolving back into settled history.
-        Ok(Some(retained)) => copy_state(&retained, private_state, route.adapter == "codex")?,
+        Ok(Some(retained)) => copy_state(&retained, private_state, AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only))?,
         // These adapters retain sessions in their existing user data stores.
         Ok(None) if AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.user_sessions) => {}
         Ok(None) => return Err("the prior attempt's retained provider state is missing or has expired; dispatch a new lane with its retained result or transcripts as context".into()),

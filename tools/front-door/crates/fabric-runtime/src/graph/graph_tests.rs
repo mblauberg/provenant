@@ -67,6 +67,7 @@ struct FakeOwner {
     review_expansion: Option<Expansion>,
     review_calls: usize,
     require_distinct: Vec<bool>,
+    skill_requirements: Vec<bool>,
     deadlines: Vec<Option<u64>>,
     families: std::collections::BTreeMap<String, String>,
     answers: std::collections::BTreeMap<String, AskReply>,
@@ -79,6 +80,7 @@ struct FakeOwner {
     fallback_evidence:
         std::collections::BTreeMap<String, provenant_records::run::PreparationFailure>,
     omit_fallback_evidence: bool,
+    fail_fallback_evidence: bool,
 }
 
 /// An inbox reply from `chair`, choosing `option` or sending `text`.
@@ -110,6 +112,9 @@ impl AttemptOwner for FakeOwner {
         _key: &AttemptKey,
         reference: &str,
     ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+        if self.fail_fallback_evidence {
+            return Err(NoObservation);
+        }
         Ok(self.fallback_evidence.get(reference).copied())
     }
 
@@ -230,6 +235,7 @@ impl AttemptOwner for FakeOwner {
         self.family_peers.push(node.family_peers.to_vec());
         self.prior_attempts.push(node.prior_attempts.to_vec());
         self.require_distinct.push(node.require_distinct);
+        self.skill_requirements.push(node.require_skill_location);
         self.deadlines.push(node.deadline_seconds);
         self.titles.push(node.title.to_owned());
         self.prompts.push(node.prompt.to_owned());
@@ -316,6 +322,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         condition: None,
         on_fail: None,
         delivery: None,
+        require_skill_location: false,
         access: AccessMode::ReadOnly,
         worktree: None,
         id: id.to_owned(),
@@ -345,6 +352,27 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         schema_version: 1,
         graph_id: "g-test".to_owned(),
         nodes,
+    }
+}
+
+#[test]
+fn graph_skill_location_requirement_reaches_the_lane() {
+    for required in [false, true] {
+        let mut lane = node("lane", route("first"));
+        lane.require_skill_location = required;
+        let encoded = serde_json::to_value(&lane).unwrap();
+        let decoded: GraphNode = serde_json::from_value(encoded).unwrap();
+        let mut owner = FakeOwner {
+            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            ..Default::default()
+        };
+        advance(
+            &graph(vec![decoded]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(owner.skill_requirements, vec![required]);
     }
 }
 
@@ -3114,7 +3142,7 @@ fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"parallel-composite","nodes":[
             {"id":"start","access":"read_only","prompt":"start","route":{"alias":"senior"}},
-            {"id":"parallel","kind":"composite","access":"read_only","depends_on":["start"],
+            {"id":"parallel","kind":"composite","access":"read_only","require_skill_location":true,"depends_on":["start"],
             "inputs":[{"node":"start","outputs":["result"]}],
             "composite":{"nodes":[
                 {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
@@ -3136,6 +3164,7 @@ fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
     assert!(run.checkpoint.successful());
     assert!(owner.prompts[1].contains("initial evidence"));
     assert!(owner.prompts[2].contains("initial evidence"));
+    assert_eq!(owner.skill_requirements, [false, true, true]);
     let result = run
         .checkpoint
         .nodes
@@ -5630,6 +5659,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         condition: None,
         on_fail: None,
         delivery: None,
+        require_skill_location: false,
         access: AccessMode::ReadOnly,
         worktree: None,
         id: "node".to_owned(),
@@ -5904,6 +5934,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             condition: None,
             on_fail: None,
             delivery: None,
+            require_skill_location: false,
             access: AccessMode::ReadOnly,
             worktree: None,
             id: "node".to_owned(),
@@ -5961,7 +5992,11 @@ fn writer_limit_after_launch_never_tries_a_second_route() {
 
 #[test]
 fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
-    let document = graph(vec![node("task", route("senior"))]);
+    let mut pool = route("senior");
+    pool.adapter = None;
+    pool.model = None;
+    pool.alias = Some("senior".into());
+    let document = graph(vec![node("task", pool)]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([terminal_with_result(AttemptOutcome::UsageLimited, "")]),
         ..FakeOwner::default()
@@ -6055,6 +6090,11 @@ fn check_fallback(
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(owner.calls.len(), if expected { 2 } else { 1 }, "{case}");
+    assert_eq!(
+        run.checkpoint.nodes[0].attempts.len(),
+        if expected { 2 } else { 1 },
+        "{case}"
+    );
     assert!(
         owner
             .permissions
@@ -6074,6 +6114,19 @@ fn check_fallback(
         },
         "{case}"
     );
+    if access == AccessMode::WorktreeWrite
+        && launched
+        && matches!(
+            outcome,
+            AttemptOutcome::AuthRequired | AttemptOutcome::UsageLimited
+        )
+    {
+        assert_eq!(
+            run.checkpoint.nodes[0].advance_error_code.as_deref(),
+            Some("fallback_launched_writer"),
+            "{case}"
+        );
+    }
     assert_eq!(
         run.checkpoint.nodes[0].worktree.as_deref(),
         (access == AccessMode::WorktreeWrite).then_some("/private/tmp/writer"),
@@ -6116,20 +6169,55 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
             AccessMode::ReadOnly,
             true,
             AttemptOutcome::UsageLimited,
-            false,
+            true,
         ),
         (
             "reader auth refusal after launch",
             AccessMode::ReadOnly,
             true,
             AttemptOutcome::AuthRequired,
-            false,
+            true,
         ),
         (
             "reader unavailable adapter after launch",
             AccessMode::ReadOnly,
             true,
             AttemptOutcome::AdapterUnavailable,
+            false,
+        ),
+        (
+            "writer usage limit after launch",
+            AccessMode::WorktreeWrite,
+            true,
+            AttemptOutcome::UsageLimited,
+            false,
+        ),
+        (
+            "reader task failure after launch",
+            AccessMode::ReadOnly,
+            true,
+            AttemptOutcome::TaskFailed,
+            false,
+        ),
+        (
+            "reader review required before launch",
+            AccessMode::ReadOnly,
+            false,
+            AttemptOutcome::ReviewRequired,
+            false,
+        ),
+        (
+            "reader unclassified failure after launch",
+            AccessMode::ReadOnly,
+            true,
+            AttemptOutcome::OtherFailure,
+            false,
+        ),
+        (
+            "reader deadline before launch",
+            AccessMode::ReadOnly,
+            false,
+            AttemptOutcome::DeadlineExceeded,
             false,
         ),
         (
@@ -6149,6 +6237,132 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
     ] {
         check_fallback(case, access, launched, outcome, expected);
     }
+}
+
+#[test]
+fn launched_reader_fallback_respects_retry_budget() {
+    let mut task = node("node", route("first"));
+    task.access = AccessMode::ReadOnly;
+    task.route = None;
+    task.routes = Some(vec![route("first"), route("second")]);
+    let document = graph(vec![task]);
+    let mut owner = FakeOwner {
+        retry_limit: Some(0),
+        observations: VecDeque::from([AttemptObservation::Terminal {
+            attempt_ref: Some("host/attempt".into()),
+            outcome: AttemptOutcome::UsageLimited,
+            launched: true,
+            result: None,
+            result_warning: None,
+            result_path: None,
+            branch: None,
+            commit: None,
+        }]),
+        ..FakeOwner::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(
+        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("fallback_budget_exhausted")
+    );
+}
+
+#[test]
+fn launched_reader_reports_pinned_route() {
+    let task = node("node", route("first"));
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([AttemptObservation::Terminal {
+            attempt_ref: Some("host/attempt".into()),
+            outcome: AttemptOutcome::UsageLimited,
+            launched: true,
+            result: None,
+            result_warning: None,
+            result_path: None,
+            branch: None,
+            commit: None,
+        }]),
+        ..FakeOwner::default()
+    };
+    let run = advance(
+        &graph(vec![task]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(
+        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("fallback_route_pinned")
+    );
+}
+
+#[test]
+fn launched_reader_fallback_keeps_account_pin() {
+    let mut task = node("node", route("first"));
+    let mut first = route("first");
+    first.account = Some("account-one".into());
+    let mut second = route("second");
+    second.account = Some("account-two".into());
+    task.route = None;
+    task.routes = Some(vec![first, second]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([AttemptObservation::Terminal {
+            attempt_ref: Some("host/attempt".into()),
+            outcome: AttemptOutcome::AuthRequired,
+            launched: true,
+            result: None,
+            result_warning: None,
+            result_path: None,
+            branch: None,
+            commit: None,
+        }]),
+        ..FakeOwner::default()
+    };
+    let run = advance(
+        &graph(vec![task]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(
+        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("fallback_account_pinned")
+    );
+}
+
+#[test]
+fn fallback_reports_unreadable_evidence() {
+    let mut task = node("node", route("first"));
+    task.route = None;
+    task.routes = Some(vec![route("first"), route("second")]);
+    let mut owner = FakeOwner {
+        fail_fallback_evidence: true,
+        observations: VecDeque::from([AttemptObservation::Terminal {
+            attempt_ref: Some("host/attempt".into()),
+            outcome: AttemptOutcome::AuthRequired,
+            launched: false,
+            result: None,
+            result_warning: None,
+            result_path: None,
+            branch: None,
+            commit: None,
+        }]),
+        ..FakeOwner::default()
+    };
+    let run = advance(
+        &graph(vec![task]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(
+        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("fallback_evidence_unreadable")
+    );
 }
 
 #[test]
@@ -6344,6 +6558,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         condition: None,
         on_fail: None,
         delivery: None,
+        require_skill_location: false,
         access: AccessMode::ReadOnly,
         worktree: None,
         id: "node".to_owned(),

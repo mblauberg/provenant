@@ -470,19 +470,31 @@ fn derive_topology(
         || !addition.patterns.is_empty()
         || addition.nodes.iter().any(|node| node.composite.is_some())
     {
-        let spec = expanded
+        let planner = expanded
             .nodes
             .iter()
             .find(|node| node.id == addition.source)
-            .and_then(|node| node.plan.as_ref())
+            .filter(|node| node.plan.is_some())
             .ok_or_else(|| {
                 (
                     addition.source.clone(),
                     "composite topology requires a planner specification",
                 )
             })?;
+        let spec = planner.plan.as_ref().ok_or_else(|| {
+            (
+                addition.source.clone(),
+                "composite topology requires a planner specification",
+            )
+        })?;
         if fallback {
-            let derived = fallback_expansion(&addition.source, spec, document).map_err(|_| {
+            let derived = fallback_expansion(
+                &addition.source,
+                spec,
+                document,
+                planner.require_skill_location,
+            )
+            .map_err(|_| {
                 (
                     addition.source.clone(),
                     "fallback topology must be derivable from its specification",
@@ -874,6 +886,7 @@ fn prepare(
     document: &GraphDocument,
     trusted: bool,
 ) -> Result<(), String> {
+    child.require_skill_location |= node.require_skill_location;
     if !trusted {
         // A planner may narrow but never widen the access its own node holds.
         if let Some(role) = &child.role
@@ -1451,7 +1464,7 @@ pub(super) fn settle(
             .position(|progress| progress.id == node.id)?;
         let reason = fallback_reason(&checkpoint.nodes[index]);
         let built = (|| {
-            let addition = fallback_expansion(&node.id, spec, source)?;
+            let addition = fallback_expansion(&node.id, spec, source, node.require_skill_location)?;
             let mut preview = document.clone();
             append(&mut preview, &addition);
             let (plan, positions) =
@@ -1604,7 +1617,8 @@ pub(super) fn settle(
                     NOTE_BYTES,
                 );
                 let fallback = (|| {
-                    let addition = fallback_expansion(&node.id, spec, source)?;
+                    let addition =
+                        fallback_expansion(&node.id, spec, source, node.require_skill_location)?;
                     let mut preview = document.clone();
                     append(&mut preview, &addition);
                     validate_schema(&preview).map_err(str::to_owned)?;
@@ -1692,6 +1706,7 @@ pub(super) fn fallback_expansion(
     node_id: &str,
     spec: &PlanSpec,
     source: &GraphDocument,
+    require_skill_location: bool,
 ) -> Result<Expansion, String> {
     let fallback = spec
         .fallback
@@ -1723,6 +1738,17 @@ pub(super) fn fallback_expansion(
             .nodes
             .into_iter()
             .filter(|child| child.id == root_id || child.id.starts_with(&format!("{root_id}--")))
+            .map(|mut child| {
+                if child.composite.is_none()
+                    && !matches!(
+                        child.kind,
+                        Some(NodeKind::Gate | NodeKind::Decide | NodeKind::Land)
+                    )
+                {
+                    child.require_skill_location |= require_skill_location;
+                }
+                child
+            })
             .collect(),
         patterns: Vec::new(),
     })
