@@ -440,17 +440,30 @@ impl Layers {
                 repo_files.push(origin.clone());
             }
             let mut layer = layer.clone();
-            layer
-                .as_object_mut()
-                .ok_or("preset must be a table")?
-                .remove("extends");
+            let table = layer.as_object_mut().ok_or("preset must be a table")?;
+            table.remove("extends");
+            if let Some(stages) = table.get_mut("stages").and_then(Value::as_array_mut) {
+                for stage in stages {
+                    if let Some(floor) = stage
+                        .as_object_mut()
+                        .and_then(|stage| stage.remove("read_only_floor"))
+                    {
+                        match floor.as_bool() {
+                            Some(true) => {
+                                origins.insert("$scope_read_only".into(), origin.clone());
+                            }
+                            Some(false) => {}
+                            None => {
+                                return Err(format!(
+                                    "preset {name}: stage read_only_floor must be a boolean ({origin})"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
             merge(&mut value, &layer, "", origin, &mut origins)
                 .map_err(|error| format!("preset {name}: {error} ({origin})"))?;
-        }
-        // Keep the scope floor in internal provenance, outside caller-settable
-        // configuration, so an extending preset cannot discard it.
-        if name == "scope" {
-            origins.insert("$scope_read_only".into(), "bundled scope floor".into());
         }
         stack.pop();
         Ok((value, origins))
@@ -1002,7 +1015,12 @@ pub fn expand_with(
     if let Some(catalogue) = catalogue {
         planner::attach(&mut nodes, catalogue)?;
     }
-    origins.retain(|path, _| !path.ends_with("$scope_read_only"));
+    // Request bindings affect how inputs reach parameters, not the graph itself.
+    origins.retain(|path, _| {
+        !path.ends_with("$scope_read_only")
+            && !(path.ends_with(".bind")
+                && (path.starts_with("parameters.") || path.contains(".parameters.")))
+    });
     if let Some(trusted) = trusted
         && (!repo_files.is_empty() || repo_roles)
     {

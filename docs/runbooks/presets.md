@@ -38,6 +38,9 @@ A typed parameter can declare `bind = "risk_tier"` or `bind = "kind"` to receive
 the corresponding `--risk-tier` or `--task-kind` request. An unbound flag warns
 and is dropped. Parameter files and `--set` retain their usual precedence.
 
+A stage may declare `read_only_floor = true` to keep its preset read-only,
+including through inheritance.
+
 Typed parameters without defaults are required. Missing-value errors name the
 parameter; `--set` and parameter files satisfy it and retain type validation.
 Injected `read_roots` is optional for a nested preset that does not declare it;

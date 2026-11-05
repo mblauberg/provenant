@@ -225,6 +225,19 @@ fn scope_preset_refuses_tree_write_broadening() {
             .contains("scope preset refuses")
     );
     layers
+        .insert(
+            "test",
+            "custom-floor",
+            "stages=[{id='reader',access='read_only',read_only_floor=true}]",
+        )
+        .unwrap();
+    layers.insert("test", "custom-floor-extended", "extends='custom-floor'\nstages=[{id='writer',access='worktree_write',worktree='/repo/lane',write_scope=['src']}]").unwrap();
+    assert!(
+        expand(&layers, "custom-floor-extended", "brief", &[])
+            .unwrap_err()
+            .contains("write-broadening")
+    );
+    layers
         .insert("test", "scope-delivery", "extends='scope'\ndelivery='pr'")
         .unwrap();
     assert!(
