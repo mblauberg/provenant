@@ -6889,7 +6889,7 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
-            let _session = open(edge, &call).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
 
             let target_project_id = provenant_confinement::worktrees::with_context(
                 edge.roots,
@@ -6907,8 +6907,9 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
                 .join(target_project_id.to_string());
             std::fs::create_dir_all(&reg_dir)?;
 
-            // Background thread acquires worktrees.lock and holds it for 5.3s
+            // Keep contention in place until dispatch reaches its deadline.
             let (tx, rx) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
             let lock_dir_path = reg_dir.clone();
             let holder = std::thread::spawn(move || {
                 let dir = Directory::open_anchor(&lock_dir_path).unwrap();
@@ -6924,11 +6925,7 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
                     )
                     .unwrap();
                 tx.send(()).unwrap();
-                let wake = clk
-                    .mono_now()
-                    .checked_add(DurationMicros::from_micros(3_000_000))
-                    .unwrap();
-                clk.wait_until(wake).unwrap();
+                let _ = released.recv();
                 drop(guard);
             });
 
@@ -6950,23 +6947,20 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
             ])?;
             cmd.wait = None;
 
-            let started = clock.mono_now();
             let reply = dispatch_with_workers(cmd, edge, &Free);
+            release.send(())?;
+            holder.join().map_err(|_| "lock holder panicked")?;
             assert_eq!(
                 reply.result.status,
                 Status::Refused,
                 "{:?}",
                 reply.result.error
             );
-            assert!(
-                clock
-                    .mono_now()
-                    .as_micros()
-                    .saturating_sub(started.as_micros())
-                    < 2_000_000,
-                "lock wait exceeded admission deadline"
-            );
-            holder.join().unwrap();
+            let window = session
+                .store
+                .admission_window(&"lock-retry-test".parse()?, &call)?
+                .expect("admission window must be saved");
+            assert!(window.wake_at.is_none_or(|wake| wake <= window.deadline));
 
             Ok(())
         },
