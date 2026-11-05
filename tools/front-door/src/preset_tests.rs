@@ -5046,6 +5046,9 @@ fn a_head_subject_review_defers_its_size_to_the_pinned_commit() {
     assert!(lenses.get("composite").is_none());
     let templates = lenses["lens_templates"].as_object().unwrap();
     assert!(templates.contains_key("correctness-spec") && templates.contains_key("adversarial"));
+    for lens in lenses["review"]["lenses"].as_array().unwrap() {
+        assert!(templates.contains_key(lens["name"].as_str().unwrap()));
+    }
     let template = &templates["tests"];
     assert_eq!(template["access"], "read_only");
     assert_eq!(template["role"], "lens.tests");
@@ -5843,4 +5846,22 @@ fn tracker_advice_is_declared_by_parameter() {
     assert_eq!(tracker_advice_parameter(&custom), Some("ticket"));
     let (single, _) = layers.resolve("single").unwrap();
     assert_eq!(tracker_advice_parameter(&single), None);
+}
+
+#[test]
+fn review_lens_selection_is_declared_on_the_stage() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "declared-selection", "stages=[{id='selected',for_each='${choices}',review_lenses=true,prompt='selected'},{id='ordinary',for_each='${choices}',prompt='ordinary'}]\n[parameters]\nchoices=[{name='always'},{name='conditional',when='security'}]\n").unwrap();
+    let expanded = expand(&layers, "declared-selection", "brief", &[]).unwrap();
+    let nodes = expanded.document["nodes"].as_array().unwrap();
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node["id"] != "selected-conditional")
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node["id"] == "ordinary-conditional")
+    );
 }

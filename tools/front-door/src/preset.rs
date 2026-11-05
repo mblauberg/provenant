@@ -552,8 +552,8 @@ pub(super) fn tracker_advice_parameter(config: &Value) -> Option<&str> {
         })
 }
 
-fn list_is_lenses(value: Option<&Value>) -> bool {
-    value.and_then(Value::as_str) == Some("${lenses}")
+fn selects_review_lenses(entry: &Value) -> bool {
+    entry.get("review_lenses").and_then(Value::as_bool) == Some(true)
 }
 
 fn merge(
@@ -2212,14 +2212,22 @@ impl StageBuilder<'_> {
             return Err(format!("preset composition depth exceeds {DEPTH}"));
         }
         let object = entry.as_object().ok_or("stage entries must be tables")?;
+        if object
+            .get("review_lenses")
+            .is_some_and(|flag| !flag.is_boolean())
+        {
+            return Err("review_lenses must be a boolean".into());
+        }
+        if selects_review_lenses(entry) && !object.contains_key("for_each") {
+            return Err("review_lenses requires for_each".into());
+        }
         let items: Vec<Option<Value>> = if let Some(list) = object.get("for_each") {
             if object.contains_key("count") {
                 return Err("for_each and count are exclusive".into());
             }
             match interpolate(list, &self.parameters, self.prompt, 1)? {
                 Value::Array(list) => {
-                    // Only the lenses parameter is governed by review shape.
-                    let list = if list_is_lenses(object.get("for_each")) {
+                    let list = if selects_review_lenses(entry) {
                         self.select_items(list)?
                     } else {
                         list
@@ -2275,6 +2283,7 @@ impl StageBuilder<'_> {
             let mut object = object.clone();
             object.remove("count");
             object.remove("for_each");
+            object.remove("review_lenses");
             object.remove("id");
             let fallback_stage = object.remove("fallback_stage");
             let distinct_families = object.remove("distinct_families");
@@ -3832,10 +3841,11 @@ pub fn run(
                 paths: request.selection_paths.clone(),
             });
         }
+        // Request values enter the review selector through declared parameters.
         layers.review = Some(review_selector(
             config.domains.routing.review.clone(),
             directory.clone(),
-            request.task_kind.clone(),
+            None,
         ));
         // Experiments apply only to work items and never beside an explicit
         // preset. A malformed entry warns and is skipped; the others still apply.

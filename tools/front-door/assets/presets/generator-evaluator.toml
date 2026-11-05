@@ -1,7 +1,7 @@
 stages = [
   { id = "implement", role = "write.implement" },
   { id = "lens", min_successful = "${min_lenses}", parallel = [
-    { id = "lens", for_each = "${lenses}", role = "lens.${item.name}", require_findings = true, outputs = ["result", "commit"] },
+    { id = "lens", for_each = "${lenses}", review_lenses = true, role = "lens.${item.name}", require_findings = true, outputs = ["result", "commit"] },
   ], source = { type = "node", node = "implement" } },
   { id = "evaluate", role = "review.evaluator", outputs = ["findings"], source = { type = "node", node = "implement" } },
 ]

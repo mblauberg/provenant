@@ -2915,3 +2915,37 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
     }
     Ok(())
 }
+
+#[test]
+fn unbound_request_values_warn_in_explain() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let prompt = temp.path().join("prompt");
+    std::fs::write(&prompt, "Review the bounded change")?;
+    let output = fixture_cli()
+        .current_dir(&root)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "run", "--preset", "single", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--risk-tier", "routine", "--task-kind", "docs", "--explain"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let warnings = result["data"]["graph"]["provenance"]["warnings"]
+        .as_array()
+        .ok_or("warnings missing")?;
+    for flag in ["--risk-tier", "--task-kind"] {
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains(flag))),
+            "{warnings:?}"
+        );
+    }
+    Ok(())
+}

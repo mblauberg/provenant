@@ -38,6 +38,9 @@ A typed parameter can declare `bind = "risk_tier"` or `bind = "kind"` to receive
 the corresponding `--risk-tier` or `--task-kind` request. An unbound flag warns
 and is dropped. Parameter files and `--set` retain their usual precedence.
 
+A `for_each` stage may declare `review_lenses = true` to apply the review
+shape and risk-tag selection to its list.
+
 A typed child parameter can declare `inherit = true` to receive a matching
 parent parameter unless the stage supplies its own value.
 

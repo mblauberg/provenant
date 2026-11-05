@@ -467,7 +467,7 @@ impl StageBuilder<'_> {
         nodes: &[Value],
     ) -> bool {
         let source = object.get("source");
-        if !matches!(entries, [entry] if super::list_is_lenses(entry.get("for_each")))
+        if !matches!(entries, [entry] if super::selects_review_lenses(entry))
             || source.and_then(|source| source["type"].as_str()) != Some("node")
         {
             return false;
@@ -504,7 +504,7 @@ impl StageBuilder<'_> {
     ) -> Result<Option<Value>, String> {
         // Static and deferred review stages alike record the requested base.
         let is_review = self.layers.review.is_some()
-            && matches!(entries, [entry] if super::list_is_lenses(entry.get("for_each")));
+            && matches!(entries, [entry] if super::selects_review_lenses(entry));
         if let Some(base) = self.parameters.get("base").and_then(Value::as_str)
             && is_review
             && !base.is_empty()
@@ -527,6 +527,8 @@ impl StageBuilder<'_> {
             .as_object()
             .cloned()
             .ok_or("stage entries must be tables")?;
+        // Templates cover every candidate; selection happens when the head is pinned.
+        lens_entry.remove("review_lenses");
         lens_entry.insert("for_each".into(), Value::Array(items));
         let mut leaves = Vec::new();
         self.entry(
