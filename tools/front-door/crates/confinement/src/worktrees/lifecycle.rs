@@ -184,6 +184,7 @@ fn list_impl(
             .copied()
             .unwrap_or(WorkerState::Unknown);
         let mut owner = OwnerStatus::Unknown;
+        let mut owner_evidence = None;
         let (dirty, writer, disk, registration_unknown) = if path == primary {
             owner = OwnerStatus::Primary;
             (
@@ -211,7 +212,11 @@ fn list_impl(
                     owner = match load_owner(&worktree) {
                         Ok(Some(_)) => OwnerStatus::Registered,
                         Ok(None) => OwnerStatus::Unowned,
-                        Err(_) => OwnerStatus::Unknown,
+                        Err(error) => {
+                            owner_evidence =
+                                Some(format!("owner record could not be read: {error}"));
+                            OwnerStatus::Unknown
+                        }
                     };
                     let disk = if entry.locked || entry.prunable {
                         WorkerState::Unknown
@@ -244,17 +249,19 @@ fn list_impl(
         };
         let occupancy = if disk == WorkerState::Busy {
             Occupancy::Held
-        } else if registration_unknown {
+        } else if registration_unknown || owner_evidence.is_some() {
             let evidence = if entry.locked {
-                "Git marks the worktree locked"
+                "Git marks the worktree locked".to_owned()
             } else if entry.prunable {
-                "Git marks the worktree prunable"
+                "Git marks the worktree prunable".to_owned()
             } else {
-                "worktree registration or writer custody could not be verified"
+                owner_evidence.unwrap_or_else(|| {
+                    "worktree registration or writer custody could not be verified".to_owned()
+                })
             };
             Occupancy::Unknown {
                 scope: path.clone(),
-                evidence: evidence.into(),
+                evidence,
                 source: OccupancyUnknownSource::Custody,
             }
         } else {

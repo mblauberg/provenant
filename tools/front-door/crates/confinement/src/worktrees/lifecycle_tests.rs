@@ -1341,6 +1341,19 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
     };
     save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
     assert_eq!(load_owner(&tree)?, Some(owner));
+    let owner_path = tree.repo().private_git_dir().join("provenant-owner.json");
+    let saved = fs::read(&owner_path)?;
+    fs::write(&owner_path, b"invalid owner record")?;
+    let observation = list_with_observation(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.info.path == info.path)
+        .ok_or("missing worktree")?;
+    assert!(matches!(
+        observation.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
+            if scope == info.path && evidence.contains("owner record could not be read")
+    ));
+    fs::write(&owner_path, saved)?;
     fixture.run(&["worktree", "lock", info.path.to_str().ok_or("path")?])?;
     let observation = list_with_observation(&context, &cancel())?
         .into_iter()

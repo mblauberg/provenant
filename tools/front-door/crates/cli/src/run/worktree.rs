@@ -136,6 +136,17 @@ pub(super) fn own_worktree(
                             base,
                         });
                     }
+                    if let Occupancy::Unknown {
+                        scope,
+                        evidence,
+                        source: OccupancyUnknownSource::Custody,
+                    } = &observation.occupancy
+                    {
+                        return Err(worktrees::WorktreeError::UnknownOccupancy {
+                            path: scope.clone(),
+                            detail: evidence.clone(),
+                        });
+                    }
                     let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
                     let owner = worktrees::load_owner(&tree)?;
                     if owner

@@ -3319,6 +3319,16 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
     drop(held);
     let replay_with_bystander = attempt_claim()?;
     assert_eq!(replay_with_bystander.0.path, path);
+    let owner_path = git_dir.join("provenant-owner.json");
+    let saved_owner = std::fs::read(&owner_path)?;
+    std::fs::write(&owner_path, b"invalid owner record")?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::UnknownOccupancy { path: scope, detail }
+        ))) if scope == path && detail.contains("owner record could not be read")
+    ));
+    std::fs::write(&owner_path, saved_owner)?;
     let run_policy = CensusPolicyWorkers::for_run(&observer, &roots)?;
     let replay = super::own_worktree(
         &super::OwnedWorktree {
