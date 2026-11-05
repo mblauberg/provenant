@@ -424,19 +424,7 @@ mod checkout_tests {
         fs::write(remote.join("file"), "first").unwrap();
         git(&remote, &["add".into(), "file".into()]).unwrap();
         let commit = |message: &str| {
-            git(
-                &remote,
-                &[
-                    "-c".into(),
-                    "user.name=Test".into(),
-                    "-c".into(),
-                    "user.email=test@example.invalid".into(),
-                    "commit".into(),
-                    "-am".into(),
-                    message.into(),
-                ],
-            )
-            .unwrap();
+            provenant_os::fixture::run_git(&remote, &["commit", "-am", message]).unwrap();
         };
         commit("first");
         git(
