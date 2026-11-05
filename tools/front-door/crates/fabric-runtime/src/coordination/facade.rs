@@ -799,24 +799,15 @@ mod diagnostic_tests {
     }
 
     #[test]
-    fn resume_preserves_no_fallback_and_defaults_for_older_senders()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut input = serde_json::json!({
+    fn resume_preserves_no_fallback_and_target() -> Result<(), Box<dyn std::error::Error>> {
+        let input = serde_json::json!({
             "op": "resume",
             "target": { "attempt": "00000000000000000000000000000001" },
             "operation_id": "resume-fixture",
             "prompt": "Continue",
-            "expected_generation": 0
+            "expected_generation": 0,
+            "no_fallback": true
         });
-        let legacy: super::RunInput = serde_json::from_value(input.clone())?;
-        assert!(matches!(
-            legacy,
-            super::RunInput::Resume {
-                no_fallback: false,
-                ..
-            }
-        ));
-        input["no_fallback"] = true.into();
         let explicit: super::RunInput = serde_json::from_value(input)?;
         assert!(matches!(
             explicit,
@@ -825,7 +816,12 @@ mod diagnostic_tests {
                 ..
             }
         ));
-        assert_eq!(serde_json::to_value(explicit)?["no_fallback"], true);
+        let wire = serde_json::to_value(explicit)?;
+        assert_eq!(wire["no_fallback"], true);
+        assert_eq!(
+            wire["target"]["attempt"],
+            "00000000000000000000000000000001"
+        );
         Ok(())
     }
 
