@@ -175,6 +175,28 @@ pub(super) fn worktree_cleanliness_at(
     }
 }
 
+/// Recheck that a verified worktree is clean while the caller holds writer
+/// custody. This probes the worktree's Git configuration before running status.
+pub fn require_clean_worktree(
+    context: &WorktreeContext<'_>,
+    worktree: &mut VerifiedWorktree,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    context
+        .utility
+        .probe_worktree(context.executor, worktree, context.utility_budget, cancel)?;
+    match worktree_cleanliness_at(context, worktree.repo(), cancel)? {
+        WorktreeCleanliness::Clean => Ok(()),
+        WorktreeCleanliness::Ignored => Err(WorktreeError::IgnoredPaths(String::new())),
+        WorktreeCleanliness::Dirty(paths) => Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
+        WorktreeCleanliness::Unknown => Err(WorktreeError::UnknownOccupancy {
+            path: worktree.path().to_path_buf(),
+            detail: "worktree cleanliness could not be verified".into(),
+        }),
+    }
+}
+
 pub(super) fn worktree_dirty_at(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,

@@ -64,7 +64,9 @@ scope and evidence. Admission represents a held lease, an advisory process and
 unknown census or custody evidence as distinct occupancy outcomes. Reassignment
 rechecks the owner and HEAD under repository
 and writer custody, and still refuses dirty trees, Git operations and retained
-writer fences.
+writer fences. Peer worktree adoption also rechecks writer custody, branch,
+HEAD and Git-operation state before accepting an existing checkout;
+process-only observations travel as warnings.
 
 Session handoff holds writer custody through WIP Git operations. It rechecks
 registration, branch, HEAD, Git operation markers and untracked files before

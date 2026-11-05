@@ -233,8 +233,11 @@ pub enum FacadeError {
     LaneCoordinationRefused,
     #[error("request violates confinement")]
     ConfinementRefused,
-    #[error("writer lock or writer is busy")]
-    WriterBusy,
+    #[error("writer lock or writer is busy{}", .holder.map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
+    WriterBusy {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder: Option<AttemptId>,
+    },
     #[error("writer custody is unknown")]
     WriterUnknown,
     #[error("a requested credential-root grant was refused")]
@@ -451,7 +454,12 @@ impl FacadeError {
             Self::HostDeliveryStage { stage } | Self::Io { delivery_stage: Some(stage), .. } => projected = projected.detail(format!("host writer delivery failed at {stage:?}")).next("inspect host delivery before retrying"),
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
-            Self::WriterBusy => projected = projected.next("wait for the current writer or lock holder to finish"),
+            Self::WriterBusy { holder } => {
+                if let Some(holder) = holder {
+                    projected = projected.detail(format!("writer is held by attempt {holder}"));
+                }
+                projected = projected.next("wait for the current writer or lock holder to finish");
+            }
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
             Self::ConfinementRefused => projected = projected.next("inspect the requested access and confinement policy"),
             Self::CredentialRoot { access } => {
@@ -482,7 +490,7 @@ impl FacadeError {
             Self::LaneDepth => "lane_depth",
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused => "confinement_refused",
-            Self::WriterBusy => "writer_busy",
+            Self::WriterBusy { .. } => "writer_busy",
             Self::WriterUnknown => "writer_unknown",
             Self::CredentialRoot { .. } => "credential_root",
             Self::DispatchRefused { .. } => "dispatch_refused",
@@ -781,6 +789,30 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::FacadeError;
+
+    #[test]
+    fn writer_busy_preserves_holder_and_reads_prior_frames()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let old: FacadeError = serde_json::from_value(serde_json::json!({"code":"writer_busy"}))?;
+        assert_eq!(old, FacadeError::WriterBusy { holder: None });
+        let holder = provenant_core::AttemptId::from_bytes([23; 16]);
+        let current = FacadeError::WriterBusy {
+            holder: Some(holder),
+        };
+        assert!(current.to_string().contains(&holder.to_string()));
+        assert!(
+            current
+                .diagnostic()
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains(&holder.to_string()))
+        );
+        assert_eq!(
+            serde_json::from_value::<FacadeError>(serde_json::to_value(&current)?)?,
+            current
+        );
+        Ok(())
+    }
 
     #[test]
     fn future_schema_requires_upgrade_with_version_diagnostics() {

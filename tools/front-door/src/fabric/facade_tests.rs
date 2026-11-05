@@ -1,5 +1,225 @@
 #[cfg(test)]
 #[test]
+fn peer_adoption_checks_lease_and_treats_census_as_advisory()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{self, WorkerObserver, WorkerState};
+    use std::collections::BTreeMap;
+    struct Observer(WorkerState);
+    impl WorkerObserver for Observer {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots.iter().cloned().map(|path| (path, self.0)).collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&state)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::create_dir_all(&project)?;
+    provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+    provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let attempt = provenant_core::AttemptId::from_bytes([23; 16]);
+    let operation = provenant_core::OperationId::parse("peer-adoption")?;
+    let info = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Observer(WorkerState::Free),
+        |context| {
+            let info = worktrees::create(
+                context,
+                worktrees::WorktreeCreate {
+                    branch: "peer-adoption".into(),
+                    base: None,
+                },
+                &cancel,
+            )?;
+            let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+            worktrees::save_owner(
+                &tree,
+                &worktrees::WorktreeOwner {
+                    attempt_id: Some(attempt),
+                    operation_id: Some(operation.clone()),
+                    branch: "peer-adoption".into(),
+                    base: info.head.to_string(),
+                    host: provenant_core::HostId::from_bytes([9; 16]),
+                    created_at: clock
+                        .wall_now()
+                        .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                    origin: worktrees::WorktreeOrigin::Lane,
+                    label: None,
+                },
+            )?;
+            Ok(info)
+        },
+    )?;
+    let held = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Observer(WorkerState::Free),
+        |context| {
+            worktrees::cache_writer_guard(context.project_state, &info.path)
+                .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+        },
+    )?;
+    let facts = worktrees::RepoFacts::default();
+    let observe = |state| {
+        worktrees::with_context_using_workers(
+            &roots,
+            &home,
+            &project,
+            &clock,
+            &cancel,
+            &Observer(state),
+            |context| {
+                let entry = worktrees::list_with_observation_and_facts(context, &facts, &cancel)?
+                    .into_iter()
+                    .find(|entry| entry.info.path == info.path)
+                    .ok_or(worktrees::WorktreeError::NotFound)?;
+                peer_adoption_custody(context, &facts, &entry, &cancel)
+            },
+        )
+    };
+    let busy = observe(WorkerState::Live).expect_err("a held lease must refuse adoption");
+    assert!(matches!(
+        &busy,
+        worktrees::WorktreeError::WriterBusy { holder: Some(id) } if *id == attempt
+    ));
+    assert!(matches!(
+        run_error(provenant_run::RunError::Writer(busy)),
+        FacadeError::WriterBusy { holder: Some(id) } if id == attempt
+    ));
+    let stale_held = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Observer(WorkerState::Free),
+        |context| {
+            worktrees::list_with_observation_and_facts(context, &facts, &cancel)?
+                .into_iter()
+                .find(|entry| entry.info.path == info.path)
+                .ok_or(worktrees::WorktreeError::NotFound)
+        },
+    )?;
+    assert!(matches!(&stale_held.occupancy, worktrees::Occupancy::Held));
+    drop(held);
+    assert!(
+        worktrees::with_context_using_workers(
+            &roots,
+            &home,
+            &project,
+            &clock,
+            &cancel,
+            &Observer(WorkerState::Free),
+            |context| peer_adoption_custody(context, &facts, &stale_held, &cancel),
+        )?
+        .is_none()
+    );
+    assert!(observe(WorkerState::Live)?.is_some());
+    assert!(observe(WorkerState::Unknown)?.is_some());
+    let stale = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Observer(WorkerState::Free),
+        |context| {
+            worktrees::list_with_observation_and_facts(context, &facts, &cancel)?
+                .into_iter()
+                .find(|entry| entry.info.path == info.path)
+                .ok_or(worktrees::WorktreeError::NotFound)
+        },
+    )?;
+    std::fs::write(info.path.join("uncommitted"), "preserve")?;
+    assert!(matches!(
+        worktrees::with_context_using_workers(
+            &roots,
+            &home,
+            &project,
+            &clock,
+            &cancel,
+            &Observer(WorkerState::Free),
+            |context| peer_adoption_custody(context, &facts, &stale, &cancel),
+        ),
+        Err(worktrees::WorktreeError::Dirty(_))
+    ));
+    assert_eq!(
+        std::fs::read_to_string(info.path.join("uncommitted"))?,
+        "preserve"
+    );
+    std::fs::remove_file(info.path.join("uncommitted"))?;
+    let git_dir = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Observer(WorkerState::Free),
+        |context| {
+            Ok(
+                provenant_confinement::verify_worktree(context.repo, &info.path)?
+                    .repo()
+                    .private_git_dir()
+                    .to_path_buf(),
+            )
+        },
+    )?;
+    std::fs::write(git_dir.join("MERGE_HEAD"), format!("{}\n", info.head))?;
+    assert!(matches!(
+        worktrees::with_context_using_workers(
+            &roots,
+            &home,
+            &project,
+            &clock,
+            &cancel,
+            &Observer(WorkerState::Free),
+            |context| peer_adoption_custody(context, &facts, &stale, &cancel),
+        ),
+        Err(worktrees::WorktreeError::GitOperationInProgress)
+    ));
+    assert!(git_dir.join("MERGE_HEAD").exists());
+    std::fs::remove_file(git_dir.join("MERGE_HEAD"))?;
+    provenant_os::fixture::run_git(&info.path, &["commit", "--allow-empty", "-qm", "moved"])?;
+    assert!(matches!(
+        worktrees::with_context_using_workers(
+            &roots,
+            &home,
+            &project,
+            &clock,
+            &cancel,
+            &Observer(WorkerState::Free),
+            |context| peer_adoption_custody(context, &facts, &stale, &cancel),
+        ),
+        Err(worktrees::WorktreeError::IdentityChanged)
+    ));
+    provenant_os::fixture::run_git(
+        &project,
+        &["worktree", "lock", info.path.to_str().ok_or("path")?],
+    )?;
+    assert!(
+        matches!(observe(WorkerState::Free), Err(worktrees::WorktreeError::UnknownOccupancy { path, detail }) if path == info.path && detail.contains("locked"))
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
 fn cli_failure_uses_stderr_without_structured_json() {
     let error = cli_failure(b"not json", b"specific failure\nadditional detail\n");
     assert!(matches!(error, ServiceError::Cli { code, message, data }

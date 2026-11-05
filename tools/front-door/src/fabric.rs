@@ -29,6 +29,77 @@ include!("fabric/graph_tests.rs");
 
 use provenant_cli::fabric::Context;
 
+/// Recheck writer custody before adopting an existing peer worktree. Census
+/// observations remain advisory; an actual held lease or retained fence refuses.
+fn peer_adoption_custody(
+    context: &provenant_confinement::worktrees::WorktreeContext<'_>,
+    facts: &provenant_confinement::worktrees::RepoFacts,
+    observation: &provenant_confinement::worktrees::WorktreeObservation,
+    cancel: &CancelToken,
+) -> Result<Option<&'static str>, provenant_confinement::worktrees::WorktreeError> {
+    use provenant_confinement::worktrees::{
+        self, Occupancy, OccupancyUnknownSource, WorkerState, WorktreeError,
+    };
+    let warning = match &observation.occupancy {
+        Occupancy::Held => None,
+        Occupancy::Unknown {
+            scope,
+            evidence,
+            source: OccupancyUnknownSource::Custody,
+        } => {
+            return Err(WorktreeError::UnknownOccupancy {
+                path: scope.clone(),
+                detail: evidence.clone(),
+            });
+        }
+        Occupancy::Unknown { .. } => {
+            Some("process census was incomplete; writer custody was checked")
+        }
+        Occupancy::Observed { .. } => {
+            Some("a process was observed in the worktree; writer custody was checked")
+        }
+        Occupancy::Available => None,
+    };
+    let mut tree = provenant_confinement::verify_worktree(context.repo, &observation.info.path)
+        .map_err(|error| WorktreeError::UnknownOccupancy {
+            path: observation.info.path.clone(),
+            detail: format!("worktree registration could not be verified: {error}"),
+        })?;
+    let holder =
+        || worktrees::load_owner(&tree).map(|owner| owner.and_then(|owner| owner.attempt_id));
+    let _writer =
+        worktrees::cache_writer_guard(context.project_state, tree.path()).map_err(|state| {
+            match state {
+                WorkerState::Busy => WorktreeError::WriterBusy {
+                    holder: holder().ok().flatten(),
+                },
+                _ => WorktreeError::UnknownOccupancy {
+                    path: tree.path().to_path_buf(),
+                    detail: "writer custody could not be verified".into(),
+                },
+            }
+        })?;
+    worktrees::check_writer_terminal(tree.repo())?;
+    let branch = observation
+        .info
+        .branch
+        .as_deref()
+        .ok_or(WorktreeError::IdentityChanged)?;
+    let reference = provenant_confinement::repo::GitRefName::new(branch)
+        .map_err(|_| WorktreeError::IdentityChanged)?;
+    let head = tree
+        .repo()
+        .private_dir()
+        .read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
+    if head != format!("ref: {}\n", reference.as_str()).as_bytes()
+        || facts.resolve_commit(context, reference, cancel)? != observation.info.head
+    {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    worktrees::require_clean_worktree(context, &mut tree, cancel)?;
+    Ok(warning)
+}
+
 /// Repeat a list-then-read tail lookup until two consecutive passes name the
 /// same attempt, and return the earlier pass's record. The later pass listed
 /// after the earlier one read its state, so agreement proves no successor had
@@ -1583,6 +1654,12 @@ fn events_within<T: serde::Serialize>(events: &[T], max_bytes: u64) -> Result<us
     Ok(events.len())
 }
 fn run_error(error: provenant_run::RunError) -> FacadeError {
+    if let provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::WriterBusy { holder },
+    ) = &error
+    {
+        return FacadeError::WriterBusy { holder: *holder };
+    }
     fail_error(error.into())
 }
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
@@ -1701,7 +1778,7 @@ fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
         | E::LaneCap
         | E::BuildSettings
         | E::GuardianIdentity => FacadeError::ConfinementRefused,
-        E::WriterBusy => FacadeError::WriterBusy,
+        E::WriterBusy => FacadeError::WriterBusy { holder: None },
         E::WriterUnknown => FacadeError::WriterUnknown,
         E::CredentialRoot => FacadeError::CredentialRoot {
             access: "requested".into(),
@@ -2346,7 +2423,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::runs::PeerWorktree, FacadeError> {
         use provenant_confinement::worktrees::{
-            self, WorktreeCondition, WorktreeCreate, WorktreeError, WriterState,
+            self, WorktreeCondition, WorktreeCreate, WorktreeError,
         };
         let branch = provenant_confinement::repo::GitRefName::branch(&spec.branch)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
@@ -2369,39 +2446,44 @@ impl BinaryRunOwner<'_> {
         } else {
             Some(fetch_remote_base(project, &spec.base, half())?)
         };
-        let info = crate::worktrees::with_context(
+        let facts = worktrees::RepoFacts::default();
+        let (info, warning) = crate::worktrees::with_context(
             &self.factory.context.roots,
             &self.factory.home,
             project,
             half(),
             self.factory.workers,
             |context, cancel| {
-                let existing = worktrees::list(context, cancel)?
+                let existing = worktrees::list_with_observation_and_facts(context, &facts, cancel)?
                     .into_iter()
-                    .find(|w| w.branch.as_deref() == Some(branch.as_str()));
+                    .find(|entry| entry.info.branch.as_deref() == Some(branch.as_str()));
                 let Some(base) = base else {
-                    return existing.ok_or(WorktreeError::NotFound.into());
+                    return existing
+                        .map(|entry| (entry.info, None))
+                        .ok_or(WorktreeError::NotFound.into());
                 };
                 match existing {
-                    Some(info)
-                        if info.head == base
-                            && info.dirty == WorktreeCondition::Clean
-                            && info.writer != WriterState::Live =>
-                    {
-                        Ok(info)
+                    Some(entry) => {
+                        if entry.info.head != base || entry.info.dirty != WorktreeCondition::Clean {
+                            if matches!(&entry.occupancy, worktrees::Occupancy::Held) {
+                                let _ = peer_adoption_custody(context, &facts, &entry, cancel)?;
+                            }
+                            return Err(WorktreeError::BranchExistsWithBase {
+                                branch: spec.branch.clone(),
+                                head: entry.info.head,
+                                base,
+                            }
+                            .into());
+                        }
+                        let warning = peer_adoption_custody(context, &facts, &entry, cancel)?;
+                        Ok((entry.info, warning))
                     }
-                    Some(info) => Err(WorktreeError::BranchExistsWithBase {
-                        branch: spec.branch.clone(),
-                        head: info.head,
-                        base,
-                    }
-                    .into()),
                     None => {
                         let request = WorktreeCreate {
                             branch: spec.branch.clone(),
                             base: Some(base.to_string()),
                         };
-                        Ok(worktrees::create(context, request, cancel)?)
+                        Ok((worktrees::create(context, request, cancel)?, None))
                     }
                 }
             },
@@ -2418,10 +2500,31 @@ impl BinaryRunOwner<'_> {
                 FacadeError::BaseUnreachable
             }
             crate::worktrees::Error::Worktree(WorktreeError::Cancelled) => FacadeError::Cancelled,
+            crate::worktrees::Error::Worktree(WorktreeError::IdentityChanged) => {
+                FacadeError::Conflict
+            }
+            crate::worktrees::Error::Worktree(
+                WorktreeError::GitOperationInProgress
+                | WorktreeError::Dirty(_)
+                | WorktreeError::IgnoredPaths(_),
+            ) => FacadeError::ConfinementRefused,
+            crate::worktrees::Error::Worktree(WorktreeError::WriterBusy { holder }) => {
+                FacadeError::WriterBusy { holder }
+            }
+            crate::worktrees::Error::Worktree(WorktreeError::LockBusy) => {
+                FacadeError::WriterBusy { holder: None }
+            }
+            crate::worktrees::Error::Worktree(
+                WorktreeError::UnknownOccupancy { .. } | WorktreeError::UnknownWriter,
+            ) => FacadeError::WriterUnknown,
             _ => FacadeError::io("create peer worktree"),
         })?;
+        let mut extra = provenant_records::ExtraFields::default();
+        if let Some(warning) = warning {
+            extra.insert("warnings".into(), serde_json::json!([warning]));
+        }
         Ok(provenant_fabric_runtime::runs::PeerWorktree {
-            extra: Default::default(),
+            extra,
             path: info
                 .path
                 .to_str()
