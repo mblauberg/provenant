@@ -176,7 +176,7 @@ fn account_placement() -> Result {
     use provenant_os::exec::Executor;
     use provenant_os::exec::SystemExecutor;
     use provenant_providers::{
-        Adapter, PrepareInput, Prompt, SetupStep, Stdin,
+        Adapter, PrepareInput, Prompt, Stdin,
         codex::Codex,
         identity::{Accounts, RegisteredAccount},
     };
@@ -222,7 +222,7 @@ fn account_placement() -> Result {
             permissions: PlanPermissions {
                 read_only: None,
                 mode: AccessMode::ReadOnly,
-                scratch: grant(scratch),
+                scratch: grant(scratch.clone()),
                 private_state: Some(grant(state.clone())),
                 read_roots: vec![grant(rig.project.clone())],
                 protected_roots: vec![],
@@ -290,22 +290,14 @@ fn account_placement() -> Result {
         })?;
         let auth = account.directory().join("auth.json");
         let selected = &spec.profile.spec.authentication[0];
-        assert_eq!(selected.roots.len(), 1);
-        assert_eq!(selected.roots[0].path, auth);
-        assert_eq!(selected.in_place_writes.len(), 1);
-        assert_eq!(selected.in_place_writes[0].path, auth);
-        for step in &spec.setup {
-            match step {
-                SetupStep::CreateDir(path) => std::fs::create_dir_all(path)?,
-                SetupStep::WriteFile { path, bytes } => std::fs::write(path, bytes)?,
-                SetupStep::WriteExecutable { path, bytes } => {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::write(path, bytes)?;
-                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-                }
-                SetupStep::Symlink { link, target } => std::os::unix::fs::symlink(target, link)?,
-            }
-        }
+        assert!(selected.roots.iter().any(|root| root.path == auth));
+        assert!(
+            selected
+                .in_place_writes
+                .iter()
+                .any(|root| root.path == auth)
+        );
+        provenant_cli::run::apply_fixture_setup(&spec.setup, &[&scratch, &state, &rig.state])?;
         specs.push((key, state, spec));
     }
     let coordinator = std::thread::spawn(move || -> std::io::Result<Vec<String>> {

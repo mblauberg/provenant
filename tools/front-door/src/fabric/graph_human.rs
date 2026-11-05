@@ -31,6 +31,9 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
                 .unwrap_or("unavailable")
         ));
     }
+    if let Some(outcome) = run.outcome {
+        human.push_str(&format!("Outcome: {outcome:?}\n"));
+    }
     if run.status == provenant_fabric_runtime::graph::GraphStatus::Paused
         && let Some(reason) = &run.checkpoint.pause_reason
     {

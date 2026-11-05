@@ -6374,6 +6374,7 @@ impl Factory {
             use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphRun, GraphStatus};
             GraphRun {
                 status: GraphStatus::Paused,
+                outcome: None,
                 checkpoint: GraphCheckpoint {
                     bound_review_base: None,
                     bound_integration_base: None,
@@ -6409,7 +6410,7 @@ impl Factory {
             }
         };
         if matches!(input, GraphInput::Status { .. }) {
-            let mut checkpoint = match FileJournal::read_checkpoint(
+            let mut checkpoint = match FileJournal::read_status_checkpoint(
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,

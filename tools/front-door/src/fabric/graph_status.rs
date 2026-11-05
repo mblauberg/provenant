@@ -67,6 +67,7 @@ pub(super) fn graph_snapshot(
         .find_map(|node| node.advance_error.clone());
     GraphRun {
         status,
+        outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
         checkpoint,
         advance_error,
     }

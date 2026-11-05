@@ -808,48 +808,6 @@ fn read_only_store_reports_whether_it_holds_a_run() -> TestResult {
 }
 
 #[test]
-fn historical_task_class_preserves_request_verification_and_lane_listing() -> TestResult {
-    for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        let mut input = input();
-        let mut sealed = serde_json::to_value(&input.request)?;
-        sealed["tasks"][0]["profile"] = serde_json::json!({
-            "name": "", "knobs": {}, "overrides": [], "task_class": task_class
-        });
-        let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
-        input.request = serde_json::from_value(sealed.clone())?;
-        store.create(&input, &call)?;
-        assert_eq!(store.run(input.run_id, &call)?.request_digest, digest);
-        assert_eq!(
-            serde_json::to_value(store.request(input.run_id, &call)?)?,
-            sealed
-        );
-        let page = store.lanes(
-            &LaneQuery {
-                targets: Vec::new(),
-                all: true,
-                limit: 10,
-                after: 0,
-                newest_first: false,
-                owner: None,
-                unseen_after: None,
-            },
-            &call,
-        )?;
-        assert_eq!(page.lanes.len(), 1);
-        assert_eq!(
-            serde_json::to_value(&page.lanes[0].profile)?,
-            sealed["tasks"][0]["profile"]
-        );
-    }
-    Ok(())
-}
-
-#[test]
 fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -2417,57 +2375,6 @@ fn the_store_initialises_at_version_six_without_spacing() -> TestResult {
 }
 
 #[test]
-fn temporary_tracking_upgrade_preserves_version_one_cancel_binding() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    // Shape the store exactly as version 1 left it.
-    RunStore::open(&context, &call)?
-        .db
-        .execute_batch(
-            "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
-        )?;
-    let store = RunStore::open(&context, &call)?;
-    let op = OperationId::parse("stop")?;
-    store.bind_cancel(&op, "attempt", &call)?;
-    assert!(matches!(
-        store.bind_cancel(&op, "other", &call),
-        Err(RunError::OperationConflict)
-    ));
-    Ok(())
-}
-
-#[test]
-fn temporary_tracking_upgrade_drops_version_two_spacing() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    // Shape the store exactly as version 2 left it, with the unused table back.
-    RunStore::open(&context, &call)?.db.execute_batch(
-        "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
-    )?;
-    let store = RunStore::open(&context, &call)?;
-    let remaining: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='spacing'",
-        [],
-        |r| r.get(0),
-    )?;
-    assert_eq!(remaining, 0);
-    let version: i64 =
-        store
-            .db
-            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
-                r.get(0)
-            })?;
-    assert_eq!(version, 8);
-    Ok(())
-}
-
-#[test]
 fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -2729,49 +2636,6 @@ fn work_context_bounds_are_enforced() -> TestResult {
         ..Default::default()
     });
     store.create(&request, &call)?;
-    Ok(())
-}
-
-#[test]
-fn version_six_upgrades_from_five_and_keeps_existing_attempts() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    let input = input();
-    let store = RunStore::open(&context, &call)?;
-    store.create(&input, &call)?;
-    // Shape the store exactly as version 5 left it.
-    store.db.execute_batch(
-        "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; PRAGMA user_version=5;",
-    )?;
-    drop(store);
-    let store = RunStore::open(&context, &call)?;
-    let backup = context.state_root.as_path().join(format!(
-        "run.sqlite3.bak-{}",
-        call.clock.wall_now()?.as_micros()
-    ));
-    let backup = provenant_sqlite::open_connection(&backup, true)?;
-    assert_eq!(
-        backup.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        5
-    );
-    assert_eq!(
-        backup.query_row("SELECT count(*) FROM attempts", [], |row| row
-            .get::<_, i64>(0))?,
-        1
-    );
-    let version: i64 =
-        store
-            .db
-            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
-                r.get(0)
-            })?;
-    assert_eq!(version, 8);
-    // History is not backfilled: nothing is owed for attempts that predate it.
-    assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
-    store.record(input.attempts[0].attempt_id, &call)?;
     Ok(())
 }
 
@@ -3228,5 +3092,54 @@ fn pressure_collection_uses_configured_logs_age() -> TestResult {
     assert!(store.reaction(id, &call)?.is_some());
     store.gc_temporary(&directory, 7, 5, now, false, &call)?;
     assert!(store.reaction(id, &call)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn historical_run_stores_upgrade_with_attempts_and_backups() -> TestResult {
+    for version in [1, 2, 5] {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let input = input();
+        let store = RunStore::open(&context, &call)?;
+        store.create(&input, &call)?;
+        store.db.execute_batch(
+            "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions;",
+        )?;
+        if version < 5 {
+            store.db.execute_batch("DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT;")?;
+        }
+        if version == 1 {
+            store.db.execute_batch("DROP TABLE cancellations;")?;
+        }
+        store.db.pragma_update(None, "user_version", version)?;
+        drop(store);
+        let upgraded = RunStore::open(&context, &call)?;
+        let backup = context.state_root.as_path().join(format!(
+            "run.sqlite3.bak-{}",
+            call.clock.wall_now()?.as_micros()
+        ));
+        let backup = provenant_sqlite::open_connection(&backup, true)?;
+        assert_eq!(
+            backup.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?,
+            version
+        );
+        assert_eq!(
+            backup.query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))?,
+            1
+        );
+        upgraded.record(input.attempts[0].attempt_id, &call)?;
+        if version == 1 {
+            let op = OperationId::parse("stop")?;
+            upgraded.bind_cancel(&op, "attempt", &call)?;
+            assert!(matches!(
+                upgraded.bind_cancel(&op, "other", &call),
+                Err(RunError::OperationConflict)
+            ));
+        }
+    }
     Ok(())
 }

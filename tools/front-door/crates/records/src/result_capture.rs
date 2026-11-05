@@ -46,42 +46,6 @@ pub struct CapturedResult {
     pub disposition_proof: DispositionProof,
 }
 
-impl CapturedResult {
-    /// The legacy first-line verdict declaration retained for one release
-    /// (#2371): the first non-empty line of the answer, read only when the
-    /// whole answer declares exactly one verdict and that line is complete.
-    /// Review reads this shape, and settlement counts it as a report, so a
-    /// lane the reader accepts never settles as if it reported nothing.
-    pub fn legacy_verdict_token(&self) -> Option<String> {
-        if self.declarations != 1 {
-            return None;
-        }
-        let line = self
-            .excerpt
-            .split_inclusive('\n')
-            .find(|line| !line.trim().is_empty())?;
-        // A clipped first line is not legacy evidence.
-        if self.truncated && !line.ends_with('\n') {
-            return None;
-        }
-        let stripped = line.replace('*', "");
-        let (label, token) = stripped.trim().trim_matches('_').trim().split_once(':')?;
-        if !label
-            .trim_matches(|c| c == '*' || c == '_')
-            .trim()
-            .eq_ignore_ascii_case("verdict")
-        {
-            return None;
-        }
-        Some(
-            token
-                .trim()
-                .trim_matches(|c| c == '*' || c == '_')
-                .to_owned(),
-        )
-    }
-}
-
 impl ResultCapture {
     pub const HEAD_BYTES: usize = HEAD_BYTES;
 
@@ -509,47 +473,6 @@ fn window(bytes: &[u8], cap: usize, tail: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn legacy_first_line_verdict_is_read_only_when_it_is_the_single_declaration() {
-        let run = |text: &str| {
-            let mut capture = ResultCapture::new(None);
-            for chunk in text.as_bytes().chunks(5) {
-                capture.push(chunk);
-            }
-            capture.finish()
-        };
-        for (text, expected) in [
-            ("Verdict: approve\nNothing found", Some("approve")),
-            ("\n **Verdict: APPROVE**\nNothing found", Some("APPROVE")),
-            (
-                "**Verdict:** *Request_Changes*\nFinding",
-                Some("Request_Changes"),
-            ),
-            ("Reviewed.\nVerdict: approve\nFinding", None),
-            ("Verdict: approve\nVerdict: request_changes", None),
-            ("I approve\nVerdict: approve", None),
-            (
-                "Verdict: approve_with_nits\nFinding",
-                Some("approve_with_nits"),
-            ),
-        ] {
-            assert_eq!(
-                run(text).legacy_verdict_token().as_deref(),
-                expected,
-                "{text:?}"
-            );
-        }
-        // A clipped first line is not legacy evidence.
-        assert_eq!(
-            run(&format!("Verdict: approve{}", " ".repeat(9000))).legacy_verdict_token(),
-            None
-        );
-        // The final-line grammar answers on its own.
-        let final_line = run("Reviewed.\nVERDICT: APPROVE\n");
-        assert_eq!(final_line.verdict.as_deref(), Some("VERDICT: APPROVE"));
-        assert_eq!(final_line.legacy_verdict_token(), None);
-    }
 
     #[test]
     fn verdict_survives_trailing_handoff_but_not_prose() {

@@ -1158,55 +1158,6 @@ mod tests {
     }
 
     #[test]
-    fn v3_store_migrates_to_v4_keeping_its_links()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let (context, mut attempt, old, _) = fixture(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        let head = GitOid::parse(&"a".repeat(40))?;
-        db.bind(context.project_id, "feat/x", &old, head, &call)?;
-        attempt.attempt_id = AttemptId::from_bytes([1; 16]);
-        db.capture(&attempt, "feat/x", "worker", &call)?;
-        db.0.execute_batch("DROP TABLE reassignments; PRAGMA user_version=3;")?;
-        drop(db);
-        let v3 = Contributions::open_read_only(context.state_root.as_path(), &call)?
-            .ok_or("v3 store")?;
-        assert_eq!(v3.for_pr(&old, &call)?.len(), 1);
-        assert_eq!(v3.reassigned_from_pr(&old, &call)?, 0);
-        drop(v3);
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        assert_eq!(db.for_pr(&old, &call)?.len(), 1);
-        let backup = context
-            .state_root
-            .as_path()
-            .join(format!("{FILE}.bak-{}", call.clock.wall_now()?.as_micros()));
-        let backup = provenant_sqlite::open_connection(&backup, true)?;
-        assert_eq!(
-            backup.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-            3
-        );
-        assert_eq!(
-            backup.query_row("SELECT count(*) FROM branch_prs", [], |row| row
-                .get::<_, i64>(0))?,
-            1
-        );
-        let tables: i64 = db.0.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name='reassignments'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(tables, 1);
-        assert_eq!(
-            db.0.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-            4
-        );
-        Ok(())
-    }
-
-    #[test]
     fn reader_orders_by_queue_time_then_attempt()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -1336,107 +1287,6 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn migrates_legacy_links_without_inventing_metadata()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let pr = PullRequest {
-            repository: "owner/repo".into(),
-            number: 42,
-        };
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        db.link(AttemptId::from_bytes([1; 16]), &pr, &call)?;
-        db.0.execute_batch(
-            "DROP TABLE branch_attempts; DROP TABLE branch_prs; DROP TABLE branch_generations; DROP TABLE truncations; DROP TABLE reassignments; PRAGMA user_version=1;",
-        )?;
-        drop(db);
-        let legacy = Contributions::open_read_only(context.state_root.as_path(), &call)?
-            .ok_or("legacy store")?;
-        let rows = legacy.for_pr(&pr, &call)?;
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].role.is_none());
-        assert!(rows[0].run.is_none());
-        assert!(rows[0].queued_at.is_none());
-        assert_eq!(
-            legacy
-                .0
-                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-            1
-        );
-        drop(legacy);
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        let rows = db.for_pr(&pr, &call)?;
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].role.is_none());
-        assert!(rows[0].weight_millionths.is_none());
-        assert!(rows[0].head.is_none());
-        Ok(())
-    }
-    #[test]
-    fn v2_metadata_is_readable_and_migrates_without_losing_links()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let pr = PullRequest {
-            repository: "owner/repo".into(),
-            number: 42,
-        };
-        let id = AttemptId::from_bytes([1; 16]);
-        let head = "a".repeat(40);
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        db.link(id, &pr, &call)?;
-        db.0.execute_batch(
-            "DROP TABLE branch_attempts; DROP TABLE branch_prs;
-             DROP TABLE branch_generations; DROP TABLE truncations; DROP TABLE reassignments;
-             CREATE TABLE branch_attempts (
-                 attempt TEXT PRIMARY KEY, project TEXT NOT NULL, branch TEXT NOT NULL,
-                 role TEXT NOT NULL, model TEXT, account TEXT) STRICT;
-             CREATE TABLE branch_prs (
-                 project TEXT NOT NULL, branch TEXT NOT NULL, repository TEXT NOT NULL,
-                 number INTEGER NOT NULL, head TEXT NOT NULL,
-                 PRIMARY KEY(project,branch,repository,number)) STRICT;
-             PRAGMA user_version=2;",
-        )?;
-        db.0.execute(
-            "INSERT INTO branch_attempts VALUES (?1,?2,'feat','review','fixture/model',NULL)",
-            params![id.to_string(), context.project_id.to_string()],
-        )?;
-        db.0.execute(
-            "INSERT INTO branch_prs VALUES (?1,'feat','owner/repo',42,?2)",
-            params![context.project_id.to_string(), head],
-        )?;
-        drop(db);
-        let legacy =
-            Contributions::open_read_only(context.state_root.as_path(), &call)?.ok_or("store")?;
-        let before = legacy.for_pr(&pr, &call)?;
-        assert_eq!(before.len(), 1);
-        assert_eq!(before[0].role.as_deref(), Some("read_only"));
-        assert_eq!(before[0].model.as_deref(), Some("fixture/model"));
-        assert!(before[0].run.is_none());
-        assert_eq!(
-            legacy
-                .0
-                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-            2
-        );
-        drop(legacy);
-        let migrated = Contributions::open(context.state_root.as_path(), &call)?;
-        assert_eq!(migrated.for_pr(&pr, &call)?, before);
-        migrated.close(context.project_id, &pr, &call)?;
-        assert_eq!(
-            Contributions::generation(&migrated.0, context.project_id, "feat")?,
-            1
-        );
-        Ok(())
-    }
-
-    #[test]
     fn allocation_roundtrip() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
@@ -1504,6 +1354,157 @@ mod tests {
         assert_eq!(rows[0].pr_count, 2);
         assert!(!rows[0].ambiguous);
         assert!(rows[1..].iter().all(|row| row.weight_millionths.is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn v3_store_migrates_to_v4_keeping_its_links()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (context, mut attempt, old, _) = fixture(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let db = Contributions::open(context.state_root.as_path(), &call)?;
+        let head = GitOid::parse(&"a".repeat(40))?;
+        db.bind(context.project_id, "feat/x", &old, head, &call)?;
+        attempt.attempt_id = AttemptId::from_bytes([1; 16]);
+        db.capture(&attempt, "feat/x", "worker", &call)?;
+        db.0.execute_batch("DROP TABLE reassignments; PRAGMA user_version=3;")?;
+        drop(db);
+        let v3 = Contributions::open_read_only(context.state_root.as_path(), &call)?
+            .ok_or("v3 store")?;
+        assert_eq!(v3.for_pr(&old, &call)?.len(), 1);
+        assert_eq!(v3.reassigned_from_pr(&old, &call)?, 0);
+        drop(v3);
+        let db = Contributions::open(context.state_root.as_path(), &call)?;
+        assert_eq!(db.for_pr(&old, &call)?.len(), 1);
+        let backup = context
+            .state_root
+            .as_path()
+            .join(format!("{FILE}.bak-{}", call.clock.wall_now()?.as_micros()));
+        let backup = provenant_sqlite::open_connection(&backup, true)?;
+        assert_eq!(
+            backup.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+            3
+        );
+        assert_eq!(
+            backup.query_row("SELECT count(*) FROM branch_prs", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+        let tables: i64 = db.0.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='reassignments'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(tables, 1);
+        assert_eq!(
+            db.0.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+            4
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_legacy_links_without_inventing_metadata()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let pr = PullRequest {
+            repository: "owner/repo".into(),
+            number: 42,
+        };
+        let db = Contributions::open(context.state_root.as_path(), &call)?;
+        db.link(AttemptId::from_bytes([1; 16]), &pr, &call)?;
+        db.0.execute_batch(
+            "DROP TABLE branch_attempts; DROP TABLE branch_prs; DROP TABLE branch_generations; DROP TABLE truncations; DROP TABLE reassignments; PRAGMA user_version=1;",
+        )?;
+        drop(db);
+        let legacy = Contributions::open_read_only(context.state_root.as_path(), &call)?
+            .ok_or("legacy store")?;
+        let rows = legacy.for_pr(&pr, &call)?;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].role.is_none());
+        assert!(rows[0].run.is_none());
+        assert!(rows[0].queued_at.is_none());
+        assert_eq!(
+            legacy
+                .0
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+            1
+        );
+        drop(legacy);
+        let db = Contributions::open(context.state_root.as_path(), &call)?;
+        let rows = db.for_pr(&pr, &call)?;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].role.is_none());
+        assert!(rows[0].weight_millionths.is_none());
+        assert!(rows[0].head.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn v2_metadata_is_readable_and_migrates_without_losing_links()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let pr = PullRequest {
+            repository: "owner/repo".into(),
+            number: 42,
+        };
+        let id = AttemptId::from_bytes([1; 16]);
+        let head = "a".repeat(40);
+        let db = Contributions::open(context.state_root.as_path(), &call)?;
+        db.link(id, &pr, &call)?;
+        db.0.execute_batch(
+            "DROP TABLE branch_attempts; DROP TABLE branch_prs;
+             DROP TABLE branch_generations; DROP TABLE truncations; DROP TABLE reassignments;
+             CREATE TABLE branch_attempts (
+                 attempt TEXT PRIMARY KEY, project TEXT NOT NULL, branch TEXT NOT NULL,
+                 role TEXT NOT NULL, model TEXT, account TEXT) STRICT;
+             CREATE TABLE branch_prs (
+                 project TEXT NOT NULL, branch TEXT NOT NULL, repository TEXT NOT NULL,
+                 number INTEGER NOT NULL, head TEXT NOT NULL,
+                 PRIMARY KEY(project,branch,repository,number)) STRICT;
+             PRAGMA user_version=2;",
+        )?;
+        db.0.execute(
+            "INSERT INTO branch_attempts VALUES (?1,?2,'feat','review','fixture/model',NULL)",
+            params![id.to_string(), context.project_id.to_string()],
+        )?;
+        db.0.execute(
+            "INSERT INTO branch_prs VALUES (?1,'feat','owner/repo',42,?2)",
+            params![context.project_id.to_string(), head],
+        )?;
+        drop(db);
+        let legacy =
+            Contributions::open_read_only(context.state_root.as_path(), &call)?.ok_or("store")?;
+        let before = legacy.for_pr(&pr, &call)?;
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].role.as_deref(), Some("read_only"));
+        assert_eq!(before[0].model.as_deref(), Some("fixture/model"));
+        assert!(before[0].run.is_none());
+        assert_eq!(
+            legacy
+                .0
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+            2
+        );
+        drop(legacy);
+        let migrated = Contributions::open(context.state_root.as_path(), &call)?;
+        assert_eq!(migrated.for_pr(&pr, &call)?, before);
+        migrated.close(context.project_id, &pr, &call)?;
+        assert_eq!(
+            Contributions::generation(&migrated.0, context.project_id, "feat")?,
+            1
+        );
         Ok(())
     }
 }

@@ -287,6 +287,7 @@ fn node_bound(
         .collect(),
         children: node.composite_members.clone(),
         source_binding: node.source.clone(),
+        min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
         source_commit: node.source.as_ref().map(|_| String::new()),
         writer_binding: None,
         writer_binding_pending: plans::writer(node),
