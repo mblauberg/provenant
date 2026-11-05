@@ -9773,3 +9773,23 @@ fn launch_projection_omits_untrusted_error_sources() {
     assert!(!reason.contains("/private/host"));
     assert!(!reason.chars().any(char::is_control));
 }
+
+#[test]
+fn terminal_attempt_transitions_need_only_node_state() {
+    let mut progress: NodeProgress = serde_json::from_value(serde_json::json!({
+        "id":"node", "state":"running", "worktree":null, "attempts":[]
+    }))
+    .unwrap();
+    apply_attempt_deadline(&mut progress);
+    assert_eq!(progress.state, NodeState::Failed);
+    assert_eq!(
+        progress.advance_error_code.as_deref(),
+        Some("deadline_exceeded")
+    );
+    assert_eq!(
+        progress.advance_error.as_deref(),
+        Some("node deadline exceeded; lane was cancelled")
+    );
+    apply_attempt_success(&mut progress);
+    assert_eq!(progress.state, NodeState::Succeeded);
+}

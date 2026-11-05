@@ -1016,6 +1016,18 @@ fn apply_unknown_observation(
     *state = NodeState::Running;
 }
 
+/// Apply a successful terminal attempt observation without I/O.
+fn apply_attempt_success(progress: &mut NodeProgress) {
+    progress.state = NodeState::Succeeded;
+}
+
+/// Apply a timed-out terminal attempt observation without I/O.
+fn apply_attempt_deadline(progress: &mut NodeProgress) {
+    progress.advance_error_code = Some("deadline_exceeded".into());
+    progress.advance_error = Some("node deadline exceeded; lane was cancelled".into());
+    progress.state = NodeState::Failed;
+}
+
 /// Revert cancellation-only state changes without altering attempt records.
 fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (String, &'static str)> {
     let saved_wake = checkpoint.wake_at;
@@ -2910,7 +2922,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             progress.outputs = Some(outputs);
                             match outcome {
                                 AttemptOutcome::Succeeded => {
-                                    progress.state = NodeState::Succeeded;
+                                    apply_attempt_success(progress);
                                     false
                                 }
                                 AttemptOutcome::AuthRequired
@@ -2997,10 +3009,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     }
                                 }
                                 AttemptOutcome::DeadlineExceeded => {
-                                    progress.advance_error_code = Some("deadline_exceeded".into());
-                                    progress.advance_error =
-                                        Some("node deadline exceeded; lane was cancelled".into());
-                                    progress.state = NodeState::Failed;
+                                    apply_attempt_deadline(progress);
                                     false
                                 }
                                 AttemptOutcome::TaskFailed
