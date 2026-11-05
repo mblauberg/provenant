@@ -3072,15 +3072,31 @@ pub(crate) mod peer_tests {
         if host_test("fabric::peer_tests::unmatched_graph_writer_keeps_its_worktree")? {
             return Ok(());
         }
-        let fixture = SettlementFixture::resumed_as("graph-unmatched")?;
-        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-        let clock = SystemClock;
-        let cancel = CancelToken::new();
-        let call = provenant_run::Request { clock: &clock, cancel: &cancel };
-        let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?
-            .ok_or("missing settlement")?;
-        assert_eq!(receipt["state"], "retained");
-        assert!(fixture.worktree.exists());
+        for corrupt in [false, true] {
+            let fixture = if corrupt {
+                SettlementFixture::settled_fixture("graph-unmatched", Some("broken"))?
+            } else {
+                SettlementFixture::resumed_as("graph-unmatched")?
+            };
+            let clock = SystemClock;
+            let cancel = CancelToken::new();
+            let call = provenant_run::Request { clock: &clock, cancel: &cancel };
+            if corrupt {
+                drop(provenant_fabric_runtime::graph::FileJournal::open(
+                    &fixture.roots.state, fixture.settled.project_id, "broken",
+                    call.lock_budget(), &cancel, &clock,
+                )?);
+                let path = fixture.roots.state.as_path().join("fabric/graphs")
+                    .join(fixture.settled.project_id.to_string()).join("graph-broken.json");
+                std::fs::write(path, b"invalid checkpoint")?;
+            }
+            settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+            let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?
+                .ok_or("missing settlement")?;
+            assert_eq!(receipt["state"], "retained");
+            assert!(receipt["reason"].as_str().is_some_and(|reason| !reason.is_empty()));
+            assert!(fixture.worktree.exists());
+        }
         Ok(())
     }
 
