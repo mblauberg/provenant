@@ -12,15 +12,6 @@ pub enum ExclusionSelector {
     Account { adapter: String, key: String },
     /// One exact `adapter/id` model.
     Model(ModelId),
-    /// One model within one named pool, without excluding it elsewhere.
-    PoolMember { pool: String, model: ModelId },
-    /// A selector supported by a cause and optionally bounded in time.
-    /// Wrap one of the scope variants; expiry is exclusive.
-    Evidenced {
-        scope: Box<ExclusionSelector>,
-        cause: String,
-        expires_at: Option<provenant_core::WallTime>,
-    },
 }
 /// Where an exclusion came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,18 +77,6 @@ impl fmt::Display for ExclusionSelector {
             Self::Provider(provider) => write!(f, "provider {provider}"),
             Self::Account { adapter, key } => write!(f, "account {adapter}/{key}"),
             Self::Model(model) => write!(f, "model {}", model.as_str()),
-            Self::PoolMember { pool, model } => write!(f, "pool {pool} member {}", model.as_str()),
-            Self::Evidenced {
-                scope,
-                cause,
-                expires_at,
-            } => {
-                write!(f, "{scope} ({cause}")?;
-                if let Some(expiry) = expires_at {
-                    write!(f, ", until {expiry}")?;
-                }
-                write!(f, ")")
-            }
         }
     }
 }
@@ -106,100 +85,22 @@ impl fmt::Display for ExclusionRule {
         write!(f, "excluded by {}: {}", self.source.as_str(), self.selector)
     }
 }
-impl ExclusionSelector {
-    /// Whether this evidence is active at the supplied snapshot time.
-    pub fn active_at(&self, now: provenant_core::WallTime) -> bool {
-        match self {
-            Self::Evidenced {
-                scope, expires_at, ..
-            } => expires_at.is_none_or(|expiry| now < expiry) && scope.active_at(now),
-            _ => true,
-        }
-    }
-
-    fn scope(&self) -> &Self {
-        match self {
-            Self::Evidenced { scope, .. } => scope.scope(),
-            _ => self,
-        }
-    }
-}
-
 impl ExclusionRule {
-    /// Whether the rule removes a member after excluded accounts are withheld.
-    pub(crate) fn removes(
-        &self,
-        model: &ModelId,
-        pool: Option<&str>,
-        serving_accounts_remain: bool,
-        now: provenant_core::WallTime,
-    ) -> bool {
-        if !self.selector.active_at(now) {
-            return false;
-        }
-        match self.selector.scope() {
+    /// Whether the rule removes a member whose account choices are `remaining`
+    /// after the excluded accounts have already been withheld.
+    pub(crate) fn removes(&self, model: &ModelId, serving_accounts_remain: bool) -> bool {
+        match &self.selector {
             ExclusionSelector::Provider(provider) => model.adapter() == provider,
             ExclusionSelector::Model(excluded) => excluded == model,
-            ExclusionSelector::PoolMember {
-                pool: excluded_pool,
-                model: excluded,
-            } => pool == Some(excluded_pool.as_str()) && excluded == model,
             ExclusionSelector::Account { adapter, .. } => {
                 model.adapter() == adapter && !serving_accounts_remain
             }
-            ExclusionSelector::Evidenced { .. } => unreachable!("scope unwraps evidence"),
         }
     }
-    pub(crate) fn account(&self, now: provenant_core::WallTime) -> Option<(&str, &str)> {
-        if !self.selector.active_at(now) {
-            return None;
-        }
-        match self.selector.scope() {
+    pub(crate) fn account(&self) -> Option<(&str, &str)> {
+        match &self.selector {
             ExclusionSelector::Account { adapter, key } => Some((adapter, key)),
             _ => None,
         }
-    }
-}
-
-#[cfg(test)]
-mod evidence_tests {
-    use super::*;
-    use provenant_core::WallTime;
-    #[test]
-    fn evidence_respects_scope_and_expiry() {
-        let model = ModelId::parse("codex/alpha").unwrap();
-        let other = ModelId::parse("codex/beta").unwrap();
-        let now = WallTime::from_unix_seconds(10).unwrap();
-        let expiry = WallTime::from_unix_seconds(11).unwrap();
-        let rule = |scope| ExclusionRule {
-            selector: ExclusionSelector::Evidenced {
-                scope: Box::new(scope),
-                cause: "refused".into(),
-                expires_at: Some(expiry),
-            },
-            source: ExclusionSource::Graph,
-        };
-        let provider = rule(ExclusionSelector::Provider("codex".into()));
-        assert!(provider.removes(&model, Some("pool"), true, now));
-        assert!(!provider.removes(&model, Some("pool"), true, expiry));
-        let account = rule(ExclusionSelector::Account {
-            adapter: "codex".into(),
-            key: "a".into(),
-        });
-        assert_eq!(account.account(now), Some(("codex", "a")));
-        assert!(account.removes(&model, None, false, now));
-        assert!(!account.removes(&model, None, true, now));
-        assert_eq!(account.account(expiry), None);
-        let exact = rule(ExclusionSelector::Model(model.clone()));
-        assert!(exact.removes(&model, None, true, now));
-        assert!(!exact.removes(&other, None, true, now));
-        let member = rule(ExclusionSelector::PoolMember {
-            pool: "pool".into(),
-            model: model.clone(),
-        });
-        assert!(member.removes(&model, Some("pool"), true, now));
-        assert!(!member.removes(&model, Some("other"), true, now));
-        assert!(!member.removes(&other, Some("pool"), true, now));
-        assert!(!member.removes(&model, Some("pool"), true, expiry));
     }
 }

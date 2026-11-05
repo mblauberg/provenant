@@ -67,32 +67,22 @@ The refusal is scoped to `opencode-go`, or
 interval with a unit (or a bare `retry-after` header value, in seconds) sets
 the refusal expiry.
 
-A read-only graph node re-resolves its pool alias after a recorded quota,
-rate-limit, authentication or adapter-unavailable settlement. The refused
-member is excluded from that pool for the node's retry lineage. Shared quota
-refusals still apply only at their recorded account, model or quota-pool scope,
-so other nodes avoid an active refusal without excluding unrelated accounts.
-The node succeeds if an eligible successor succeeds; pool exhaustion or a spent
-allowance stops it. Each terminal receipt remains available through `lanes --all`
-and its successor's `retry_of` link. The graph's attempt reference follows the
-live policy tail rather than replacing the failed receipt.
+A graph node can move to its next configured route after the host verifies a
+local preparation refusal and released custody. The earlier attempt remains in
+the receipt history. Once a provider has launched, the graph does not switch
+routes automatically; a quota-stopped writer with an unfinished handoff may
+continue on another eligible account.
 
-The cumulative infrastructure-successor allowance is
-`domains.routing.settlement_retries` (shipped default **2**). Set `retry.retries`
-on a preset or graph document for its default, or on a node to override it:
-node → preset → host configuration → shipped default. Zero disables successors.
-For example, a preset may declare `retry = { retries = 1 }`, and a leaf stage
-may declare `retry = { retries = 0 }`. `fabric graph status ID --full` shows
-`settlement_retries` and its origin for each admitted node. Admission seals the
-effective allowance; restart, same-key observation and admission reprobes do not
-renew or spend it. Run policy successors and configured graph-route transitions
-share that allowance.
+The settlement retry allowance is `domains.routing.settlement_retries`
+(shipped default **2**). Set `retry.retries` on a preset or graph document for
+its default, or on a node to override it: node → preset → host configuration →
+shipped default. Zero disables settlement successors. For example, a preset
+may declare `retry = { retries = 1 }`, and a leaf stage may declare
+`retry = { retries = 0 }`. `fabric graph status ID --full` shows the effective
+value and its origin. Admission seals the allowance; restart, same-key
+observation, admission reprobes and verified pre-launch preparation fallbacks
+do not renew or spend it.
 
-Writers retain the existing stop guard: cross-member writer fallback awaits
-custody, pinned-source, clean-worktree and publication checks in a follow-up.
-Exact model/account pins and family-constrained nodes are never redrawn across
-pool members. Task failure, input-required and uncertain-launch outcomes do not
-authorise fallback.
 `provenant quota` includes a recorded refusal's expiry in `resets_at` using
 RFC 3339 and shows its time in the host's local zone. Human output adds the
 local clock time (and weekday when the expiry is not today); a refusal without

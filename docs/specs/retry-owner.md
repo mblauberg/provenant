@@ -4,9 +4,9 @@ Owner: run, routing, confinement and fabric-runtime
 Anchor: `crates/run/src/policy.rs`
 
 A retry lineage preserves each terminal receipt and its `retry_of` links. The
-sealed policy decision carries a typed cause and action; absent fields mean
-unknown and never authorise a writer retry. Terminal publication and successor
-insertion are atomic. A stop decision is recorded even without a successor.
+version 2 sealed policy decision requires a typed cause and action. Drain
+active runs before upgrading; prior decision records are not read. Terminal
+publication and successor insertion are atomic. A stop decision is recorded even without a successor.
 `Service::live_tail` resolves the live attempt with a bounded status and tail
 recheck. Any unavoidable migration must be forward-only, idempotent and
 preceded by a timestamped, WAL-aware store backup.
@@ -14,11 +14,12 @@ preceded by a timestamped, WAL-aware store backup.
 One cumulative infrastructure-successor allowance per lineage uses
 `settlement_retries` (shipped default 2), overridden by preset then node
 `retry.retries`; the effective value carries its origin. Graph and run must not
-multiply the allowance. Observation and admission reprobes spend nothing.
-Scoped exclusions carry cause, scope and expiry evidence. Account refusals
-apply only at their evidenced scope. Exact pins, family separation, uncertain
-launches and task failures are never redrawn. Cross-member writer fallback also
-requires released custody, pinned HEAD, a clean worktree and no publication.
+multiply the allowance. Observation, admission reprobes and verified pre-launch
+preparation fallbacks spend no settlement retries. Scoped account refusals apply
+only at their evidenced scope. Route switches require a verified local
+preparation failure and released custody; launched or uncertain attempts do not
+switch routes. A quota-stopped writer may continue on another eligible account
+with an unfinished handoff.
 
 Admission keeps `--wait` as settlement observation timeout. `--admission-timeout`
 defaults from the run admission policy. An admission window has one persisted absolute deadline and next wake under the same

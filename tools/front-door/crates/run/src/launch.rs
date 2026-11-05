@@ -1468,35 +1468,6 @@ impl RunStore {
                 {
                     effective_task.account = None;
                 }
-                // Carry only sealed host decisions into fresh pool draws. These
-                // node-local members supplement quota's account-scoped evidence.
-                if let RequestedRoute::Named { name, .. } = &record.requested_route
-                    && task
-                        .context
-                        .as_ref()
-                        .is_some_and(|context| context.graph_id.is_some())
-                    && task.writer.is_none()
-                    && task.access.write_roots.is_empty()
-                {
-                    let refusals = self.policy_refusals(record.attempt_id, call)?;
-                    let mut members = Vec::new();
-                    for prior in refusals {
-                        let decision = self
-                            .staged_policy_retry(&prior)?
-                            .ok_or(RunError::Validation("retry refusal decision"))?;
-                        if let Some(model) = prior
-                            .applied_route
-                            .as_ref()
-                            .and_then(|route| route.model.as_ref())
-                        {
-                            members.push(serde_json::json!({"pool": name, "model": model, "cause": decision.cause}));
-                        }
-                    }
-                    effective_task
-                        .profile
-                        .knobs
-                        .insert("routing.retry_refusals".into(), serde_json::json!(members));
-                }
                 effective_task.route = record.requested_route.clone();
                 effective_task.fallback.clear();
                 if task.writer.is_some()

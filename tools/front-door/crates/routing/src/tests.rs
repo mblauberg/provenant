@@ -5323,46 +5323,6 @@ fn unavailable_pool_member_is_drawn_around() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn evidenced_exclusions_are_applied_to_routing_at_snapshot_time()
--> Result<(), Box<dyn std::error::Error>> {
-    let (catalogue, records) = exclusion_fixture()?;
-    let time = now()?;
-    let evidence = |scope, expires_at| {
-        rule(ExclusionSelector::Evidenced {
-            scope: Box::new(scope),
-            cause: "capacity refusal".into(),
-            expires_at,
-        })
-    };
-    let account = || ExclusionSelector::Account {
-        adapter: "codex".into(),
-        key: "codex-key".into(),
-    };
-    assert_eq!(
-        trial_picks(&catalogue, &records, &[evidence(account(), None)])?,
-        ["claude"]
-    );
-    assert_eq!(
-        trial_picks(&catalogue, &records, &[evidence(account(), Some(time))])?,
-        ["claude", "codex"]
-    );
-    let model = catalogue.pools["trial"][1].model.clone();
-    let member = |pool: &str| ExclusionSelector::PoolMember {
-        pool: pool.into(),
-        model: model.clone(),
-    };
-    assert_eq!(
-        trial_picks(&catalogue, &records, &[evidence(member("trial"), None)])?,
-        ["claude"]
-    );
-    assert_eq!(
-        trial_picks(&catalogue, &records, &[evidence(member("other"), None)])?,
-        ["claude", "codex"]
-    );
-    Ok(())
-}
-
-#[test]
 fn routing_default_matches_bundled_asset() {
     let asset: RoutingConfig =
         toml_edit::de::from_str(include_str!("../assets/review-defaults.toml")).unwrap();

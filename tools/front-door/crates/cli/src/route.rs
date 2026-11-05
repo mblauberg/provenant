@@ -361,34 +361,6 @@ pub(crate) fn task_exclusion_rules(
             }
         }
     }
-    if let Some(members) = profile.knobs.get("routing.retry_refusals") {
-        for member in members
-            .as_array()
-            .ok_or_else(|| EdgeError::RetryEvidence("retry refusals must be an array".into()))?
-        {
-            let pool = member["pool"]
-                .as_str()
-                .ok_or_else(|| EdgeError::RetryEvidence("retry refusal pool".into()))?;
-            let model = member["model"]
-                .as_str()
-                .ok_or_else(|| EdgeError::RetryEvidence("retry refusal model".into()))?;
-            rules.push(provenant_routing::ExclusionRule {
-                selector: provenant_routing::ExclusionSelector::Evidenced {
-                    scope: Box::new(provenant_routing::ExclusionSelector::PoolMember {
-                        pool: pool.into(),
-                        model: provenant_routing::ModelId::parse(model)
-                            .map_err(|e| EdgeError::RetryEvidence(e.to_string()))?,
-                    }),
-                    cause: member["cause"]
-                        .as_str()
-                        .ok_or_else(|| EdgeError::RetryEvidence("retry refusal cause".into()))?
-                        .into(),
-                    expires_at: None,
-                },
-                source: provenant_routing::ExclusionSource::Graph,
-            });
-        }
-    }
     Ok(rules)
 }
 /// The rules a dispatch with these `--exclude` flags would apply, through the
@@ -548,8 +520,6 @@ fn resolve_request(
 }
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EdgeError {
-    #[error("invalid sealed retry evidence: {0}")]
-    RetryEvidence(String),
     #[error(
         "no route or model matches `{name}`{}; try `provenant route resolve {}`, \
          `provenant route resolve {}` or `provenant route list`",
@@ -4079,43 +4049,6 @@ mod route_tests {
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
             Ok(())
         }
-    }
-
-    #[test]
-    fn sealed_refusal_redraw_excludes_only_the_refused_pool_member() -> Result<(), Box<dyn Error>> {
-        let fixture = ReviewFixture::new()?;
-        let resolve = |rules: &[provenant_routing::ExclusionRule]| {
-            super::resolve_dispatch(
-                &fixture.request,
-                &fixture.roots,
-                None,
-                ("fixture", 0),
-                &fixture.availability,
-                &fixture.access,
-                "fixture",
-                None,
-                rules,
-            )
-        };
-        let first = resolve(&[])?;
-        let model = format!("{}/{}", first.adapter, first.model);
-        let mut profile =
-            provenant_config::read_with_domains(&fixture.roots, &crate::domains::SECTIONS)?
-                .dispatch_profile(&[])?;
-        profile.knobs.insert(
-            "routing.retry_refusals".into(),
-            serde_json::json!([{"pool":"test","model":model,"cause":"quota"}]),
-        );
-        let rules = super::task_exclusion_rules(&profile, &fixture.roots)?;
-        for _ in 0..10 {
-            let next = resolve(&rules)?;
-            assert_ne!(format!("{}/{}", next.adapter, next.model), model);
-        }
-        assert!(
-            matches!(&rules[0].selector, provenant_routing::ExclusionSelector::Evidenced {scope, ..}
-            if matches!(scope.as_ref(), provenant_routing::ExclusionSelector::PoolMember { pool, .. } if pool == "test"))
-        );
-        Ok(())
     }
 
     #[test]

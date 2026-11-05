@@ -1395,26 +1395,21 @@ saved can be read back.
 
 ### Fallback only for unavailability
 
-Only a terminal `auth_required`, `usage_limited` or `adapter_unavailable`
-moves a node to the next route. Model capacity failures are treated as model
-unavailability for this purpose. Task failure, input requirements and uncertain
-launches never fall back; after launch only read-only nodes may fall back. A failed
-writer keeps its worktree. Graph writers deliver only when their node explicitly requests it.
-An unreadable or integrity-invalid result fails the node without fallback,
-regardless of the provider outcome.
-Read-only alias nodes re-resolve the same pool through sealed run-policy
-successors, excluding refused members with `ExclusionSelector`. Terminal
-receipts and `retry_of` links remain immutable. Account refusals retain their
-evidenced scope. Exact pins and family-constrained nodes never redraw members.
-The existing `settlement_retries` allowance (default 2), overridden by preset
-then node `retry.retries`, is cumulative across run successors and configured
-graph-route transitions. First admission retains its effective value and origin
-for full graph status; replay does not replenish it.
-- Why: retrying a writer elsewhere would duplicate edits.
-- Test: `crates/fabric-runtime/src/graph.rs::writer_limit_after_launch_never_tries_a_second_route`;
-  `::terminal_task_failure_does_not_try_a_fallback_route`;
-  `tests/dispatch_provider.rs::graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts`;
-  `crates/fabric-runtime/src/graph/graph_tests.rs::cumulative_allowance_counts_run_successors_and_survives_observation_replay`
+A node may move to its next configured route only when a typed local
+preparation failure reports authentication, quota or adapter unavailability,
+and the host verifies that custody has been released. Task failure, input
+requirements, launched attempts and uncertain launches do not switch routes.
+The graph keeps each attempt's receipt. A quota-stopped writer may continue its
+retained work on another eligible account with a verified unfinished handoff.
+
+The `settlement_retries` allowance (default 2), overridden by preset then node
+`retry.retries`, limits settlement successors. The graph seals the effective
+value and origin on first admission; replay does not replenish it. Verified
+pre-launch preparation fallbacks and same-key observation spend no settlement
+retries.
+- Why: route switches must not duplicate an attempt that may have started.
+- Test: `crates/fabric-runtime/src/graph/graph_tests.rs::preparation_fallback_does_not_consume_settlement_allowance`;
+  `tests/dispatch_provider.rs::graph_read_only_alias_does_not_redraw_after_launch_quota`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ### Settlement advances graphs
