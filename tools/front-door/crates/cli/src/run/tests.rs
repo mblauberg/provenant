@@ -6721,8 +6721,7 @@ fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
 }
 
 #[test]
-fn worktrees_lock_held_past_five_seconds_retries_and_admits()
--> Result<(), Box<dyn std::error::Error>> {
+fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
     use provenant_os::fs::{Directory, LockMode};
 
@@ -6740,8 +6739,7 @@ fn worktrees_lock_held_past_five_seconds_retries_and_admits()
         }
     }
 
-    if reexec_test_in_lane("run::tests::worktrees_lock_held_past_five_seconds_retries_and_admits")?
-    {
+    if reexec_test_in_lane("run::tests::worktrees_lock_contention_retries_and_admits")? {
         return Ok(());
     }
     let fixture = linked_fixture()?;
@@ -6776,9 +6774,10 @@ fn worktrees_lock_held_past_five_seconds_retries_and_admits()
                 .join(target_project_id.to_string());
             std::fs::create_dir_all(&reg_dir)?;
 
-            // Background thread acquires worktrees.lock and holds it for 5.3s
+            // Hold the lock until dispatch records its first contention retry.
             let (tx, rx) = std::sync::mpsc::channel();
             let lock_dir_path = reg_dir.clone();
+            let context = session.context.clone();
             let holder = std::thread::spawn(move || {
                 let dir = Directory::open_anchor(&lock_dir_path).unwrap();
                 let clk = SystemClock::new();
@@ -6793,11 +6792,26 @@ fn worktrees_lock_held_past_five_seconds_retries_and_admits()
                     )
                     .unwrap();
                 tx.send(()).unwrap();
-                let wake = clk
-                    .mono_now()
-                    .checked_add(DurationMicros::from_micros(6_500_000))
-                    .unwrap();
-                clk.wait_until(wake).unwrap();
+                let call = run::Request {
+                    clock: &clk,
+                    cancel: &cnl,
+                };
+                let store = run::RunStore::open(&context, &call).unwrap();
+                let operation = "lock-retry-test".parse().unwrap();
+                provenant_test_support::wait_for(
+                    "admission contention retry",
+                    Duration::from_secs(30),
+                    || store.admission_window(&operation, &call),
+                    |window| {
+                        window.as_ref().is_ok_and(|window| {
+                            window
+                                .as_ref()
+                                .is_some_and(|window| window.wake_at.is_some())
+                        })
+                    },
+                )
+                .unwrap()
+                .unwrap();
                 drop(guard);
             });
 
