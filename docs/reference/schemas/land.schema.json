@@ -73,6 +73,12 @@
                           }
                         ]
                       },
+                      "cloud": {
+                        "type": "object"
+                      },
+                      "cloud_state": {
+                        "type": "string"
+                      },
                       "continuation": {},
                       "delivery": {},
                       "delivery_id": {
