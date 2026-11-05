@@ -180,9 +180,9 @@ are independent.
 A dispatch with both context values prefers the model in its named route, if
 it is eligible. The normal account, confidentiality, exclusion,
 launch and model-policy checks still apply; unavailable candidates fall back to
-the ordinary route. An explicit model pin wins. Preset dispatch copies its
-`--risk-tier` and `--task-kind` into graph context; graph authors can set the
-same context fields. Missing context does not match.
+the ordinary route. An explicit model pin wins. Dispatch copies `--risk-tier`
+and `--task-kind` into task context; preset dispatch copies them into graph
+context. Graph authors can set the same fields. Missing context does not match.
 
 - Why: a reviewed outcome can guide later route selection without extending
   authority or making an indefinite policy change.
