@@ -1200,6 +1200,17 @@ pub(crate) mod peer_tests {
             .is_none()
         );
         assert!(fixture.worktree.exists());
+        let resolved = crate::roots::Resolved {
+            assets: fixture.rig.project.clone(), home: fixture.rig.home.clone(),
+            project: fixture.rig.project.clone(), roots: fixture.roots.clone(),
+            claude_config: None, codex_home: None,
+        };
+        let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+        assert!(tick.advanced > 0);
+        let completed = FileJournal::read_checkpoint(
+            &fixture.roots.state, fixture.settled.project_id, "b-completes",
+        )?.ok_or("B checkpoint after tick")?;
+        assert_eq!(completed.nodes[0].state, NodeState::Succeeded);
         Ok(())
     }
 
