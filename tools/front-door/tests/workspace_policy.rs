@@ -1231,7 +1231,7 @@ fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
     let harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*\s*\.\s*spec\s*\(\s*\)\s*\.\s*name";
     let typed_harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*";
     regex::Regex::new(&format!(
-        r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness}|{typed_harness})|(?:{literal}|{harness}|{typed_harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*(?:\||=>|if\b)|matches!\s*\([^,]+,[^;{{}}\n]*(?:{literal}|{harness})|\.\s*(?:eq|ne|eq_ignore_ascii_case)\s*\(\s*(?:{literal}|{harness}|{typed_harness})|{typed_harness}[^;{{}}]*=>|\blet\s+[^=;{{}}]*{typed_harness}[^=;{{}}]*=|matches!\s*\([^;{{}}]*{typed_harness})"
+        r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness}|{typed_harness})|(?:{literal}|{harness}|{typed_harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*(?:\||=>|if\b)|matches!\s*\([^,]+,[^;{{}}\n]*(?:{literal}|{harness})|\.\s*(?:eq|ne|eq_ignore_ascii_case)\s*\(\s*(?:{literal}|{harness}|{typed_harness})|{typed_harness}[^,;{{}}]*=>|\blet\s+[^=;{{}}]*{typed_harness}[^=;{{}}]*=|matches!\s*\([^;{{}}]*{typed_harness})"
     ))
 }
 
