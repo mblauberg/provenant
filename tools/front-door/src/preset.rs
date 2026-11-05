@@ -102,6 +102,7 @@ fn decode_lowered_node(
         for children in [
             value.get("composite").and_then(|group| group.get("nodes")),
             value.get("loop").and_then(|body| body.get("body")),
+            value.pointer("/plan/fallback/nodes"),
         ]
         .into_iter()
         .flatten()

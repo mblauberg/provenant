@@ -2903,6 +2903,12 @@ fn malformed_node_settings_name_the_stage_and_field() {
         error.contains("member") && error.contains("deadline_seconds"),
         "{error}"
     );
+    layers.insert("test", "bad-fallback", "stages = [{ id = 'plan', kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', deadline_seconds = 'bad' }], exports = [] } } }]\n").unwrap();
+    let error = expand(&layers, "bad-fallback", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("member") && error.contains("deadline_seconds"),
+        "{error}"
+    );
 }
 
 #[test]
