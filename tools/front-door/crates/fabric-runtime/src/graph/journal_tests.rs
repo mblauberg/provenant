@@ -23,6 +23,31 @@ impl AttemptOwner for Owner {
     }
 }
 #[test]
+fn launched_route_fallback_history_is_unreadable() {
+    let mut stored: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    let node = &mut stored.checkpoint.nodes[0];
+    node.attempts[0].launched = true;
+    node.attempts[0].outcome = Some(AttemptOutcome::UsageLimited);
+    let mut next = node.attempts[0].clone();
+    next.key.route_index = 1;
+    node.attempts.push(next);
+    stored.digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&stored.checkpoint, &stored.execution),
+    )
+    .unwrap()
+    .to_string();
+    let error = match decode_checkpoint(&serde_json::to_vec(&stored).unwrap(), "g-test") {
+        Err(error) => error,
+        Ok(_) => panic!("old launched-route fallback must be unreadable"),
+    };
+    assert!(matches!(error, JournalError::RetiredFallbackCheckpoint));
+    assert!(error.is_unreadable());
+    assert!(error.to_string().contains("previous release"));
+}
+#[test]
 fn delivery_retry_reopens_only_the_matching_failed_attempt() {
     for outcome in [AttemptOutcome::OtherFailure, AttemptOutcome::ReviewRequired] {
         assert_delivery_retry_reopens_matching_attempt(outcome);
