@@ -56,8 +56,13 @@ is a paid subscription model (see the
 
 OpenCode quota refusals come from its structured quota and free-limit events,
 and from stderr diagnostics naming `AI.Error.QuotaExceeded` or `usage limit
-exceeded`. Stderr evidence is read from the matching line and the one after
-it, only for a run that did not succeed. It is scoped to `opencode-go`, or
+exceeded`. During a run, a line beginning with `AI.Error.QuotaExceeded:`
+(after whitespace or ANSI control sequences) is treated as an authoritative
+refusal and triggers cleanup even if the process might otherwise succeed. The
+live rule also accepts an unterminated line; log-prefixed errors and generic
+quota wording do not trigger it. At exit, stderr evidence is read from the
+matching line and the one after it only if the adapter did not accept the run.
+The refusal is scoped to `opencode-go`, or
 `opencode-free` when that text names the free tier or free usage; a retry
 interval with a unit (or a bare `retry-after` header value, in seconds) sets
 the refusal expiry. A pool alias is one route entry, so quota on its last
@@ -137,7 +142,7 @@ distinct model families. Configure them in the selected state's `config.toml`:
 reviewers = [{ pool = "junior", count = 1 }]
 
 [domains.routing.review.shapes.standard]
-reviewers = [{ pool = "junior", count = 3, distinct_families = true }]
+reviewers = [{ pool = "junior", count = 5, distinct_families = true }]
 
 [domains.routing.review.shapes.deep]
 reviewers = [
@@ -195,14 +200,14 @@ and model, and any writer keep a single route. A route table without an alias,
 or without an adapter and a model, is refused by name.
 
 Lenses fill a shape's slots in the order given by `review.lenses.order`, without
-repeats. The standard shape has three slots: `correctness-spec`, `tests`, then one
-more lens in that order (`design-fit-reuse`). A kind can replace the order or add
+repeats. The standard shape has five slots: `correctness-spec`, `tests`,
+`design-fit-reuse`, `simplicity` and `reliability`. A kind can replace the order or add
 lenses outside the slot cap, and risk tags add their conditional lenses:
 
 ```toml
 [domains.routing.review.lenses]
 order = ["correctness-spec", "tests", "design-fit-reuse", "simplicity",
-  "conventions-readability", "refactor-cleanup", "reliability", "flexibility"]
+  "reliability", "conventions-readability", "refactor-cleanup", "flexibility"]
 [domains.routing.review.lenses.by_kind.docs]
 order = ["conventions-readability"]    # one base lens, however many slots
 [domains.routing.review.lenses.by_kind.refactor]

@@ -10,13 +10,8 @@ use std::{
 
 const NUMBER: &str = "1668";
 
-/// Capture through dispatch, then retain through real land and gc.
-pub(crate) fn pr_contribution_roundtrip() -> Result {
-    use provenant_core::{CancelToken, Clock, OperationId, TaskId};
-    use provenant_run::{DispatchRequest, DispatchTask, Service};
+pub(crate) fn pr_contribution_unbound_project() -> Result {
     let landing = landing()?;
-    let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
-    let store = super::worktree_tests::open_writer_store(&context)?;
     let unbound = landing.rig.root.join("unbound");
     fs::create_dir(&unbound)?;
     git_in(&landing.rig, &unbound, &["init", "-q"])?;
@@ -51,6 +46,16 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     assert_ne!(code(&retry_unbound), 0);
     let failure = json(&retry_unbound)?;
     assert_eq!(failure["error"]["code"], "PR_PROJECT_UNBOUND", "{failure}");
+    Ok(())
+}
+
+/// Capture through dispatch, then retain through real land and gc.
+pub(crate) fn pr_contribution_roundtrip() -> Result {
+    use provenant_core::{CancelToken, Clock, OperationId, TaskId};
+    use provenant_run::{DispatchRequest, DispatchTask, Service};
+    let landing = landing()?;
+    let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
+    let store = super::worktree_tests::open_writer_store(&context)?;
     fs::write(
         landing.rig.state.join("config.toml"),
         format!(
@@ -127,12 +132,14 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                 [attempt.to_string()],
             )?;
         }
-        assert_eq!(
-            Service::new(&store)
-                .dispatch(submit()?, &landing.worktree, &call)?
-                .run_id,
-            run.run_id
-        );
+        if index == 1 {
+            assert_eq!(
+                Service::new(&store)
+                    .dispatch(submit()?, &landing.worktree, &call)?
+                    .run_id,
+                run.run_id
+            );
+        }
         if index < 2 {
             contribution_terminal(
                 &store,
@@ -188,8 +195,9 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         );
         Ok(json(&output)?["data"].clone())
     };
-    assert!(read()?["attempts"].as_array().ok_or("attempts")?.is_empty());
-    assert_eq!(read()?["coverage"]["local_attempts"], "unbound");
+    let unbound = read()?;
+    assert!(unbound["attempts"].as_array().ok_or("attempts")?.is_empty());
+    assert_eq!(unbound["coverage"]["local_attempts"], "unbound");
     git(&landing.rig, &["push", "-q", "origin", "feat"])?;
     let template = landing.rig.project.join(".github/pull_request_template.md");
     fs::write(
@@ -585,6 +593,16 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     );
     assert_eq!(links.for_pr(&active[0], &call)?[0].pr_count, 2);
 
+    Ok(())
+}
+
+pub(crate) fn pr_contribution_land_warns_when_binding_fails() -> Result {
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
     // Successful land must warn too when its bind failed and close has no row.
     let unbound_landing = self::landing()?;
     let (_, context) = super::worktree_tests::writer_context(&unbound_landing.rig)?;
@@ -774,7 +792,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     }
     let dir = std::env::var_os("FIXTURE_GH_DIR")
         .map(PathBuf::from)
-        .unwrap_or_default();
+        .unwrap_or_else(|| PathBuf::from("."));
     writeln!(
         fs::OpenOptions::new()
             .create(true)
@@ -784,6 +802,20 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     )?;
     let normalised = call.replace("api --include ", "api ");
     match normalised.as_str() {
+        "api repos/{owner}/{repo}" => {
+            io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","permissions":{"push":true}}"#)?;
+        }
+        value if value.starts_with("api --paginate --slurp repos/{owner}/{repo}/pulls/") && value.ends_with("/reviews?per_page=100") => {
+            let head: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
+            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([[{"id": 1, "user": {"login": "reviewer"}, "state": "APPROVED", "commit_id": head["headRefOid"]}]]))?)?;
+        }
+        value if value.starts_with("api repos/{owner}/{repo}/git/commits/") => {
+            let commit = value.rsplit('/').next().ok_or("commit")?;
+            let output = provenant_os::fixture::git_command().current_dir(&dir).args(["rev-parse", &format!("{commit}^{{tree}}")]).output()?;
+            if !output.status.success() { return Err("cannot resolve fixture tree".into()); }
+            let tree = String::from_utf8(output.stdout)?.trim().to_owned();
+            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"tree": {"sha": tree}}))?)?;
+        }
         value if (value.starts_with("api repos/{owner}/{repo}/pulls/") || value.starts_with("api repos/owner/repo/pulls/")) && !value.ends_with("/merge") => {
             let head: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
             let mut view: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("view.json"))?)?;
@@ -809,7 +841,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
                 "state": state,
                 "head": {"sha": head["headRefOid"], "ref": branch, "repo": {"full_name": head_repo}},
                 "base": {"sha": head["headRefOid"], "ref": base, "repo": {"full_name": "owner/repo"}},
-                "mergeable": mergeable, "mergeable_state": "clean", "title": view["title"].as_str().unwrap_or("fixture"),
+                "mergeable": mergeable, "mergeable_state": "clean", "title": view["title"].as_str().unwrap_or("fixture"), "user": {"login":"author"},
                 "merged_at": if merged { Some("2099-01-01T00:00:00Z") } else { None },
                 "closed_at": if view["state"] == "CLOSED" { Some("2020-01-01T00:00:00Z") } else { None },
                 "merge_commit_sha": view["mergeCommit"]["oid"]
@@ -881,30 +913,29 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
                 br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#,
             )?;
         }
-        "api repos/owner/repo/branches/main" => {
+        "api repos/owner/repo/branches/main" | "api repos/{owner}/{repo}/branches/main" => {
             io::stdout().write_all(br#"{"protected":false}"#)?;
         }
-        "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" => {
+        "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" | "api --paginate --slurp repos/{owner}/{repo}/rules/branches/main?per_page=100" => {
             io::stdout().write_all(b"[[]]")?;
         }
         value
-            if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
+            if (value.starts_with("api --paginate --slurp repos/owner/repo/commits/") || value.starts_with("api --paginate --slurp repos/{owner}/{repo}/commits/"))
                 && value.ends_with("/statuses?per_page=100") =>
         {
             io::stdout().write_all(b"[[]]")?;
         }
         value
-            if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
+            if (value.starts_with("api --paginate --slurp repos/owner/repo/commits/") || value.starts_with("api --paginate --slurp repos/{owner}/{repo}/commits/"))
                 && value.ends_with("/check-runs?per_page=100&filter=latest") =>
         {
             if dir.join("checks-fail").exists() {
                 return Ok(1);
             }
-            let head: serde_json::Value =
-                serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
+            let commit = value.split("/commits/").nth(1).and_then(|part| part.split('/').next()).ok_or("check commit")?;
             io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([{"check_runs":[{
-                "name":"build","head_sha":head["headRefOid"],"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"
-            }]}]))?)?;
+                "name":"build","head_sha":commit,"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"
+            }, {"name":"ci-status","head_sha":commit,"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"}]}]))?)?;
         }
         "pr checks 1668 --json bucket" | "pr checks 1668 --json name,bucket" => {
             if dir.join("checks-fail").exists() {
@@ -1098,6 +1129,34 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     );
     assert!(text.contains("  worktree skipped"), "{text}");
     assert!(text.contains("  branch skipped"), "{text}");
+    Ok(())
+}
+
+pub(crate) fn pr_land_default_batch_gates_then_cleans_up() -> Result {
+    let landing = landing()?;
+    let rig = &landing.rig;
+    let mut view: serde_json::Value =
+        serde_json::from_slice(&fs::read(rig.project.join("view.json"))?)?;
+    view["state"] = "OPEN".into();
+    fs::write(rig.project.join("view.json"), serde_json::to_vec(&view)?)?;
+    let output = command(rig, &["land", NUMBER, "--json"])?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(value["data"]["merged"], true, "{value}");
+    for step in ["fetch", "fast_forward", "worktree", "branch"] {
+        assert_eq!(status(&value, step)?, "done", "{value}");
+    }
+    let landed = git(rig, &["rev-parse", "main"])?;
+    assert_eq!(
+        git(rig, &["rev-parse", &format!("{landed}^2")])?,
+        landing.head
+    );
+    assert_eq!(
+        value["data"]["receipts"][0]["gate_evidence"]["result"], "passed",
+        "{value}"
+    );
+    assert!(!landing.worktree.exists());
+    assert!(!branch_exists(rig, "feat")?);
     Ok(())
 }
 
@@ -1332,18 +1391,22 @@ pub(crate) fn pr_land_canonicalises_quoted_worktree_paths() -> Result {
 }
 
 pub(crate) fn pr_land_uses_writer_lock_and_preserves_attempt_recovery_evidence() -> Result {
-    use provenant_core::Clock;
-    use provenant_supervisor::custody::{Scope, WriterBinding};
-    for case in [
-        "abandoned",
-        "held",
-        "malformed",
-        "wrong_binding",
+    pr_land_writer_cases(&["abandoned", "held", "malformed", "wrong_binding"])
+}
+
+pub(crate) fn pr_land_writer_lock_preserves_dirty_and_output_cases() -> Result {
+    pr_land_writer_cases(&[
         "dirty",
         "symlink_output",
         "protected_output",
         "allowed_output",
-    ] {
+    ])
+}
+
+fn pr_land_writer_cases(cases: &[&str]) -> Result {
+    use provenant_core::Clock;
+    use provenant_supervisor::custody::{Scope, WriterBinding};
+    for &case in cases {
         let landing = landing()?;
         let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
         let clock = provenant_os::clock::SystemClock;
@@ -2200,6 +2263,114 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
     Ok(())
 }
 
+pub(crate) fn pr_land_recovery_uses_recorded_merged_head() -> Result {
+    let landing = landing()?;
+    let rig = &landing.rig;
+    fs::write(
+        rig.project.join("view.json"),
+        r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
+    )?;
+    fs::write(landing.worktree.join("notes.txt"), "uncommitted")?;
+    let first = command(rig, &["land", NUMBER, "--json"])?;
+    let value = json(&first)?;
+    assert_eq!(code(&first), 0, "{value}");
+    assert_eq!(value["data"]["cleanup_pending"], true, "{value}");
+    assert_eq!(status(&value, "worktree")?, "refused");
+    fs::remove_file(landing.worktree.join("notes.txt"))?;
+    fs::write(
+        rig.project.join("view.json"),
+        r#"{"state":"MERGED","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
+    )?;
+    fs::write(
+        rig.project.join("head.json"),
+        r#"{"headRefOid":"2222222222222222222222222222222222222222"}"#,
+    )?;
+    let retry = command(rig, &["land", NUMBER, "--json"])?;
+    let value = json(&retry)?;
+    assert_eq!(code(&retry), 0, "{value}");
+    assert_eq!(value["data"]["head"], landing.head, "{value}");
+    assert_eq!(value["data"]["cleanup_pending"], false, "{value}");
+    assert!(!landing.worktree.exists());
+    assert!(!branch_exists(rig, "feat")?);
+    Ok(())
+}
+
+pub(crate) fn pr_land_dirty_primary_does_not_block_later_batches() -> Result {
+    let landing = landing()?;
+    let rig = &landing.rig;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.pr.land]\nbatch_size=1\n",
+    )?;
+    fs::write(
+        rig.project.join("view.json"),
+        r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
+    )?;
+    fs::write(rig.project.join(".gitignore"), "dirty tracked checkout\n")?;
+    let output = command(rig, &["land", NUMBER, "1669", "--json"])?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(value["data"]["outcomes"][NUMBER], "landed", "{value}");
+    assert_eq!(value["data"]["outcomes"]["1669"], "landed", "{value}");
+    assert_eq!(
+        value["data"]["receipts"]
+            .as_array()
+            .ok_or("receipts")?
+            .len(),
+        2
+    );
+    assert!(
+        value["data"]["local_follow_up"][NUMBER]["steps"]
+            .as_array()
+            .ok_or("steps")?
+            .iter()
+            .any(|step| step["step"] == "fast_forward" && step["status"] == "refused")
+    );
+    let later = command(rig, &["land", "1670", "--json"])?;
+    let later_value = json(&later)?;
+    assert_eq!(code(&later), 0, "{later_value}");
+    assert_eq!(
+        later_value["data"]["outcomes"]["1670"], "landed",
+        "{later_value}"
+    );
+    assert_eq!(git(rig, &["rev-parse", "main"])?, landing.stale);
+    Ok(())
+}
+
+pub(crate) fn pr_land_default_batch_preserves_checkout_when_publication_is_unknown() -> Result {
+    // The default batch publishes over REST, but an unconfirmed response must not clean up.
+    let landing = self::landing()?;
+    let rig = &landing.rig;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.pr.land]\npublish='rest_ordered'\npublish_settle_seconds=0\n",
+    )?;
+    fs::write(
+        rig.project.join("view.json"),
+        r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
+    )?;
+    let output = command(rig, &["land", NUMBER, "--json"])?;
+    let value = json(&output)?;
+    assert_ne!(code(&output), 0, "{value}");
+    assert_eq!(
+        value["error"]["code"], "LAND_PUBLICATION_UNKNOWN",
+        "{value}"
+    );
+    assert_eq!(value["data"]["merged"], false, "{value}");
+    assert!(
+        value["data"]["local_follow_up"]
+            .as_object()
+            .is_some_and(|reports| reports.is_empty()),
+        "{value}"
+    );
+    assert!(rig.project.join("merge-args").exists());
+    assert!(landing.worktree.exists());
+    assert!(branch_exists(rig, "feat")?);
+    assert_eq!(git(rig, &["rev-parse", "main"])?, landing.stale);
+
+    Ok(())
+}
+
 pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result {
     for flag in ["checks-fail", "moved"] {
         let landing = landing()?;
@@ -2225,15 +2396,21 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
         assert!(branch_exists(rig, "feat")?, "{flag}");
         assert_eq!(git(rig, &["rev-parse", "main"])?, landing.stale, "{flag}");
     }
-    // The current head is the default, and a pending merge cleans nothing.
+    // The default batch cannot publish or clean up when CI cannot be read.
     let landing = landing()?;
     fs::write(
         landing.rig.project.join("view.json"),
         r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
     )?;
-    let value = land(&landing)?;
+    fs::write(landing.rig.project.join("checks-fail"), "")?;
+    let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    let value = json(&output)?;
+    assert_ne!(code(&output), 0, "{value}");
+    assert_eq!(value["error"]["code"], "CI_UNAVAILABLE", "{value}");
     assert_eq!(value["data"]["merged"], false);
     assert!(landing.worktree.exists());
+    assert!(branch_exists(&landing.rig, "feat")?);
+    assert_eq!(git(&landing.rig, &["rev-parse", "main"])?, landing.stale);
 
     // An unconfirmed merge must preserve real local worktrees and refs.
     let landing = self::landing()?;

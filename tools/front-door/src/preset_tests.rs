@@ -1890,15 +1890,15 @@ fn read_roots_are_confined_to_the_project_or_the_host_allow_list()
 }
 
 /// Stand-in for the routing review configuration: low risk is one junior,
-/// high risk is eight, otherwise three.
+/// high risk is eight, otherwise five.
 fn shapes() -> super::preset::ShapeSelector {
     Box::new(|query| {
         let (name, source, count) = match (query.shape, query.risk, query.kind) {
             (_, _, Some("integration")) => ("deep", "by_kind", 8),
-            (Some("standard"), _, _) => ("standard", "override", 3),
+            (Some("standard"), _, _) => ("standard", "override", 5),
             (_, Some("crucial"), _) => ("deep", "by_risk", 8),
             (_, Some("routine"), _) => ("quick", "by_risk", 1),
-            _ => ("standard", "default", 3),
+            _ => ("standard", "default", 5),
         };
         Ok(super::preset::ShapeHint {
             name: name.into(),
@@ -2211,9 +2211,9 @@ fn review_council_fans_out_one_lens_role_over_the_lens_list() {
             "lens-tests",
             "lens-design-fit-reuse",
             "lens-simplicity",
+            "lens-reliability",
             "lens-conventions-readability",
             "lens-refactor-cleanup",
-            "lens-reliability",
             "lens-flexibility",
         ]
     );
@@ -2338,6 +2338,8 @@ fn refactor_panel_adds_kind_lenses_outside_the_slot_cap() {
             "lens-correctness-spec",
             "lens-tests",
             "lens-design-fit-reuse",
+            "lens-simplicity",
+            "lens-reliability",
             "lens-refactor-cleanup"
         ]
     );
@@ -2460,7 +2462,7 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
     let nodes = document["nodes"][1]["composite"]["nodes"]
         .as_array()
         .unwrap();
-    assert_eq!(nodes.len(), 3);
+    assert_eq!(nodes.len(), 5);
     assert!(nodes.iter().all(|node| route(node)["alias"] == "junior"));
     let document = council(
         &[
@@ -2956,6 +2958,10 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
     );
     let evaluate = node(&expanded.document, "evaluate");
     assert_eq!(evaluate["kind"], "synthesise");
+    assert_eq!(
+        evaluate["inputs"][0],
+        json!({"node":"lens", "outputs":["findings"]})
+    );
     assert_eq!(route(evaluate)["alias"], "principal");
     assert_eq!(evaluate["source"]["node"], "implement");
     assert_eq!(evaluate["review_base"], "main");
@@ -4965,13 +4971,13 @@ fn deliver_forwards_size_and_kind_into_the_review_panel() {
     );
     assert_eq!(
         review_lens_count(&panel(&["parameters.size='medium'"]).document),
-        3
+        5
     );
     assert_eq!(
         review_lens_count(
             &panel(&["parameters.size='medium'", "parameters.kind='refactor'"]).document
         ),
-        4
+        6
     );
     assert_eq!(
         review_lens_count(&panel(&["parameters.size='large'"]).document),

@@ -243,6 +243,28 @@ fn fixture() -> Result {
             std::thread::sleep(std::time::Duration::from_secs(60));
             return Ok(());
         }
+        if prompt.contains("stderr refusal then hang")
+            || prompt.contains("stderr refusal then success")
+        {
+            write!(
+                io::stderr(),
+                "\x1b[31mAI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000"
+            )?;
+            io::stderr().flush()?;
+            if prompt.contains("stderr refusal then hang") {
+                loop {
+                    std::thread::park();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(4));
+        }
+        if prompt.contains("stderr quota mention") {
+            writeln!(
+                io::stderr(),
+                "The documentation mentions quota and usage limit exceeded"
+            )?;
+            io::stderr().flush()?;
+        }
         let frames = if prompt.contains("free limit") {
             include_str!("fixtures/providers/opencode/v2.2.0-free-limit.jsonl")
         } else if prompt.contains("model unavailable") {
@@ -1319,6 +1341,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     assert_eq!(result["data"]["selection_source"], "override");
     let reviewers = result["data"]["reviewers"].as_array().ok_or("reviewers")?;
     assert_eq!(reviewers.len(), 2);
+    assert_eq!(result["data"]["verdicts"]["approve"], 2);
     assert_eq!(reviewers[0]["run_id"], timed_rows[0]["run_id"]);
     for (index, lens) in ["correctness", "tests"].iter().enumerate() {
         let row = &reviewers[index];
@@ -1555,6 +1578,78 @@ fn opencode_usage_limit_stops_hanging_provider() -> Result {
     assert_eq!(exit["stop_reason"], "post_terminal_cleanup", "{exit}");
     assert_eq!(exit["terminal_observed"], true, "{exit}");
     cleanup.disarm();
+    Ok(())
+}
+
+/// Real stderr-only refusal and incidental text through the guardian.
+fn opencode_stderr_live_quota() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    for (prompt_text, expected, stop_reason) in [
+        (
+            "stderr refusal then hang",
+            "quota_limited",
+            Some("post_terminal_cleanup"),
+        ),
+        (
+            "stderr refusal then success",
+            "quota_limited",
+            Some("post_terminal_cleanup"),
+        ),
+        ("stderr quota mention", "succeeded", None),
+    ] {
+        let mut rig = TestRig::new()?;
+        let cleanup = rig.process_cleanup();
+        let data = rig.home.join(".local/share/opencode");
+        fs::create_dir_all(&data)?;
+        let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+        db.execute_batch(
+            r#"CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
+            INSERT INTO session_message VALUES ('ses_x', 'assistant',
+            '{"model":{"providerID":"opencode","id":"glm-5.3-flash-free"},"finish":"stop"}');"#,
+        )?;
+        let bin = rig.root.join("provider/bin");
+        fs::create_dir_all(&bin)?;
+        rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+        rig.env.retain(|(key, _)| key != "PATH");
+        rig.env.push((
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", bin.display()).into(),
+        ));
+        let prompt = rig.root.join("prompt.md");
+        fs::write(&prompt, prompt_text)?;
+        let out = rig.command(&[
+            "dispatch",
+            "--model",
+            "opencode/opencode/glm-5.3-flash-free",
+            "--operation-id",
+            "stderr-quota",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "5s",
+            "--json",
+        ])?;
+        assert_eq!(code(&out), 0, "{out:?}");
+        let dispatched: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        let run = dispatched["data"]["run_id"].as_str().ok_or("run")?;
+        let out = rig.command(&["lanes", "--id", run, "--json"])?;
+        assert_eq!(code(&out), 0, "{out:?}");
+        let lanes: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        let lane = &lanes["data"]["lanes"][0];
+        assert_eq!(lane["state"], expected, "{lane}");
+        let attempt = rig
+            .state
+            .join("runs")
+            .join(run)
+            .join("attempts")
+            .join(lane["attempt_id"].as_str().ok_or("attempt")?);
+        let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
+        assert_eq!(exit["stop_reason"].as_str(), stop_reason, "{exit}");
+        assert_eq!(exit["terminal_observed"], stop_reason.is_some(), "{exit}");
+        cleanup.disarm();
+    }
     Ok(())
 }
 
@@ -4836,6 +4931,7 @@ fn main() -> ExitCode {
                 "review_fans_out_and_collects_fake_provider",
                 "opencode_usage_limit_settlement_is_bounded",
                 "opencode_usage_limit_stops_hanging_provider",
+                "opencode_stderr_live_quota",
                 "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
                 "claude_dispatch_refreshes_registered_account",
@@ -4897,6 +4993,7 @@ fn main() -> ExitCode {
                     "opencode_usage_limit_stops_hanging_provider" => {
                         opencode_usage_limit_stops_hanging_provider()
                     }
+                    "opencode_stderr_live_quota" => opencode_stderr_live_quota(),
                     "opencode_dispatch_observes_v2_wal_session" => {
                         opencode_dispatch_observes_v2_wal_session()
                     }

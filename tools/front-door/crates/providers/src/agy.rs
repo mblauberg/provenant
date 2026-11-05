@@ -10,6 +10,8 @@ pub struct Agy;
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &Agy,
     quota_source: Some(&Agy),
+    stdout_decoder: None,
+    stderr_decoder: None,
     display_name: "Agy",
     quota: provenant_quota::QuotaPolicy {
         adapter: "agy",

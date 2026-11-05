@@ -2180,7 +2180,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 } else {
                     selected_findings(node, &plan, &checkpoint, &positions)
                         .into_iter()
-                        .map(|(_, finding)| finding)
+                        .map(|(source, mut finding)| {
+                            finding.extra.insert(
+                                "propagates".into(),
+                                format!("{source}:{}", finding.id).into(),
+                            );
+                            finding
+                        })
                         .collect()
                 };
                 let proof_dispositions = if node.dispositions.is_empty()
