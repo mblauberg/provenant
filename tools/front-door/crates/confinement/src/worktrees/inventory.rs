@@ -109,6 +109,32 @@ impl RepoFacts {
         parse_oid(trim_ascii(&outcome.stdout.bytes))
     }
 
+    /// Resolve a read-only ref without peeling it, preserving Git's distinction
+    /// between an absent ref and a ref to a non-commit object.
+    pub fn resolve_read_ref(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        name: GitRefName,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        let budget = budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = crate::utility::run_read_utility(
+            executor,
+            GitRead::ResolveRefOid { name },
+            repo,
+            utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
     /// Resolve a revision from fresh Git evidence using this session's scalar cap.
     pub fn resolve_revision(
         &self,

@@ -238,6 +238,61 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
         context.utility_budget,
         &cancel(),
     )?;
+    // An existing ref to a non-commit object remains distinct from a missing
+    // ref, even when a caller separately asks for a peeled commit.
+    fs::write(fixture.root.join("blob-fixture"), b"object")?;
+    let blob = fixture.run(&["hash-object", "-w", "blob-fixture"])?;
+    let blob = std::str::from_utf8(&blob.stdout.bytes)?.trim();
+    fs::write(
+        fixture.repo.common_git_dir().join("refs/heads/blob-ref"),
+        format!("{blob}\n"),
+    )?;
+    assert_eq!(
+        facts.resolve_read_ref(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            GitRefName::branch("blob-ref")?,
+            &cancel()
+        )?,
+        GitOid::parse(blob)?
+    );
+    assert!(matches!(
+        facts.resolve_read_commit(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            GitRefName::branch("blob-ref")?,
+            &cancel()
+        ),
+        Err(WorktreeError::NotFound)
+    ));
+    assert_eq!(
+        facts.resolve_read_ref(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            GitRefName::branch("facts-ref")?,
+            &cancel()
+        )?,
+        moved
+    );
+    assert!(matches!(
+        limited.resolve_read_ref(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            GitRefName::branch("facts-ref")?,
+            &cancel()
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
     assert!(matches!(
         limited.resolve_read_commit(
             &read_only,

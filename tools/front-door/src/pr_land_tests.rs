@@ -1459,6 +1459,8 @@ pub(crate) fn pr_land_canonicalises_quoted_worktree_paths() -> Result {
     assert_eq!(code(&output), 0, "{value}");
     assert_eq!(status(&value, "worktree")?, "done", "{value}");
     assert!(!landing.worktree.exists());
+    let remaining = git(&landing.rig, &["worktree", "list", "--porcelain"])?;
+    assert!(!remaining.contains("branch refs/heads/feat"), "{remaining}");
     Ok(())
 }
 
@@ -1827,6 +1829,8 @@ pub(crate) fn pr_land_primary_with_separate_git_directory() -> Result {
         assert!(!landing.worktree.exists());
         landing.rig.project = main;
         assert!(!branch_exists(&landing.rig, "feat")?);
+        let remaining = git(&landing.rig, &["worktree", "list", "--porcelain"])?;
+        assert!(!remaining.contains("branch refs/heads/feat"), "{remaining}");
     }
     Ok(())
 }

@@ -64,31 +64,12 @@ fn default_branch(project: &Path) -> Result<String> {
 }
 
 /// Resolve the remote-tracking base through the command's bounded facts session.
-fn base_commit(
-    facts: &provenant_confinement::worktrees::RepoFacts,
-    project: &Path,
-    remote: &str,
-    base: &str,
-) -> Result<Option<String>> {
-    use provenant_confinement::{
-        repo::GitRefName,
-        utility::{UtilityBudget, UtilityRuntime},
-        worktrees::WorktreeError,
-    };
+fn base_commit(git: &Git, project: &Path, remote: &str, base: &str) -> Result<Option<String>> {
+    use provenant_confinement::repo::GitRefName;
     let Ok(reference) = GitRefName::remote_tracking(format!("{remote}/{base}")) else {
         return Ok(None);
     };
-    let git = provenant_os::git::git_executable().ok_or("Git executable is unavailable")?;
-    let runtime = UtilityRuntime::read_only(git)?;
-    let executor = provenant_os::exec::SystemExecutor::new(1)?;
-    let budget = UtilityBudget::bounded(super::git::GIT_TIMEOUT)?;
-    let cancel = provenant_core::CancelToken::new();
-    let repo = runtime.open_read_repo(&executor, project, budget, &cancel)?;
-    match facts.resolve_read_commit(&repo, &executor, &runtime, budget, reference, &cancel) {
-        Ok(oid) => Ok(Some(oid.to_string())),
-        Err(WorktreeError::NotFound) => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+    Ok(git.commit(project, reference)?.map(|oid| oid.to_string()))
 }
 
 fn plan(
@@ -161,8 +142,7 @@ fn plan(
     }
     let git = Git::new()?;
     let remote = git.remote_of(project, &base)?;
-    let facts = provenant_confinement::worktrees::RepoFacts::default();
-    let base_sha = base_commit(&facts, project, &remote, &base)?;
+    let base_sha = base_commit(&git, project, &remote, &base)?;
     if !command.dry_run {
         // The body states this head, so refuse a branch that is elsewhere.
         let listed = git
@@ -312,7 +292,7 @@ mod tests {
     #[test]
     fn base_commit_uses_bounded_repository_facts() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let facts = provenant_confinement::worktrees::RepoFacts::default();
+        let git = Git::new()?;
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project)?;
         provenant_os::fixture::run_git(&project, &["init", "-q"])?;
@@ -326,16 +306,41 @@ mod tests {
             &["rev-parse", "HEAD"],
         )?)?;
         assert_eq!(
-            base_commit(&facts, &project, "origin", "main")?,
+            base_commit(&git, &project, "origin", "main")?,
             Some(expected.trim().to_owned())
         );
-        assert_eq!(base_commit(&facts, &project, "origin", "missing")?, None);
+        assert_eq!(base_commit(&git, &project, "origin", "missing")?, None);
+        provenant_os::fixture::run_git(
+            &project,
+            &["update-ref", "refs/remotes/origin/moving", "HEAD"],
+        )?;
+        let tree = String::from_utf8(provenant_os::fixture::run_git(
+            &project,
+            &["rev-parse", "HEAD^{tree}"],
+        )?)?;
+        let moved = String::from_utf8(provenant_os::fixture::run_git(
+            &project,
+            &["commit-tree", tree.trim(), "-m", "moving ref"],
+        )?)?;
+        assert_eq!(
+            base_commit(&git, &project, "origin", "moving")?,
+            Some(expected.trim().to_owned())
+        );
+        provenant_os::fixture::run_git(
+            &project,
+            &["update-ref", "refs/remotes/origin/moving", moved.trim()],
+        )?;
+        assert_eq!(
+            base_commit(&git, &project, "origin", "moving")?,
+            Some(moved.trim().to_owned())
+        );
+
         provenant_os::fixture::run_git(
             &project,
             &["update-ref", "refs/remotes/origin/équipe", "HEAD"],
         )?;
         assert_eq!(
-            base_commit(&facts, &project, "origin", "équipe")?,
+            base_commit(&git, &project, "origin", "équipe")?,
             Some(expected.trim().to_owned())
         );
         let separate = temp.path().join("separate");
@@ -360,7 +365,7 @@ mod tests {
             &["rev-parse", "HEAD"],
         )?)?;
         assert_eq!(
-            base_commit(&facts, &separate, "origin", "main")?,
+            base_commit(&git, &separate, "origin", "main")?,
             Some(separate_head.trim().to_owned())
         );
         let shared = temp.path().join("shared");
@@ -380,7 +385,7 @@ mod tests {
             &["update-ref", "refs/remotes/origin/main", "HEAD"],
         )?;
         assert_eq!(
-            base_commit(&facts, &shared, "origin", "main")?,
+            base_commit(&git, &shared, "origin", "main")?,
             Some(expected.trim().to_owned())
         );
         Ok(())

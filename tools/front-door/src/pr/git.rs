@@ -18,6 +18,14 @@ pub(super) fn plain_ref(name: &str) -> bool {
 
 pub(super) struct Git {
     executable: String,
+    facts: provenant_confinement::worktrees::RepoFacts,
+    utility: provenant_confinement::utility::UtilityRuntime,
+    executor: provenant_os::exec::SystemExecutor,
+    budget: provenant_confinement::utility::UtilityBudget,
+    cancel: provenant_core::CancelToken,
+    repositories: std::sync::Mutex<
+        std::collections::BTreeMap<std::path::PathBuf, provenant_confinement::repo::ReadOnlyRepo>,
+    >,
 }
 impl Git {
     pub(super) fn new() -> Result<Self> {
@@ -26,8 +34,93 @@ impl Git {
             .to_str()
             .ok_or("Git executable path is not UTF-8")?
             .to_owned();
-        Ok(Self { executable })
+        Ok(Self {
+            executable,
+            facts: provenant_confinement::worktrees::RepoFacts::default(),
+            utility: provenant_confinement::utility::UtilityRuntime::read_only(git)?,
+            executor: provenant_os::exec::SystemExecutor::new(1)?,
+            budget: provenant_confinement::utility::UtilityBudget::bounded(GIT_TIMEOUT)?,
+            cancel: provenant_core::CancelToken::new(),
+            repositories: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        })
     }
+    /// Resolve one ref using this command's bounded repository facts.
+    pub(super) fn commit(
+        &self,
+        dir: &Path,
+        reference: provenant_confinement::repo::GitRefName,
+    ) -> Result<Option<provenant_core::GitOid>> {
+        self.read_ref(dir, reference, true)
+    }
+
+    fn read_ref(
+        &self,
+        dir: &Path,
+        reference: provenant_confinement::repo::GitRefName,
+        peel: bool,
+    ) -> Result<Option<provenant_core::GitOid>> {
+        use provenant_confinement::worktrees::WorktreeError;
+        let mut repositories = self
+            .repositories
+            .lock()
+            .map_err(|_| "repository facts lock failed")?;
+        let repo = match repositories.entry(dir.to_path_buf()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
+                self.utility
+                    .open_read_repo(&self.executor, dir, self.budget, &self.cancel)?,
+            ),
+        };
+        let result = if peel {
+            self.facts.resolve_read_commit(
+                repo,
+                &self.executor,
+                &self.utility,
+                self.budget,
+                reference,
+                &self.cancel,
+            )
+        } else {
+            self.facts.resolve_read_ref(
+                repo,
+                &self.executor,
+                &self.utility,
+                self.budget,
+                reference,
+                &self.cancel,
+            )
+        };
+        match result {
+            Ok(oid) => Ok(Some(oid)),
+            Err(WorktreeError::NotFound) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Resolve a local branch through this command's facts session.
+    pub(super) fn branch_commit(
+        &self,
+        dir: &Path,
+        branch: &str,
+    ) -> Result<Option<provenant_core::GitOid>> {
+        let Ok(reference) = provenant_confinement::repo::GitRefName::branch(branch) else {
+            return Ok(None);
+        };
+        self.commit(dir, reference)
+    }
+
+    /// Check the unpeeled branch ref, including refs to non-commit objects.
+    pub(super) fn branch_ref(
+        &self,
+        dir: &Path,
+        branch: &str,
+    ) -> Result<Option<provenant_core::GitOid>> {
+        let Ok(reference) = provenant_confinement::repo::GitRefName::branch(branch) else {
+            return Ok(None);
+        };
+        self.read_ref(dir, reference, false)
+    }
+
     /// Whether Git exited zero, and its first line of output or error.
     pub(super) fn run(&self, dir: &Path, args: &[&str]) -> Result<(bool, String)> {
         let mut argv = vec![self.executable.as_str()];

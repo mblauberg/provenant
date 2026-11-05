@@ -813,12 +813,9 @@ fn cleanup_target(
             ),
         ));
     }
-    let local = format!("refs/heads/{branch}^{{commit}}");
-    let (exists, tip) = git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
-    if !exists {
+    let Some(tip) = git.branch_commit(project, branch)? else {
         return Ok(Cleanup::Skip(Status::Skipped, "no local branch".into()));
-    }
-    let tip = GitOid::parse(&tip)?;
+    };
     let (contained, _) = git.run(
         project,
         &["merge-base", "--is-ancestor", &tip.to_string(), upstream],
@@ -898,9 +895,7 @@ fn fast_forward(
     upstream: &str,
     checkouts: &[Checkout],
 ) -> Result<Step> {
-    let local = format!("refs/heads/{base}");
-    let (exists, _) = git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
-    if !exists {
+    if git.branch_ref(project, base)?.is_none() {
         return Ok(Step::new(
             "fast_forward",
             Status::Skipped,
@@ -965,8 +960,7 @@ fn delete_branch(
         ));
     }
     let local = format!("refs/heads/{branch}");
-    let (exists, _) = git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
-    if !exists {
+    if git.branch_ref(project, branch)?.is_none() {
         return Ok(Step::new("branch", Status::Skipped, "no local branch"));
     }
     let (contained, _) = git.run(project, &["merge-base", "--is-ancestor", &local, upstream])?;
@@ -1009,8 +1003,7 @@ fn delete_branch(
             (true, _) => {
                 // Like `git branch -d`, drop the branch's tracking settings, but
                 // only when no other process has recreated the branch meanwhile.
-                let (recreated, _) =
-                    git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
+                let recreated = git.branch_ref(project, branch)?.is_some();
                 if !recreated {
                     git.run(
                         project,
