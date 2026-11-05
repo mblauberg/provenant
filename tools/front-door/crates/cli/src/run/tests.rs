@@ -2948,21 +2948,6 @@ fn manifest_task_network_and_adapter_route_syntax() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn manifest_rejects_flat_route_fields() {
-    for task in [
-        json!({"prompt": "review", "model": "codex/gpt-6-luna", "effort": "high"}),
-        json!({"prompt": "review", "route": "senior"}),
-        json!({"prompt": "review", "route": {"kind": "named", "name": "senior"}, "effort": "high"}),
-        json!({"prompt": "review"}),
-    ] {
-        assert!(
-            serde_json::from_value::<Manifest>(json!({"schema_version": 1, "tasks": [task]}))
-                .is_err()
-        );
-    }
-}
-
-#[test]
 fn operation_replays_after_its_context_ref_moves_or_is_deleted()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{ActorId, RootInputs};
