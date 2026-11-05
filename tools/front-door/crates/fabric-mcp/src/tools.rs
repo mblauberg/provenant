@@ -1410,17 +1410,46 @@ impl ServiceError {
             }
             return value;
         }
-        if let Self::Coordination(CoordinationError::Store(error)) = self {
-            if let provenant_fabric_runtime::StoreError::Invalid(field) = error {
-                return serde_json::json!({"code":self.code(),"field":field,"message":error.to_string(),"hint":"Check the field and retry."});
+        if let Self::Coordination(error) = self {
+            let projection = error.diagnostic();
+            let mut value = serde_json::to_value(&projection)
+                .unwrap_or_else(|_| serde_json::json!({"code": self.code()}));
+            value["message"] = Value::String(
+                projection
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| projection.code.clone()),
+            );
+            value["hint"] = Value::String(
+                projection
+                    .next
+                    .clone()
+                    .unwrap_or_else(|| "Inspect the current state before retrying.".into()),
+            );
+            match error {
+                CoordinationError::Store(provenant_fabric_runtime::StoreError::Invalid(field)) => {
+                    value["field"] =
+                        serde_json::json!(provenant_records::diagnostic::safe_text(field));
+                }
+                CoordinationError::Input(error) => {
+                    value["path"] = serde_json::json!(error.safe_path());
+                }
+                CoordinationError::Peer(provenant_fabric_runtime::hosts::PeerError::Unknown {
+                    operation_id,
+                }) => {
+                    value["operation_id"] = serde_json::json!(operation_id);
+                }
+                _ => {}
             }
-            let facade = FacadeError::from(error);
-            if matches!(
-                facade,
-                FacadeError::UpgradeRequired { .. } | FacadeError::Io { .. }
-            ) {
-                return Self::Facade(facade).structured_error();
+            if let FacadeError::Io { operation, .. } = FacadeError::from(error)
+                && operation == "access Fabric store"
+            {
+                value["operation"] = Value::String(operation);
             }
+            if self.code() == "busy" {
+                value["retryable"] = Value::Bool(true);
+            }
+            return value;
         }
         if let Self::Mutation {
             operation_id,
@@ -1451,25 +1480,11 @@ impl ServiceError {
                 }
                 value
             }
-            Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
-            Self::Coordination(CoordinationError::LaneMutation) => {
-                serde_json::json!({"code":self.code(),"message":self.to_string()})
-            }
-            Self::Coordination(CoordinationError::Peer(
-                provenant_fabric_runtime::hosts::PeerError::ProtocolMismatch { .. },
-            )) => {
-                serde_json::json!({"code":self.code(),"message":self.to_string()})
-            }
-            Self::Coordination(CoordinationError::Input(error)) => {
-                serde_json::json!({"code":self.code(),"path":error.path})
+            Self::Invalid(error) => {
+                serde_json::json!({"code":self.code(),"path":error.safe_path()})
             }
             Self::Inbox(InboxError::Invalid(field)) => {
                 serde_json::json!({"code":self.code(),"field":field})
-            }
-            Self::Coordination(CoordinationError::Peer(
-                provenant_fabric_runtime::hosts::PeerError::Unknown { operation_id },
-            )) => {
-                serde_json::json!({"code":self.code(),"operation_id":operation_id})
             }
             _ => serde_json::json!({"code":self.code()}),
         };

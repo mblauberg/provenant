@@ -1,3 +1,30 @@
+#[test]
+fn invalid_input_paths_omit_untrusted_data() {
+    use provenant_fabric_runtime::coordination::{CoordinationError, InputError};
+    for path in [
+        "/private/TOKEN_SENTINEL\u{1b}".to_owned(),
+        format!("tasks[{}].title", "1".repeat(200)),
+    ] {
+        for error in [
+            ServiceError::Invalid(InputError { path: path.clone() }),
+            ServiceError::Coordination(CoordinationError::Input(InputError { path: path.clone() })),
+        ] {
+            let detail = error.structured_error();
+            let wire = detail.to_string();
+            assert_eq!(detail["code"], "invalid_input");
+            assert!(detail["path"].is_null());
+            assert!(!wire.contains("TOKEN_SENTINEL"));
+            assert!(!wire.contains("/private"));
+            assert!(detail["hint"].is_string());
+        }
+    }
+    let detail = ServiceError::Invalid(InputError {
+        path: "tasks[1].title".into(),
+    })
+    .structured_error();
+    assert_eq!(detail["path"], "tasks[1].title");
+}
+
 use super::*;
 use provenant_core::OperationId;
 use serde_json::json;
@@ -540,7 +567,10 @@ fn control_ops_are_strict_local_mutations_with_bounded_text() {
 fn coordination_store_errors_include_safe_context() {
     use provenant_fabric_store::Error;
     let invalid = ServiceError::Coordination(CoordinationError::Store(Error::Invalid("through")));
-    assert_eq!(invalid.structured_error()["field"], "through");
+    let invalid = invalid.structured_error();
+    assert_eq!(invalid["field"], "through");
+    assert!(invalid["message"].as_str().unwrap().contains("through"));
+    assert!(invalid["hint"].is_string());
     let io = ServiceError::Coordination(CoordinationError::Store(Error::Io {
         path: "/state/inbox.db".into(),
         source: std::io::Error::other("private"),

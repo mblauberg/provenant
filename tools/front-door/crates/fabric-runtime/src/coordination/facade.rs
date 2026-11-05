@@ -422,6 +422,31 @@ fn delivery_stage_wire<S: serde::Serializer>(
 }
 
 impl FacadeError {
+    /// Project a state directory permission refusal for the selected edge.
+    pub fn state_directory_permissions(
+        path: &std::path::Path,
+        mode: u32,
+        destination: provenant_records::diagnostic::Destination<'_>,
+    ) -> provenant_records::diagnostic::Diagnostic {
+        use provenant_records::diagnostic::{Diagnostic, safe_path, shell_path};
+        let detail = safe_path(path, destination).map_or_else(
+            || format!("Fabric state directory has mode {mode:04o}; other users can access it"),
+            |path| {
+                format!(
+                    "Fabric state directory {path} has mode {mode:04o}; other users can access it"
+                )
+            },
+        );
+        let action = shell_path(path, destination).map_or_else(
+            || "restrict the state directory to its owner, then retry".into(),
+            |path| format!("run chmod 700 {path} and retry"),
+        );
+        Diagnostic::new("invalid_input")
+            .category("invalid")
+            .detail(detail)
+            .next(action)
+    }
+
     /// Project only facts selected by the owning refusal, never its source text.
     pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
         use provenant_records::diagnostic::Diagnostic;
@@ -530,6 +555,10 @@ fn safe_invalid_detail(detail: &str) -> Option<String> {
         .strip_prefix("invalid input field `")?
         .split('`')
         .next()?;
+    safe_input_field(field).map(|field| format!("invalid input field `{field}`"))
+}
+
+pub(super) fn safe_input_field(field: &str) -> Option<&str> {
     let allowed = [
         "scope",
         "paths",
@@ -594,7 +623,7 @@ fn safe_invalid_detail(detail: &str) -> Option<String> {
             .filter(|part| !part.is_empty())
             .all(|part| part.bytes().all(|b| b.is_ascii_digit()) || allowed.contains(&part))
     {
-        return Some(format!("invalid input field `{field}`"));
+        return Some(field);
     }
     None
 }
@@ -804,6 +833,25 @@ mod diagnostic_tests {
             FacadeError::from(&Error::SchemaVersion(1)),
             FacadeError::StateCorrupt
         );
+    }
+
+    #[test]
+    fn directory_permissions_projection_respects_destination() {
+        use provenant_records::diagnostic::Destination;
+        let path = std::path::Path::new("/private/a b");
+        let local = FacadeError::state_directory_permissions(path, 0o755, Destination::Local);
+        assert!(local.next.unwrap().contains("chmod 700 '/private/a b'"));
+        let remote = FacadeError::state_directory_permissions(
+            path,
+            0o755,
+            Destination::Remote {
+                repository: None,
+                home: None,
+            },
+        );
+        let wire = serde_json::to_string(&remote).unwrap();
+        assert!(!wire.contains("/private"));
+        assert!(remote.next.is_some());
     }
 
     #[test]

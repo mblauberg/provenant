@@ -4511,6 +4511,11 @@ fn account_evidence_reasons_carry_their_repair_text() {
             "scoped provider refusal",
         ),
         (RouteExclusionReason::InvalidAccountEvidence, "invalid"),
+        (
+            RouteExclusionReason::UnknownAvailability,
+            "provenant quota tick",
+        ),
+        (RouteExclusionReason::StaleAvailability, "stale"),
     ] {
         assert!(exclusion_detail(&reason).contains(text), "{reason:?}");
     }

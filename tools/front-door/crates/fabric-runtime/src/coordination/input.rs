@@ -31,6 +31,11 @@ impl InputError {
         super::facade::FacadeError::InvalidInput { detail: None }.code()
     }
 
+    /// A bounded schema field path safe for diagnostic envelopes.
+    pub fn safe_path(&self) -> Option<&str> {
+        super::facade::safe_input_field(&self.path)
+    }
+
     pub(crate) fn new(path: impl Into<String>) -> Self {
         Self { path: path.into() }
     }

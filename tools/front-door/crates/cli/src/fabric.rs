@@ -550,7 +550,7 @@ pub enum EdgeError {
     Time(#[from] provenant_core::TimeError),
     #[error(transparent)]
     Encode(#[from] serde_json::Error),
-    #[error("Fabric state directory {} has mode {mode:04o}; other users can read or access it; {}", path.display(), self.repair().unwrap_or_default())]
+    #[error("Fabric state directory {} has mode {mode:04o}; other users can read or access it", path.display())]
     StateDirectoryPermissions { path: PathBuf, mode: u32 },
     #[error("invalid Fabric input")]
     Invalid,
@@ -559,17 +559,24 @@ pub enum EdgeError {
     #[error("Git executable is unavailable")]
     GitUnavailable,
 }
-impl EdgeError {
-    pub fn repair(&self) -> Option<String> {
-        match self {
-            Self::StateDirectoryPermissions { path, .. } => Some(format!(
-                "run chmod 700 '{}' and retry",
-                path.to_string_lossy().replace('\'', "'\"'\"'")
-            )),
-            _ => None,
+fn edge_diagnostic(error: &EdgeError) -> Option<provenant_records::diagnostic::Diagnostic> {
+    use provenant_fabric_runtime::coordination::facade::FacadeError;
+    match error {
+        EdgeError::StateDirectoryPermissions { path, mode } => {
+            Some(FacadeError::state_directory_permissions(
+                path,
+                *mode,
+                provenant_records::diagnostic::Destination::Local,
+            ))
         }
+        EdgeError::Coordination(error) => Some(error.diagnostic()),
+        EdgeError::Relay(provenant_fabric_mcp::tools::ServiceError::Facade(error)) => {
+            Some(error.diagnostic())
+        }
+        _ => None,
     }
 }
+
 fn json(value: impl Serialize) -> Result<Value, EdgeError> {
     Ok(serde_json::to_value(value)?)
 }
@@ -1083,13 +1090,22 @@ pub fn run(
                 EdgeError::Config(_) => (Outcome::Invalid, "config"),
                 _ => (Outcome::Error, "io"),
             };
+            let projection = edge_diagnostic(&error);
             let mut result = CommandResult::new(&command, status, Value::Null);
             result.error = Some(CommandError {
-                diagnostic: None,
+                diagnostic: projection.as_ref().map(Into::into),
                 code: code.into(),
-                message: error.to_string(),
+                message: projection.as_ref().map_or_else(
+                    || error.to_string(),
+                    |projection| {
+                        projection
+                            .detail
+                            .clone()
+                            .unwrap_or_else(|| projection.code.clone())
+                    },
+                ),
                 cause: None,
-                repair: error.repair(),
+                repair: projection.and_then(|projection| projection.next),
             });
             result
         }
@@ -1141,6 +1157,23 @@ pub fn coordination_outcome(
 #[cfg(test)]
 mod outcome_tests {
     use super::*;
+
+    #[test]
+    fn coordination_edge_uses_safe_owner_projection() {
+        let error = EdgeError::Coordination(CoordinationError::Peer(
+            provenant_fabric_runtime::hosts::PeerError::ProtocolMismatch {
+                peer: "/private/TOKEN_SENTINEL".into(),
+                remote: 1,
+                expected: 2,
+            },
+        ));
+        let projection = edge_diagnostic(&error).unwrap();
+        let encoded = serde_json::to_string(&projection).unwrap();
+        assert!(!encoded.contains("TOKEN_SENTINEL"));
+        assert!(!encoded.contains("/private"));
+        assert_eq!(projection.code, "peer_version");
+        assert!(projection.next.is_some());
+    }
 
     #[test]
     fn upgrade_and_peer_version_refusals_match_on_both_edges() {

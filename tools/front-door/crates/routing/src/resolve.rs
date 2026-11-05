@@ -1114,6 +1114,12 @@ pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
         RouteExclusionReason::InvalidAccountEvidence => {
             "invalid persisted account evidence; repair or re-register the account".to_owned()
         }
+        RouteExclusionReason::UnknownAvailability => {
+            "account or route readiness has not been verified; run `provenant quota tick` or check the account login".to_owned()
+        }
+        RouteExclusionReason::StaleAvailability => {
+            "account or route readiness evidence is stale; run `provenant quota tick` to refresh it".to_owned()
+        }
         other => format!("{other:?}"),
     }
 }
