@@ -53,22 +53,17 @@ impl crate::LaunchSpec {
         )
     }
     /// Restore selected environment before the provider starts a shell command.
-    pub fn configure_shell(
-        &mut self,
-        scratch: &Path,
-        adapter: &provenant_records::AdapterSpec,
-    ) -> Result<(), ProviderError> {
+    pub fn configure_shell(&mut self, scratch: &Path, adapter: &provenant_records::AdapterSpec) {
         let Some((relative, selector)) = adapter.shell_prefix else {
-            return Ok(());
+            return;
         };
         let path = scratch.join(relative);
         self.setup.push(SetupStep::CreateDir(scratch.join("bin")));
         self.setup.push(SetupStep::WriteExecutable {
             path: path.clone(),
-            bytes: claude_shell(&self.env)?,
+            bytes: claude_shell(&self.env),
         });
         self.env.push((selector.into(), path.into_os_string()));
-        Ok(())
     }
     /// Put a `cargo` shim first on the lane's PATH. Cargo commands that compile
     /// take one host build slot (`slots` across every project on this state
@@ -106,6 +101,20 @@ impl crate::LaunchSpec {
             text(gate.provenant)?,
             text(gate.cargo)?,
         );
+        // Validate the environment before mutating setup or grants. The caller
+        // can then omit this optional shim if its paths cannot be represented.
+        let path_index = self
+            .env
+            .iter()
+            .position(|(key, _)| key == "PATH")
+            .ok_or(ProviderError::InvalidPath)?;
+        let path = &self.env[path_index].1;
+        let next_path = if std::env::split_paths(path).next().as_deref() == Some(bin.as_path()) {
+            path.clone()
+        } else {
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
+                .map_err(|_| ProviderError::InvalidPath)?
+        };
         let slots = gate
             .state
             .join(provenant_os::build_slots::DIRECTORY.join("/"));
@@ -117,17 +126,7 @@ impl crate::LaunchSpec {
             path: bin.join("cargo"),
             bytes: script.into_bytes(),
         });
-        let (_, path) = self
-            .env
-            .iter_mut()
-            .find(|(key, _)| key == "PATH")
-            .ok_or(ProviderError::InvalidPath)?;
-        if std::env::split_paths(path).next().as_deref() != Some(bin.as_path()) {
-            *path = std::env::join_paths(
-                std::iter::once(bin.clone()).chain(std::env::split_paths(path)),
-            )
-            .map_err(|_| ProviderError::InvalidPath)?;
-        }
+        self.env[path_index].1 = next_path;
         let profile = &mut self.profile.spec;
         // Read only: no write grant covers the slot directory.
         profile.runtime_reads.push(subtree(slots));
@@ -522,19 +521,28 @@ impl LaneRuntime<'_> {
     }
 }
 
-fn claude_shell(env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> {
-    let mut exports = String::new();
+fn claude_shell(env: &[(OsString, OsString)]) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut script = b"#!/bin/sh\n".to_vec();
     for name in [
         "CARGO_BUILD_JOBS",
         "CARGO_INCREMENTAL",
         "CARGO_PROFILE_DEV_DEBUG",
     ] {
         if let Some((_, value)) = env.iter().find(|(key, _)| key == name) {
-            let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
-            exports.push_str(&format!("export {name}={}\n", shell_quote(value)));
+            script.extend_from_slice(format!("export {name}='").as_bytes());
+            for byte in value.as_os_str().as_bytes() {
+                if *byte == b'\'' {
+                    script.extend_from_slice(b"'\\''");
+                } else {
+                    script.push(*byte);
+                }
+            }
+            script.extend_from_slice(b"'\n");
         }
     }
-    Ok(format!("#!/bin/sh\n{exports}exec /bin/bash -c \"$1\"\n").into_bytes())
+    script.extend_from_slice(b"exec /bin/bash -c \"$1\"\n");
+    script
 }
 
 /// Shell that applies the private binding only when Git acts on the lane
@@ -1311,6 +1319,35 @@ mod tests {
     }
 
     #[test]
+    fn rejected_build_slot_shim_leaves_launch_unchanged() {
+        let gate = BuildSlotGate {
+            provenant: Path::new("/runtime"),
+            state: Path::new("/state"),
+            slots: 1,
+            wait_seconds: 60,
+            cargo: Path::new("/cargo"),
+            wait_marker: Path::new("/scratch/wait"),
+        };
+        for missing_path in [true, false] {
+            let mut spec = bare_spec("/usr/bin");
+            if missing_path {
+                spec.env.retain(|(key, _)| key != "PATH");
+            }
+            let env = spec.env.clone();
+            let profile = spec.profile.spec.clone();
+            let scratch = if missing_path {
+                Path::new("/scratch")
+            } else {
+                Path::new("/scratch:invalid")
+            };
+            assert!(spec.configure_build_slots(scratch, &gate).is_err());
+            assert_eq!(spec.env, env);
+            assert_eq!(spec.profile.spec, profile);
+            assert!(spec.setup.is_empty());
+        }
+    }
+
+    #[test]
     #[allow(clippy::disallowed_methods)]
     fn claude_shell_restores_jobs_after_scrub() {
         use std::os::unix::fs::PermissionsExt;
@@ -1322,8 +1359,7 @@ mod tests {
                 ("CARGO_BUILD_JOBS".into(), "4".into()),
                 ("CARGO_INCREMENTAL".into(), "0".into()),
                 ("CARGO_PROFILE_DEV_DEBUG".into(), "line-tables-only".into()),
-            ])
-            .unwrap(),
+            ]),
         )
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1334,6 +1370,28 @@ mod tests {
             .unwrap();
         assert!(result.status.success());
         assert_eq!(result.stdout, b"4\n0\nline-tables-only\nquoted argument\n");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn claude_shell_preserves_non_utf8_and_quotes() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let script = dir.path().join("prefix");
+        let value = vec![b'a', 0xff, b'\'', b'$', b'\n', b'z'];
+        std::fs::write(
+            &script,
+            claude_shell(&[("CARGO_BUILD_JOBS".into(), OsString::from_vec(value.clone()))]),
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+        let output = std::process::Command::new(script)
+            .env_clear()
+            .arg("printf %s \"$CARGO_BUILD_JOBS\"")
+            .output()?;
+        assert!(output.status.success());
+        assert_eq!(output.stdout, value);
+        Ok(())
     }
 
     #[test]

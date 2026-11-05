@@ -2519,7 +2519,22 @@ printf 'agy 1.0.0\n'
         &confinement.plan.permissions().scratch.path,
         &codex_runtime,
         &state,
-    )?;
+    );
+    // An unrepresentable shim input warns and leaves the prepared lane intact.
+    let env_before = codex.env.clone();
+    let profile_before = codex.profile.spec.clone();
+    let setup_count = codex.setup.len();
+    configure_build_slots(
+        &mut codex,
+        &provenant_config::LaneBuildSettings::default(),
+        &home,
+        &confinement.plan.permissions().scratch.path,
+        Path::new("relative-runtime"),
+        &state,
+    );
+    assert_eq!(codex.env, env_before);
+    assert_eq!(codex.profile.spec, profile_before);
+    assert_eq!(codex.setup.len(), setup_count);
     let slots = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
     assert!(
         codex

@@ -1610,7 +1610,7 @@ pub(super) fn prepare_candidates(
             scratch,
             &provenant_executable,
             roots.state.as_path(),
-        )?;
+        );
         if !host_indexes_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
@@ -1644,8 +1644,7 @@ pub(super) fn prepare_candidates(
             build_settings.jobs(),
         );
         if let Some(adapter_spec) = adapter_spec {
-            spec.configure_shell(scratch, adapter_spec)
-                .map_err(|error| error.to_string())?;
+            spec.configure_shell(scratch, adapter_spec);
         }
         if let Some(gh) = publishing_gh.as_ref() {
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)

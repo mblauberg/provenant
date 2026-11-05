@@ -133,8 +133,8 @@ reason = "Private Git wrapper and runtime setup can reject paths or unavailable 
 
 [[guard]]
 site = "providers/src/lane.rs#LaunchSpec::configure_build_slots"
-boundary = "unclassified"
-reason = "Invalid build-slot paths or environment values refuse setup."
+boundary = "warning"
+reason = "Unrepresentable optional build-slot shim configuration leaves the launch ungated and emits a warning."
 
 [[guard]]
 site = "providers/src/identity.rs#RegisteredAccount::validate_route"
