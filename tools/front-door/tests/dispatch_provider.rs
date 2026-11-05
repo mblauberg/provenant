@@ -458,7 +458,7 @@ fn fixture() -> Result {
     }
     let home = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("CODEX_HOME")?);
     let auth: Value = serde_json::from_slice(&fs::read(home.join("auth.json"))?)?;
-    if !prompt.contains("fixture handoff recovery") {
+    if !prompt.contains("fixture handoff recovery") && !prompt.contains("fixture graph redraw") {
         assert_eq!(auth["tokens"]["account_id"], "fixture-one");
     }
     let session = "01234567-89ab-cdef-0123-456789abcdef";
@@ -2969,7 +2969,7 @@ fn graph_read_only_alias_does_not_redraw_after_launch_quota() -> Result {
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let rows = lanes["data"]["lanes"].as_array().ok_or("lanes")?;
     assert_eq!(rows.len(), 1, "{lanes}");
-    assert_eq!(rows[0]["state"], "quota_limited");
+    assert_eq!(rows[0]["state"], "quota_limited", "{lanes}");
     cleanup.disarm();
     Ok(())
 }
