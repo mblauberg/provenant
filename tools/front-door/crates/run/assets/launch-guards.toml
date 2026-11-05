@@ -253,8 +253,13 @@ reason = "Absent separate private state warns and uses the already-confined atte
 
 [[guard]]
 site = "providers/src/opencode.rs#prepare"
+boundary = "authority"
+reason = "When a Git-context prompt refers to scratch, OpenCode must receive an exact matching path for that authorised context."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
 boundary = "unclassified"
-reason = "JSON path conversion and search-path construction still need a tolerant fallback."
+reason = "A required scratch-bin entry that PATH cannot encode still needs a safe fallback or boundary classification."
 
 [[guard]]
 site = "providers/src/command.rs#prepare"
