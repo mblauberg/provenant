@@ -1719,6 +1719,8 @@ fn preset_limits_and_composition_wiring() {
             .unwrap_err()
             .contains("limits.nodes=512")
     );
+    large.graph_limits.nodes = 2048;
+    assert!(expand(&large, "outer", "brief", &[]).is_ok());
     let mut deep = Layers::empty();
     for i in 0..9 {
         let stages = if i < 8 {
