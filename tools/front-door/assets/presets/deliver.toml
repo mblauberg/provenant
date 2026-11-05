@@ -32,6 +32,9 @@ cost = "1 writer + up to max_iterations repairs + review; no model runs while CI
 select_when = "An approved slice should go from implementation to a merged pull request without a chair watching CI."
 tags = ["write", "review", "deliver"]
 
+[plan]
+delegate = "review"
+
 [parameters]
 local_check_policy = { type = "string", inherit = true, default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
 worktree = { type = "string", default = "", doc = "Registered writer worktree; repairs continue its branch." }

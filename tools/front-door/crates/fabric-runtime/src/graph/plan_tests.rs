@@ -1755,6 +1755,53 @@ fn planned_scout_swarm_expands_scouts_with_a_question_and_a_route() {
 }
 
 #[test]
+fn single_planned_review_records_rationale_before_lens() {
+    let doc = planned_fixture("review");
+    let fragment = pattern_result(json!({"id":"correctness", "pattern":"lens-correctness-spec", "parameters":{"tier":"senior"}}));
+    let output = format!("The change needs a correctness review.\n{fragment}");
+    let mut results = vec!["framed", output.as_str()];
+    results.extend(std::iter::repeat_n("done\nVERDICT: PASS", 12));
+    let mut owner = fixture_owner(&results);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let planner = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    assert!(planner.outputs.as_ref().unwrap().result.as_ref().unwrap().excerpt.contains("The change needs a correctness review."));
+    let planner_call = owner.calls.iter().position(|(key, _)| key.node_id == "plan").unwrap();
+    let lens_call = owner.calls.iter().position(|(key, _)| key.node_id == "plan--correctness--lens").unwrap();
+    assert!(planner_call < lens_call);
+    assert_eq!(run.checkpoint.expansions[0].patterns.len(), 1);
+}
+
+#[test]
+fn review_catalogue_binds_every_lens_to_the_pinned_commit() {
+    let mut doc = planned_fixture("review");
+    let spec = doc.nodes.iter_mut().find(|node| node.id == "plan").unwrap().plan.as_mut().unwrap();
+    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    spec.pin_review_subject(head).unwrap();
+    for pattern in &spec.patterns {
+        for lens in &pattern.nodes {
+            assert_eq!(lens["source"], json!({"type":"commit", "commit":head}));
+        }
+    }
+    let output = pattern_result(json!({"id":"correctness", "pattern":"lens-correctness-spec"}));
+    let mut owner = fixture_owner(&["framed", &output, "done\nVERDICT: PASS", "done\nVERDICT: PASS", "done\nVERDICT: PASS"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let lens = run.checkpoint.expansions[0].nodes.iter().find(|node| node.id == "plan--correctness--lens").unwrap();
+    assert_eq!(lens.source, Some(SourceBinding::Commit { commit: head.into() }));
+}
+
+#[test]
+fn review_catalogue_pins_nested_pattern_leaves() {
+    let mut doc = planner(1);
+    let plan = doc.nodes[0].plan.as_mut().unwrap();
+    plan.patterns.push(serde_json::from_value(json!({"name":"nested","nodes":[{"id":"group","composite":{"nodes":[{"id":"lens","source":{"type":"head","node":"writer"}}],"exports":[{"node":"lens","outputs":["result"]}]}}],"exports":[{"node":"group","outputs":["result"]}]})).unwrap());
+    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    plan.pin_review_subject(head).unwrap();
+    assert_eq!(plan.patterns[0].nodes[0]["composite"]["nodes"][0]["source"], json!({"type":"commit","commit":head}));
+}
+
+#[test]
 fn planned_review_expands_only_the_lens_legs_the_catalogue_lists() {
     let doc = planned_fixture("review");
     let leg = |lens: &str, tier: &str| {

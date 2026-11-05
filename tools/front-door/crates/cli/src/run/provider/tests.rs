@@ -389,6 +389,7 @@ fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
         },
         &RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
