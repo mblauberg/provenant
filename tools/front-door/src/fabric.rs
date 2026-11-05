@@ -4703,6 +4703,37 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.prior_models(attempts)
     }
 
+    fn bind_implicit_writer(
+        &mut self,
+        path: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::ImplicitWriterBinding>, Self::Error> {
+        let request = provenant_run::resolve_writer(
+            self.factory.context.roots.state.as_path(),
+            &self.factory.cwd,
+            Path::new(path),
+        )
+        .map_err(run_error)?;
+        let writer = provenant_run::prepare_writer(
+            &request,
+            self.factory.context.roots.state.as_path(),
+            self.factory.context.identity.project,
+        )
+        .map_err(run_error)?;
+        let worktree = writer
+            .worktree
+            .path()
+            .to_str()
+            .ok_or(FacadeError::InvalidInput { detail: None })?
+            .to_owned();
+        Ok(Some(
+            provenant_fabric_runtime::graph::ImplicitWriterBinding {
+                extra: Default::default(),
+                worktree,
+                source_commit: writer.source_commit().to_string(),
+            },
+        ))
+    }
+
     fn bound_graph_bases(
         &self,
     ) -> (

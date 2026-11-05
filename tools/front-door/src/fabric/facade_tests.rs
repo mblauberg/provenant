@@ -706,6 +706,37 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
+    fn implicit_writer_binding_uses_verified_worktree_head() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::implicit_writer_binding_uses_verified_worktree_head")? { return Ok(()); }
+        use provenant_fabric_runtime::graph::AttemptOwner;
+        let rig = crate::worktree_tests::repository()?;
+        let git = |args: &[&str]| crate::worktree_tests::git(&rig, args);
+        let initial = git(&["rev-parse", "HEAD"])?;
+        let lane = rig.root.join("lane");
+        git(&["worktree", "add", "-qb", "lane", lane.to_str().ok_or("lane path")?])?;
+        git(&["commit", "--allow-empty", "-qm", "move invoking checkout"])?;
+        assert_ne!(git(&["rev-parse", "HEAD"])?, initial);
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?, project_attribution: false,
+            clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
+            host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None,
+            integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel,
+            prices: None, tick: false };
+        let binding = owner.bind_implicit_writer(lane.to_str().ok_or("lane path")?)?.ok_or("binding")?;
+        assert_eq!(binding.worktree, std::fs::canonicalize(&lane)?.to_string_lossy());
+        assert_eq!(binding.source_commit, initial);
+        git(&["-C", lane.to_str().ok_or("lane path")?, "checkout", "--detach", "-q"])?;
+        assert!(owner.bind_implicit_writer(lane.to_str().ok_or("lane path")?).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base() -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::integrating_graph_writer_refuses_a_source_outside_the_pinned_base")? { return Ok(()); }
         use provenant_fabric_runtime::graph::{self, AttemptOwner};

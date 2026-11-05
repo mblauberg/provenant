@@ -765,6 +765,9 @@ pub struct NodeProgress {
     /// Resolved once before launch and retained across retries and replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
+    /// Canonical worktree and initial source for a writer with no explicit source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implicit_writer: Option<ImplicitWriterBinding>,
     /// Node-specific review base resolved before the first attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_base: Option<String>,
@@ -819,6 +822,14 @@ pub struct NodeProgress {
     pub outputs: Option<NodeOutputs>,
     /// One durable row per route actually tried, in route order.
     pub attempts: Vec<GraphAttempt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImplicitWriterBinding {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub worktree: String,
+    pub source_commit: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

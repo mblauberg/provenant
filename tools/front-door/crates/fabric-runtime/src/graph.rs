@@ -298,6 +298,14 @@ pub trait AttemptOwner {
         Ok(Vec::new())
     }
 
+    /// Verify a registered writer and bind its current source before admission.
+    fn bind_implicit_writer(
+        &mut self,
+        _worktree: &str,
+    ) -> Result<Option<ImplicitWriterBinding>, Self::Error> {
+        Ok(None)
+    }
+
     /// Graph-wide review and integration bases bound by the execution owner.
     fn bound_graph_bases(
         &self,
@@ -1020,7 +1028,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 return Err(GraphError::Invalid(reason));
             }
             let asks = may_ask(&plan);
-            let checkpoint = GraphCheckpoint {
+            let mut checkpoint = GraphCheckpoint {
                 extra: Default::default(),
                 expansions: Vec::new(),
                 remaining: None,
@@ -1061,6 +1069,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         extra: Default::default(),
                         children: node.composite_members.clone(),
                         source_commit: None,
+                        implicit_writer: None,
                         review_base: None,
                         fragment: None,
                         handoff: None,
@@ -1087,6 +1096,39 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     })
                     .collect(),
             };
+            if document.schema_version >= 2 {
+                for (node, progress) in plan.nodes.iter().zip(&mut checkpoint.nodes) {
+                    if plans::writer(node) && node.source.is_none() && node.continues.is_none() {
+                        let worktree = node
+                            .worktree
+                            .as_deref()
+                            .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
+                        let binding = owner
+                            .bind_implicit_writer(worktree)
+                            .map_err(GraphError::Run)?
+                            .ok_or_else(|| {
+                                GraphError::Refused(format!(
+                                    "node {}: host cannot bind the writer source",
+                                    node.id
+                                ))
+                            })?;
+                        if !std::path::Path::new(&binding.worktree).is_absolute()
+                            || binding.worktree.len() > 4096
+                            || binding
+                                .source_commit
+                                .parse::<provenant_core::GitOid>()
+                                .is_err()
+                        {
+                            return Err(GraphError::Refused(format!(
+                                "node {}: writer binding is invalid",
+                                node.id
+                            )));
+                        }
+                        progress.source_commit = Some(binding.source_commit.clone());
+                        progress.implicit_writer = Some(binding);
+                    }
+                }
+            }
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
             checkpoint
         }
@@ -1833,6 +1875,49 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .map_err(|_| GraphError::Invalid(String::from("route count")))?,
                 };
 
+                // Expanded writers acquire their binding as soon as they exist.
+                if document.schema_version >= 2
+                    && plans::writer(node)
+                    && node.source.is_none()
+                    && node.continues.is_none()
+                    && checkpoint.nodes[node_index].implicit_writer.is_none()
+                {
+                    if !checkpoint.nodes[node_index].attempts.is_empty() {
+                        return Err(GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "implicit writer must retain its binding",
+                        });
+                    }
+                    let path = node
+                        .worktree
+                        .as_deref()
+                        .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
+                    let binding = owner
+                        .bind_implicit_writer(path)
+                        .map_err(GraphError::Run)?
+                        .ok_or_else(|| {
+                            GraphError::Refused(format!(
+                                "node {}: host cannot bind the writer source",
+                                node.id
+                            ))
+                        })?;
+                    if !std::path::Path::new(&binding.worktree).is_absolute()
+                        || binding.worktree.len() > 4096
+                        || binding
+                            .source_commit
+                            .parse::<provenant_core::GitOid>()
+                            .is_err()
+                    {
+                        return Err(GraphError::Refused(format!(
+                            "node {}: writer binding is invalid",
+                            node.id
+                        )));
+                    }
+                    checkpoint.nodes[node_index].source_commit =
+                        Some(binding.source_commit.clone());
+                    checkpoint.nodes[node_index].implicit_writer = Some(binding);
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
                 let requested_review_base = (node.access == AccessMode::ReadOnly)
                     .then(|| {
                         node.extra
@@ -2414,7 +2499,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     },
                     &route,
                     node.access,
-                    node.worktree.as_deref(),
+                    checkpoint.nodes[node_index]
+                        .implicit_writer
+                        .as_ref()
+                        .map(|binding| binding.worktree.as_str())
+                        .or(node.worktree.as_deref()),
                     Replay {
                         delivery: land::delivery(node),
                         branch: continued.as_deref(),

@@ -161,6 +161,11 @@ pub struct WriterLaunch {
     pub(crate) review_exempt: provenant_confinement::review_exempt::ReviewExempt,
 }
 impl WriterLaunch {
+    /// The verified branch head captured while preparing this writer.
+    pub fn source_commit(&self) -> GitOid {
+        self.base
+    }
+
     /// Bind a graph writer to its immutable source. The instruction snapshot
     /// rechecks this prepared base while holding writer custody before launch.
     pub fn require_source(&self, expected: GitOid) -> Result<()> {

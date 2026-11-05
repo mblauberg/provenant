@@ -285,6 +285,7 @@ fn node_bound(
         .collect(),
         children: node.composite_members.clone(),
         source_commit: node.source.as_ref().map(|_| String::new()),
+        implicit_writer: None,
         review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
         fragment: (node.plan.is_some() && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
@@ -452,6 +453,9 @@ fn node_bound(
                 .saturating_add(count.saturating_mul(256))
                 .saturating_add(OUTPUT_FIELD_BYTES + 512);
         }
+    }
+    if plans::writer(node) && node.source.is_none() && node.continues.is_none() {
+        bytes = bytes.saturating_add(6 * 4096 + 256);
     }
     if !boundary {
         let excerpt = if node.composite.is_some() {

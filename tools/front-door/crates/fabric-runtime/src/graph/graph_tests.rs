@@ -63,6 +63,8 @@ struct FakeOwner {
         Option<provenant_core::GitOid>,
         Option<provenant_core::GitOid>,
     ),
+    implicit_head: Option<String>,
+    implicit_bindings: usize,
     source_commits: Vec<Option<String>>,
     resolved_review_base: Option<String>,
     review_base_resolutions: usize,
@@ -154,6 +156,21 @@ impl AttemptOwner for FakeOwner {
         self.review_expansion
             .clone()
             .ok_or(ReviewResolveError::Unsupported)
+    }
+    fn bind_implicit_writer(
+        &mut self,
+        worktree: &str,
+    ) -> Result<Option<ImplicitWriterBinding>, Self::Error> {
+        self.implicit_bindings += 1;
+        Ok(Some(ImplicitWriterBinding {
+            extra: Default::default(),
+            worktree: if std::path::Path::new(worktree).is_absolute() {
+                worktree.to_owned()
+            } else {
+                format!("/fixture/{worktree}")
+            },
+            source_commit: self.implicit_head.clone().unwrap_or_else(|| "a".repeat(40)),
+        }))
     }
     fn bound_graph_bases(
         &self,
@@ -3037,6 +3054,103 @@ fn source_and_read_roots_survive_retry_and_replay() {
     );
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(replay.checkpoint.nodes[0].source_commit, Some(commit));
+}
+
+#[test]
+fn implicit_writer_binds_before_its_dependency_settles() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    writer.depends_on.push("gate".into());
+    let mut document = graph(vec![writer, node("gate", route("fixture"))]);
+    document.schema_version = 2;
+    let first_head = "1".repeat(40);
+    let mut owner = FakeOwner {
+        implicit_head: Some(first_head.clone()),
+        observations: VecDeque::from([
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/gate".into()),
+            },
+            terminal(AttemptOutcome::Succeeded),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = pending
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "writer")
+        .unwrap();
+    assert!(progress.attempts.is_empty());
+    assert_eq!(progress.source_commit.as_deref(), Some(first_head.as_str()));
+    owner.implicit_head = Some("2".repeat(40));
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.implicit_bindings, 1);
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "writer")
+            .unwrap()
+            .source_commit
+            .as_deref(),
+        Some(first_head.as_str())
+    );
+    assert!(owner.source_commits.contains(&Some(first_head)));
+}
+
+#[test]
+fn implicit_writer_source_is_bound_at_admission_and_survives_replay() {
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    let mut document = graph(vec![writer]);
+    document.schema_version = 2;
+    let first_head = "1".repeat(40);
+    let mut owner = FakeOwner {
+        implicit_head: Some(first_head.clone()),
+        observations: VecDeque::from([
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/attempt".into()),
+            },
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &pending.checkpoint.nodes[0];
+    assert_eq!(progress.source_commit.as_deref(), Some(first_head.as_str()));
+    assert_eq!(
+        progress.implicit_writer.as_ref().unwrap().worktree,
+        "/fixture/lane"
+    );
+    assert_eq!(owner.implicit_bindings, 1);
+    owner.implicit_head = Some("2".repeat(40));
+    let done = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.implicit_bindings, 1);
+    assert_eq!(
+        owner.source_commits,
+        vec![Some(first_head.clone()), Some(first_head.clone())]
+    );
+    assert_eq!(owner.permissions[0].1.as_deref(), Some("/fixture/lane"));
+    assert_eq!(
+        done.checkpoint.nodes[0].source_commit.as_deref(),
+        Some(first_head.as_str())
+    );
+    let mut broken = done.checkpoint.clone();
+    broken.nodes[0].implicit_writer = None;
+    assert!(matches!(
+        advance(
+            &document,
+            &mut FakeOwner::default(),
+            &mut MemoryJournal(Some(broken))
+        ),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
 }
 
 #[test]

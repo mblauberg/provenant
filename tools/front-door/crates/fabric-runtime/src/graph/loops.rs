@@ -567,6 +567,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 extra: Default::default(),
                 children: n.composite_members.clone(),
                 source_commit: None,
+                implicit_writer: None,
                 review_base: None,
                 fragment: None,
                 handoff: None,

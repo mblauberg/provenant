@@ -1010,7 +1010,9 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 "composite completion edges must include every member",
             ),
             (
-                progress.source_commit.is_some() && node.source.is_none(),
+                progress.source_commit.is_some()
+                    && node.source.is_none()
+                    && progress.implicit_writer.is_none(),
                 "resolved source requires a source binding",
             ),
             (
@@ -1135,6 +1137,30 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             continue;
         } else if progress.land.is_some() {
             return Err(bad("land record requires a land node"));
+        }
+        if let Some(binding) = &progress.implicit_writer {
+            if !plans::writer(node)
+                || node.source.is_some()
+                || node.continues.is_some()
+                || !std::path::Path::new(&binding.worktree).is_absolute()
+                || binding.worktree.len() > 4096
+                || binding
+                    .source_commit
+                    .parse::<provenant_core::GitOid>()
+                    .is_err()
+                || progress.source_commit.as_ref() != Some(&binding.source_commit)
+            {
+                return Err(bad(
+                    "implicit writer binding must retain its worktree and source",
+                ));
+            }
+        } else if document.schema_version >= 2
+            && plans::writer(node)
+            && node.source.is_none()
+            && node.continues.is_none()
+            && !progress.attempts.is_empty()
+        {
+            return Err(bad("launched implicit writer must retain its binding"));
         }
         if !progress.attempts.is_empty()
             && node.source.is_some()
