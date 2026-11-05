@@ -3297,6 +3297,31 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
             .unwrap();
         assert_eq!(gate.gate.as_ref().is_some_and(|gate| gate.passed), passes);
     }
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1, "graph_id":"blocked-review", "nodes":[
+            {"id":"reviews", "kind":"composite", "access":"read_only",
+             "composite":{"reduce_verdict":true,"min_successful":2,
+                "nodes":[{"id":"a","access":"read_only","prompt":"a","route":{"alias":"fixture"}},
+                         {"id":"b","access":"read_only","prompt":"b","route":{"alias":"fixture"},"depends_on":["a"]}],
+                "exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]}}
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [terminal(AttemptOutcome::AdapterUnavailable)].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let composite = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "reviews")
+        .unwrap();
+    assert_eq!(
+        composite.advance_error_code.as_deref(),
+        Some("coverage_below_minimum")
+    );
+    assert!(composite.outputs.is_none());
 }
 
 #[test]

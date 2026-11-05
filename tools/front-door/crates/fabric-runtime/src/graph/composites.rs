@@ -701,7 +701,11 @@ fn unavailable(
     exporting_members(spec, positions)
         .into_iter()
         .map(|member| &checkpoint.nodes[member])
-        .filter(|progress| progress.state == NodeState::Failed)
+        .filter(|progress| {
+            progress.state == NodeState::Failed
+                || (spec.reduce_verdict
+                    && matches!(progress.state, NodeState::Blocked | NodeState::Skipped))
+        })
         .map(|progress| {
             let reason = progress.advance_error.as_deref().unwrap_or_else(|| {
                 match progress.attempts.last().and_then(|a| a.outcome.as_ref()) {
@@ -836,9 +840,13 @@ fn state(
                 NodeState::Pending
             };
         }
-        if members
-            .iter()
-            .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))
+        if !node
+            .composite
+            .as_ref()
+            .is_some_and(|spec| spec.reduce_verdict)
+            && members
+                .iter()
+                .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))
         {
             return NodeState::Blocked;
         }
