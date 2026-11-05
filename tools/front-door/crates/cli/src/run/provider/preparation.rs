@@ -658,14 +658,13 @@ pub(super) fn prepare_candidates(
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
-    for spec in ADAPTER_SPECS
-        .iter()
-        .filter(|spec| spec.default_account_directory.is_some() && eligible(spec.name))
-    {
+    for spec in ADAPTER_SPECS.iter().filter(|spec| eligible(spec.name)) {
+        let Some((environment, fallback)) = spec.default_account_directory else {
+            continue;
+        };
         if entries.iter().any(|entry| entry.adapter == spec.name) {
             continue;
         }
-        let (environment, fallback) = spec.default_account_directory.expect("filtered above");
         let directory = registry
             .host
             .and_then(|host| host.default_account_directories.get(spec.name).cloned())

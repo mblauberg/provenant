@@ -1801,7 +1801,7 @@ fn display_list_data(
             &catalogue.admission_pools(&model),
             None,
             None,
-            &lookup,
+            lookup,
         );
         for row in rows {
             if recorded_readiness.len() == 256 {
