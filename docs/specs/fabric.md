@@ -1356,7 +1356,8 @@ bounded by the effective per-node prompt byte limit. If the node prompt leaves
 no room for the block, or the selected outputs do not fit, the node fails
 before its next attempt is admitted with a per-node advance error. A failure
 before a fallback preserves the earlier attempt's outcome and creates no
-fallback attempt. An admitted attempt retains its admission cap on replay; a
+fallback attempt. An admitted attempt retains its admission cap and its default or configured
+origin on replay; older records may report only effective graph limits. A
 node without selected inputs replays its full admitted prompt even if the
 limit is lowered. Increase `node_prompt_bytes` within the host ceiling, cancel
 the graph, and rerun the document under a new `graph_id` to retry a failed

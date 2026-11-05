@@ -4498,6 +4498,10 @@ impl BoundGraphOwner<'_> {
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn input_cap_source(&self) -> provenant_fabric_runtime::graph::InputCapSource {
+        self.factory.context.graph_prompt_limit_source
+    }
+
     fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
         use provenant_config::KnobSource;
         let mut policy = provenant_fabric_runtime::graph::LaunchRetryPolicy::default();
@@ -6441,7 +6445,7 @@ impl Factory {
                 prices: None,
                 tick: false,
             };
-            let graph_config = &self.context.config.graph;
+            let graph_config = &owner.factory.context.config.graph;
             let run = if resume {
                 let extensions = match &input {
                     GraphInput::Resume { extend, .. } => extend.as_slice(),

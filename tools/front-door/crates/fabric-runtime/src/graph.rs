@@ -186,6 +186,11 @@ pub trait AttemptOwner {
         Ok(0)
     }
 
+    /// Origin of the effective node prompt limit, sealed with the attempt.
+    fn input_cap_source(&self) -> InputCapSource {
+        InputCapSource::EffectiveGraphLimits
+    }
+
     /// Effective launch retry budget and timing, sealed before launch.
     fn launch_retry_policy(&self) -> LaunchRetryPolicy {
         LaunchRetryPolicy::default()
@@ -2383,9 +2388,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         launched: true,
                         launch_actor: owner.actor(),
                         settled: 0,
-                        input_cap: (!node.inputs.is_empty()).then_some(cap),
-                        input_cap_source: (!node.inputs.is_empty())
-                            .then_some(InputCapSource::EffectiveGraphLimits),
+                        input_cap: Some(cap),
+                        input_cap_source: Some(owner.input_cap_source()),
                         input_manifest: Some(initial_manifest),
                         usage: None,
                     });

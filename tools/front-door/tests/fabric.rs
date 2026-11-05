@@ -690,6 +690,9 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
     struct FixtureOwner;
     impl AttemptOwner for FixtureOwner {
         type Error = Infallible;
+        fn input_cap_source(&self) -> graph::InputCapSource {
+            graph::InputCapSource::Configured
+        }
         fn actor(&self) -> String {
             "fixture".into()
         }
@@ -802,7 +805,7 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
         "fixture/model"
     );
     assert_eq!(attempt["input_cap"], 262144);
-    assert_eq!(attempt["input_cap_source"], "effective_graph_limits");
+    assert_eq!(attempt["input_cap_source"], "configured");
     assert_eq!(attempt["outcome"], "succeeded");
     let human = rig.command(&["fabric", "graph", "status", "inspection", "--full"])?;
     assert_eq!(code(&human), 0);
@@ -815,6 +818,7 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
         "selected_input",
         "dependencies=",
         "ordering-only",
+        "input_limit_source=configured",
         "delivery=Delivered",
         "Succeeded",
     ] {

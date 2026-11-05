@@ -168,7 +168,11 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
                         manifest.integration_base.as_deref().unwrap_or("unavailable"),
                         manifest.integration_source.as_deref().unwrap_or("unavailable"),
                         attempt.input_cap.map_or_else(|| "unavailable".into(), |cap| cap.to_string()),
-                        attempt.input_cap_source.map_or("unavailable", |_| "effective_graph_limits"),
+                        attempt.input_cap_source.map_or("unavailable", |source| match source {
+                            provenant_fabric_runtime::graph::InputCapSource::EffectiveGraphLimits => "effective_graph_limits",
+                            provenant_fabric_runtime::graph::InputCapSource::Default => "default",
+                            provenant_fabric_runtime::graph::InputCapSource::Configured => "configured",
+                        }),
                         manifest.omitted,
                     ));
                     if let Some(producer) = &manifest.source_producer {

@@ -891,6 +891,9 @@ pub struct GraphAttempt {
 #[serde(rename_all = "snake_case")]
 pub enum InputCapSource {
     EffectiveGraphLimits,
+    #[serde(rename = "default")]
+    Default,
+    Configured,
 }
 
 /// Evidence contains identifiers and digests only, never input text or host paths.
