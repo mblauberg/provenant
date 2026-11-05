@@ -1016,6 +1016,13 @@ fn apply_unknown_observation(
     *state = NodeState::Running;
 }
 
+/// Record a node failure without changing its attempt history.
+fn apply_node_failure(progress: &mut NodeProgress, code: &str, reason: String) {
+    progress.state = NodeState::Failed;
+    progress.advance_error_code = Some(code.into());
+    progress.advance_error = Some(reason);
+}
+
 /// Apply a successful terminal attempt observation without I/O.
 fn apply_attempt_success(progress: &mut NodeProgress) {
     progress.state = NodeState::Succeeded;
@@ -1759,13 +1766,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .as_ref()
                         .is_none_or(|value| value.parse::<provenant_core::GitOid>().is_err())
                     {
-                        let progress = &mut checkpoint.nodes[node_index];
-                        progress.state = NodeState::Failed;
-                        progress.advance_error_code = Some("source_commit_unavailable".into());
-                        progress.advance_error = Some(format!(
-                            "node {}: source commit unavailable or invalid",
-                            node.id
-                        ));
+                        apply_node_failure(
+                            &mut checkpoint.nodes[node_index],
+                            "source_commit_unavailable",
+                            format!("node {}: source commit unavailable or invalid", node.id),
+                        );
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         continue;
                     }
@@ -1998,10 +2003,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         if !live_fallback_allowed(outcome, last.launched, node.access, evidence) {
                             let (code, message) =
                                 fallback_denial(last.launched, node.access, unreadable);
-                            let progress = &mut checkpoint.nodes[node_index];
-                            progress.state = NodeState::Failed;
-                            progress.advance_error_code = Some(code.into());
-                            progress.advance_error = Some(message.into());
+                            apply_node_failure(
+                                &mut checkpoint.nodes[node_index],
+                                code,
+                                message.into(),
+                            );
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             break;
                         }
@@ -2013,11 +2019,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 .count()
                                 >= limits.review_substitutions
                         {
-                            let progress = &mut checkpoint.nodes[node_index];
-                            progress.state = NodeState::Failed;
-                            progress.advance_error_code = Some("review_substitution_limit".into());
-                            progress.advance_error =
-                                Some("review substitution limit reached".into());
+                            apply_node_failure(
+                                &mut checkpoint.nodes[node_index],
+                                "review_substitution_limit",
+                                "review substitution limit reached".into(),
+                            );
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             break;
                         }
@@ -2039,11 +2045,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 .is_some_and(|next| next.account.as_ref() != Some(account))
                         })
                 {
-                    let progress = &mut checkpoint.nodes[node_index];
-                    progress.state = NodeState::Failed;
-                    progress.advance_error_code = Some("fallback_account_pinned".into());
-                    progress.advance_error =
-                        Some("Route fallback cannot change the pinned account.".into());
+                    apply_node_failure(
+                        &mut checkpoint.nodes[node_index],
+                        "fallback_account_pinned",
+                        "Route fallback cannot change the pinned account.".into(),
+                    );
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                     break;
                 }

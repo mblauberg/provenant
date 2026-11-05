@@ -9793,3 +9793,28 @@ fn terminal_attempt_transitions_need_only_node_state() {
     apply_attempt_success(&mut progress);
     assert_eq!(progress.state, NodeState::Succeeded);
 }
+
+#[test]
+fn node_failure_transition_preserves_attempt_history() {
+    let mut progress: NodeProgress = serde_json::from_value(serde_json::json!({
+        "id":"node", "state":"running", "worktree":null, "attempts":[{
+            "launched":true, "key":{"graph_id":"graph","node_id":"node","route_index":0},
+            "route":{"alias":"primary"}, "state":"starting", "attempt_ref":"host/1",
+            "outcome":null, "launch_actor":"actor"
+        }]
+    }))
+    .unwrap();
+    let attempts = progress.attempts.clone();
+    apply_node_failure(
+        &mut progress,
+        "fallback_account_pinned",
+        "account is pinned".into(),
+    );
+    assert_eq!(progress.state, NodeState::Failed);
+    assert_eq!(
+        progress.advance_error_code.as_deref(),
+        Some("fallback_account_pinned")
+    );
+    assert_eq!(progress.advance_error.as_deref(), Some("account is pinned"));
+    assert_eq!(progress.attempts, attempts);
+}
