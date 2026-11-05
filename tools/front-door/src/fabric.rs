@@ -86,7 +86,7 @@ fn graph_writer_initialisation_error(
 ) -> FacadeError {
     use provenant_confinement::worktrees::WorktreeError;
     match error {
-        WorktreeError::RegistryLockTimeout | WorktreeError::LockBusy => FacadeError::Busy,
+        WorktreeError::RegistryLockTimeout | WorktreeError::LockBusy => FacadeError::WriterLockBusy,
         WorktreeError::UnknownWriter
         | WorktreeError::UnknownWriterAt { .. }
         | WorktreeError::CensusUnknown { .. }
@@ -1652,7 +1652,7 @@ fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
         | E::BuildSettings
         | E::GuardianIdentity => FacadeError::ConfinementRefused,
         E::WriterBusy => FacadeError::WriterBusy,
-        E::WriterLockBusy => FacadeError::Busy,
+        E::WriterLockBusy => FacadeError::WriterLockBusy,
         E::WriterUnknown => FacadeError::WriterUnknown,
         E::CredentialRoot => FacadeError::CredentialRoot {
             access: "requested".into(),

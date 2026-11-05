@@ -14,11 +14,11 @@ mod graph_writer_admission_tests {
         });
         assert!(matches!(
             graph_writer_initialisation_error("head", WorktreeError::RegistryLockTimeout),
-            FacadeError::Busy
+            FacadeError::WriterLockBusy
         ));
         assert!(matches!(
             graph_writer_initialisation_error("head", WorktreeError::LockBusy),
-            FacadeError::Busy
+            FacadeError::WriterLockBusy
         ));
         assert!(matches!(
             graph_writer_initialisation_error("head", WorktreeError::UnknownWriter),

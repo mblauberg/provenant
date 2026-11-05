@@ -7465,6 +7465,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
         FacadeError::Timeout,
         FacadeError::HomeUnavailable,
         FacadeError::WriterUnknown,
+        FacadeError::WriterLockBusy,
         FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
