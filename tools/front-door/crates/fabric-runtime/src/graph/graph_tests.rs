@@ -6544,11 +6544,24 @@ fn launch_wake_is_capped_by_the_original_deadline() {
 #[test]
 fn launch_with_an_admission_window_continues_without_a_wall_clock() {
     let document = graph(vec![node("one", route("first"))]);
-    let mut owner = ErrorLauncher::default();
+    let mut owner = ErrorLauncher {
+        errors: busy_times(1),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
+    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+    assert!(
+        retry_of(&waiting.checkpoint)
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("wall clock unavailable")
+    );
     let result = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(result.checkpoint.nodes[0].state, NodeState::Succeeded);
-    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(owner.calls.len(), 2);
 }
 
 #[test]
