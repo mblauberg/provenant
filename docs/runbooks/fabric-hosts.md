@@ -682,11 +682,15 @@ Every request and reply envelope carries integer `protocol`, currently 6.
 Ingress refuses a different protocol before decoding or executing the action,
 replying with `peer_version` and its own version. The client checks the reply
 protocol; a missing field or the released peer's decode refusal means protocol
-1. Each call uses one SSH connection. A difference fails the call with
+1. Each exchange uses one SSH connection. A difference fails the call with
 `peer_version` (`PEER_VERSION` on the CLI), for example: "peer workshop speaks
 protocol 1, this host speaks 6; upgrade both". Peers must be upgraded together.
-There is no capability negotiation or support for older peers. The framing
-envelope's `version` remains 1.
+Before a submission, the chair reads the peer health response for its release
+and run capabilities in a separate, short exchange. A peer reporting a release
+older than 1.6.5 or reporting that it cannot submit is refused before launch;
+upgrade an older peer with `provenant upgrade` on that host. Missing or
+unparseable advertisements and failed probes do not prevent submission; the
+peer can still refuse an incompatible protocol. The framing envelope's `version` remains 1.
 
 Health replies also carry `protocol`. `hosts` retains a mismatched peer with
 `available: false`, its remote protocol and `reason: "peer_version"`, alongside

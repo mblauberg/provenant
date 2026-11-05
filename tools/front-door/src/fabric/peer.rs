@@ -447,6 +447,8 @@ pub fn peer(
                     host: context.identity.host,
                     available: true,
                     execution: Some(owner.capabilities().submit),
+                    release: Some(env!("CARGO_PKG_VERSION").into()),
+                    run_capabilities: Some(owner.capabilities()),
                     readiness: Some(provenant_fabric_runtime::hosts::PeerReadiness::reporting()),
                 },
                 extra: Default::default(),
