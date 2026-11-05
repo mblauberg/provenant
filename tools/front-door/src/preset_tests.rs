@@ -2817,27 +2817,27 @@ fn embedded_graph_nodes_reject_unknown_fields() {
     for (name, body) in [
         (
             "raw-composite",
-            "kind = 'composite', composite = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', mispelled = true }], exports = [] }",
+            "kind = 'composite', composite = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', unexpected_field = true }], exports = [] }",
         ),
         (
             "raw-loop",
-            "kind = 'loop', loop = { max_rounds = 1, until = 'member', body = [{ id = 'member', access = 'read_only', prompt = 'work', mispelled = true }] }",
+            "kind = 'loop', loop = { max_rounds = 1, until = 'member', body = [{ id = 'member', access = 'read_only', prompt = 'work', unexpected_field = true }] }",
         ),
         (
             "raw-plan-fallback",
-            "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', mispelled = true }], exports = [] } }",
+            "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', unexpected_field = true }], exports = [] } }",
         ),
         (
             "invalid-raw-composite",
-            "kind = 'composite', composite = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', mispelled = true }], exports = [] }",
+            "kind = 'composite', composite = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', unexpected_field = true }], exports = [] }",
         ),
         (
             "invalid-raw-loop",
-            "kind = 'loop', loop = { max_rounds = 1, until = 'member', body = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', mispelled = true }] }",
+            "kind = 'loop', loop = { max_rounds = 1, until = 'member', body = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', unexpected_field = true }] }",
         ),
         (
             "invalid-raw-plan-fallback",
-            "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', mispelled = true }], exports = [] } }",
+            "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', unexpected_field = true }], exports = [] } }",
         ),
     ] {
         let mut layers = Layers::empty();
@@ -2850,7 +2850,7 @@ fn embedded_graph_nodes_reject_unknown_fields() {
             .unwrap();
         let error = expand(&layers, name, "brief", &[]).unwrap_err();
         assert!(
-            error.contains("member") && error.contains("mispelled"),
+            error.contains("member") && error.contains("unexpected_field"),
             "{error}"
         );
     }
