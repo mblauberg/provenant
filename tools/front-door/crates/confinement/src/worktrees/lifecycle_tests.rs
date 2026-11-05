@@ -64,17 +64,45 @@ fn streaming_inventory_reports_the_total_before_checked_rows() -> Result<(), Box
 }
 
 #[test]
+#[allow(clippy::disallowed_methods, clippy::print_stderr)] // Timing fixture around the real GC preview.
 fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    struct Counting(AtomicUsize);
+    struct Counting {
+        calls: AtomicUsize,
+        current: ProcessFact,
+    }
+    impl ProcessObserver for Counting {
+        fn boot_identity(&self) -> Result<String, CensusError> {
+            Ok("fixture-boot".into())
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            if pid == self.current.identity.pid {
+                ProcessObservation::Present(self.current.clone())
+            } else {
+                ProcessObservation::Absent
+            }
+        }
+        fn census(&self, _: usize) -> Result<Census, CensusError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Census::from_observations([self.current.clone()], [], [], true, false, 32)
+        }
+    }
+    impl CwdObserver for Counting {
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: true,
+                gap: None,
+            }
+        }
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Gone)
+        }
+    }
     impl WorkerObserver for Counting {
         fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            roots
-                .iter()
-                .cloned()
-                .map(|root| (root, WorkerState::Free))
-                .collect()
+            super::census::observe_worker_roots(roots, self, self, &self.current, false).0
         }
     }
     let fixture = Fixture::new()?;
@@ -110,7 +138,22 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
             self.inner.execute(options)
         }
     }
-    let observer = Counting(AtomicUsize::new(0));
+    let observer = Counting {
+        calls: AtomicUsize::new(0),
+        current: ProcessFact {
+            identity: ProcessIdentity {
+                boot: "fixture-boot".into(),
+                pid: 100,
+                native_start: 100,
+                group_id: 100,
+                session_id: 100,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        },
+    };
     let session = CensusSession::new(&observer, &test.clock);
     let git = CountingGit {
         inner: context.executor,
@@ -118,6 +161,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
     };
     context.workers = &session;
     context.executor = &git;
+    let started = std::time::Instant::now();
     let report = collect(
         &context,
         &lanes,
@@ -133,7 +177,11 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
         },
         &cancel(),
     )?;
-    assert_eq!(observer.0.load(Ordering::SeqCst), 1);
+    eprintln!(
+        "GC preview collection for 40 worktrees: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
     assert_eq!(git.listings.load(Ordering::SeqCst), 1);
     assert_eq!(report.idle_output.len(), 40, "{report:?}");
     assert!(

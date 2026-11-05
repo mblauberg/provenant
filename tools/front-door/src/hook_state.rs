@@ -603,6 +603,10 @@ esac
             },
         );
         let output = String::from_utf8(context.stdout).unwrap();
+        assert!(
+            Instant::now() < host_deadline,
+            "hook response missed its deadline"
+        );
         for text in [
             "r/t/a",
             "/lane",
