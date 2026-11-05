@@ -462,7 +462,7 @@ pub fn create(
     if !root_identity.same_identity(&named_root) {
         return Err(WorktreeError::UnknownWriter);
     }
-    let primary_head = primary_head(context, cancel)?;
+    let primary_head = primary_head(context, &facts, cancel)?;
     if let Err(cause) = execute_mutation(
         context,
         GitMutation::WorktreeAdd {
@@ -487,7 +487,7 @@ pub fn create(
     // Creating a linked worktree must leave the primary's HEAD, branch or
     // detached, exactly as it was (#1331). A hook or race that moved it is
     // reported rather than hidden; the worktree stays for the operator.
-    if primary_head != self::primary_head(context, cancel)? {
+    if primary_head != self::primary_head(context, &facts, cancel)? {
         return Err(WorktreeError::PrimaryMoved);
     }
     context.repo.revalidate()?;
@@ -608,6 +608,7 @@ pub(super) fn remove_admin_entry(common_git_dir: &Path, target: &Path) -> bool {
 /// failures propagate: an unreadable snapshot must not disable the check.
 pub(super) fn primary_head(
     context: &WorktreeContext<'_>,
+    facts: &RepoFacts,
     cancel: &CancelToken,
 ) -> Result<(Vec<u8>, Option<GitOid>), WorktreeError> {
     let bytes = std::fs::read(context.repo.common_git_dir().join("HEAD"))
@@ -617,11 +618,10 @@ pub(super) fn primary_head(
         return Ok((bytes, None));
     };
     let name = GitRefName::new(name).map_err(|_| WorktreeError::InvalidOutput)?;
-    let outcome = run_git(context, context.repo, GitRead::ResolveRef { name }, cancel)?;
-    let commit = if exit_code(&outcome)? == 0 {
-        Some(parse_oid(trim_ascii(&outcome.stdout.bytes))?)
-    } else {
-        None
+    let commit = match facts.resolve_commit(context, name, cancel) {
+        Ok(commit) => Some(commit),
+        Err(WorktreeError::NotFound) => None,
+        Err(error) => return Err(error),
     };
     Ok((bytes, commit))
 }
@@ -993,7 +993,7 @@ pub(super) fn pin_integration(
     let mut invalid = true;
     for candidate in candidates.into_iter().flatten() {
         invalid = false;
-        match resolve_ref(context, candidate.clone(), cancel) {
+        match facts.resolve_commit(context, candidate.clone(), cancel) {
             Ok(oid) => {
                 let oid = if candidate.as_str().starts_with("refs/remotes/") {
                     pin_revision(context, &facts, candidate.as_str(), cancel)?
