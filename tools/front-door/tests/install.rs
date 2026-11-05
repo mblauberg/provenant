@@ -2212,16 +2212,10 @@ fn install_compacts_routine_output_and_keeps_json_actions_once() -> Result {
     );
     let report: serde_json::Value = serde_json::from_slice(&applied.stdout.bytes)?;
     let text = String::from_utf8(human.stdout.bytes.clone())?;
-    eprintln!(
-        "install bytes: preview JSON={}, human={}, applied JSON={}",
-        preview.stdout.bytes.len(),
-        human.stdout.bytes.len(),
-        applied.stdout.bytes.len()
-    );
-    assert!(text.contains("MCP); 1 targets"), "{text}");
-    assert!(!text.contains("changed links"), "{text}");
-    assert!(!text.contains("peer agent:"), "{text}");
-    assert!(!text.contains("host tick:"), "{text}");
+    assert!(human.stdout.bytes.len() < preview.stdout.bytes.len(), "{text}");
+    for line in text.lines() {
+        assert!(!line.trim_start().starts_with("action:"), "{line}");
+    }
     assert!(
         report["data"]["outcome"]["actions"]
             .as_array()
