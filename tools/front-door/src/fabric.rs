@@ -1560,6 +1560,10 @@ pub(crate) fn remote_base(
         .collect();
     let executor = SystemExecutor::new(1).map_err(|_| FacadeError::io("create Git executor"))?;
     let git_output = |args: &[&str]| -> Result<Vec<u8>, FacadeError> {
+        context
+            .repo
+            .revalidate()
+            .map_err(|_| FacadeError::BaseUnreachable)?;
         let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
             .chain(
                 [

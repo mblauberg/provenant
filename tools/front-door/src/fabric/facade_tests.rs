@@ -85,6 +85,19 @@ fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
                 ),
                 Err(FacadeError::BaseUnreachable)
             ));
+            std::fs::rename(&project, temp.path().join("moved-project"))
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            std::fs::create_dir(&project).map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            assert!(matches!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    true,
+                    &cancel
+                ),
+                Err(FacadeError::BaseUnreachable)
+            ));
             Ok(())
         },
     )?;
