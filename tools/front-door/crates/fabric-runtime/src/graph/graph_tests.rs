@@ -8537,6 +8537,32 @@ fn launch_wake_is_capped_by_the_original_deadline() {
 }
 
 #[test]
+fn launch_block_transition_needs_only_node_and_error() {
+    let mut progress: NodeProgress = serde_json::from_value(serde_json::json!({
+        "id":"one", "state":"running", "worktree":null, "attempts":[]
+    }))
+    .unwrap();
+    apply_launch_block(
+        "graph",
+        &mut progress,
+        &crate::coordination::facade::FacadeError::Busy,
+        true,
+    );
+    assert_eq!(progress.state, NodeState::Blocked);
+    assert_eq!(
+        progress.advance_error_code.as_deref(),
+        Some("launch_retry_exhausted")
+    );
+    assert!(
+        progress
+            .advance_error
+            .as_deref()
+            .unwrap()
+            .contains("service is busy")
+    );
+}
+
+#[test]
 fn launch_disposition_write_failure_keeps_persisted_checkpoint() {
     struct FailSave(GraphCheckpoint);
     impl GraphJournal for FailSave {

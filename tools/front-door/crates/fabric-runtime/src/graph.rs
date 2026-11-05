@@ -829,10 +829,25 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
             return journal.save(checkpoint).map_err(GraphError::Journal);
         }
     }
+    apply_launch_block(
+        &checkpoint.graph_id,
+        &mut checkpoint.nodes[index],
+        error,
+        retrying,
+    );
+    asks::refresh_wake(checkpoint);
+    journal.save(checkpoint).map_err(GraphError::Journal)
+}
+
+/// Apply a launch refusal to one node without accessing a journal or owner.
+fn apply_launch_block(
+    graph_id: &str,
+    progress: &mut NodeProgress,
+    error: &(dyn Error + 'static),
+    retrying: bool,
+) {
     // A permanent refusal, or a retry budget spent: block the node with the
     // reason and a remedy, and keep the refusal visible in graph status.
-    let graph_id = checkpoint.graph_id.clone();
-    let progress = &mut checkpoint.nodes[index];
     let id = &progress.id;
     let code = if retrying {
         "launch_retry_exhausted"
@@ -846,7 +861,6 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         .next
         .as_deref()
         .unwrap_or("inspect the node's inputs and state before retrying");
-    let error: &(dyn Error + 'static) = error;
     let recovery = if error
         .downcast_ref::<crate::coordination::facade::FacadeError>()
         .is_some_and(|e| {
@@ -878,8 +892,6 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     // Keep the attempt row even when launch handoff is uncertain. A guardian
     // may already exist, and cancellation needs its identity and custody.
     progress.launch_retry = None;
-    asks::refresh_wake(checkpoint);
-    journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
 /// Revert cancellation-only state changes without altering attempt records.
