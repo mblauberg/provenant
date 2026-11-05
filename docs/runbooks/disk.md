@@ -35,9 +35,7 @@ and GC preview below to investigate it.
 
 3. Interpret classifications using the [disk specification](../specs/disk.md).
    A lane entry with `reclaim: "gc"` names the existing GC owner; the report
-   does not run it. V1 markers with missing owners are orphaned and eligible for
-   GC; existing project owners stay legacy and never become idle. Foreign,
-   legacy, refused and unmarked caches require owner investigation.
+   does not run it. Foreign, refused and unmarked caches require owner investigation.
    An `attempt_tmp` entry with `leak: true` belongs to an indexed
    terminal attempt. `provider_state` measures resumable provider state
    separately; [GC](gc.md) applies its terminal retention policy. The `attempt_logs` class measures

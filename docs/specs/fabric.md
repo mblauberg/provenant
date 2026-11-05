@@ -207,7 +207,7 @@ host and peer actor with the answer; the answering host keeps no authoritative
 copy. MCP `fabric_inbox` accepts a host selector for the same owner routing.
 Close and acknowledgement are owner-local chair operations, retaining
 exact chair and delivery target checks. Remote attempts return
-`owner_local_only` before a write and direct the caller to the owner. An
+`OWNER_LOCAL_ONLY` before a write and direct the caller to the owner. An
 unavailable owner is reported rather than replaced with a local mirror.
 Paging binds project, host, session, state, page size and request snapshot;
 changed filters or snapshots require an explicit restart. New observations
@@ -1490,7 +1490,7 @@ SSH session; this is the existing configured-peer trust model.
 A remote mutation is prepared durably, marked sent and recorded committed or
 unknown. If its outcome is uncertain, Fabric asks only for the home host's receipt and
 never repeats it or falls back locally, and a sent but unanswered launch is
-`launch_unknown`. A peer error naming another operation, or a reply naming
+`LAUNCH_UNKNOWN`. A peer error naming another operation, or a reply naming
 the wrong attempt, is `state_corrupt`. Absolute paths under the user's home directory travel relative to it; others
 are refused. Cancelling a peer call stops the SSH
 child, never the remote run.
@@ -1627,3 +1627,5 @@ launches are auto-resolved.
   `crates/run/src/delivery_tests.rs::graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes`;
   `crates/run/src/delivery_tests.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
+
+`fabric graph wait GRAPH --wait DURATION` observes the retained status until it settles or the budget expires. It does not advance the graph. A pending graph at the deadline returns `waiting`; a paused graph returns immediately.

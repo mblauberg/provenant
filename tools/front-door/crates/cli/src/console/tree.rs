@@ -1,6 +1,6 @@
 //! Bounded host-local composition of indexed run stores.
 use super::Error;
-use provenant_core::{ActorId, AttemptId, CancelToken, ProjectId, RootInputs, Roots};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RootInputs, Roots};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, RunStore};
 use serde_json::{Value, json};
@@ -188,7 +188,15 @@ pub(super) fn read_inner(
                         ),
                     },
                 }
-                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"run_id":attempt.run_id,"task_id":attempt.task_id,"attempt_id":attempt.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"metadata":lane}));
+                let projected = crate::run::project_lane(
+                    attempt,
+                    &[],
+                    state.as_path(),
+                    &Default::default(),
+                    clock.wall_now().ok(),
+                    false,
+                );
+                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"run_id":projected.run_id,"task_id":projected.task_id,"attempt_id":projected.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"usage":usage,"metadata":{"run":lane.run,"attempt":projected}}));
             }
             match page.next {
                 Some(next) => after = next,
@@ -239,7 +247,6 @@ pub(super) fn read_inner(
         node["children"] = json!(children);
         node["status"] = metadata["attempt"]["state"].clone();
         node["title"] = metadata["attempt"]["title"].clone();
-        node["usage"] = metadata["attempt"]["usage"].clone();
         node["parents"] = json!({"dispatch":metadata["run"]["parent_attempt"],"continuation":metadata["run"]["parent"],"retry":metadata["attempt"]["retry_of"]});
         if !detail {
             node.as_object_mut()

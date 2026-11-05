@@ -633,16 +633,29 @@ fn overview_bounds_aggregate_request_bytes_before_decoding() {
 fn local_delivery_target_query_is_indexed() {
     let f = Fixture::new();
     let store = f.open();
-    let plan: Vec<String> = store.db.prepare(
-        "EXPLAIN QUERY PLAN SELECT project FROM human_answer_outbox INDEXED BY human_local_delivery
-         WHERE json_extract(CAST(record AS TEXT),'$.target_host')=?1
-         AND json_extract(CAST(record AS TEXT),'$.target_session')=?2
-         AND json_extract(CAST(record AS TEXT),'$.target_actor')=?3
-         AND project=?4
-         AND json_extract(CAST(record AS TEXT),'$.state') IN ('queued','offered')
-         ORDER BY project,answer LIMIT 1"
-    ).unwrap().query_map(params!["host", "session", "actor", "project"], |row| row.get(3))
-      .unwrap().collect::<std::result::Result<_,_>>().unwrap();
+    let sql = format!(
+        "EXPLAIN QUERY PLAN {}",
+        crate::local_delivery::pending_candidates_sql()
+    );
+    let plan: Vec<String> = store
+        .db
+        .prepare(&sql)
+        .unwrap()
+        .query_map(
+            params![
+                "host",
+                "session",
+                "actor",
+                "project",
+                4096,
+                10,
+                None::<String>
+            ],
+            |row| row.get(3),
+        )
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
     assert!(
         plan.iter()
             .any(|line| line.contains("SEARCH") && line.contains("human_local_delivery")),

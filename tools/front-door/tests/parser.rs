@@ -111,6 +111,15 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
             .as_str()
             .is_some_and(|id| id.starts_with("cli-"))
     );
+    let first_id = value["data"]["lanes"][0]["attempt_id"]
+        .as_str()
+        .ok_or("attempt")?;
+    assert!(
+        value["data"]["result_tails"][first_id]["bytes"]["data"]
+            .as_str()
+            .is_some(),
+        "{value}"
+    );
     attempts.push(
         value["data"]["lanes"][0]["attempt_id"]
             .as_str()
@@ -160,7 +169,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert_eq!(lanes.len(), 20);
     assert_eq!(lanes[0]["attempt_id"], attempts[20]);
     assert_eq!(lanes[19]["attempt_id"], attempts[1]);
-    assert!(lanes[0]["state"].is_object(), "full record: {value}");
+    assert_eq!(lanes[0]["state"], "rejected", "{value}");
     assert_eq!(
         value["data"]["review_exempt"],
         serde_json::json!([
@@ -175,10 +184,16 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert!(text.len() <= 2048, "{text}");
     assert!(text.starts_with("20 lanes"), "{text}");
     assert!(text.contains(&attempts[20][..8]), "{text}");
-    assert!(
-        text.contains("review-exempt paths: docs/release-notes/next.d/, docs/specs/, Cargo.lock, .tracker-input"),
-        "{text}"
-    );
+    let exempt = text
+        .lines()
+        .find(|line| line.contains("review-exempt paths:"))
+        .ok_or("review-exempt line")?;
+    for path in value["data"]["review_exempt"]
+        .as_array()
+        .ok_or("review-exempt paths")?
+    {
+        assert!(exempt.contains(path.as_str().ok_or("path")?), "{exempt}");
+    }
     assert!(
         text.contains(&format!("next: provenant output {}", attempts[20])),
         "{text}"
@@ -203,7 +218,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     let page: serde_json::Value = serde_json::from_slice(&page.stdout.bytes)?;
     assert_eq!(page["data"]["lanes"].as_array().ok_or("page")?.len(), 1);
     let cursor = page["data"]["next_cursor"]
-        .as_u64()
+        .as_str()
         .ok_or("next cursor")?
         .to_string();
     let next = rig.command(&[
@@ -715,7 +730,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
     let lane = &value["data"]["lanes"][0];
     assert_eq!(lane["state"], "rejected");
-    assert_eq!(lane["account"], "unknown");
+    assert!(lane["account"].is_null(), "{lane}");
     let manifest = rig.root.join("accounts.json");
     std::fs::write(&manifest, br#"{"schema_version":1,"tasks":[{"prompt":"fixture","route":{"kind":"model","provider":"codex","model":"gpt-6-luna"},"account":"fixture-account"}]}"#)?;
     let placed = rig.command(&[
@@ -882,6 +897,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let prompt = rig.command(&["output", &attempt, "--part", "prompt", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
     assert_eq!(value["data"]["bytes"]["data"], "hello");
+    let output_lane = value["data"].clone();
     // `RUN/ATTEMPT` and `--host local` name the same local attempt, and a
     // `--tail` above the bound is clamped, not refused (#1837).
     let run_attempt = format!(
@@ -919,7 +935,10 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         "ff".repeat(16),
         lane["attempt_id"].as_str().ok_or("attempt")?
     );
-    assert_ne!(code(&rig.command(&["output", &wrong_run, "--json"])?), 0);
+    let wrong_output = rig.command(&["output", &wrong_run, "--json"])?;
+    assert_ne!(code(&wrong_output), 0);
+    let wrong_output: serde_json::Value = serde_json::from_slice(&wrong_output.stdout.bytes)?;
+    assert_eq!(wrong_output["error"]["code"], "NOT_FOUND");
 
     let trace = rig.command(&["output", &attempt, "--trace", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&trace.stdout.bytes)?;
@@ -942,6 +961,29 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         value["data"]["receipts"][0]["receipt"]["state"],
         "already_terminal"
     );
+    assert!(value["data"].is_object());
+    let status = rig.command(&["status", &attempt, "--json"])?;
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout.bytes)?;
+    for field in [
+        "run_id",
+        "task_id",
+        "attempt_id",
+        "state",
+        "cause",
+        "retry_of",
+        "superseded_by",
+    ] {
+        assert_eq!(output_lane[field], lane[field], "output {field}");
+        assert_eq!(
+            value["data"]["lanes"][0][field], lane[field],
+            "cancel {field}"
+        );
+        assert_eq!(
+            status["data"]["lanes"][0][field], lane[field],
+            "status {field}"
+        );
+    }
+
     // This rejected attempt launched no provider, and the fixture has no
     // provider executable for fresh fallback. Refusal must neither add an
     // attempt nor spend the continuation, including operation retries.

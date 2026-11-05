@@ -146,12 +146,15 @@ pub fn error_schema() -> Value {
             ("cause", nullable(string())),
             ("repair", nullable(string())),
         ],
-        &[],
+        &[
+            ("category", string()),
+            ("detail", string()),
+            ("next", string()),
+        ],
     )
 }
 
-/// Schema for an error that stands for one receipt row (cancel rows): code and
-/// message only.
+/// Schema for one receipt row's owner error.
 pub fn row_error_schema() -> Value {
-    object(&[("code", string()), ("message", string())], &[])
+    error_schema()
 }

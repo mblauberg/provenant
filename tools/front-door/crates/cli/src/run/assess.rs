@@ -93,7 +93,7 @@ pub(super) fn assess_model_result(
                 cause: run::PolicyCause::Unfinished, action: if resume { run::PolicyAction::Resume } else { run::PolicyAction::Retry },
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: route.provider.clone().unwrap_or_default(), model, effort: route.effort.clone() },
                 resume, max_attempts: u64::from(policy.lane.max_continuations.unwrap_or(0)) + 1,
-                instruction: "Continue the unfinished task using the handoff and existing worktree. Carry out the remaining work and verification, keep handoff.json current, and end with the updated schema v2 handoff fence.".into(),
+                instruction: "Your turn ended with work remaining. Start the next remaining item now and write the code; do not re-audit what is done or report without changing anything. Carry on through every remaining item and its verification, keep handoff.json current, and end with the updated schema v2 handoff fence.".into(),
                 not_before_unix_seconds: None,
             }),
             note: None,

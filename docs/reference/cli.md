@@ -766,6 +766,32 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
+## `provenant fabric graph wait`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Wait limit (seconds or a duration such as 30m)", "name": "wait", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Wait for a task graph to settle without advancing it",
+  "groups": [
+    {
+      "arguments": [
+        "id",
+        "wait"
+      ],
+      "multiple": true,
+      "name": "Wait",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant fabric graph cancel`
 
 | Argument | Contract |
@@ -2380,10 +2406,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--title` | `{"conflicts": ["manifest"], "description": "Short human title for this task", "name": "title"}` |
 | `--task-id` | `{"description": "Fabric task this lane serves", "name": "task_id"}` |
 | `--delivery-id` | `{"description": "Delivery this lane belongs to", "name": "delivery_id"}` |
-| `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "description": "Host delivery: none, push, integrate:<branch> (local), or pr (origin)", "name": "deliver"}` |
-| `--deliver-remote` | `{"description": "Fetch and deliver this writer's final head on the host", "name": "deliver_remote", "requires": ["deliver_branch", "writer_target"]}` |
-| `--deliver-branch` | `{"description": "Branch to push the writer's head to", "name": "deliver_branch", "requires": ["deliver_remote"]}` |
-| `--open-pr` | `{"defaults": ["false"], "description": "Create a pull request after the host verifies the pushed head", "name": "open_pr", "requires": ["deliver_remote"], "values": ["true", "false"]}` |
+| `--deliver` | `{"description": "Host delivery: none, push, integrate:<branch> (local), or pr (origin)", "name": "deliver"}` |
 | `--read-heavy` | `{"defaults": ["false"], "description": "Optimise selection for read-heavy work", "name": "read_heavy", "values": ["true", "false"]}` |
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
@@ -2404,7 +2427,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--head` | `{"description": "Chair-verified full commit SHA to review (must exist on the executing host)", "name": "head"}` |
 | `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
 | `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "write_root", "capability", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
 | `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
 | `--worktree` | `{"description": "Bind an existing preset writer worktree; single tasks can create an owned worktree for a missing branch name", "name": "worktree"}` |
@@ -2631,10 +2654,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--title` | `{"conflicts": ["manifest"], "description": "Short human title for this task", "name": "title"}` |
 | `--task-id` | `{"description": "Fabric task this lane serves", "name": "task_id"}` |
 | `--delivery-id` | `{"description": "Delivery this lane belongs to", "name": "delivery_id"}` |
-| `--deliver` | `{"conflicts": ["deliver_remote", "deliver_branch", "open_pr"], "description": "Host delivery: none, push, integrate:<branch> (local), or pr (origin)", "name": "deliver"}` |
-| `--deliver-remote` | `{"description": "Fetch and deliver this writer's final head on the host", "name": "deliver_remote", "requires": ["deliver_branch", "writer_target"]}` |
-| `--deliver-branch` | `{"description": "Branch to push the writer's head to", "name": "deliver_branch", "requires": ["deliver_remote"]}` |
-| `--open-pr` | `{"defaults": ["false"], "description": "Create a pull request after the host verifies the pushed head", "name": "open_pr", "requires": ["deliver_remote"], "values": ["true", "false"]}` |
+| `--deliver` | `{"description": "Host delivery: none, push, integrate:<branch> (local), or pr (origin)", "name": "deliver"}` |
 | `--read-heavy` | `{"defaults": ["false"], "description": "Optimise selection for read-heavy work", "name": "read_heavy", "values": ["true", "false"]}` |
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
@@ -2657,7 +2677,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for task or preset graph settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
 | `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "write_root", "capability", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
 | `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
 | `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency", "requires": ["manifest"]}` |

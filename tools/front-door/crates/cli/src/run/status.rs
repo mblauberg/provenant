@@ -39,7 +39,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let (exempt, exempt_line) = review_exempt_view(&context);
             let Some(store) = store else {
                 return Ok((
-                    json!({"lanes": [], "review_exempt": exempt}),
+                    json!({"lanes": [], "next_cursor": null, "review_exempt": exempt}),
                     format!("no lanes\n{exempt_line}"),
                 ));
             };
@@ -157,10 +157,20 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             compact.lines.push(exempt_line.trim_end().to_owned());
             summary = Some(compact);
             let human = format!("{human}{exempt_line}");
-            Ok((
-                json!({"lanes": rows, "next_cursor": next, "review_exempt": exempt}),
-                human,
-            ))
+            let successors = policy_successors(&session, &rows, &call)?;
+            let (mut data, _) = render_lanes_with_lineage(
+                &rows,
+                &waits,
+                next,
+                session.context.state_root.as_path(),
+                None,
+                &successors,
+            );
+            if let Some(object) = data.as_object_mut() {
+                object.remove("capacity_cooldowns");
+            }
+            data["review_exempt"] = exempt;
+            Ok((data, human))
         })(),
     );
     out.summary = summary;
@@ -381,6 +391,11 @@ pub(super) fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> 
     summary
 }
 
+pub(super) fn structured_path_text(value: &Value) -> Option<String> {
+    let path: provenant_records::StructuredPathWire = serde_json::from_value(value.clone()).ok()?;
+    Some(path.to_path_buf().ok()?.to_string_lossy().into_owned())
+}
+
 /// The lane rows of a `lanes` or `run` reply, in the shape `lane_summary` reads.
 pub(super) fn lane_lines(data: &Value) -> Vec<LaneLine> {
     data["lanes"]
@@ -401,7 +416,7 @@ pub(super) fn lane_lines(data: &Value) -> Vec<LaneLine> {
                             .unwrap_or_default()
                             .to_owned(),
                         provider_error: row["provider_error"].as_str().map(str::to_owned),
-                        result_path: row["result_path"].as_str().map(str::to_owned),
+                        result_path: structured_path_text(&row["result_path"]),
                     })
                 })
                 .collect()
@@ -575,26 +590,9 @@ pub(super) fn artifact(root: &Path, record: &run::AttemptRecord, name: &str) -> 
     ))
 }
 
-pub(super) fn state_name(state: &run::AttemptState) -> String {
-    match state {
-        run::AttemptState::Terminal { outcome, .. } => serde_json::to_value(outcome)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default(),
-        other => serde_json::to_value(other)
-            .ok()
-            .and_then(|v| v.get("state").and_then(Value::as_str).map(str::to_owned))
-            .unwrap_or_default(),
-    }
-}
-
-/// The state name and, for a terminal attempt, its recorded reason.
+/// The projected state and recorded terminal reason.
 pub fn state_and_reason(state: &run::AttemptState) -> (String, Option<String>) {
-    let reason = match state {
-        run::AttemptState::Terminal { reason, .. } => reason.clone(),
-        _ => None,
-    };
-    (state_name(state), reason)
+    provenant_records::wire::LaneRow::state_and_reason(state)
 }
 
 pub(super) fn delivery_state_text(state: &provenant_records::run::WriterDeliveryState) -> String {
@@ -622,6 +620,100 @@ pub(super) fn render_lanes(
     render_lanes_with_lineage(lanes, waits, next, root, cooldowns, &Default::default())
 }
 
+/// Read one retained attempt without reaping or changing its history.
+pub fn project_retained_attempt(
+    target: &Target,
+    edge: &Edge<'_>,
+) -> Result<provenant_records::wire::LaneRow, Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let candidate = targets::resolve(edge, target, true)?;
+    let (session, target) = targets::read_resolved(edge, candidate, &call)?;
+    let id = target
+        .attempt
+        .ok_or_else(|| Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required"))?;
+    let record = session.store.record(id, &call)?;
+    if target.run.is_some_and(|run| run != record.run_id)
+        || target.task.is_some_and(|task| task != record.task_id)
+    {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::NotFound,
+            "attempt is not in that run/task",
+        ));
+    }
+    let successors = policy_successors(&session, std::slice::from_ref(&record), &call)?;
+    Ok(project_lane(
+        &record,
+        &[],
+        session.context.state_root.as_path(),
+        &successors,
+        clock.wall_now().ok(),
+        false,
+    ))
+}
+
+pub fn project_lane(
+    lane: &run::AttemptRecord,
+    waits: &[run::LaneWait],
+    root: &Path,
+    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
+    now_wall: Option<WallTime>,
+    observe_host: bool,
+) -> provenant_records::wire::LaneRow {
+    let wait = waits.iter().find(|wait| wait.attempt_id == lane.attempt_id);
+    let waiting_for = wait.map(|wait| wait.waiting_for.clone()).or_else(|| {
+        lane.provider_silent_for_ms
+            .0
+            .map(run::provider_silence_reason)
+    });
+    let transcript = lane
+        .applied_route
+        .as_ref()
+        .and_then(|route| route.provider.as_deref())
+        .zip(lane.session.as_deref())
+        .map(|(adapter, session)| {
+            let attempt = artifact(root, lane, "");
+            let path = observe_host
+                .then(|| run::locate_transcript(&attempt, session, &lane.write_grants))
+                .flatten()
+                .map(|path| attempt.join(path));
+            provenant_records::wire::LaneTranscript {
+                adapter: adapter.to_owned(),
+                session: session.to_owned(),
+                path: path
+                    .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok()),
+            }
+        });
+    let result_path = observe_host
+        .then(|| {
+            lane.result
+                .as_ref()
+                .map(|_| artifact(root, lane, "result.md"))
+        })
+        .flatten()
+        .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
+    provenant_records::wire::LaneRow::project(
+        lane,
+        provenant_records::wire::LaneProjectionFacts {
+            superseded_by: successors.get(&lane.attempt_id).copied(),
+            waiting_for,
+            lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
+            overdue: now_wall.map(|now| run::overdue_at(lane, now)),
+            stale: observe_host.then(|| run::holder_absent(root, lane)),
+            result_path,
+            transcript,
+            cache_read_share: provenant_routing::cache_read_share(
+                lane.usage.uncached_input,
+                lane.usage.cache_read,
+                lane.usage.cache_write,
+            ),
+            ..Default::default()
+        },
+    )
+}
+
 pub(super) fn render_lanes_with_lineage(
     lanes: &[run::AttemptRecord],
     waits: &[run::LaneWait],
@@ -630,26 +722,30 @@ pub(super) fn render_lanes_with_lineage(
     cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
     successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
 ) -> (Value, String) {
+    render_lanes_with_view(lanes, waits, next, root, cooldowns, successors, true)
+}
+
+pub(super) fn render_lanes_with_view(
+    lanes: &[run::AttemptRecord],
+    waits: &[run::LaneWait],
+    next: Option<u64>,
+    root: &Path,
+    cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
+    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
+    observe_host: bool,
+) -> (Value, String) {
     let mut human = String::new();
     let now_wall = SystemClock::new().wall_now().ok();
     let rows: Vec<Value> = lanes
         .iter()
         .map(|lane| {
-            let state = state_name(&lane.state);
+            let projected = project_lane(lane, waits, root, successors, now_wall, observe_host);
+            let state = projected.state.clone();
             let route = lane
                 .applied_route
                 .as_ref()
                 .and_then(|r| r.model.clone())
                 .unwrap_or_else(|| "unresolved".into());
-            let (exit_code, finished_at, reason) = match &lane.state {
-                run::AttemptState::Terminal {
-                    exit_code,
-                    finished_at,
-                    reason,
-                    ..
-                } => (*exit_code, Some(*finished_at), reason.clone()),
-                _ => (None, None, None),
-            };
             let result = lane
                 .result
                 .as_ref()
@@ -658,22 +754,11 @@ pub(super) fn render_lanes_with_lineage(
                 .applied_route
                 .as_ref()
                 .and_then(|r| r.account_label.as_deref());
-            let account = resolved_account.unwrap_or("unknown");
             let account_field = resolved_account
                 .map(|a| format!(" account={}", plain_text(a, usize::MAX)))
                 .unwrap_or_default();
             let route_text = plain_text(&route, usize::MAX);
-            // A lane that has not started says what it is waiting for.
-            let wait = waits.iter().find(|w| w.attempt_id == lane.attempt_id);
-            let silence_reason = lane
-                .provider_silent_for_ms.0
-                .map(provenant_records::run::provider_silence_reason);
-            let reason = reason
-                .or_else(|| wait.map(|w| w.waiting_for.clone()))
-                .or_else(|| silence_reason.clone());
-            let waiting_for = wait
-                .map(|w| w.waiting_for.clone())
-                .or(silence_reason);
+            let reason = projected.reason.clone();
             let reason_text = reason
                 .as_deref()
                 .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
@@ -693,7 +778,9 @@ pub(super) fn render_lanes_with_lineage(
                 Some(id) => format!("{state_text} → retrying ({id})"),
                 None => state_text,
             };
-            let state_text = lane.retry_of.map_or(state_text.clone(), |id| format!("{state_text} (retry of {id})"));
+            let state_text = lane.retry_of.map_or(state_text.clone(), |id| {
+                format!("{state_text} (retry of {id})")
+            });
             // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
                 "{}/{}/{}{title_text} {state_text} {route_text}{account_field}{reason_text}\n",
@@ -748,9 +835,7 @@ pub(super) fn render_lanes_with_lineage(
                     ..
                 }
             ) {
-                let capacity = reason
-                    .as_deref()
-                    .is_some_and(capacity_reason);
+                let capacity = reason.as_deref().is_some_and(capacity_reason);
                 if capacity
                     && lane
                         .session
@@ -828,70 +913,7 @@ pub(super) fn render_lanes_with_lineage(
                         .unwrap_or_else(|| "unknown".into())
                 ));
             }
-            // A pointer to the provider's own transcript; never a copy.
-            let transcript = lane
-                .applied_route
-                .as_ref()
-                .and_then(|r| r.provider.as_deref())
-                .zip(lane.session.as_deref())
-                .map(|(adapter, session)| {
-                    let attempt = artifact(root, lane, "");
-                    let path = run::locate_transcript(&attempt, session, &lane.write_grants)
-                        .map(|path| attempt.join(path));
-                    json!({ "adapter": adapter, "session": session, "path": path })
-                });
-            // The settled record's own reason, without a waiting lane's note.
-            let settlement = matches!(lane.state, run::AttemptState::Terminal { .. })
-                .then(|| json!({ "reason": state_and_reason(&lane.state).1 }));
-            let mut row = json!({
-                "run_id": lane.run_id,
-                "task_id": lane.task_id,
-                "attempt_id": lane.attempt_id,
-                "attempt_number": lane.attempt_number,
-                "retry_of": lane.retry_of,
-                "superseded_by": successors.get(&lane.attempt_id),
-                "state": state,
-                "exit_code": exit_code,
-                "reason": reason,
-                "settlement": settlement,
-                "lane_class": wait.map(|w| w.lane_class),
-                "waiting_for": waiting_for,
-                "requested_route": lane.requested_route,
-                "resolved_route": lane.resolved_route,
-                "applied_route": lane.applied_route,
-                "skipped_routes": lane.skipped_routes,
-                "account": account,
-                "observed_route": lane.observed_route,
-                "queued_at": lane.queued_at,
-                "started_at": lane.started_at,
-                "priority": lane.priority,
-                "finished_at": finished_at,
-                "last_output_at": lane.last_output_at,
-                "runtime_deadline": lane.runtime_deadline,
-                "overdue": now_wall.is_some_and(|now| run::overdue_at(lane, now)),
-                "stale": run::holder_absent(root, lane),
-                "partial_signals": lane.partial_signals,
-                "delivery_id": lane.delivery_id,
-                "write_grants": lane.write_grants,
-                "read_only_writable": lane.read_only_writable,
-                "git_grants_digest": lane.git_grants_digest,
-                "head": lane.head,
-                "protected_paths": lane.protected_paths,
-                "delivery": lane.delivery,
-                "continuation": lane.continuation,
-                "cache_read_share": provenant_routing::cache_read_share(lane.usage.uncached_input, lane.usage.cache_read, lane.usage.cache_write),
-                "result_path": result,
-                "transcript": transcript,
-            });
-            if let Some(title) = &lane.title {
-                row["title"] = json!(title);
-            }
-            if lane.requested_priority.map(i32::from) != lane.priority
-                && let Some(priority) = lane.requested_priority
-            {
-                row["requested_priority"] = json!(priority);
-            }
-            row
+            json!(projected)
         })
         .collect();
     if rows.is_empty() {
@@ -1236,7 +1258,7 @@ pub(super) fn lanes_inner(
                     || command
                         .states
                         .iter()
-                        .any(|state| state.as_str() == state_name(&lane.state));
+                        .any(|state| state.as_str() == state_and_reason(&lane.state).0);
                 let since_matches = since.is_none_or(|since| lane.queued_at >= since);
                 if state_matches && since_matches && by_session(&lane) {
                     matches.push(lane);
@@ -1347,11 +1369,16 @@ pub(super) fn route_label(record: &run::AttemptRecord) -> String {
 /// Receipt facts shared by explicit PR opening and graph delivery. Workflow
 /// review receipts, when present, are added by the caller that owns that store.
 pub fn recorded_attempt_facts(record: &run::AttemptRecord) -> AttemptFacts {
-    let (state, _) = state_and_reason(&record.state);
-    let exit_code = match &record.state {
-        run::AttemptState::Terminal { exit_code, .. } => *exit_code,
-        _ => None,
-    };
+    let lane = project_lane(
+        record,
+        &[],
+        Path::new("/"),
+        &Default::default(),
+        None,
+        false,
+    );
+    let state = lane.state;
+    let exit_code = lane.exit_code;
     AttemptFacts {
         attempt_id: record.attempt_id,
         run_id: record.run_id,

@@ -149,12 +149,9 @@ def schema_files(data):
     text = header("Published JSON Schemas", "provenant-records print-wire-schemas")
     text += (
         "These JSON Schemas (draft 2020-12) describe the `--json` envelope the CLI emits\n"
-        "today (`schema_version` 1) for `lanes`, `cancel` and `output`. `status` is the exception:\n"
-        "its envelope matches, but its `data` is the planned typed shape (lane rows and a\n"
-        "string cursor), while the CLI still emits raw attempt records and a numeric\n"
-        "next_cursor. MCP schemas describe planned structuredContent. Version 2 is the\n"
-        "planned typed generation and is not emitted yet; `schema_version` is bumped for any\n"
-        "change an existing consumer could misread, with no dual-emit period.\n\n"
+        "today (`schema_version` 1) for `lanes`, `status`, `output`, `cancel` and `land`.\n"
+        "Their lane rows share the same projection. MCP schemas describe planned\n"
+        "structuredContent; version 2 is not emitted yet.\n\n"
         "A non-ok status may carry `error: null` (for example a `lanes --wait` timeout or an\n"
         "unobservable cancel) and partial `data`, so the command schemas check `data` only\n"
         "for `ok`, `pending` and `waiting`. A failed cancel carries `data: {operation_id}`\n"
@@ -167,9 +164,8 @@ def schema_files(data):
     text += (
         "\n## Edge error codes\n\n"
         "Stable `error.code` values emitted outside the run owner (those are listed in the\n"
-        "[CLI reference](cli.md#error-codes)). `legacy_spelling` codes keep the spelling\n"
-        "consumers already match on; `umbrella` codes cover a command family until an\n"
-        "owner splits them.\n\n| Code | Kind | Meaning |\n|---|---|---|\n"
+        "[CLI reference](cli.md#error-codes)). `umbrella` codes cover a command family\n"
+        "until an owner splits them.\n\n| Code | Kind | Meaning |\n|---|---|---|\n"
     )
     for entry in data["error-codes"]:
         text += f"| `{entry['code']}` | {entry['kind']} | {entry['summary'].replace('|', '&#124;')} |\n"

@@ -128,8 +128,14 @@ fn suite() -> Result {
     assert_eq!(code(&out), 23);
     let out = rig.execute(&executable, &["flood"], None)?;
     assert_eq!(code(&out), 0);
-    assert!(out.stdout.truncated && out.stderr.truncated);
-    assert_eq!(out.stdout.total_bytes, 3 * 1024 * 1024);
+    for (stream, limit) in [
+        (&out.stdout, support::FIXTURE_STDOUT_LIMIT),
+        (&out.stderr, support::FIXTURE_STDERR_LIMIT),
+    ] {
+        assert!(stream.truncated);
+        assert!(stream.bytes.len() <= limit);
+        assert!(stream.total_bytes > stream.bytes.len() as u64);
+    }
     let out = rig.execute(
         &executable,
         &["record", "fixture argument", "--fixture"],

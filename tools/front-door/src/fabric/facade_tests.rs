@@ -119,6 +119,78 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
+    fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_wait_observes_settlement_and_budget")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal, GraphStatus, NodeState};
+        use provenant_core::{DurationMicros, MonoTime, TestClock, WallTime};
+        struct Advance<'a> { clock: &'a TestClock, settle: std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>> }
+        impl provenant_core::Pause for Advance<'_> {
+            fn wait(&self, delay: DurationMicros, _: &CancelToken) {
+                self.clock.wait_until(self.clock.mono_now().checked_add(delay).unwrap()).unwrap();
+                if self.clock.mono_now().as_micros() >= 2_000_000 && let Some(settle) = self.settle.borrow_mut().take() { settle(); }
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let project = factory.context.identity.project;
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"wait-test", "nodes":[{"id":"one", "prompt":"work", "access":"read_only", "route":{"alias":"senior"}}]
+        }))?;
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"wait-test", "plan_digest":"digest", "nodes":[{"id":"one", "state":"running", "worktree":null, "attempts":[]}]
+        }))?;
+        let mut journal = FileJournal::open(&roots.state, project, "wait-test", budget, &cancel, &factory.clock)?;
+        journal.bind(GraphExecution { extra: Default::default(), integration_base: None, review_base: None, directory: rig.project.clone(), document })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let clock = TestClock::new(WallTime::from_unix_seconds(0)?, MonoTime::from_micros(0));
+        let observe = || factory.graph(GraphInput::Status { extra: Default::default(), id: "wait-test".into() }, budget, &cancel);
+        let pause = Advance { clock: &clock, settle: std::cell::RefCell::new(None) };
+        let pending = super::wait_graph(&clock, &pause, 1, &cancel, observe)?;
+        assert_eq!(pending.status, GraphStatus::Pending);
+        let waited = serde_json::to_value(super::graph_command_result("fabric graph wait", pending.clone()))?;
+        let status = serde_json::to_value(super::graph_command_result("fabric graph status", pending.clone()))?;
+        assert_eq!(waited["status"], "waiting");
+        assert_eq!(waited["data"]["checkpoint"]["graph_id"], "wait-test");
+        assert_eq!(waited["data"], status["data"]);
+        let human = super::graph_waiting_human(&pending, &provenant_cli::Globals::default());
+        assert!(human.contains("fabric graph status wait-test"));
+        assert!(!human.contains("graph resume"));
+        assert_eq!(clock.mono_now().as_micros(), 1_000_000);
+        checkpoint.nodes[0].state = NodeState::Succeeded;
+        let settle = || {
+            let mut journal = FileJournal::open(&roots.state, project, "wait-test", budget, &cancel, &factory.clock).unwrap();
+            journal.save(&checkpoint).unwrap();
+        };
+        let pause = Advance { clock: &clock, settle: std::cell::RefCell::new(Some(Box::new(settle))) };
+        let settled = super::wait_graph(&clock, &pause, 1, &cancel, observe)?;
+        assert_eq!(settled.status, GraphStatus::Complete);
+        assert_eq!(settled.checkpoint.graph_id, "wait-test");
+        assert_eq!(clock.mono_now().as_micros(), 2_000_000);
+        drop(pause);
+        checkpoint.nodes[0].state = NodeState::Running;
+        checkpoint.pause_reason = Some("decision required".into());
+        let mut journal = FileJournal::open(&roots.state, project, "wait-test", budget, &cancel, &factory.clock)?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let pause = Advance { clock: &clock, settle: std::cell::RefCell::new(None) };
+        let paused = super::wait_graph(&clock, &pause, 1, &cancel, observe)?;
+        assert_eq!(paused.status, GraphStatus::Paused);
+        assert_eq!(clock.mono_now().as_micros(), 2_000_000);
+        Ok(())
+    }
+
+    #[test]
     fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::graph_cancel_persists_reason_and_skips_pending_node")? {
             return Ok(());
@@ -166,6 +238,9 @@ pub(crate) mod peer_tests {
     #[test]
     fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std::error::Error>>
     {
+        if host_test("fabric::peer_tests::graph_status_and_cancel_retire_unreadable_record")? {
+            return Ok(());
+        }
         use provenant_fabric_runtime::graph::{FileJournal, GraphStatus};
         let rig = crate::worktree_tests::support::TestRig::new()?;
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
@@ -185,62 +260,69 @@ pub(crate) mod peer_tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let project = factory.context.identity.project;
-        drop(FileJournal::open(
-            &roots.state,
-            project,
-            "broken",
-            budget,
-            &cancel,
-            &factory.clock,
-        )?);
-        let directory = roots
-            .state
-            .as_path()
-            .join("fabric/graphs")
-            .join(project.to_string());
-        std::fs::write(directory.join("graph-broken.json"), b"invalid json")?;
-        let status = factory.graph(
-            GraphInput::Status {
-                extra: Default::default(),
-                id: "broken".into(),
-            },
-            budget,
-            &cancel,
-        )?;
-        assert_eq!(status.status, GraphStatus::Paused);
-        assert!(
-            status
-                .advance_error
-                .unwrap()
-                .contains("cancel it to retire")
-        );
-        let retired = factory.graph(
-            GraphInput::Cancel {
-                extra: Default::default(),
-                id: "broken".into(),
-                reason: None,
-            },
-            budget,
-            &cancel,
-        )?;
-        assert!(
-            retired
-                .advance_error
-                .unwrap()
-                .contains("Active attempts were not cancelled")
-        );
-        assert!(!directory.join("graph-broken.json").exists());
-        assert!(matches!(
-            factory.graph(
+        for (id, contents) in [
+            ("broken", b"invalid json".as_slice()),
+            ("g-test", include_bytes!("fixtures/pre-node-asks-checkpoint.json").as_slice()),
+        ] {
+            drop(FileJournal::open(
+                &roots.state,
+                project,
+                id,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?);
+            let directory = roots
+                .state
+                .as_path()
+                .join("fabric/graphs")
+                .join(project.to_string());
+            let path = directory.join(format!("graph-{id}.json"));
+            std::fs::write(&path, contents)?;
+            let status = factory.graph(
                 GraphInput::Status {
                     extra: Default::default(),
-                    id: "broken".into()
+                    id: id.into(),
                 },
                 budget,
-                &cancel
-            ),
-            Err(FacadeError::NotFound)
-        ));
+                &cancel,
+            )?;
+            assert_eq!(status.status, GraphStatus::Paused);
+            let explanation = status.advance_error.unwrap();
+            assert!(explanation.contains(id), "{explanation}");
+            assert!(explanation.contains("cancel it to retire"), "{explanation}");
+            if id == "g-test" {
+                assert!(explanation.contains("predates node asks"), "{explanation}");
+                assert!(explanation.contains("previous release"), "{explanation}");
+            }
+            let retired = factory.graph(
+                GraphInput::Cancel {
+                    extra: Default::default(),
+                    id: id.into(),
+                    reason: None,
+                },
+                budget,
+                &cancel,
+            )?;
+            assert!(
+                retired
+                    .advance_error
+                    .unwrap()
+                    .contains("unidentifiable work")
+            );
+            assert!(!path.exists());
+            assert!(matches!(
+                factory.graph(
+                    GraphInput::Status {
+                        extra: Default::default(),
+                        id: id.into()
+                    },
+                    budget,
+                    &cancel
+                ),
+                Err(FacadeError::NotFound)
+            ));
+        }
         Ok(())
     }
 
@@ -668,10 +750,10 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
-    fn graph_replay_preserves_legacy_context_without_a_checkpoint_reference()
+    fn graph_replay_preserves_accepted_context_without_a_checkpoint_reference()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(
-            "fabric::peer_tests::graph_replay_preserves_legacy_context_without_a_checkpoint_reference",
+            "fabric::peer_tests::graph_replay_preserves_accepted_context_without_a_checkpoint_reference",
         )? {
             return Ok(());
         }
@@ -728,28 +810,7 @@ pub(crate) mod peer_tests {
             serde_json::json!({"adapter":"fixture", "model":"fixture/model"}),
         )?;
         let store = run_owner.store(&cancel)?;
-        for prepared in [false, true] {
-            if prepared {
-                graph_owner.exclude = vec!["codex/gpt-6-luna".into()];
-                // Reserve the legacy digest without the canonical request file,
-                // as a crash between row reservation and publication would leave it.
-                let call = run_owner.call(&cancel);
-                let mut operation = store
-                    .operation(&receipt.operation_id, &call)?
-                    .ok_or("operation")?;
-                operation.state = provenant_run::OperationState::Prepared;
-                let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-                db.execute(
-                    "UPDATE operations SET record=?1",
-                    [serde_json::to_vec(&operation)?],
-                )?;
-                std::fs::remove_file(
-                    rig.state
-                        .join("runs")
-                        .join(operation.run_id.to_string())
-                        .join("request.json"),
-                )?;
-            }
+        {
             let observation = graph_owner.observe_or_start(
                 &key,
                 graph::NodeInput {
@@ -870,9 +931,9 @@ pub(crate) mod peer_tests {
         assert!(page.next_after.is_none());
         let second = serde_json::to_value(&page.items[0])?;
         assert_ne!(second["attempt_id"], row["attempt_id"]);
-        assert_eq!(second["state"]["outcome"], "cancelled");
-        assert_eq!(second["state"]["reason"], "fixture");
-        assert!(second["state"]["finished_at"].is_string());
+        assert_eq!(second["state"], "cancelled");
+        assert_eq!(second["reason"], "fixture");
+        assert!(second["finished_at"].is_string());
         let status = owner.run(
             RunInput::Status {
                 extra: Default::default(),
