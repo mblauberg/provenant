@@ -300,13 +300,23 @@ pub(super) fn observe_account(
     let out = executor.execute(options).map_err(|e| e.to_string())?;
     let unavailable = || {
         format!(
-            "provider version is unavailable (termination={:?}, timed_out={}, stdout_truncated={})",
-            out.termination, out.timed_out, out.stdout.truncated
+            "provider version is unavailable (termination={:?}, timed_out={}, cancelled={}, drain_truncated={}, overflow_stopped={}, stdout_truncated={}, stdout_read_failed={})",
+            out.termination,
+            out.timed_out,
+            out.cancelled,
+            out.drain_truncated,
+            out.overflow_stopped,
+            out.stdout.truncated,
+            out.stdout.read_failed
         )
     };
     if out.termination != provenant_os::exec::Termination::Exit(0)
         || out.timed_out
+        || out.cancelled
+        || out.drain_truncated
+        || out.overflow_stopped
         || out.stdout.truncated
+        || out.stdout.read_failed
     {
         return Err(AccountObservationError::VersionUnavailable(unavailable()));
     }

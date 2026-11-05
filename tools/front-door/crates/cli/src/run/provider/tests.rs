@@ -619,6 +619,40 @@ fn version_probe_reports_outcomes_without_disclosing_output()
             }
         }
     }
+    for incomplete in 0..4 {
+        let executor = VersionExecutor(ExecOutcome {
+            termination: Termination::Exit(0),
+            timed_out: false,
+            stdout: CapturedStream {
+                bytes: b"opencode v2.0.32".to_vec(),
+                read_failed: incomplete == 0,
+                ..CapturedStream::default()
+            },
+            stderr: CapturedStream::default(),
+            drain_truncated: incomplete == 1,
+            overflow_stopped: incomplete == 2,
+            cancelled: incomplete == 3,
+            elapsed_micros: 0,
+        });
+        let executor = provenant_providers::host::HostProbeExecutor::new(&executor, &root)?;
+        let probe = Probe {
+            roots: Some(&roots),
+            executor: &executor,
+            home: &root,
+            user: "fixture".as_ref(),
+            scratch: &root,
+        };
+        assert!(matches!(
+            observe_account(
+                &entry,
+                Path::new("/fixture/opencode"),
+                &probe,
+                "fixture",
+                100
+            ),
+            Err(AccountObservationError::VersionUnavailable(_))
+        ));
+    }
     Ok(())
 }
 
