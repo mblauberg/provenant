@@ -149,6 +149,7 @@ fn command_identity_is_verified_without_manufacturing_model_evidence() {
 
 #[test]
 fn unsafe_path_reports_each_check_and_relative_path() {
+    let mut messages = std::collections::BTreeSet::new();
     for (check, reason) in [
         (PathCheck::Mode, "mode"),
         (PathCheck::Owner, "owner"),
@@ -160,12 +161,14 @@ fn unsafe_path_reports_each_check_and_relative_path() {
         (PathCheck::Missing, "missing"),
     ] {
         let error = RunError::unsafe_path("runs/example/process.json", check);
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "run-store path runs/example/process.json is not private or contained: {reason}"
-            )
+        assert!(
+            matches!(&error, RunError::UnsafePath { path, check: actual }
+            if path == std::path::Path::new("runs/example/process.json") && *actual == check)
         );
+        let message = error.to_string();
+        assert!(message.contains("runs/example/process.json"), "{message}");
+        assert!(message.contains(reason), "{message}");
+        assert!(messages.insert(message));
     }
 }
 
