@@ -85,9 +85,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     std::fs::write(&cargo_credentials, b"token")?;
     let project_locks = root.join("agent-run");
     std::fs::create_dir(&project_locks)?;
-    let shared_locks = root.join("shared-locks");
+    let shared_locks = fixture.repo.root_path().join(".agent-run/locks");
     let configured_tools = root.join("configured-tools");
-    std::fs::create_dir(&shared_locks)?;
+    std::fs::create_dir_all(&shared_locks)?;
     std::fs::create_dir(&configured_tools)?;
     let private = linked.repo().private_git_dir().to_owned();
     let common = linked.repo().common_git_dir().to_owned();
@@ -583,6 +583,71 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
     assert!(!successful_probe(&lock_probe(&sbpl)));
     drop(held);
     assert!(successful_probe(&lock_probe(&sbpl)));
+    // A lane-created lock excludes the host until the lane releases it.
+    let lane_ready = shared_locks.join("lane-ready");
+    let host_started = shared_locks.join("host-started");
+    let host_acquired = shared_locks.join("host-acquired");
+    let lane_lock = shared_locks.join("lane-created.lock");
+    let release_path = shared_locks.join("release.lock");
+    let release = lock_directory.try_lock(
+        std::ffi::OsStr::new("release.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let lane = scope.spawn(|| {
+            let argv = [OsString::from(SANDBOX_EXEC), "-p".into(), sbpl.clone().into(), executables[6].as_os_str().to_owned(), "-e".into(),
+                "open(my $f, '>>', $ARGV[0]) or die $!; flock($f, 2) or die $!; open(my $r, '>', $ARGV[1]) or die $!; close($r); open(my $g, '>>', $ARGV[2]) or die $!; flock($g, 2) or die $!;".into(),
+                lane_lock.as_os_str().to_owned(), lane_ready.as_os_str().to_owned(), release_path.as_os_str().to_owned()];
+            let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(20));
+            options.env = Some(&env);
+            options.stderr = StreamPolicy::Capture { limit: 1024 };
+            executor.execute(options)
+        });
+        provenant_test_support::wait_for(
+            "lane lock",
+            Duration::from_secs(10),
+            || lane_ready.exists(),
+            |ready| *ready,
+        )?;
+        assert!(
+            lock_directory
+                .try_lock(
+                    std::ffi::OsStr::new("lane-created.lock"),
+                    provenant_os::fs::LockMode::Exclusive
+                )
+                .is_err()
+        );
+        let host = scope.spawn(|| {
+            let argv = [executables[6].as_os_str().to_owned(), "-e".into(),
+                "open(my $f, '>>', $ARGV[0]) or die $!; open(my $s, '>', $ARGV[1]) or die $!; close($s); flock($f, 2) or die $!; open(my $a, '>', $ARGV[2]) or die $!;".into(),
+                lane_lock.as_os_str().to_owned(), host_started.as_os_str().to_owned(), host_acquired.as_os_str().to_owned()];
+            let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(20));
+            options.stderr = StreamPolicy::Capture { limit: 1024 };
+            executor.execute(options)
+        });
+        provenant_test_support::wait_for(
+            "host contender",
+            Duration::from_secs(10),
+            || host_started.exists(),
+            |started| *started,
+        )?;
+        assert!(
+            !host_acquired.exists(),
+            "host acquired a lock held by the lane"
+        );
+        drop(release);
+        let lane_outcome = lane.join().map_err(|_| "lane thread panicked")??;
+        assert!(
+            successful_probe(&lane_outcome),
+            "lane lock: {lane_outcome:?}"
+        );
+        let host_outcome = host.join().map_err(|_| "host thread panicked")??;
+        assert!(
+            successful_probe(&host_outcome) && host_acquired.exists(),
+            "host lock: {host_outcome:?}"
+        );
+        Ok(())
+    })?;
     for (name, outcome) in [
         (
             "tool store write",

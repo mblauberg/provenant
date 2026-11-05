@@ -174,7 +174,7 @@ providers' credential stores, and GitHub CLI configuration stays denied
 ## Project paths and host checkout identity
 
 Lanes receive `PROVENANT_PRIMARY_CHECKOUT`, the canonical primary checkout.
-Linked-worktree lanes also receive `PROVENANT_WORKTREE_GITDIR`, their real,
+Git-backed lanes also receive `PROVENANT_WORKTREE_GITDIR`, their real,
 read-only admin directory. A writer's `git rev-parse --git-common-dir` still
 names its private Git view; use the environment variable to locate host-owned
 project state instead of querying Git against the primary checkout.

@@ -1,0 +1,3 @@
+capability_sources: [{"name":"postgres","source":"project default"}]
+capability_sources: [{"name":"postgres","source":"node"}]
+capability_sources: [{"name":"postgres","source":"flag"}]

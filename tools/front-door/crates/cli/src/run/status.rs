@@ -155,8 +155,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let mut compact = lane_summary(&lines, continuation);
             // The compact view keeps the paths a writer may change unreviewed.
             compact.lines.push(exempt_line.trim_end().to_owned());
-            summary = Some(compact);
-            let human = format!("{human}{exempt_line}");
+            let mut human = format!("{human}{exempt_line}");
             let successors = policy_successors(&session, &rows, &call)?;
             let (mut data, _) = render_lanes_with_lineage(
                 &rows,
@@ -169,6 +168,13 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             if let Some(object) = data.as_object_mut() {
                 object.remove("capacity_cooldowns");
             }
+            attach_capability_sources(&session, &rows, &mut data, &call);
+            let capabilities = capability_sources_text(&data);
+            compact
+                .lines
+                .extend(capabilities.lines().take(8).map(str::to_owned));
+            summary = Some(compact);
+            human.push_str(&capabilities);
             data["review_exempt"] = exempt;
             Ok((data, human))
         })(),
@@ -176,6 +182,43 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
     out.summary = summary;
     out.read_only = true;
     out
+}
+
+pub(super) fn attach_capability_sources(
+    session: &Session,
+    rows: &[run::AttemptRecord],
+    data: &mut Value,
+    call: &run::Request<'_>,
+) {
+    let Some(output) = data["lanes"].as_array_mut() else {
+        return;
+    };
+    for (lane, row) in rows.iter().zip(output) {
+        if let Ok(request) = session.store.request(lane.run_id, call)
+            && let Some(task) = request
+                .tasks
+                .iter()
+                .find(|task| task.task_id == lane.task_id)
+            && let Some(sources) = task.access.extra.get("capability_sources")
+        {
+            row["capabilities"] = sources.clone();
+        }
+    }
+}
+
+fn capability_sources_text(data: &Value) -> String {
+    let mut text = String::new();
+    for lane in data["lanes"].as_array().into_iter().flatten() {
+        for capability in lane["capabilities"].as_array().into_iter().flatten() {
+            text.push_str(&format!(
+                "{}: capability {} ({})\n",
+                plain_text(lane["attempt_id"].as_str().unwrap_or("-"), 128),
+                plain_text(capability["name"].as_str().unwrap_or("-"), 128),
+                plain_text(capability["source"].as_str().unwrap_or("-"), 128)
+            ));
+        }
+    }
+    text
 }
 
 fn paused_graph_status(
@@ -547,6 +590,9 @@ pub(super) fn report(
                 .find(|task| row["task_id"] == task.task_id.to_string())
             {
                 row["network"] = json!(task.access.network(task.writer.is_some()));
+                if let Some(sources) = task.access.extra.get("capability_sources") {
+                    row["capabilities"] = sources.clone();
+                }
             }
         }
     }
@@ -556,7 +602,12 @@ pub(super) fn report(
     if !unknown.is_empty() {
         data["launch_unknown"] = json!(unknown);
     }
-    Ok((data, format!("run {}\n{human}", record.run_id), timed_out))
+    let capability_text = capability_sources_text(&data);
+    Ok((
+        data,
+        format!("run {}\n{human}{capability_text}", record.run_id),
+        timed_out,
+    ))
 }
 
 pub(super) fn lane_query(
