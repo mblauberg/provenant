@@ -3,11 +3,7 @@
     "pattern": "scout-swarm",
     "preset": "scout-swarm"
   },
-<<<<<<< HEAD
-  "graph_id": "preset-977073ae38d2909da48be021e5c8960c",
-=======
-  "graph_id": "preset-8e0c52c2773eca78e27d425e912ab5f5",
->>>>>>> origin/main
+  "graph_id": "preset-780ea8d25ccef36fe4342d7a3da28d1c",
   "nodes": [
     {
       "access": "read_only",
@@ -83,13 +79,7 @@
                       }
                     ],
                     "role": "scout.codebase",
-<<<<<<< HEAD
                     "role_digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57",
-                    "route": {
-                      "alias": "junior"
-                    },
-=======
-                    "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
                     "routes": [
                       {
                         "alias": "junior"
@@ -98,7 +88,6 @@
                         "alias": "junior"
                       }
                     ],
->>>>>>> origin/main
                     "title": "scout-1"
                   },
                   {
@@ -117,13 +106,7 @@
                       }
                     ],
                     "role": "scout.codebase",
-<<<<<<< HEAD
                     "role_digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57",
-                    "route": {
-                      "alias": "junior"
-                    },
-=======
-                    "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
                     "routes": [
                       {
                         "alias": "junior"
@@ -132,7 +115,6 @@
                         "alias": "junior"
                       }
                     ],
->>>>>>> origin/main
                     "title": "scout-2"
                   },
                   {
@@ -151,13 +133,7 @@
                       }
                     ],
                     "role": "scout.codebase",
-<<<<<<< HEAD
                     "role_digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57",
-                    "route": {
-                      "alias": "junior"
-                    },
-=======
-                    "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
                     "routes": [
                       {
                         "alias": "junior"
@@ -166,7 +142,6 @@
                         "alias": "junior"
                       }
                     ],
->>>>>>> origin/main
                     "title": "scout-3"
                   },
                   {
@@ -185,13 +160,7 @@
                       }
                     ],
                     "role": "scout.codebase",
-<<<<<<< HEAD
                     "role_digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57",
-                    "route": {
-                      "alias": "junior"
-                    },
-=======
-                    "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
                     "routes": [
                       {
                         "alias": "junior"
@@ -200,7 +169,6 @@
                         "alias": "junior"
                       }
                     ],
->>>>>>> origin/main
                     "title": "scout-4"
                   },
                   {
@@ -216,13 +184,7 @@
                       }
                     ],
                     "role": "scout.external",
-<<<<<<< HEAD
                     "role_digest": "sha256:6a06d9ece1c9bb403d70e93ee5fcbfd439f2cbfbb9517f5b8cfc8164f87859bc",
-                    "route": {
-                      "alias": "web"
-                    },
-=======
-                    "role_digest": "sha256:1037e572ae7b8be53967840edb7d2ca08a1cbc9dd1c85848d9b3a4eb0d839495",
                     "routes": [
                       {
                         "alias": "web"
@@ -231,7 +193,6 @@
                         "alias": "web"
                       }
                     ],
->>>>>>> origin/main
                     "title": "external"
                   }
                 ]
@@ -279,13 +240,7 @@
                   }
                 ],
                 "role": "scout.codebase",
-<<<<<<< HEAD
                 "role_digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57",
-                "route": {
-                  "alias": "${route}"
-                },
-=======
-                "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
                 "routes": [
                   {
                     "alias": "${route}"
@@ -294,7 +249,6 @@
                     "alias": "${route}"
                   }
                 ],
->>>>>>> origin/main
                 "title": "scout"
               }
             ],
@@ -343,13 +297,7 @@
                   }
                 ],
                 "role": "scout.external",
-<<<<<<< HEAD
                 "role_digest": "sha256:6a06d9ece1c9bb403d70e93ee5fcbfd439f2cbfbb9517f5b8cfc8164f87859bc",
-                "route": {
-                  "alias": "web"
-                },
-=======
-                "role_digest": "sha256:1037e572ae7b8be53967840edb7d2ca08a1cbc9dd1c85848d9b3a4eb0d839495",
                 "routes": [
                   {
                     "alias": "web"
@@ -358,7 +306,6 @@
                     "alias": "web"
                   }
                 ],
->>>>>>> origin/main
                 "title": "scout"
               }
             ],
@@ -406,13 +353,7 @@
       "kind": "synthesise",
       "prompt": "You reconcile research evidence for the writers; you do not implement.\n\nMap and reconcile the scouts' evidence for the writers: brief\nThe shared brief describes their work, not instructions for you to implement.\nDo not implement, edit files, commit, or require an implementation worktree.\nPreserve useful scope partitions, file references, dated external sources and\nunresolved uncertainty. Recommend next steps and retain every child's evidence.\n",
       "role": "plan.research",
-<<<<<<< HEAD
       "role_digest": "sha256:8e06e7a486b81c987903b260609047d9091de7fe066ae9697fe11ee15c207dbc",
-      "route": {
-        "alias": "senior"
-      },
-=======
-      "role_digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
       "routes": [
         {
           "alias": "senior"
@@ -421,7 +362,6 @@
           "alias": "senior"
         }
       ],
->>>>>>> origin/main
       "title": "synthesis"
     }
   ],
