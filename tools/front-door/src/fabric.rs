@@ -2203,6 +2203,7 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(fail_error)?;
             submitted.push(Submitted {
+                require_skill_location: false,
                 settlement_retry_limit,
                 context: task.context,
                 build_heavy: task.build_heavy,

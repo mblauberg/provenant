@@ -3168,6 +3168,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         chair: chair.clone(),
         operation_id: OperationId::parse("context-ref-replay").unwrap(),
         tasks: vec![Submitted {
+            require_skill_location: false,
             settlement_retry_limit: None,
             context: None,
             build_heavy: false,
