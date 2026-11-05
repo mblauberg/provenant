@@ -620,6 +620,41 @@ fn source_worktree<'a>(
     None
 }
 
+/// The verifier belongs to the same panel when it follows the deferred lens
+/// group in the same composite scope. Lens members belong directly.
+fn review_panel_contains(
+    expansion: &Expansion,
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    if expansion.review.is_none() {
+        return false;
+    }
+    if expansion.nodes.iter().any(|member| member.id == node.id) {
+        return true;
+    }
+    if node.role.as_deref() != Some("review.verify")
+        || node.id.rsplit_once("--").map(|(scope, _)| scope)
+            != expansion.source.rsplit_once("--").map(|(scope, _)| scope)
+    {
+        return false;
+    }
+    let mut pending: Vec<&String> = node.dependencies().collect();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if id == &expansion.source {
+            return true;
+        }
+        if let Some(index) = positions.get(id)
+            && seen.insert(*index)
+        {
+            pending.extend(plan.nodes[*index].dependencies());
+        }
+    }
+    false
+}
+
 /// Advance all currently ready nodes once. Independent nodes can progress
 /// while a dependency is still running. Stable keys make calls safe to repeat.
 #[cfg(test)]
@@ -1008,14 +1043,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         expansion_depth: usize::MAX,
         ..limits.clone()
     };
-    let mut stored = journal
+    let stored = journal
         .load(&document.graph_id)
         .map_err(GraphError::Journal)?;
-    if let Some(checkpoint) = &mut stored {
-        plans::restore_legacy_topology(
+    if let Some(checkpoint) = &stored {
+        plans::validate_persisted_topology(
             document,
             &checkpoint.extensions,
-            &mut checkpoint.expansions,
+            &checkpoint.expansions,
             &unbounded,
         )
         .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
@@ -1042,18 +1077,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
     let mut checkpoint = match stored {
         Some(checkpoint) => {
-            if let Some(reason) = loops::legacy(&checkpoint) {
-                if checkpoint.cancelled && !resume {
-                    let mut checkpoint = checkpoint;
-                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
-                    return Ok(GraphRun {
-                        status: GraphStatus::Cancelled,
-                        checkpoint,
-                        advance_error: None,
-                    });
-                }
-                return Err(GraphError::Refused(reason));
-            }
             let mut validation = checkpoint.clone();
             restore_cancelled_nodes(&mut validation)
                 .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
@@ -1788,6 +1811,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     })
                     .and_then(|mut addition| {
                         if let Some(review) = &mut addition.review {
+                            if !review.substitutions.is_empty() {
+                                return Err("new review resolution cannot contain substitutions".into());
+                            }
                             let source = bounded(&review.source, MAX_ADVANCE_ERROR_BYTES - 32);
                             if source.len() < review.source.len() {
                                 review.source = format!("{source} [truncated]");
@@ -1953,9 +1979,27 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         usize::from(last.key.route_index)
                     }
                     Some(last)
-                        if last.outcome.is_some_and(|outcome| {
-                            historical_fallback_admissible(outcome, node.access, last.launched)
-                        }) =>
+                        if review_substitution(node, last)
+                            && progress
+                                .attempts
+                                .iter()
+                                .filter(|attempt| attempt.review_substitution)
+                                .count()
+                                < limits.review_substitutions =>
+                    {
+                        progress.attempts.len()
+                    }
+                    Some(last) if review_substitution(node, last) => {
+                        // A lowered limit can withdraw a retry that was saved
+                        // but had not yet started when the graph stopped.
+                        checkpoint.nodes[node_index].state = NodeState::Failed;
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
+                    Some(last)
+                        if last
+                            .outcome
+                            .is_some_and(|outcome| fallback_candidate(outcome, last.launched)) =>
                     {
                         let Some(outcome) = last.outcome else { break };
                         let evidence = last.attempt_ref.as_deref().and_then(|reference| {
@@ -1970,6 +2014,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             progress.advance_error_code =
                                 Some("fallback_evidence_unavailable".into());
                             progress.advance_error = Some("Cannot verify local preparation and released custody for route fallback.".into());
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            break;
+                        }
+                        if review_preparation_substitution(node, last)
+                            && progress
+                                .attempts
+                                .iter()
+                                .filter(|attempt| attempt.review_substitution)
+                                .count()
+                                >= limits.review_substitutions
+                        {
+                            let progress = &mut checkpoint.nodes[node_index];
+                            progress.state = NodeState::Failed;
+                            progress.advance_error_code = Some("review_substitution_limit".into());
+                            progress.advance_error =
+                                Some("review substitution limit reached".into());
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             break;
                         }
@@ -2292,8 +2352,29 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             input.file_delivery = InputDelivery::Pending;
                         }
                     }
+                    let review_substitution = checkpoint.nodes[node_index]
+                        .attempts
+                        .last()
+                        .is_some_and(|attempt| {
+                            review_substitution(node, attempt)
+                                || review_preparation_substitution(node, attempt)
+                        });
+                    if review_substitution {
+                        for expansion in &mut checkpoint.expansions {
+                            if review_panel_contains(expansion, node, &plan, &positions)
+                                && let Some(review) = &mut expansion.review
+                            {
+                                review.substitutions.push(ReviewSubstitution {
+                                    member: node.id.clone(),
+                                    route_index: key.route_index,
+                                });
+                                review.substitutions.sort();
+                            }
+                        }
+                    }
                     checkpoint.nodes[node_index].attempts.push(GraphAttempt {
                         extra: Default::default(),
+                        review_substitution,
                         key: key.clone(),
                         route: route.clone(),
                         state: AttemptState::Starting,
@@ -2498,7 +2579,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .filter_map(|attempt| attempt.attempt_ref.clone())
                             .collect()
                     });
-                let family_peers = if node.family_group.is_some()
+                let review_retry = checkpoint.nodes[node_index]
+                    .attempts
+                    .last()
+                    .is_some_and(|attempt| attempt.review_substitution);
+                let mut family_peers = if (node.family_group.is_some() || review_retry)
                     && !needs_record
                     && checkpoint.nodes[node_index].separation.is_some()
                 {
@@ -2516,11 +2601,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 } else {
                     owner.attempt_families(&peer_refs).unwrap_or_default()
                 };
+                if review_retry && needs_record {
+                    let previous: Vec<_> = checkpoint.nodes[node_index]
+                        .attempts
+                        .iter()
+                        .take(route_index)
+                        .filter_map(|attempt| attempt.attempt_ref.clone())
+                        .collect();
+                    for family in owner.attempt_families(&previous).unwrap_or_default() {
+                        if !family_peers.contains(&family) {
+                            family_peers.push(family);
+                        }
+                    }
+                }
                 let mut prior_attempts = Vec::new();
                 for attempt in checkpoint.nodes[node_index]
                     .attempts
                     .iter()
                     .take(route_index)
+                    .filter(|_| !review_retry)
                 {
                     let resolved = if let Some(reference) = &attempt.attempt_ref {
                         owner
@@ -2538,7 +2637,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let require_distinct = node.distinct_strength == Some(FamilyStrength::Require)
                     && (node.family_group.is_none() || node.distinct_from.is_some());
                 if (needs_record || checkpoint.nodes[node_index].separation.is_none())
-                    && (node.distinct_from.is_some() || node.family_group.is_some())
+                    && (node.distinct_from.is_some() || node.family_group.is_some() || review_retry)
                 {
                     let mut excluded = owner
                         .attempt_families(&distinct_attempts)
@@ -2720,7 +2819,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let recorded_separation =
                     match (&observation, node.distinct_from, &node.family_group) {
                         (AttemptObservation::Terminal { attempt_ref, .. }, distinct, group)
-                            if distinct.is_some() || group.is_some() =>
+                            if distinct.is_some() || group.is_some() || review_retry =>
                         {
                             let mut excluded = owner
                                 .attempt_families(&distinct_attempts)
@@ -2846,6 +2945,21 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 commit,
                                 &upstream_findings,
                             );
+                            if node.access == AccessMode::ReadOnly
+                                && let Some(lens) = node
+                                    .role
+                                    .as_deref()
+                                    .and_then(|role| role.strip_prefix("lens."))
+                            {
+                                for finding in &mut outputs.findings {
+                                    if !upstream_findings
+                                        .iter()
+                                        .any(|source| source.id == finding.id)
+                                    {
+                                        finding.extra.insert("lens".into(), lens.into());
+                                    }
+                                }
+                            }
                             let marker_warnings = propagation_warnings(&outputs, &marker_inputs);
                             if !marker_warnings.is_empty() {
                                 outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(2));
@@ -2972,8 +3086,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 AttemptOutcome::AuthRequired
                                 | AttemptOutcome::UsageLimited
                                 | AttemptOutcome::AdapterUnavailable => {
+                                    let review_limit_reached =
+                                        review_preparation_substitution(node, attempt)
+                                            && progress
+                                                .attempts
+                                                .iter()
+                                                .filter(|attempt| attempt.review_substitution)
+                                                .count()
+                                                >= limits.review_substitutions;
                                     if !live_fallback_allowed(outcome, launched, fallback_evidence)
                                         || route_index + 1 == node.routes.len()
+                                        || review_limit_reached
                                     {
                                         if outcome == AttemptOutcome::UsageLimited {
                                             progress.advance_error_code =
@@ -3002,6 +3125,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                                 Some("fallback_evidence_unavailable".into());
                                             progress.advance_error = Some("Cannot verify local preparation and released custody for route fallback.".into());
                                         }
+                                        if review_limit_reached
+                                            && live_fallback_allowed(
+                                                outcome,
+                                                launched,
+                                                fallback_evidence,
+                                            )
+                                        {
+                                            progress.advance_error_code =
+                                                Some("review_substitution_limit".into());
+                                            progress.advance_error =
+                                                Some("review substitution limit reached".into());
+                                        }
                                         progress.state = NodeState::Failed;
                                         false
                                     } else {
@@ -3014,6 +3149,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         Some("node deadline exceeded; lane was cancelled".into());
                                     progress.state = NodeState::Failed;
                                     false
+                                }
+                                AttemptOutcome::TaskFailed
+                                    if review_substitution(node, attempt)
+                                        && route_index + 1 < node.routes.len()
+                                        && progress
+                                            .attempts
+                                            .iter()
+                                            .filter(|attempt| attempt.review_substitution)
+                                            .count()
+                                            < limits.review_substitutions =>
+                                {
+                                    progress.outputs = None;
+                                    progress.advance_error = None;
+                                    progress.advance_error_code = None;
+                                    progress.state = NodeState::Running;
+                                    true
                                 }
                                 AttemptOutcome::TaskFailed
                                 | AttemptOutcome::OtherFailure

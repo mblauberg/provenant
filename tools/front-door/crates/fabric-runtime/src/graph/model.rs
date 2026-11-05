@@ -194,6 +194,15 @@ pub struct ReviewResolution {
     pub measured_size: String,
     pub shape: String,
     pub source: String,
+    /// Replacement attempts made for members of this resolved panel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substitutions: Vec<ReviewSubstitution>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ReviewSubstitution {
+    pub member: String,
+    pub route_index: u16,
 }
 
 // Wire presence is transient decoding metadata, not part of node identity.
@@ -851,6 +860,9 @@ pub struct GraphAttempt {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub launched: bool,
+    /// This attempt replaces a settled failed review member on its next route.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub review_substitution: bool,
     pub key: AttemptKey,
     pub route: GraphRoute,
     pub state: AttemptState,

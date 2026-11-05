@@ -1137,9 +1137,11 @@ pub(super) fn prepare_candidates(
                 provenant_records::RouteExclusionReason::UnknownAvailability
             ) {
                 if let Some((kind, detail)) = default_failures.get(&route.adapter) {
-                    if *kind == SkipKind::AuthRequired {
-                        previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
-                    }
+                    previous_outcome = if *kind == SkipKind::AuthRequired {
+                        provenant_routing::FallbackOutcome::AuthRequired
+                    } else {
+                        provenant_routing::FallbackOutcome::AdapterUnavailable
+                    };
                     reasons.push(skip(&label, *kind, detail));
                     continue;
                 }
@@ -1158,6 +1160,7 @@ pub(super) fn prepare_candidates(
                 if unavailable_auth_detail(&route, selected, &entries, &auth_failures).is_none()
                     && !relevant.is_empty()
                 {
+                    previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
                     reasons.push(skip(
                         &label,
                         SkipKind::Account,

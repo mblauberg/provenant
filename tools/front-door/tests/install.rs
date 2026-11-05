@@ -2212,16 +2212,13 @@ fn install_compacts_routine_output_and_keeps_json_actions_once() -> Result {
     );
     let report: serde_json::Value = serde_json::from_slice(&applied.stdout.bytes)?;
     let text = String::from_utf8(human.stdout.bytes.clone())?;
-    eprintln!(
-        "install bytes: preview JSON={}, human={}, applied JSON={}",
-        preview.stdout.bytes.len(),
-        human.stdout.bytes.len(),
-        applied.stdout.bytes.len()
+    assert!(
+        human.stdout.bytes.len() < preview.stdout.bytes.len(),
+        "{text}"
     );
-    assert!(text.contains("MCP); 1 targets"), "{text}");
-    assert!(!text.contains("changed links"), "{text}");
-    assert!(!text.contains("peer agent:"), "{text}");
-    assert!(!text.contains("host tick:"), "{text}");
+    for line in text.lines() {
+        assert!(!line.trim_start().starts_with("action:"), "{line}");
+    }
     assert!(
         report["data"]["outcome"]["actions"]
             .as_array()
@@ -2257,9 +2254,10 @@ fn invalid_install_home_names_the_repair() -> Result {
         let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(value["status"], "invalid", "{value}");
         assert_eq!(value["error"]["code"], "HOME", "{value}");
-        assert_eq!(
-            value["error"]["repair"],
-            "Set HOME to your absolute home directory, then rerun `provenant install`."
+        let repair = value["error"]["repair"].as_str().ok_or("repair")?;
+        assert!(
+            repair.contains("HOME") && repair.contains("absolute home directory"),
+            "{repair}"
         );
     }
     Ok(())

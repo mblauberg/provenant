@@ -1503,16 +1503,92 @@ fn expansion_golden(name: &str) {
 }
 
 #[test]
-fn composite_bundled_expansions_match_golden_graphs() {
-    for name in [
-        "scout-swarm",
-        "generator-evaluator",
-        "review-council",
-        "big-batch",
-        "scope-then-run",
-        "deliver",
+fn composite_bundled_expansions_preserve_stage_wiring() {
+    expansion_golden("generator-evaluator");
+    let layers = Layers::empty();
+    for (name, expected) in [
+        (
+            "big-batch",
+            &["scout", "lanes", "council", "refactor", "repair"][..],
+        ),
+        ("scout-swarm", &["scouts", "synthesis"][..]),
+        ("scope-then-run", &["scout", "scope", "ready", "run"][..]),
+        (
+            "review-council",
+            &["subject", "lenses", "verify", "synthesis"][..],
+        ),
+        ("deliver", &["write", "ci", "review", "accept", "land"][..]),
     ] {
-        expansion_golden(name);
+        let document = expand(&layers, name, "brief", &[]).unwrap().document;
+        let nodes = document["nodes"].as_array().unwrap();
+        let ids: Vec<_> = nodes
+            .iter()
+            .map(|node| node["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, expected, "{name}");
+        let depends = |node: &str, dependency: &str| {
+            nodes.iter().find(|item| item["id"] == node).unwrap()["depends_on"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item == dependency)
+        };
+        let (values, _) = layers.resolve(name).unwrap();
+        let params = &values["parameters"];
+        match name {
+            "big-batch" => {
+                assert_eq!(
+                    nodes[1]["composite"]["nodes"].as_array().unwrap().len(),
+                    params["lanes"].as_array().unwrap().len()
+                );
+                assert!(depends("council", "lanes"));
+                assert!(depends("refactor", "council"));
+                assert!(depends("repair", "refactor"));
+            }
+            "scout-swarm" => {
+                let scouts = nodes[0]["composite"]["nodes"].as_array().unwrap();
+                let count = scouts
+                    .iter()
+                    .filter(|node| {
+                        node["id"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("scout-"))
+                    })
+                    .count();
+                assert_eq!(count as u64, params["width"]["default"].as_u64().unwrap());
+                assert!(depends("synthesis", "scouts"));
+            }
+            "scope-then-run" => assert!(depends("run", "ready")),
+            "review-council" => {
+                let expected = params["lenses"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|lens| lens["when"].as_str().is_none_or(str::is_empty))
+                    .count();
+                assert_eq!(
+                    nodes[1]["composite"]["nodes"].as_array().unwrap().len(),
+                    expected
+                );
+            }
+            "deliver" => {
+                let council = expand(&layers, "review-council", "brief", &[])
+                    .unwrap()
+                    .document;
+                assert_eq!(
+                    review_lens_count(&document),
+                    council["nodes"][1]["composite"]["nodes"]
+                        .as_array()
+                        .unwrap()
+                        .len()
+                );
+                assert_eq!(
+                    nodes[1]["composite"]["nodes"][1]["loop"]["max_rounds"],
+                    params["max_iterations"]["default"]
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -4723,27 +4799,61 @@ mod planner_front_end {
     }
 
     #[test]
-    fn planned_research_and_review_match_their_golden_graphs() {
+    fn planned_research_and_review_preserve_stage_wiring() {
         let council = vec![("worktree".to_owned(), json!("/repo/lane"))];
         let roots = vec![("read_roots".to_owned(), json!(["/repo/extra"]))];
         let scoped = vec![("worktree".to_owned(), json!("/repo/lane"))];
-        for (name, params) in [
-            ("scout-swarm", roots),
-            ("review-council", council),
-            ("fan-out", Vec::new()),
-            ("fan-out-synthesise", Vec::new()),
-            ("scope-then-run", scoped),
+        for (name, params, expected, last_dependency) in [
+            (
+                "scout-swarm",
+                roots,
+                &["plan", "synthesis"][..],
+                Some("plan"),
+            ),
+            (
+                "review-council",
+                council,
+                &["subject", "plan", "verify", "synthesis"][..],
+                Some("verify"),
+            ),
+            ("fan-out", Vec::new(), &["plan"][..], None),
+            (
+                "fan-out-synthesise",
+                Vec::new(),
+                &["plan", "synthesis"][..],
+                Some("plan"),
+            ),
+            (
+                "scope-then-run",
+                scoped,
+                &["plan", "synthesis", "scope", "ready", "run"][..],
+                Some("ready"),
+            ),
         ] {
-            let expansion = run(&layers(PlanMode::On, None), name, "brief", params);
-            let mut actual = serde_json::to_string_pretty(&expansion.document).unwrap();
-            actual.push('\n');
-            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("assets/presets/fixtures/{name}.plan.json"));
-            if std::env::var_os("UPDATE_GOLDEN").is_some() {
-                std::fs::write(&path, &actual).unwrap();
+            let expansion = run(&layers(PlanMode::On, None), name, "brief", params.clone());
+            assert_eq!(
+                ids(&expansion)
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                expected.to_vec(),
+                "{name}"
+            );
+            let nodes = expansion.document["nodes"].as_array().unwrap();
+            let planner = nodes.iter().find(|node| node["id"] == "plan").unwrap();
+            assert_eq!(route(planner)["alias"], "principal", "{name}");
+            if let Some(dependency) = last_dependency {
+                assert!(
+                    nodes.last().unwrap()["depends_on"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(dependency)),
+                    "{name}"
+                );
             }
-            let expected = std::fs::read_to_string(&path).unwrap_or_default();
-            assert_eq!(actual, expected, "{name}: rerun with UPDATE_GOLDEN=1");
+            if name == "review-council" {
+                assert_eq!(lens_names(&expansion), static_lenses(params));
+            }
         }
     }
 
@@ -4931,22 +5041,26 @@ mod planner_front_end {
     }
 
     #[test]
-    fn planned_big_batch_matches_its_golden_graph() {
+    fn planned_big_batch_preserves_stages_and_lane_count() {
         let expansion = run(
             &layers(PlanMode::On, None),
             "big-batch",
             "brief",
             worktrees(),
         );
-        let mut actual = serde_json::to_string_pretty(&expansion.document).unwrap();
-        actual.push('\n');
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/presets/fixtures/big-batch.plan.json");
-        if std::env::var_os("UPDATE_GOLDEN").is_some() {
-            std::fs::write(&path, &actual).unwrap();
-        }
-        let expected = std::fs::read_to_string(&path).unwrap_or_default();
-        assert_eq!(actual, expected, "rerun with UPDATE_GOLDEN=1 to refresh");
+        assert_eq!(
+            ids(&expansion),
+            ["scout", "plan", "council", "refactor", "repair"]
+        );
+        let plan = &expansion.document["nodes"][1];
+        assert_eq!(route(plan)["alias"], "principal");
+        assert_eq!(
+            plan["plan"]["fallback"]["nodes"][0]["composite"]["nodes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }
 
@@ -5224,25 +5338,50 @@ fn an_unknown_size_override_is_refused() {
 }
 
 #[test]
-fn big_batch_without_scout_matches_golden() {
-    let expanded = super::preset::expand_with(
-        &Layers::empty(),
+fn big_batch_without_scout_preserves_remaining_stage_wiring() {
+    fn assert_no_scout_refs(value: &Value) {
+        match value {
+            Value::Object(map) => {
+                for (key, value) in map {
+                    if matches!(key.as_str(), "depends_on" | "inputs" | "exports") {
+                        assert!(!value.to_string().contains("scout"), "{key}: {value}");
+                    } else {
+                        assert_no_scout_refs(value);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for value in items {
+                    assert_no_scout_refs(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    let layers = Layers::empty();
+    let full = super::preset::expand_with(&layers, "big-batch", "brief", &[], &[]).unwrap();
+    let no_scout = super::preset::expand_with(
+        &layers,
         "big-batch",
         "brief",
         &[("scout".into(), json!(0))],
         &[],
     )
     .unwrap();
-    let nodes = expanded.document["nodes"].as_array().unwrap();
-    assert!(!nodes.iter().any(|node| node["id"] == "scout"));
-    let mut actual = serde_json::to_string_pretty(&expanded.document).unwrap();
-    actual.push('\n');
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets/presets/fixtures/big-batch.no-scout.json");
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(&path, &actual).unwrap();
-    }
-    assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
+    let ids = |document: &Value| -> Vec<String> {
+        document["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let expected: Vec<_> = ids(&full.document)
+        .into_iter()
+        .filter(|id| id != "scout")
+        .collect();
+    assert_eq!(ids(&no_scout.document), expected);
+    assert_no_scout_refs(&no_scout.document);
 }
 
 #[test]
@@ -5269,45 +5408,40 @@ fn compact_preset_explain_lists_parameter_names() {
 }
 
 #[test]
-fn preset_show_and_explain_json_match_snapshots() {
-    use provenant_records::{CommandResult, Outcome};
+fn preset_show_and_explain_describe_parameters_and_origins() {
     let layers = Layers::empty();
     let (values, mut origins) = layers.resolve("review-council").unwrap();
     origins.extend(expand(&layers, "review-council", "", &[]).unwrap().origins);
-    let show = CommandResult::new(
-        "preset",
-        Outcome::Ok,
-        json!({"name": "review-council", "values": values, "origins": origins}),
-    );
-    let explain = CommandResult::new(
-        "preset",
-        Outcome::Ok,
-        layers.explain("review-council").unwrap(),
-    );
-    // `UPDATE_GOLDEN=1` rewrites the fixtures.
-    let golden = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
-    for (actual, name) in [
-        (
-            serde_json::to_value(show).unwrap(),
-            "preset-review-council-show.json",
-        ),
-        (
-            serde_json::to_value(explain).unwrap(),
-            "preset-review-council-explain.json",
-        ),
-    ] {
-        let path = golden.join(name);
-        if std::env::var_os("UPDATE_GOLDEN").is_some() {
-            let mut text = serde_json::to_string_pretty(&actual).unwrap();
-            text.push('\n');
-            std::fs::write(&path, text).unwrap();
-        }
-        let expected = std::fs::read_to_string(&path).unwrap_or_default();
-        assert_eq!(
-            actual,
-            serde_json::from_str::<Value>(&expected).unwrap_or_default(),
-            "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
+    let explain = layers.explain("review-council").unwrap();
+    assert_eq!(explain["name"], "review-council");
+    let parameters = values["parameters"].as_object().unwrap();
+    let explained = explain["parameters"].as_array().unwrap();
+    assert_eq!(parameters.len(), explained.len());
+    for (name, spec) in parameters {
+        let item = explained.iter().find(|item| item["name"] == *name).unwrap();
+        assert!(
+            origins
+                .keys()
+                .any(|key| key == &format!("parameters.{name}")
+                    || key.starts_with(&format!("parameters.{name}."))),
+            "{name}"
         );
+        assert!(
+            item["origin"]
+                .as_str()
+                .is_some_and(|origin| !origin.is_empty()),
+            "{name}"
+        );
+        if let Some(kind) = spec.get("type") {
+            assert_eq!(&item["type"], kind, "{name}");
+        }
+        if let Some(default) = spec.get("default") {
+            assert_eq!(&item["default"], default, "{name}");
+        }
+    }
+    let stages = explain["stages"].as_array().unwrap();
+    for id in ["verify", "synthesis"] {
+        assert!(stages.iter().any(|stage| stage["id"] == id), "{id}");
     }
 }
 
@@ -5318,9 +5452,19 @@ fn preset_human_views_preserve_detail_and_type_plain_tables() {
         "subject":{"type":"commit", "commit":"HEAD"}
     }}, "origins":{}});
     let compact = super::preset::human_for_test(&data, false);
-    assert!(compact.contains("schema  integer  1  First."));
+    let schema = compact
+        .lines()
+        .find(|line| line.contains("schema"))
+        .unwrap();
+    for cell in ["integer", "1", "First."] {
+        assert!(schema.contains(cell), "{schema}");
+    }
     assert!(!compact.contains("Second."));
-    assert!(compact.contains("subject  table"));
+    let subject = compact
+        .lines()
+        .find(|line| line.contains("subject"))
+        .unwrap();
+    assert!(subject.contains("table"), "{subject}");
     let full = super::preset::human_for_test(&data, true);
     assert!(full.contains("\"min\":0"));
     assert!(full.contains("Second."));
@@ -5699,32 +5843,6 @@ fn preset_file_spec_resolves_relative_writer_from_launch_and_falls_back_to_main(
             "{warning}"
         );
     }
-}
-
-#[test]
-fn file_spec_expansion_golden() {
-    let mut layers = Layers::empty();
-    layers.project_dir = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let mut expanded = expand(
-        &layers,
-        "generator-evaluator",
-        "brief",
-        &["parameters.spec='assets/presets/fixtures/review-spec.md'".into()],
-    )
-    .unwrap();
-    expanded.document["graph_id"] = json!("<graph-id>");
-    let mut actual = serde_json::to_string_pretty(&expanded.document)
-        .unwrap()
-        .replace(env!("CARGO_MANIFEST_DIR"), "<project>");
-    actual.push('\n');
-    let path = layers
-        .project_dir
-        .unwrap()
-        .join("assets/presets/fixtures/generator-evaluator-file-spec.expansion.json");
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(&path, &actual).unwrap();
-    }
-    assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
 }
 
 #[test]

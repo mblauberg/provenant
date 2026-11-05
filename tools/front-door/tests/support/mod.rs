@@ -12,6 +12,9 @@ use std::{
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+pub const FIXTURE_STDOUT_LIMIT: usize = 2 * 1024 * 1024;
+pub const FIXTURE_STDERR_LIMIT: usize = 64 * 1024;
+
 static PROCESS_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
@@ -279,9 +282,11 @@ impl TestRig {
         options.env = Some(&self.env);
         options.stdin = stdin;
         options.stdout = StreamPolicy::Capture {
-            limit: 2 * 1024 * 1024,
+            limit: FIXTURE_STDOUT_LIMIT,
         };
-        options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
+        options.stderr = StreamPolicy::Capture {
+            limit: FIXTURE_STDERR_LIMIT,
+        };
         let result = self.executor.execute(options)?;
         if result.timed_out || result.drain_truncated {
             return Err("fixture watchdog or capture drain failed".into());

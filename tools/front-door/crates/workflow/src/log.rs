@@ -954,16 +954,11 @@ mod tests {
         let dir = store.dir(false).unwrap();
         let mut db = store.open(&dir, true).unwrap().unwrap();
         let tx = db.transaction().unwrap();
-        {
-            let mut insert = tx
-                .prepare("INSERT INTO receipts VALUES(?1,?2,'digest',?3,?2,'host')")
-                .unwrap();
-            for n in 0..100_001 {
-                insert
-                    .execute(params![format!("synthetic-{n}"), 1, n + 2])
-                    .unwrap();
-            }
-        }
+        tx.execute_batch(
+            "WITH RECURSIVE rows(n) AS (VALUES(0) UNION ALL SELECT n + 1 FROM rows WHERE n < 100000)
+             INSERT INTO receipts SELECT 'synthetic-' || n, 1, 'digest', n + 2, 1, 'host' FROM rows",
+        )
+        .unwrap();
         tx.commit().unwrap();
         drop(db);
         assert_eq!(

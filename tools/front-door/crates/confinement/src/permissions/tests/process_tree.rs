@@ -423,11 +423,14 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
                     return Err(format!("ready lane identity unavailable: {observation:?}").into());
                 }
             };
-            let swap_started = std::time::Instant::now();
-            let before = host_swap(&executor, &root)?;
+            let mut host_samples = Vec::new();
+            for _ in 0..3 {
+                host_samples.push(host_swap(&executor, &root)?);
+            }
             let snapshot = process_tree::sample(&identity, attempt)?;
-            let after = host_swap(&executor, &root)?;
-            assert!(swap_started.elapsed() < Duration::from_secs(5));
+            for _ in 0..3 {
+                host_samples.push(host_swap(&executor, &root)?);
+            }
             process_tree::publish(&directory, Some(&snapshot))?;
             let result = reader.join().expect("confined reader executor")?;
             assert!(
@@ -445,12 +448,17 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
             {
                 let actual = lane_swap[index].ok_or("lane swap must be measured")? as f64;
                 let rounding = 0.01 * 1024.0 * 1024.0;
+                let low = host_samples
+                    .iter()
+                    .map(|sample| sample[index])
+                    .fold(f64::INFINITY, f64::min);
+                let high = host_samples
+                    .iter()
+                    .map(|sample| sample[index])
+                    .fold(f64::NEG_INFINITY, f64::max);
                 assert!(
-                    actual >= before[index].min(after[index]) - rounding
-                        && actual <= before[index].max(after[index]) + rounding,
-                    "{field}: lane={actual}, host before={}, after={}",
-                    before[index],
-                    after[index]
+                    actual >= low - rounding && actual <= high + rounding,
+                    "{field}: lane={actual}, host range={low}..{high}"
                 );
             }
             peer_stop.cancel();

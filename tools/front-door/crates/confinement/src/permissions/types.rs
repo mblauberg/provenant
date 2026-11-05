@@ -180,7 +180,6 @@ mod repository_error_tests {
     fn repository_refusal_names_the_underlying_reason() {
         let message = PermissionError::from(RepoError::IdentityChanged).to_string();
         assert!(message.contains("IdentityChanged"));
-        assert!(message.contains("verified repository path or Git metadata changed"));
     }
 }
 

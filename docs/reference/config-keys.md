@@ -48,6 +48,7 @@ Set these in `[domains.pr.land]` in the host configuration. Omit a key for its d
 | `batch_wait_seconds` | 30 | Maximum batch collection time. (0 or more seconds). |
 | `candidate_ref_prefix` | land/ | Prefix for temporary candidate refs. (valid Git ref prefix). |
 | `publish_settle_seconds` | 30 | Time to wait before observing an unresolved publication again. (0 or more seconds). |
+| `publish_unknown_warn_seconds` | 3600 | Warn when a publication remains unknown for this long. (0 or more seconds). |
 | `max_rebuilds` | 3 | Maximum rebuilds after target movement. (0 or more). |
 | `gate.kind` | checks | Candidate gate type. (checks or commands). |
 | `gate.checks` | ci-status | Required candidate checks. (check names). |
@@ -79,6 +80,7 @@ Set these in `[domains.pr.land]` in the host configuration. Omit a key for its d
 | `projects.{project}.batch_wait_seconds` | inherited | Override batch_wait_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
 | `projects.{project}.candidate_ref_prefix` | inherited | Override candidate_ref_prefix for this project; omitted fields inherit lower layers. (valid Git ref prefix). |
 | `projects.{project}.publish_settle_seconds` | inherited | Override publish_settle_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
+| `projects.{project}.publish_unknown_warn_seconds` | inherited | Override publish_unknown_warn_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
 | `projects.{project}.max_rebuilds` | inherited | Override max_rebuilds for this project; omitted fields inherit lower layers. (0 or more). |
 | `projects.{project}.gate.kind` | inherited | Override gate.kind for this project; omitted fields inherit lower layers. (checks or commands). |
 | `projects.{project}.gate.checks` | inherited | Override gate.checks for this project; omitted fields inherit lower layers. (check names). |
@@ -110,6 +112,7 @@ Set these in `[domains.pr.land]` in the host configuration. Omit a key for its d
 | `tiers.{tier}.batch_wait_seconds` | inherited | Override batch_wait_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |
 | `tiers.{tier}.candidate_ref_prefix` | inherited | Override candidate_ref_prefix for this risk tier; omitted fields inherit lower layers. (valid Git ref prefix). |
 | `tiers.{tier}.publish_settle_seconds` | inherited | Override publish_settle_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |
+| `tiers.{tier}.publish_unknown_warn_seconds` | inherited | Override publish_unknown_warn_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |
 | `tiers.{tier}.max_rebuilds` | inherited | Override max_rebuilds for this risk tier; omitted fields inherit lower layers. (0 or more). |
 | `tiers.{tier}.gate.kind` | inherited | Override gate.kind for this risk tier; omitted fields inherit lower layers. (checks or commands). |
 | `tiers.{tier}.gate.checks` | inherited | Override gate.checks for this risk tier; omitted fields inherit lower layers. (check names). |
@@ -153,6 +156,7 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | `limits.nodes` | 512 | Graph nodes limit. (1 or more). |
 | `limits.edges` | 4096 | Graph edges limit. (1 or more). |
 | `limits.routes_per_node` | 16 | Graph routes per node limit. (1 or more). |
+| `limits.review_substitutions` | 1 | Maximum substitutions per review member. (0 or more). |
 | `limits.node_prompt_bytes` | 262144 | Graph node prompt bytes limit. (1 or more). |
 | `limits.graph_prompt_bytes` | 4194304 | Graph graph prompt bytes limit. (1 or more). |
 | `limits.fan_out_width` | 32 | Graph fan out width limit. (1 or more). |

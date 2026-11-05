@@ -45,6 +45,10 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         ));
     }
     for node in &run.checkpoint.nodes {
+        let substituted = node
+            .attempts
+            .iter()
+            .any(|attempt| attempt.review_substitution);
         let waiting_ci = node.ci.as_ref().filter(|ci| {
             node.state == provenant_fabric_runtime::graph::NodeState::Running
                 && ci.state == provenant_fabric_runtime::graph::CiState::Pending
@@ -52,6 +56,7 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         if !full
             && (members.contains(&node.id) || node.round.is_some())
             && waiting_ci.is_none()
+            && !substituted
             && !matches!(
                 node.state,
                 provenant_fabric_runtime::graph::NodeState::Running
@@ -62,6 +67,9 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
             continue;
         }
         human.push_str(&format!("  {}: {:?}", node.id, node.state));
+        if substituted {
+            human.push_str(" (review substitute)");
+        }
         if let Some(reason) = &node.skip_reason {
             human.push_str(&format!(" ({})", bounded_reason(reason)));
         }

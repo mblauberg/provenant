@@ -37,7 +37,8 @@ pub(super) fn output_with(
                 std::fs::write(path, &bytes).map_err(|error| {
                     Fail::new(Status::Error, ErrorKind::Io, error.to_string())
                 })?;
-                data["to"] = json!(path.display().to_string());
+                let written_path = std::fs::canonicalize(path).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+                data["to"] = json!(provenant_records::StructuredPathWire::from_path(&written_path).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?);
                 data["written"] = json!(bytes.len());
                 text = format!("wrote {} bytes to {}\n", bytes.len(), path.display());
             }
@@ -81,8 +82,8 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
                     crate::bounded_text(error, 160)
                 ));
             }
-            if let Some(path) = data["result_path"].as_str() {
-                lines.push(format!("result: {}", crate::bounded_text(path, 512)));
+            if let Some(path) = structured_path_text(&data["result_path"]) {
+                lines.push(format!("result: {}", crate::bounded_text(&path, 512)));
             }
         }
     }
@@ -102,7 +103,7 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
                 let more = total.saturating_sub(paths.len());
                 let listed = paths
                     .iter()
-                    .filter_map(Value::as_str)
+                    .filter_map(structured_path_text)
                     .collect::<Vec<_>>()
                     .join(", ");
                 let more = if more > 0 {
@@ -347,8 +348,60 @@ pub(super) fn output_inner(
     output_read(command, edge, &session, target, &call)
 }
 
-/// Read the selected part of an attempt in an opened local store.
+/// Read the selected part and attach the shared lane projection.
 fn output_read(
+    command: Output,
+    edge: &Edge<'_>,
+    session: &Session,
+    target: Target,
+    call: &run::Request<'_>,
+) -> Result<(Value, String), Fail> {
+    let (mut data, human) = output_read_part(command, edge, session, target, call)?;
+    let id = data["attempt_id"]
+        .as_str()
+        .and_then(|id| id.parse().ok())
+        .ok_or_else(|| {
+            Fail::new(
+                Status::Error,
+                ErrorKind::StateCorrupt,
+                "output has no attempt identity",
+            )
+        })?;
+    let record = session.service().status(id, call)?;
+    let waits = session
+        .store
+        .lane_waits(std::slice::from_ref(&record), call);
+    let successors = policy_successors(session, std::slice::from_ref(&record), call)?;
+    let projected = project_lane(
+        &record,
+        &waits,
+        session.context.state_root.as_path(),
+        &successors,
+        call.clock.wall_now().ok(),
+        true,
+    );
+    if let (Some(data), Some(row)) = (data.as_object_mut(), json!(projected).as_object()) {
+        data.remove("settlement_reason");
+        if let Some(grants) = data.get_mut("grants").and_then(Value::as_object_mut) {
+            for field in ["write_grants", "read_only_writable"] {
+                if let Some(value) = row.get(field) {
+                    grants.insert(field.into(), value.clone());
+                }
+            }
+            if let Some(route) = row.get("applied_route") {
+                grants.insert(
+                    "user_skills".into(),
+                    route.get("user_skills").cloned().unwrap_or(Value::Null),
+                );
+            }
+        }
+        data.extend(row.clone());
+    }
+    Ok((data, human))
+}
+
+/// Read the selected part of an attempt in an opened local store.
+fn output_read_part(
     command: Output,
     edge: &Edge<'_>,
     session: &Session,
@@ -430,7 +483,7 @@ fn output_read(
         };
         let path = artifact(session.context.state_root.as_path(), &record, file.name());
         return Ok((
-            json!({ "attempt_id": id, "part": format!("{:?}", command.part).to_lowercase(), "path": path.display().to_string() }),
+            json!({ "attempt_id": id, "part": format!("{:?}", command.part).to_lowercase(), "path": provenant_records::StructuredPathWire::from_path(&path).ok() }),
             format!("{}\n", path.display()),
         ));
     }
@@ -488,7 +541,7 @@ fn output_read(
             }
             let human = events
                 .iter()
-                .map(|e| format!("{} {}\n", e.revision, state_name(&e.change)))
+                .map(|e| format!("{} {}\n", e.revision, state_and_reason(&e.change).0))
                 .collect();
             return Ok((json!({ "attempt_id": id, "events": events }), human));
         }
@@ -558,11 +611,6 @@ fn output_read(
         )
     {
         data["provider_error"] = json!(provider_error_line(session, id, call));
-        data["result_path"] = json!(record.result.as_ref().map(|_| {
-            artifact(session.context.state_root.as_path(), &record, "result.md")
-                .display()
-                .to_string()
-        }));
     }
     if let Some(selected) = selected {
         data["selected"] = selected;
@@ -749,7 +797,7 @@ pub(super) fn changed_file_evidence(
     call: &run::Request<'_>,
 ) -> (Value, Value) {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-    let read = || -> Option<(Vec<String>, usize)> {
+    let read = || -> Option<(Vec<Option<provenant_records::StructuredPathWire>>, usize)> {
         let task = session
             .store
             .request(record.run_id, call)
@@ -791,7 +839,13 @@ pub(super) fn changed_file_evidence(
         Some((
             all.iter()
                 .take(limits::OUTPUT_PATHS)
-                .map(|path| crate::bounded_text(path, limits::PATH_BYTES))
+                .map(|path| {
+                    (path.len() <= limits::PATH_BYTES)
+                        .then(|| project.join(path))
+                        .and_then(|path| {
+                            provenant_records::StructuredPathWire::from_path(&path).ok()
+                        })
+                })
                 .collect(),
             all.len(),
         ))

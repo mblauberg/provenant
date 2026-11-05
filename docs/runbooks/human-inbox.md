@@ -56,7 +56,7 @@ with `inbox REQUEST_ID`, `answer`, or `inbox close` to locate the owning project
 by request ID. Without it, these commands use the current project; if no project
 resolves, `no_project` reports the cause and names `--all-projects` as a repair.
 Close and acknowledgement must run on the owner host or in the owning chair
-session; remote attempts return `owner_local_only`.
+session; remote attempts return `OWNER_LOCAL_ONLY`.
 
 `provenant inbox --all-projects --hosts all|LABEL,… --json` also reads each
 chosen peer's first page of requests (`local` is skipped; an unknown label is
@@ -99,7 +99,7 @@ CLI routes through the local project with that key, so the answer reaches the
 owner through the normal remote path with a frozen operation ID, and an unknown
 key returns `no_project`. A key that matches more than one registered project is
 refused, and `--host` must name the same host as a qualified ID. Close stays
-`owner_local_only`.
+`OWNER_LOCAL_ONLY`.
 
 The Console shows peer requests labelled by host and groups projects by host
 and project ID. It asks for peers on the first page only. A peer that gave no
@@ -399,7 +399,7 @@ the same filters/page size. A request change invalidates the cursor; restart
 without it. `--host` selects `local`, the local host ID, or a configured peer
 label or ID. An unconfigured or unavailable owner returns `owner_unavailable`;
 no local mirror is created. Close and acknowledgement on a remote owner return
-`owner_local_only` and must be run on the owner.
+`OWNER_LOCAL_ONLY` and must be run on the owner.
 
 Request/log retention and migration behaviour are documented by the
 [store owner](../../tools/front-door/crates/fabric-store/README.md). No request

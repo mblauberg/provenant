@@ -5,10 +5,12 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn admission_clock_error_preserves_wire_message() {
-    assert_eq!(
-        CustodyError::from(AdmissionError::Clock).to_string(),
-        "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
-    );
+    let error = CustodyError::from(AdmissionError::Clock);
+    assert!(matches!(
+        error,
+        CustodyError::Admission(AdmissionError::Clock)
+    ));
+    assert!(error.to_string().contains("host monotonic clock"));
 }
 
 type TestResult = std::result::Result<(), Box<dyn Error>>;

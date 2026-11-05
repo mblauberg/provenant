@@ -293,6 +293,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     .iter()
                     .enumerate()
                     .map(|(index, route)| GraphAttempt {
+                        review_substitution: false,
                         extra: Default::default(),
                         launched: true,
                         key: AttemptKey {
@@ -651,12 +652,20 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
     let cancel = CancelToken::new();
     let project = ProjectId::from_bytes([9; 16]);
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let mut document = mixed();
-    let plan = planned(&document);
-    let checkpoint = filled_checkpoint(&document, &plan);
+    let mut document = fixture_task();
     document
         .extra
         .insert("bulk".into(), json!(vec![0; 120_000]));
+    let checkpoint = advance(
+        &document,
+        &mut FakeOwner {
+            observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
+            ..Default::default()
+        },
+        &mut MemoryJournal::default(),
+    )
+    .unwrap()
+    .checkpoint;
     let mut journal =
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
@@ -702,6 +711,7 @@ fn usage_warnings_keep_the_most_recently_settled_attempts() {
         let attempt = checkpoint.nodes[node].attempts[0].clone();
         checkpoint.nodes[node].attempts = (0..copies as u64)
             .map(|i| GraphAttempt {
+                review_substitution: false,
                 settled: first + i,
                 ..attempt.clone()
             })
@@ -1022,6 +1032,7 @@ fn fixture_review_expansion(source: &GraphNode, subject: &str) -> Expansion {
             measured_size: "large".into(),
             shape: "fixture".into(),
             source: "fixture".into(),
+            substitutions: Vec::new(),
         }),
         extra: Default::default(),
         source: id,

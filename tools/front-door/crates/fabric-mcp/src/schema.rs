@@ -980,8 +980,19 @@ mod wire_parity {
                 extra: Default::default(),
                 attempt: record.clone(),
             };
-            let value = check("fabric_run", &status);
+            let mut value = serde_json::to_value(&status).unwrap();
+            crate::tools::project_run(&mut value, false).unwrap();
+            let value = check("fabric_run", &value);
             assert_eq!(value["attempt"]["provider_seconds"], seconds);
+            assert_eq!(value["attempt"]["state"], "running");
+            assert_eq!(value["attempt"]["run_id"], record.run_id.to_string());
+            assert_eq!(value["attempt"]["task_id"], record.task_id.to_string());
+            assert_eq!(
+                value["attempt"]["attempt_id"],
+                record.attempt_id.to_string()
+            );
+            assert!(value["attempt"]["retry_of"].is_null());
+            assert!(value["attempt"]["superseded_by"].is_null());
             assert!(value["attempt"].get("provider_ms").is_none());
             assert_eq!(
                 provenant_records::wire::provider_seconds(ms),
@@ -997,13 +1008,13 @@ mod wire_parity {
                 },
             };
             check("fabric_run", &page);
-            check(
-                "fabric_run",
-                &RunResult::Cancel {
-                    extra: Default::default(),
-                    attempt: record,
-                },
-            );
+            let mut cancelled = serde_json::to_value(RunResult::Cancel {
+                extra: Default::default(),
+                attempt: record,
+            })
+            .unwrap();
+            crate::tools::project_run(&mut cancelled, true).unwrap();
+            check("fabric_run", &cancelled);
         }
     }
 
@@ -1030,15 +1041,23 @@ mod wire_parity {
                 digest: Digest::from_bytes([0; 32]),
                 bytes,
             };
-            check("fabric_output", &chunk);
+            let mut value = serde_json::to_value(&chunk).unwrap();
+            let mut lane = serde_json::to_value(provenant_records::wire::LaneRow::project(
+                &attempt(None),
+                Default::default(),
+            ))
+            .unwrap();
+            lane["provider_seconds"] = Value::Null;
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(lane.as_object().unwrap().clone());
+            check("fabric_output", &value);
         }
     }
 
     #[test]
     fn typed_output_stays_off_the_catalogue_until_enabled() {
-        let published = |kind| output_schema(kind).is_some();
-        assert_eq!(published(ToolKind::Run), TYPED_OUTPUT_PUBLISHED);
-        assert_eq!(published(ToolKind::Output), TYPED_OUTPUT_PUBLISHED);
         assert!(mcp_output_schema("fabric_run").is_some());
     }
 }

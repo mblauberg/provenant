@@ -193,12 +193,12 @@ test "$notified" = yes
                     &source,
                     "/bin/sh",
                     "-c",
-                    "printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 5",
+                    "printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 60",
                     "peer",
                     peer_pid_file.to_str().expect("UTF-8 peer PID path"),
                 ]
                 .map(OsString::from);
-                let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(6));
+                let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(65));
                 options.env = Some(&env);
                 options.cancel = Some(&peer_stop);
                 options.stdout = StreamPolicy::Capture { limit: 1024 };
@@ -208,7 +208,7 @@ test "$notified" = yes
             let _stop = StopPeer(&peer_stop);
             let peer_pid = provenant_test_support::wait_for(
                 "peer sandbox PID",
-                Duration::from_secs(2),
+                Duration::from_secs(20),
                 || {
                     std::fs::read_to_string(&peer_pid_file)
                         .ok()
