@@ -148,6 +148,17 @@ impl UtilityBudget {
         })
     }
 
+    /// Restrict stdout for a specific read without widening the caller's budget.
+    pub(crate) fn with_stdout_cap(self, cap: usize) -> Result<Self, UtilityError> {
+        if cap == 0 || cap > MAX_STREAM_LIMIT {
+            return Err(UtilityError::InvalidBudget);
+        }
+        Ok(Self {
+            stdout_limit: self.stdout_limit.min(cap),
+            ..self
+        })
+    }
+
     pub fn bounded(timeout: Duration) -> Result<Self, UtilityError> {
         Self::new(
             timeout,
@@ -1077,6 +1088,12 @@ pub(crate) fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, Util
     if outcome.cancelled {
         return Err(UtilityError::Cancelled);
     }
+    if outcome.stdout.truncated {
+        return Err(UtilityError::Truncated { stream: "stdout" });
+    }
+    if outcome.stderr.truncated {
+        return Err(UtilityError::Truncated { stream: "stderr" });
+    }
     if let Termination::Signal(signal) = outcome.termination {
         return Err(UtilityError::Signalled { signal });
     }
@@ -1098,12 +1115,6 @@ pub(crate) fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, Util
         || outcome.stderr.total_bytes != outcome.stderr.bytes.len() as u64
     {
         return Err(UtilityError::Incomplete);
-    }
-    if outcome.stdout.truncated {
-        return Err(UtilityError::Truncated { stream: "stdout" });
-    }
-    if outcome.stderr.truncated {
-        return Err(UtilityError::Truncated { stream: "stderr" });
     }
     Ok(outcome)
 }
@@ -2727,6 +2738,18 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         outcome.stderr.bytes = stderr.as_bytes().to_vec();
         outcome.stderr.total_bytes = stderr.len() as u64;
         outcome
+    }
+
+    #[test]
+    fn output_cap_reports_truncation_when_the_child_is_stopped() {
+        let mut outcome = exit_outcome(0, "");
+        outcome.termination = Termination::Signal(15);
+        outcome.stdout.truncated = true;
+        outcome.overflow_stopped = true;
+        assert!(matches!(
+            validate_outcome(outcome),
+            Err(UtilityError::Truncated { stream: "stdout" })
+        ));
     }
 
     /// Answers every config spawn with the next scripted outcome instead of

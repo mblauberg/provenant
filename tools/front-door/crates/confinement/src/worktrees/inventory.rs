@@ -3,8 +3,9 @@ use super::*;
 
 /// Command-scoped repository observations. A GC preview consumes its inventory
 /// snapshot; mutation paths always perform a fresh read while holding custody.
-#[derive(Default)]
 pub struct RepoFacts {
+    inventory_limit: usize,
+    scalar_limit: usize,
     inventories: std::sync::Mutex<BTreeMap<PathBuf, InventorySnapshot>>,
 }
 
@@ -14,14 +15,75 @@ struct InventorySnapshot {
     entries: Vec<GitWorktree>,
 }
 
+impl Default for RepoFacts {
+    fn default() -> Self {
+        Self {
+            inventory_limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+            scalar_limit: provenant_os::git::REPO_FACT_SCALAR_LIMIT,
+            inventories: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
 impl RepoFacts {
+    /// Override output caps without widening the caller's Git budget.
+    pub fn with_limits(inventory_limit: usize, scalar_limit: usize) -> Result<Self, WorktreeError> {
+        let budget = UtilityBudget::bounded(std::time::Duration::from_secs(1))?;
+        budget.with_stdout_cap(inventory_limit)?;
+        budget.with_stdout_cap(scalar_limit)?;
+        Ok(Self {
+            inventory_limit,
+            scalar_limit,
+            ..Self::default()
+        })
+    }
+
+    /// Resolve a commit ref from fresh Git evidence. Ref values can move even
+    /// within a command, so this read is never served from an earlier epoch.
+    pub fn resolve_commit(
+        &self,
+        context: &WorktreeContext<'_>,
+        name: GitRefName,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        validate_binding(context)?;
+        context.repo.revalidate()?;
+        let budget = context.utility_budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = run_utility(
+            context.executor,
+            GitRead::ResolveRef { name },
+            context.repo,
+            context.utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
     pub(super) fn capture_inventory(
         &self,
         context: &WorktreeContext<'_>,
         cancel: &CancelToken,
     ) -> Result<Vec<GitWorktree>, WorktreeError> {
         let _ = self.take_inventory(context);
-        let entries = read_worktrees(context, cancel)?;
+        let budget = context
+            .utility_budget
+            .with_stdout_cap(self.inventory_limit)?;
+        let outcome = run_utility(
+            context.executor,
+            GitRead::WorktreeList,
+            context.repo,
+            context.utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let entries = parse_worktree_list(&outcome.stdout.bytes)?;
         self.remember_inventory(context, &entries);
         Ok(entries)
     }

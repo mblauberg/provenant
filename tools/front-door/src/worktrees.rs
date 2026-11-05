@@ -223,6 +223,7 @@ fn execute(
             .map_err(|error| Error::SeedBuild(error.to_string()))?;
         return Ok(Data::SeedBuilt(generation));
     }
+    let facts = worktrees::RepoFacts::default();
     with_context(
         roots,
         home,
@@ -243,7 +244,7 @@ fn execute(
                     let upstream = if args.discard {
                         None
                     } else {
-                        match crate::gc_support::fetch_default(context) {
+                        match crate::gc_support::fetch_default(context, &facts, cancel) {
                             Ok(upstream) => upstream,
                             Err(error) => {
                                 warn_fetch(&error);
@@ -1088,7 +1089,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 let (upstream, upstream_error) = if command.pressure {
                     (None, None)
                 } else {
-                    match crate::gc_support::fetch_default(context) {
+                    match crate::gc_support::fetch_default(context, &facts, cancel) {
                         Ok(upstream) => (upstream, None),
                         Err(error) => (None, Some(error.to_string())),
                     }

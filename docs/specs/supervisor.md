@@ -21,7 +21,9 @@ relative to `tools/front-door/`.
 A GC command shares its worktree inventory between discovery and preview for
 each repository. The snapshot is tied to the common Git directory identity and
 is consumed once. Applied cleanup discards the snapshot and reads Git again
-under the repository lock before authorising mutations.
+under the repository lock before authorising mutations. Ref resolution uses
+fresh bounded evidence after fetch. The facts session's inventory and scalar
+caps are configurable and never widen the caller's utility budget.
 
 ### Worktree census sessions
 

@@ -194,6 +194,40 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let facts = RepoFacts::default();
+    fixture.run(&["branch", "facts-ref", "HEAD"])?;
+    let name = GitRefName::branch("facts-ref")?;
+    let initial = facts.resolve_commit(&context, name.clone(), &cancel())?;
+    fixture.run(&["commit", "--allow-empty", "-m", "move facts ref"])?;
+    fixture.run(&["branch", "-f", "facts-ref", "HEAD"])?;
+    let moved = facts.resolve_commit(&context, name, &cancel())?;
+    assert_ne!(moved, initial);
+    assert_eq!(moved, fixture.head()?);
+    let inventory_limit = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
+    assert!(RepoFacts::with_limits(inventory_limit, 0).is_err());
+    assert!(RepoFacts::with_limits(0, provenant_os::git::REPO_FACT_SCALAR_LIMIT).is_err());
+    let limited = RepoFacts::with_limits(inventory_limit, 1)?;
+    assert!(matches!(
+        limited.resolve_commit(&context, GitRefName::branch("facts-ref")?, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    let limited_inventory = RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+    assert!(matches!(
+        limited_inventory.capture_inventory(&context, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    Ok(())
+}
+
+#[test]
 fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountingGit<'a> {
