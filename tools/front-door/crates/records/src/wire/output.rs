@@ -156,6 +156,9 @@ fn with_lane(mut schema: Value) -> Value {
         properties.insert("to".into(), super::schema::worktree_path());
         properties.insert("written".into(), unsigned());
         properties.insert("tail_text".into(), string());
+        properties.insert("tail".into(), unsigned());
+        properties.insert("tail_clamped".into(), boolean());
+        properties.insert("selected".into(), any());
         properties.insert("planner_fallback".into(), any());
         properties.insert("host".into(), string());
     }
