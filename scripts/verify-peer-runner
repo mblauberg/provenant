@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Run a pushed commit in an isolated checkout on an SSH peer."""
+import subprocess
+import shlex
+import sys
+
+REMOTE = r'''set -eu
+repository=$1
+commit=$2
+tier=$3
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/provenant-verify.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+git clone --quiet --no-checkout -- "$repository" "$scratch/checkout"
+cd "$scratch/checkout"
+case $commit in *[!0-9a-f]*|"") echo "commit must be a hex object name" >&2; exit 2;; esac
+git checkout --quiet --detach "$commit"
+actual=$(git rev-parse HEAD)
+[ "$actual" = "$commit" ]
+status=0
+scripts/verify-tier --tier "$tier" </dev/null || status=$?
+python3 -c 'import json,sys; print(json.dumps({"commit":sys.argv[1],"tier":sys.argv[2],"exit_status":int(sys.argv[3])}))' "$actual" "$tier" "$status"
+'''
+
+
+def main(args):
+    if len(args) != 4:
+        sys.exit("usage: verify-peer-runner SSH_HOST REPOSITORY COMMIT TIER")
+    return subprocess.run(["ssh", "--", args[0], shlex.join(["sh", "-s", "--", *args[1:]])], input=REMOTE, text=True).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
