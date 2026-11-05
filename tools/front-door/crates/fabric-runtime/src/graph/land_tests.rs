@@ -571,11 +571,12 @@ fn land_replay_after_journal_failure_observes_one_merge() {
 
 #[test]
 fn pending_land_save_failure_keeps_prior_checkpoint() {
-    struct FailPending(GraphCheckpoint);
+    struct FailPending(std::path::PathBuf);
     impl GraphJournal for FailPending {
         type Error = std::io::Error;
         fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
-            Ok(Some(self.0.clone()))
+            let bytes = std::fs::read(&self.0)?;
+            Ok(Some(serde_json::from_slice(&bytes)?))
         }
         fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
             if node(checkpoint, "land")
@@ -585,8 +586,7 @@ fn pending_land_save_failure_keeps_prior_checkpoint() {
             {
                 return Err(std::io::Error::other("injected land save failure"));
             }
-            self.0 = checkpoint.clone();
-            Ok(())
+            std::fs::write(&self.0, serde_json::to_vec(checkpoint)?)
         }
     }
     let mut owner = owner();
@@ -621,15 +621,19 @@ fn pending_land_save_failure_keeps_prior_checkpoint() {
             .pending_observations,
         1
     );
-    let before = serde_json::to_vec(&prior).unwrap();
-    let mut failing = FailPending(prior);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("checkpoint.json");
+    std::fs::write(&path, serde_json::to_vec(&prior).unwrap()).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let mut failing = FailPending(path.clone());
     assert!(matches!(
         advance(&document, &mut owner, &mut failing),
         Err(GraphError::Journal(_))
     ));
-    assert_eq!(serde_json::to_vec(&failing.0).unwrap(), before);
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    let visible = failing.load("fixture").unwrap().unwrap();
     assert_eq!(
-        node(&failing.0, "land")
+        node(&visible, "land")
             .land
             .as_ref()
             .unwrap()
