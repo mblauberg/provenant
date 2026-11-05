@@ -3,6 +3,26 @@ use super::*;
 #[cfg(test)]
 thread_local! { pub(super) static CHECKPOINT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CrashPoint {
+    PendingMarker,
+    TerminalCheckpoint,
+    SentinelBefore,
+    SentinelAfter,
+}
+#[cfg(test)]
+thread_local! { pub(super) static CRASH_POINT: std::cell::Cell<Option<CrashPoint>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+fn inject_crash(point: CrashPoint) {
+    CRASH_POINT.with(|current| {
+        if current.get() == Some(point) {
+            current.set(None);
+            std::panic::panic_any("injected journal interruption");
+        }
+    });
+}
+
 #[derive(Debug, Error)]
 pub enum JournalError {
     #[error("invalid graph id for checkpoint path")]
@@ -355,6 +375,8 @@ impl FileJournal {
                 _ => {}
             }
         }
+        #[cfg(test)]
+        inject_crash(CrashPoint::SentinelBefore);
         markers
             .atomic_write(
                 OsStr::new("complete"),
@@ -363,7 +385,10 @@ impl FileJournal {
                 PublishMode::Replace,
             )?
             .require_durable()
-            .map_err(JournalError::DurabilityUnconfirmed)
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        #[cfg(test)]
+        inject_crash(CrashPoint::SentinelAfter);
+        Ok(())
     }
 
     /// Remove a stale marker only while holding the graph's writer lock.
@@ -635,6 +660,8 @@ impl GraphJournal for FileJournal {
         let pending = stored_pending(&stored);
         if pending {
             write_pending_marker(&markers, &self.graph_id)?;
+            #[cfg(test)]
+            inject_crash(CrashPoint::PendingMarker);
         }
         self.directory
             .atomic_write(
@@ -646,6 +673,8 @@ impl GraphJournal for FileJournal {
             .require_durable()
             .map_err(JournalError::DurabilityUnconfirmed)?;
         if !pending {
+            #[cfg(test)]
+            inject_crash(CrashPoint::TerminalCheckpoint);
             remove_pending_marker(&markers, &self.graph_id)?;
         }
         Ok(())
