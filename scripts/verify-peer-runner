@@ -12,6 +12,7 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/provenant-verify.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 git clone --quiet --no-checkout -- "$repository" "$scratch/checkout"
 cd "$scratch/checkout"
+case $commit in *[!0-9a-f]*|"") echo "commit must be a hex object name" >&2; exit 2;; esac
 git checkout --quiet --detach "$commit"
 actual=$(git rev-parse HEAD)
 [ "$actual" = "$commit" ]

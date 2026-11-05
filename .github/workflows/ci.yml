@@ -518,7 +518,7 @@ jobs:
       - name: Check shell scripts
         run: |
           { git ls-files '*.sh'; grep -lE '^#!.*\b(ba)?sh\b' scripts/* 2>/dev/null; } | sort -u | xargs -r shellcheck
-      - name: Test macOS path selector
+      - name: Test CI and verification scripts
         run: |
           scripts/test-select-macos-checks
           scripts/test-check-ci-status

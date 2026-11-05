@@ -11,7 +11,7 @@ runner hosts in `.provenant/verify.json`. T0 formats, checks and runs unit
 tests for touched crates; T1 runs mapped integration binaries. Add mappings as
 integration ownership is identified.
 
-T2 runs the unpartitioned CI nextest suite with the same quarantine exclusions and runs its example test unconditionally; CI runs the example test only when affected. T3 repeats the
+T2 runs the unpartitioned CI nextest suite with the same quarantine exclusions and runs its example test unconditionally. CI differs in three ways: it narrows a pull request's tests to the affected set, runs the example test only when affected, and reruns quarantined tests in a separate advisory step. T3 repeats the
 suite and runs the advisory mutation script; the CI native jobs additionally
 cover native-only environments. Heavy tiers warn locally and continue. Configure
 an appropriate host for them.
@@ -32,7 +32,7 @@ or cloud sessions may use the same contract. For an SSH peer, configure an
 argument array such as `["scripts/verify-peer-runner", "peer-name",
 "https://example.org/owner/repo.git", "{commit}", "{tier}"]`. It clones the
 pushed repository into peer scratch, checks out the requested commit and removes
-the checkout afterward. The caller must trust the runner's attestation that it
+the checkout afterwards. The caller must trust the runner's attestation that it
 checked out the reported commit.
 
 The default tier commands build the selected test binaries under a build slot,

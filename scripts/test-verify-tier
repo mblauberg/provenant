@@ -12,10 +12,15 @@ import os
 import shlex
 import subprocess
 
-loader = importlib.machinery.SourceFileLoader("verify_tier", str(Path(__file__).with_name("verify-tier")))
-spec = importlib.util.spec_from_loader(loader.name, loader)
-verify = importlib.util.module_from_spec(spec)
-loader.exec_module(verify)
+def load_script(name, script):
+    loader = importlib.machinery.SourceFileLoader(name, str(Path(__file__).with_name(script)))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+verify = load_script("verify_tier", "verify-tier")
 
 
 class Selection(unittest.TestCase):
@@ -128,10 +133,7 @@ class Selection(unittest.TestCase):
 
 
     def test_peer_runner_passes_commit_and_tier_to_ssh(self):
-        peer_loader = importlib.machinery.SourceFileLoader("verify_peer", str(Path(__file__).with_name("verify-peer-runner")))
-        peer_spec = importlib.util.spec_from_loader(peer_loader.name, peer_loader)
-        peer = importlib.util.module_from_spec(peer_spec)
-        peer_loader.exec_module(peer)
+        peer = load_script("verify_peer", "verify-peer-runner")
         with mock.patch.object(peer.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
             self.assertEqual(peer.main(["peer", "https://example.invalid/repo.git", "abc", "2"]), 0)
         command = run.call_args.args[0]
@@ -140,10 +142,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["input"], peer.REMOTE)
 
     def test_dispatched_ci_receipt_is_bound_to_commit(self):
-        ci_loader = importlib.machinery.SourceFileLoader("verify_ci", str(Path(__file__).with_name("verify-ci-runner")))
-        ci_spec = importlib.util.spec_from_loader(ci_loader.name, ci_loader)
-        ci = importlib.util.module_from_spec(ci_spec)
-        ci_loader.exec_module(ci)
+        ci = load_script("verify_ci", "verify-ci-runner")
         run = {"databaseId": 5, "displayTitle": "verify-unique", "headSha": "abc", "status": "completed", "conclusion": "success"}
         with mock.patch.object(ci.sys, "argv", ["verify-ci-runner", "upstream", "abc", "2"]), \
              mock.patch.object(ci.uuid, "uuid4", return_value=mock.Mock(hex="unique")), \
@@ -159,10 +158,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(dispatch.call_args.args[0][dispatch.call_args.args[0].index("--repo") + 1], "github.com/owner/repo")
 
     def test_nextest_build_and_execution_are_separate_commands(self):
-        nextest_loader = importlib.machinery.SourceFileLoader("verify_nextest", str(Path(__file__).with_name("verify-nextest")))
-        nextest_spec = importlib.util.spec_from_loader(nextest_loader.name, nextest_loader)
-        nextest = importlib.util.module_from_spec(nextest_spec)
-        nextest_loader.exec_module(nextest)
+        nextest = load_script("verify_nextest", "verify-nextest")
         commands = []
         def run(command, **kwargs):
             commands.append(command)
@@ -196,8 +192,7 @@ class Selection(unittest.TestCase):
             self.assertEqual(verify.main(), 0)
         args = run.call_args.args[0][1:]
         self.assertEqual(args[-2:], ["-E", "not (test(=flaky))"])
-        loader = importlib.machinery.SourceFileLoader("nextest_filter", str(Path(__file__).with_name("verify-nextest")))
-        nextest = loader.load_module()
+        nextest = load_script("nextest_filter", "verify-nextest")
         commands = []
         with mock.patch.dict(os.environ, run.call_args.kwargs["env"], clear=True), \
              mock.patch.object(nextest.subprocess, "run", side_effect=lambda command, **kw: commands.append(command) or mock.Mock(returncode=0)):
@@ -217,8 +212,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], ["command", "{literal}"])
 
     def test_ci_runner_rejects_missing_branch_and_mismatched_head_and_waits(self):
-        loader = importlib.machinery.SourceFileLoader("ci_cases", str(Path(__file__).with_name("verify-ci-runner")))
-        ci = loader.load_module()
+        ci = load_script("ci_cases", "verify-ci-runner")
         base = ["abc\trefs/heads/test\n", "https://example.com/owner/repo.git\n", "https://github.com/owner/repo\n"]
         def run_case(outputs):
             with mock.patch.object(ci.sys, "argv", ["runner", "upstream", "abc", "2"]), \
@@ -250,8 +244,7 @@ class Selection(unittest.TestCase):
             self.assertTrue(any("{quarantine_args}" in command for command in cfg["tiers"][tier]))
 
     def test_peer_tier_receives_eof(self):
-        loader = importlib.machinery.SourceFileLoader("peer_stdin", str(Path(__file__).with_name("verify-peer-runner")))
-        peer = loader.load_module()
+        peer = load_script("peer_stdin", "verify-peer-runner")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake = root / "git"
@@ -266,8 +259,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), {"commit": "abc", "tier": "2", "exit_status": 0})
 
     def test_peer_script_rejects_commit_mismatch(self):
-        loader = importlib.machinery.SourceFileLoader("peer_mismatch", str(Path(__file__).with_name("verify-peer-runner")))
-        peer = loader.load_module()
+        peer = load_script("peer_mismatch", "verify-peer-runner")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake = root / "git"

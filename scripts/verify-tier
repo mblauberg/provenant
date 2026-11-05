@@ -129,7 +129,12 @@ def main():
         env["RUST_TEST_THREADS"] = str(threads)
     quarantine_args = ""
     if any("{quarantine_args}" in template for template in templates):
-        quarantine = subprocess.check_output(cfg["quarantine_command"], cwd=ROOT, text=True).strip()
+        command = cfg.get("quarantine_command") or ["true"]
+        try:
+            quarantine = subprocess.check_output(command, cwd=ROOT, text=True).strip()
+        except (OSError, subprocess.CalledProcessError) as error:
+            print(f"quarantine command failed: {error}", file=sys.stderr)
+            return 2
         if quarantine:
             quarantine_args = "-E " + shlex.quote(f"not ({quarantine})")
     for template in templates:
