@@ -6390,6 +6390,20 @@ fn graph_waiting_human(
     )
 }
 
+fn graph_command_result(
+    command: &str,
+    run: provenant_fabric_runtime::graph::GraphRun,
+) -> provenant_records::CommandResult<provenant_fabric_runtime::graph::GraphRun> {
+    let outcome = if command == "fabric graph wait"
+        && run.status == provenant_fabric_runtime::graph::GraphStatus::Pending
+    {
+        provenant_records::Outcome::Waiting
+    } else {
+        provenant_records::Outcome::Ok
+    };
+    provenant_records::CommandResult::new(command, outcome, run)
+}
+
 fn wait_graph(
     clock: &dyn Clock,
     pause: &dyn provenant_core::Pause,
@@ -6502,20 +6516,7 @@ pub fn graph(
             if waiting {
                 human = graph_waiting_human(&data, globals);
             }
-            crate::emit(
-                &provenant_records::CommandResult::new(
-                    command,
-                    if waiting {
-                        provenant_records::Outcome::Waiting
-                    } else {
-                        provenant_records::Outcome::Ok
-                    },
-                    data,
-                ),
-                globals,
-                &human,
-                false,
-            )
+            crate::emit(&graph_command_result(command, data), globals, &human, false)
         }
         Err(error) => {
             let mut message = error.to_string();
