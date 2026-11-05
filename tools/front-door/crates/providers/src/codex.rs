@@ -224,7 +224,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         Event::Thread { thread_id } => vec![E::Session(thread_id)],
         Event::Item {
             item: Item::Answer { text },
-        } => vec![E::Text(text)],
+        } => vec![E::MessageStart, E::Text(text)],
         Event::Completed { usage } => vec![
             E::Usage {
                 // Codex counts cache reads and writes inside `input_tokens`;

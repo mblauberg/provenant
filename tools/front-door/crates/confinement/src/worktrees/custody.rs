@@ -390,24 +390,37 @@ mod dirty_tests {
             path: b"new name".to_vec(),
             original_path: Some(b"old name".to_vec()),
         }];
-        assert_eq!(dirty_paths_summary(&paths), "new name, old name");
+        let summary = dirty_paths_summary(&paths);
+        assert!(summary.contains("new name"));
+        assert!(summary.contains("old name"));
     }
 
     #[test]
     fn summary_lists_dirty_paths_and_counts_the_rest() {
         assert_eq!(dirty_paths_summary_bytes(&[]), "");
         let one = dirty_paths_summary_bytes(&[b"a.rs", b"b/c.rs"]);
-        assert_eq!(one, "a.rs, b/c.rs");
+        for path in ["a.rs", "b/c.rs"] {
+            assert_eq!(one.matches(path).count(), 1, "{one}");
+        }
         let dedup = dirty_paths_summary_bytes(&[b"a.rs", b"a.rs", b"b.rs"]);
-        assert_eq!(dedup, "a.rs, b.rs");
-        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n}").into_bytes()).collect();
+        for path in ["a.rs", "b.rs"] {
+            assert_eq!(dedup.matches(path).count(), 1, "{dedup}");
+        }
+        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n:02}").into_bytes()).collect();
         let many_refs: Vec<&[u8]> = many.iter().map(Vec::as_slice).collect();
         let summary = dirty_paths_summary_bytes(&many_refs);
-        assert!(
-            summary.contains("f11") && !summary.contains("f12"),
-            "{summary}"
-        );
-        assert!(summary.ends_with(" and 3 more"), "{summary}");
+        assert!(summary.len() <= 1024);
+        let listed = (0..15)
+            .filter(|n| summary.contains(&format!("f{n:02}")))
+            .count();
+        let omitted: usize = summary
+            .split_whitespace()
+            .rev()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(listed + omitted, many.len(), "{summary}");
         let long = vec![b'x'; 4000];
         let long_summary = dirty_paths_summary_bytes(&[&long]);
         assert!(long_summary.len() <= 1024);

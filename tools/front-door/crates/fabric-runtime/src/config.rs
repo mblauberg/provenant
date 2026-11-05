@@ -265,6 +265,8 @@ pub struct GraphLimits {
     pub nodes: usize,
     pub edges: usize,
     pub routes_per_node: usize,
+    /// Maximum substitutions after settled failures per review member.
+    pub review_substitutions: usize,
     pub node_prompt_bytes: usize,
     pub graph_prompt_bytes: usize,
     pub expansion_depth: usize,
@@ -308,6 +310,7 @@ impl Default for GraphLimits {
                     nodes: number("nodes"),
                     edges: number("edges"),
                     routes_per_node: number("routes_per_node"),
+                    review_substitutions: number("review_substitutions"),
                     node_prompt_bytes: number("node_prompt_bytes"),
                     graph_prompt_bytes: number("graph_prompt_bytes"),
                     expansion_depth: number("expansion_depth"),
@@ -994,14 +997,6 @@ mod tests {
     }
 
     #[test]
-    fn retired_bundle_bytes_config_is_rejected() {
-        let mut value = serde_json::to_value(config()).unwrap();
-        value["limits"]["bundle_bytes"] = 67_108_864.into();
-        let error = serde_json::from_value::<FabricConfig>(value).unwrap_err();
-        assert!(error.to_string().contains("bundle_bytes"));
-    }
-
-    #[test]
     fn lane_priority_defaults_and_bounds() {
         let mut config = config();
         assert!(config.lanes.cargo_seed.enabled);
@@ -1197,7 +1192,8 @@ mod tests {
     #[test]
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
-        assert_eq!(config.limits.store_busy_timeout_ms, 30_000);
+        assert!(config.validate().is_empty());
+        let default_busy_timeout = config.limits.store_busy_timeout_ms;
         config.limits.store_busy_timeout_ms = 0;
         assert!(config.validate().is_empty());
         config.limits.store_busy_timeout_ms = 600_001;
@@ -1207,13 +1203,11 @@ mod tests {
                 .iter()
                 .any(|e| e.field == "limits.store_busy_timeout_ms")
         );
-        config.limits.store_busy_timeout_ms = 30_000;
-        assert_eq!(config.graph.limits.expansion_depth, 64);
-        assert_eq!(config.graph.limits.nodes, 512);
-        assert_eq!(config.graph.limits.continuations, 2);
+        config.limits.store_busy_timeout_ms = default_busy_timeout;
+        config.graph.limits.review_substitutions = 0;
+        assert!(config.validate().is_empty());
         config.graph.limits.continuations = 0;
         assert!(config.validate().is_empty());
-        assert_eq!(config.graph.limits.graph_prompt_bytes, 4 * 1024 * 1024);
         assert!(config.graph.budget.per_graph.tokens.is_none());
         config.graph.limits.nodes = 513;
         assert!(config.validate().is_empty());

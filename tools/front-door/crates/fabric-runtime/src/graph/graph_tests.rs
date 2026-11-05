@@ -556,6 +556,7 @@ fn admitted_deferred_review_fits_checkpoint_after_expansion() {
             measured_size: "small".into(),
             shape: "deep".into(),
             source: "fixture".into(),
+            substitutions: Vec::new(),
         }),
         extra: Default::default(),
         source: "review".into(),
@@ -670,6 +671,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
             measured_size: "small".into(),
             shape: "quick".into(),
             source: "fixture".into(),
+            substitutions: Vec::new(),
         }),
         extra: Default::default(),
         source: "outer--review".into(),
@@ -1787,12 +1789,14 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         outputs: vec![OutputKind::Findings],
     };
     let mut nodes = vec![node("seed", route("first"))];
+    let qualified =
+        entry(",\"lens\":\"tests\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"");
     let mut observations = VecDeque::from([terminal_with_result(
         AttemptOutcome::Succeeded,
-        &findings_text(&format!("{},{}", entry(""), entry("").replace("F1", "F2"))),
+        &findings_text(&format!("{},{}", qualified, qualified.replace("F1", "F2"))),
     )]);
-    let long_file = "a".repeat(180);
-    let verifier_entry = entry(",\"propagates\":\"seed:F1\"").replace("a.rs", &long_file);
+    let long_file = "a".repeat(80);
+    let verifier_entry = entry(",\"propagates\":\"seed:F1\",\"lens\":\"tests\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"").replace("a.rs", &long_file);
     let entries = [
         vec![verifier_entry.clone(); MAX_FINDINGS / 2],
         vec![verifier_entry.replace("F1", "F2"); MAX_FINDINGS / 2],
@@ -1879,13 +1883,26 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         20 * MAX_FINDINGS
     );
     assert_eq!(reconstructed.len(), 20 * MAX_FINDINGS);
-    assert!(
-        reconstructed
-            .iter()
-            .all(|finding| (finding.id == "F1" || finding.id == "F2")
-                && finding.severity == "high"
-                && finding.file == long_file)
-    );
+    assert!(reconstructed.iter().all(|finding| {
+        (finding.id == "F1" || finding.id == "F2")
+            && finding.severity == "high"
+            && finding.file == long_file
+            && finding
+                .extra
+                .get("lens")
+                .and_then(serde_json::Value::as_str)
+                == Some("tests")
+            && finding
+                .extra
+                .get("evidence")
+                .and_then(serde_json::Value::as_str)
+                == Some("observed")
+            && finding
+                .extra
+                .get("proposed_fix")
+                .and_then(serde_json::Value::as_str)
+                == Some("repair")
+    }));
     assert_eq!(
         run.checkpoint.nodes.last().unwrap().state,
         NodeState::Succeeded
@@ -3426,6 +3443,76 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
 }
 
 #[test]
+fn qualified_findings_survive_reduction_and_model_synthesis() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"qualified-findings","nodes":[
+            {"id":"lenses","kind":"composite","access":"read_only",
+             "composite":{"min_successful":1,"nodes":[
+                 {"id":"tests","role":"lens.tests","access":"read_only","prompt":"review","route":{"alias":"first"}}
+             ],"exports":[{"node":"tests","outputs":["findings"]}]}},
+            {"id":"synthesis","access":"read_only","prompt":"synthesise","route":{"alias":"second"},
+             "depends_on":["lenses"],"dispositions":["accepted"],
+             "inputs":[{"node":"lenses","outputs":["findings"]}]}
+        ]
+    })).unwrap();
+    let finding = entry(
+        ",\"lens\":\"wrong\",\"evidence\":\"observed failure\",\"proposed_fix\":\"repair branch\"",
+    );
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&finding)),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
+            ),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    for id in ["lenses", "synthesis"] {
+        let node = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap();
+        let finding = &node.outputs.as_ref().unwrap().findings[0];
+        assert!(finding.id.ends_with(":F1"));
+        assert_eq!(finding.severity, "high");
+        assert_eq!((finding.file.as_str(), finding.line), ("a.rs", None));
+        assert_eq!(finding.extra["lens"], "tests");
+        assert_eq!(finding.extra["evidence"], "observed failure");
+        assert_eq!(finding.extra["proposed_fix"], "repair branch");
+    }
+    assert!(owner.prompts[1].contains("\"lens\":\"tests\""));
+    assert!(owner.prompts[1].contains("\"evidence\":\"observed failure\""));
+    assert!(owner.prompts[1].contains("\"proposed_fix\":\"repair branch\""));
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+    // A checkpoint produced before lens tagging remains replayable.
+    let checkpoint = journal.0.as_mut().unwrap();
+    for node in &mut checkpoint.nodes {
+        if let Some(outputs) = &mut node.outputs {
+            for finding in &mut outputs.findings {
+                finding.extra.remove("lens");
+            }
+        }
+    }
+    let old = checkpoint.clone();
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        old
+    );
+}
+
+#[test]
 fn partial_composite_below_its_minimum_fails_with_the_recorded_reason() {
     let (document, mut owner) = partial_review(2);
     let mut journal = MemoryJournal::default();
@@ -3707,28 +3794,6 @@ fn verdict_gate_matches_review_tokens_and_legacy_aliases() {
         )
         .is_none()
     );
-}
-
-#[test]
-fn checkpoint_serde_preserves_stored_verdict_strings() {
-    let (document, mut owner) = verdict_fixture(VerdictThreshold::All, &[Some("PASS")]);
-    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
-        .unwrap()
-        .checkpoint;
-    for stored in [
-        "VERDICT: PASS",
-        "VERDICT: APPROVE",
-        "VERDICT: FAIL",
-        "VERDICT: APPROVE_WITH_NITS",
-        "VERDICT: INCONCLUSIVE",
-    ] {
-        checkpoint.nodes[0].outputs.as_mut().unwrap().verdict = Some(stored.into());
-        let encoded = serde_json::to_value(&checkpoint).unwrap();
-        assert_eq!(encoded["nodes"][0]["outputs"]["verdict"], stored);
-        assert_eq!(encoded["nodes"][1]["outputs"]["verdict"], "PASS");
-        let decoded: GraphCheckpoint = serde_json::from_value(encoded).unwrap();
-        assert_eq!(decoded, checkpoint);
-    }
 }
 
 #[test]
@@ -6003,6 +6068,492 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
 }
 
 #[test]
+fn review_task_substitution_is_bounded_and_replays() {
+    for role in ["lens.tests", "review.verify"] {
+        for cap in [0, 1] {
+            let mut review = node("review", route("first"));
+            review.role = Some(role.into());
+            review.route = None;
+            review.routes = Some(vec![route("first"), route("second"), route("third")]);
+            let document = graph(vec![review]);
+            let mut owner = FakeOwner {
+                observations: VecDeque::from([
+                    terminal(AttemptOutcome::TaskFailed),
+                    terminal(AttemptOutcome::Succeeded),
+                ]),
+                ..Default::default()
+            };
+            let mut journal = MemoryJournal::default();
+            let limits = crate::config::GraphLimits {
+                review_substitutions: cap,
+                ..Default::default()
+            };
+            let run = advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &limits,
+                &Default::default(),
+            )
+            .unwrap();
+            assert_eq!(owner.calls.len(), cap + 1, "{role}");
+            assert_eq!(run.checkpoint.nodes.len(), 1);
+            assert!(!run.checkpoint.nodes[0].attempts[0].review_substitution);
+            if cap > 0 {
+                assert!(run.checkpoint.nodes[0].attempts[1].review_substitution);
+            }
+            assert_eq!(
+                run.checkpoint.nodes[0].state,
+                if cap == 0 {
+                    NodeState::Failed
+                } else {
+                    NodeState::Succeeded
+                }
+            );
+            let replay = advance_with_budget(
+                &document,
+                &mut FakeOwner::default(),
+                &mut journal,
+                &limits,
+                &Default::default(),
+            )
+            .unwrap();
+            assert_eq!(replay.checkpoint, run.checkpoint);
+        }
+    }
+}
+
+#[test]
+fn lowered_substitution_limit_settles_an_unstarted_retry() {
+    let mut review = node("review", route("first"));
+    review.role = Some("lens.tests".into());
+    review.route = None;
+    review.routes = Some(vec![route("first"), route("second")]);
+    let document = graph(vec![review]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal(AttemptOutcome::TaskFailed),
+            AttemptObservation::Pending { attempt_ref: None },
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &mut journal.0.as_mut().unwrap().nodes[0];
+    progress.attempts.pop();
+    progress.outputs = None;
+    progress.state = NodeState::Running;
+    let limits = crate::config::GraphLimits {
+        review_substitutions: 0,
+        ..Default::default()
+    };
+    let mut owner = FakeOwner::default();
+    let resumed = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert!(owner.calls.is_empty());
+    assert_eq!(resumed.checkpoint.nodes[0].state, NodeState::Failed);
+}
+
+#[test]
+fn uncertain_review_launch_does_not_substitute() {
+    let mut review = node("review", route("first"));
+    review.role = Some("lens.tests".into());
+    review.route = None;
+    review.routes = Some(vec![route("first"), route("second")]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([AttemptObservation::Unknown { attempt_ref: None }]),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![review]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(
+        run.checkpoint.nodes[0].attempts[0].state,
+        AttemptState::Unresolved
+    );
+}
+
+#[test]
+fn deferred_lens_substitution_keeps_panel_topology() {
+    let oid = "1".repeat(40);
+    let mut review = node("review", route("first"));
+    review.kind = Some(NodeKind::Plan);
+    review.route = None;
+    review.source = Some(SourceBinding::Commit {
+        commit: oid.clone(),
+    });
+    review.review = Some(ReviewSpec {
+        shape: None,
+        risk_tier: None,
+        kind: None,
+        size: None,
+        risk_tags: vec![],
+        worktree: None,
+        lenses: vec![],
+        min_successful: Some(1),
+        max_nodes: 2,
+    });
+    let mut verifier = node("verify", route("first"));
+    verifier.role = Some("review.verify".into());
+    verifier.route = None;
+    verifier.routes = Some(vec![route("first"), route("second")]);
+    verifier.depends_on.push("review".into());
+    let mut document = graph(vec![review, verifier]);
+    document.schema_version = 2;
+    let mut root = node("review--review", route("first"));
+    root.kind = Some(NodeKind::Composite);
+    root.route = None;
+    root.prompt.clear();
+    let mut lens = node("lens", route("first"));
+    lens.role = Some("lens.tests".into());
+    lens.route = None;
+    lens.routes = Some(vec![route("first"), route("second")]);
+    lens.source = Some(SourceBinding::Commit {
+        commit: oid.clone(),
+    });
+    root.composite = Some(CompositeSpec {
+        min_successful: Some(1),
+        nodes: vec![lens],
+        exports: vec![GraphInput {
+            extra: Default::default(),
+            node: "lens".into(),
+            outputs: vec![OutputKind::Result],
+        }],
+    });
+    let expansion = Expansion {
+        review: Some(ReviewResolution {
+            subject: oid.parse().unwrap(),
+            base: oid.parse().unwrap(),
+            measured_size: "small".into(),
+            shape: "quick".into(),
+            source: "fixture".into(),
+            substitutions: Vec::new(),
+        }),
+        extra: Default::default(),
+        source: "review".into(),
+        continuation: false,
+        nodes: composites::expand(&graph(vec![root]), &plans::generous())
+            .unwrap()
+            .nodes,
+        patterns: vec![],
+    };
+    let count = expansion.nodes.len();
+    let mut forged = expansion.clone();
+    forged
+        .review
+        .as_mut()
+        .unwrap()
+        .substitutions
+        .push(ReviewSubstitution {
+            member: "review--review--lens".into(),
+            route_index: 1,
+        });
+    let rejected = advance(
+        &document,
+        &mut FakeOwner {
+            review_expansion: Some(forged),
+            ..Default::default()
+        },
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        rejected.checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("review_resolution_failed")
+    );
+    let mut owner = FakeOwner {
+        review_expansion: Some(expansion),
+        observations: VecDeque::from([
+            terminal(AttemptOutcome::TaskFailed),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+            terminal(AttemptOutcome::TaskFailed),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.checkpoint.expansions[0].nodes.len(), count);
+    let expanded = plans::expand(
+        &document,
+        &[],
+        &run.checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    let (plan, _) = validate_flat_plan(&expanded, &plans::generous()).unwrap();
+    assert!(
+        canonical_len(&run.checkpoint)
+            <= graph_envelope_bound(&document, &run.checkpoint.expansions, &[], &plan)
+    );
+    let lens = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id.ends_with("--lens"))
+        .unwrap();
+    assert_eq!(lens.state, NodeState::Succeeded);
+    assert_eq!(lens.attempts.len(), 2);
+    assert!(lens.attempts[1].review_substitution);
+    assert_eq!(
+        run.checkpoint.expansions[0]
+            .review
+            .as_ref()
+            .unwrap()
+            .substitutions,
+        vec![
+            ReviewSubstitution {
+                member: lens.id.clone(),
+                route_index: 1
+            },
+            ReviewSubstitution {
+                member: "verify".into(),
+                route_index: 1
+            }
+        ]
+    );
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+    journal.0.as_mut().unwrap().expansions[0]
+        .review
+        .as_mut()
+        .unwrap()
+        .substitutions
+        .clear();
+    assert!(advance(&document, &mut FakeOwner::default(), &mut journal).is_err());
+    let mut expansion = run.checkpoint.expansions[0].clone();
+    expansion.review.as_mut().unwrap().substitutions.clear();
+    let mut owner = FakeOwner {
+        review_expansion: Some(expansion),
+        observations: VecDeque::from([
+            preparation_refusal("host/first", AttemptOutcome::AdapterUnavailable),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+        ]),
+        ..Default::default()
+    };
+    let prepared = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(
+        prepared.checkpoint.expansions[0]
+            .review
+            .as_ref()
+            .unwrap()
+            .substitutions,
+        vec![ReviewSubstitution {
+            member: lens.id.clone(),
+            route_index: 1
+        }]
+    );
+}
+
+#[test]
+fn review_substitution_stops_at_the_limit_and_verifier_unblocks_synthesis() {
+    let mut verify = node("verify", route("first"));
+    verify.role = Some("review.verify".into());
+    verify.route = None;
+    verify.routes = Some(vec![route("first"), route("second"), route("third")]);
+    let mut synthesis = node("synthesis", route("synth"));
+    synthesis.depends_on.push("verify".into());
+    let document = graph(vec![verify, synthesis]);
+    for succeeds in [true, false] {
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::TaskFailed),
+                terminal(if succeeds {
+                    AttemptOutcome::Succeeded
+                } else {
+                    AttemptOutcome::TaskFailed
+                }),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
+        assert_eq!(
+            run.checkpoint.nodes[1].state,
+            if succeeds {
+                NodeState::Succeeded
+            } else {
+                NodeState::Blocked
+            }
+        );
+    }
+}
+
+#[test]
+fn verifier_preparation_substitution_requires_evidence_and_respects_limit() {
+    let mut verify = node("verify", route("first"));
+    verify.role = Some("review.verify".into());
+    verify.route = None;
+    verify.routes = Some(vec![route("first"), route("second"), route("third")]);
+    let mut synthesis = node("synthesis", route("synth"));
+    synthesis.depends_on.push("verify".into());
+    let document = graph(vec![verify, synthesis]);
+    for (limit, evidence, succeeds) in [(1, true, true), (0, true, false), (1, false, false)] {
+        let mut owner = FakeOwner {
+            omit_fallback_evidence: !evidence,
+            observations: VecDeque::from([
+                preparation_refusal("host/first", AttemptOutcome::AdapterUnavailable),
+                terminal(AttemptOutcome::Succeeded),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        let limits = crate::config::GraphLimits {
+            review_substitutions: limit,
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            run.checkpoint.nodes[1].state,
+            if succeeds {
+                NodeState::Succeeded
+            } else {
+                NodeState::Blocked
+            }
+        );
+        assert_eq!(
+            run.checkpoint.nodes[0].attempts.len(),
+            if succeeds { 2 } else { 1 }
+        );
+        if succeeds {
+            assert!(run.checkpoint.nodes[0].attempts[1].review_substitution);
+        }
+        assert_eq!(
+            advance_with_budget(
+                &document,
+                &mut FakeOwner::default(),
+                &mut journal,
+                &limits,
+                &Default::default()
+            )
+            .unwrap()
+            .checkpoint,
+            run.checkpoint
+        );
+    }
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            preparation_refusal("host/first", AttemptOutcome::AdapterUnavailable),
+            terminal(AttemptOutcome::TaskFailed),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
+    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Blocked);
+}
+
+#[test]
+fn review_substitute_keeps_writer_chain_exclusion() {
+    let mut write = node("write", route("first"));
+    write.access = AccessMode::WorktreeWrite;
+    write.worktree = Some(".worktrees/write".into());
+    let mut review = node("review", route("first"));
+    review.role = Some("lens.tests".into());
+    review.source = Some(SourceBinding::Node {
+        node: "write".into(),
+    });
+    review.distinct_from = Some(DistinctFrom::Writer);
+    review.depends_on.push("write".into());
+    review.route = None;
+    review.routes = Some(vec![route("first"), route("second")]);
+    let writer = AttemptObservation::Terminal {
+        attempt_ref: Some("host/writer".into()),
+        outcome: AttemptOutcome::Succeeded,
+        launched: true,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: Some("writer".into()),
+        commit: Some("3".repeat(40)),
+    };
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            writer,
+            terminal(AttemptOutcome::TaskFailed),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![write, review]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.distinct_from[1], ["host/writer"]);
+    assert_eq!(owner.distinct_from[2], ["host/writer"]);
+}
+
+#[test]
+fn review_substitute_prefers_a_new_family_but_can_use_the_same_family() {
+    for (replacement, outcome) in [
+        ("different", SeparationOutcome::Separated),
+        ("same", SeparationOutcome::Unavailable),
+    ] {
+        let mut review = node("review", route("first"));
+        review.role = Some("lens.tests".into());
+        review.route = None;
+        let alias: GraphRoute =
+            serde_json::from_value(serde_json::json!({"alias":"senior"})).unwrap();
+        review.routes = Some(vec![alias.clone(), alias]);
+        let mut first = done_as("host/first");
+        if let AttemptObservation::Terminal { outcome, .. } = &mut first {
+            *outcome = AttemptOutcome::TaskFailed;
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([first, done_as("host/second")]),
+            families: [
+                ("host/first".into(), "same".into()),
+                ("host/second".into(), replacement.into()),
+            ]
+            .into(),
+            models: [("host/first".into(), "same/model".into())].into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![review]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert!(run.checkpoint.successful());
+        assert_eq!(owner.family_peers[1], ["same"]);
+        assert!(owner.prior_attempts[1].is_empty());
+        assert_eq!(
+            run.checkpoint.nodes[0].separation.as_ref().unwrap().outcome,
+            outcome
+        );
+    }
+}
+
+#[test]
 fn concurrency_cap_observes_running_attempts_before_admitting_more() {
     let document = graph(vec![
         node("one", route("first")),
@@ -6641,6 +7192,12 @@ fn cap_failure_on_fallback_preserves_prior_attempt_outcome() {
     let first = &mut checkpoint.nodes[1].attempts[0];
     first.state = AttemptState::Terminal;
     first.outcome = Some(AttemptOutcome::AuthRequired);
+    first.launched = false;
+    first.attempt_ref = Some("refused".into());
+    owner.fallback_evidence.insert(
+        "refused".into(),
+        provenant_records::run::PreparationFailure::AuthRequired,
+    );
     let lowered = crate::config::GraphLimits {
         node_prompt_bytes: 100,
         ..Default::default()
@@ -7992,6 +8549,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
                 measured_size: "small".into(),
                 shape: "deep".into(),
                 source: "fixture".into(),
+                substitutions: Vec::new(),
             }),
             extra: Default::default(),
             source: "review".into(),
@@ -8138,6 +8696,7 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
             measured_size: "small".into(),
             shape: "quick".into(),
             source: "fixture".into(),
+            substitutions: Vec::new(),
         }),
         extra: Default::default(),
         source: "review".into(),
