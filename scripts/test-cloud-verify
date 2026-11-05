@@ -63,6 +63,18 @@ class CloudVerify(unittest.TestCase):
         self.assertNotEqual(wrong.returncode, 0)
         self.assertFalse(marker.exists())
 
+    def test_dirty_start_and_changed_commit_are_reported(self):
+        (self.repo / "tracked").write_text("dirty\n")
+        result = self.run_helper([sys.executable, "-c", "pass"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["tracked_files_changed"])
+        self.git("add", "tracked")
+        commit = self.run_helper(["git", "commit", "-qm", "changed"])
+        self.assertEqual(commit.returncode, 0, commit.stderr)
+        result = json.loads(commit.stdout)
+        self.assertNotEqual(result["commit"], self.commit)
+        self.assertTrue(result["tracked_files_changed"])
+
 
 if __name__ == "__main__":
     unittest.main()
