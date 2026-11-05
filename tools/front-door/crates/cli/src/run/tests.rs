@@ -1886,8 +1886,6 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 (target, "owned", "integrate"),
                 (target, "existing", "integrate"),
                 (target, "manifest", "integrate"),
-                (target, "owned", "legacy-push"),
-                (target, "existing", "legacy-push"),
                 (target, "manifest", "push"),
                 (target, "owned", "push"),
             ]
@@ -1937,21 +1935,10 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             )?;
             args.extend([OsString::from("--manifest"), manifest.into_os_string()]);
         } else {
-            if delivery == "legacy-push" {
-                args.extend(
-                    ["--deliver-remote", "origin", "--deliver-branch", target].map(OsString::from),
-                );
-            } else {
-                args.extend([
-                    OsString::from("--deliver"),
-                    if delivery == "integrate" {
-                        format!("integrate:{target}")
-                    } else {
-                        "push".into()
-                    }
-                    .into(),
-                ]);
-            }
+            args.extend([
+                OsString::from("--deliver"),
+                if delivery == "integrate" { format!("integrate:{target}") } else { "push".into() }.into(),
+            ]);
             args.extend([
                 OsString::from("--prompt-file"),
                 prompt.as_os_str().to_owned(),

@@ -472,9 +472,6 @@ const PRESET_INCOMPATIBLE: &[&str] = &[
     "worktree_branch",
     "host",
     "deliver",
-    "deliver_remote",
-    "deliver_branch",
-    "open_pr",
     "write_root",
     "capability",
     "knobs",
@@ -1395,9 +1392,6 @@ mod tests {
                 ("preset_plan", vec!["preset"]),
                 ("fresh", vec!["preset"]),
                 ("preset", vec!["prompt_file"]),
-                ("deliver_remote", vec!["deliver_branch", "writer_target"]),
-                ("deliver_branch", vec!["deliver_remote"]),
-                ("open_pr", vec!["deliver_remote"]),
             ] {
                 let arg = command.arguments.iter().find(|a| a.name == name).unwrap();
                 assert_eq!(arg.requires, expected);
@@ -1968,9 +1962,6 @@ mod tests {
             vec!["--worktree-branch", "branch"],
             vec!["--host", "host"],
             vec!["--deliver", "none"],
-            vec!["--deliver-remote", "host"],
-            vec!["--deliver-branch", "branch"],
-            vec!["--open-pr"],
             vec!["--write-root", "dir"],
             vec!["--capability", "postgres"],
             vec!["--knob", "x=y"],
@@ -2332,14 +2323,7 @@ mod tests {
         for flags in [
             vec!["--worktree", "existing"],
             vec!["--host", "peer"],
-            vec![
-                "--deliver",
-                "push",
-                "--deliver-remote",
-                "origin",
-                "--deliver-branch",
-                "lane",
-            ],
+
             vec!["--deliver", "integrate:../main"],
         ] {
             let mut words = base.to_vec();

@@ -2005,23 +2005,6 @@ fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
         vec!["--provider-timeout", "3600"],
         vec!["--operation-id", "chosen"],
         vec!["--branch", "topic", "--host", "peer", "--base", "main"],
-        vec![
-            "--deliver-remote",
-            "origin",
-            "--deliver-branch",
-            "topic",
-            "--worktree-branch",
-            "work",
-        ],
-        vec![
-            "--open-pr",
-            "--deliver-remote",
-            "origin",
-            "--deliver-branch",
-            "topic",
-            "--worktree-branch",
-            "work",
-        ],
     ] {
         let automatic = run(&args)?;
         let result: serde_json::Value = serde_json::from_slice(&automatic.stdout)?;

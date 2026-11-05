@@ -4724,6 +4724,7 @@ fn owned_dispatch_retains_failed_attempt_and_replays() -> Result {
     assert!(std::path::Path::new(path).exists());
     // Explicit worktrees use the ordinary admission path, which must also
     // preserve replay after a publication target becomes protected.
+    assert_eq!(code(&rig.execute(&git, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/unrelated"], None)?), 0);
     let explicit_args = [
         "dispatch",
         "--operation-id",
@@ -4736,10 +4737,8 @@ fn owned_dispatch_retains_failed_attempt_and_replays() -> Result {
         path,
         "--base",
         "main",
-        "--deliver-remote",
-        "origin",
-        "--deliver-branch",
-        "published-explicit",
+        "--deliver",
+        "push",
         "--prompt-file",
         prompt.to_str().ok_or("prompt")?,
         "--json",
@@ -4753,7 +4752,7 @@ fn owned_dispatch_retains_failed_attempt_and_replays() -> Result {
             &[
                 "symbolic-ref",
                 "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/published-explicit",
+                "refs/remotes/origin/fixture/owned",
             ],
             None
         )?),
