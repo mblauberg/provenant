@@ -212,11 +212,7 @@ jobs:
           QUARANTINE_FILTER_FILE: ${{ runner.temp }}/quarantine-filter
         run: |
           QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
-          # The Claude read-only case and real Swift writer build run nightly.
-          filter="not (test(=lane_prepare_isolates_nested_claude_state) | test(=lane_builds_and_tests_swift_in_a_registered_worktree))"
-          if [ -n "$NEXTTEST_FILTER" ]; then
-            filter="($NEXTTEST_FILTER) & ($filter)"
-          fi
+          filter="$NEXTTEST_FILTER"
           if [ -n "$QUARANTINE_FILTER" ]; then
             if [ -n "$filter" ]; then
               filter="($filter) & not ($QUARANTINE_FILTER)"

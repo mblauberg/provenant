@@ -2,6 +2,8 @@
 slow-timeout = { period = "10s", terminate-after = 3 }
 
 [profile.ci]
+# These native cases run in the heavy tier, with no 30-second limit.
+default-filter = 'not (test(=lane_prepare_isolates_nested_claude_state) | test(=lane_builds_and_tests_swift_in_a_registered_worktree))'
 retries = 0
 flaky-result = "fail"
 fail-fast = false
@@ -61,7 +63,11 @@ not (
         test(=peer_agent::tests::forward_falls_back_only_when_no_agent_accepts) |
         test(=peer_agent::tests::listen_replaces_a_stale_socket_but_not_a_live_agent)
     )) |
-    (package(=provenant) & binary(=fabric_transport) & test(=lane_mcp_refuses_coordination_but_allows_reads_and_child_submission))
+    (package(=provenant) & binary(=fabric_transport) & test(=lane_mcp_refuses_coordination_but_allows_reads_and_child_submission)) |
+    (package(=provenant) & binary(=worktrees) & (
+        test(=lane_prepare_isolates_nested_claude_state) |
+        test(=lane_builds_and_tests_swift_in_a_registered_worktree)
+    ))
 )
 '''
 
