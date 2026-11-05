@@ -884,6 +884,45 @@ pub fn dispatch() -> io::Result<bool> {
             wait_for_eof(&mut gate)?;
             descendant.detach();
         }
+        "s2-short-parent-provider" => {
+            let root = std::env::current_dir()?;
+            let extra = [
+                fixture_path(&args, 3)?.into_os_string(),
+                fixture_path(&args, 4)?.into_os_string(),
+            ];
+            let mut parent = ChildGuard::new(
+                command_with_args("s2-short-parent", &extra, &root, false)?.spawn()?,
+            );
+            let mut gate = std::os::unix::net::UnixStream::connect(fixture_path(&args, 5)?)?;
+            gate.write_all(b"R")?;
+            wait_for_eof(&mut gate)?;
+            parent.detach();
+        }
+        "s2-short-parent" => {
+            let root = std::env::current_dir()?;
+            let extra = [fixture_path(&args, 3)?.into_os_string()];
+            let mut descendant = ChildGuard::new(
+                command_with_args("s2-late-session", &extra, &root, false)?.spawn()?,
+            );
+            let mut gate = std::os::unix::net::UnixStream::connect(fixture_path(&args, 4)?)?;
+            gate.write_all(b"R")?;
+            writeln!(gate, "{}", std::process::id())?;
+            wait_for_eof(&mut gate)?;
+            descendant.detach();
+        }
+        "s2-late-session" => {
+            let mut ready = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
+            ready.write_all(b"R")?;
+            writeln!(ready, "{}", std::process::id())?;
+            let mut command = [0_u8; 1];
+            ready.read_exact(&mut command)?;
+            if command != *b"S" {
+                return Err(io::Error::other("unexpected fixture command"));
+            }
+            provenant_os::sys::fixture_create_session()?;
+            ready.write_all(b"S")?;
+            wait_for_eof(&mut ready)?;
+        }
         "s2-detach-provider" | "s2-registered-detach-provider" => {
             // Start a session-leading descendant in the attempt's sandbox, then
             // exit at once so no census can follow the parent edge. The

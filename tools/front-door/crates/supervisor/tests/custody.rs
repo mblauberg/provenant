@@ -1123,6 +1123,28 @@ fn owner_process(root: &Path) -> Result<()> {
     drop(writer);
     Ok(())
 }
+fn owner_with_descendant(root: &Path) -> Result<()> {
+    let (writer, _handle) = start(
+        root,
+        "orphan-tree",
+        "s2-setsid-provider",
+        &[
+            root.join("orphan-descendant.sock").into_os_string(),
+            root.join("orphan-provider.sock").into_os_string(),
+        ],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut peer = UnixStream::connect(root.join("owner-ready.sock"))?;
+    peer.write_all(b"R")?;
+    let mut bytes = [0];
+    let _ = peer.read(&mut bytes)?;
+    drop(writer);
+    Ok(())
+}
 fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &Path) -> Result<()> {
     let ready_path = root.join("setsid-ready.sock");
     let gate_path = root.join("setsid-gate.sock");
@@ -1160,6 +1182,56 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
         exit.unresolved_cleanup,
         "a live setsid descendant still holds custody"
     );
+    drop(descendant_stream);
+    wait_for_identity_absence(&descendant)?;
+    Ok(())
+}
+fn descendant_stays_attributed_after_parent_exit_and_session_change(root: &Path) -> Result<()> {
+    let descendant_listener = UnixListener::bind(root.join("short-descendant.sock"))?;
+    let parent_listener = UnixListener::bind(root.join("short-parent.sock"))?;
+    let provider_listener = UnixListener::bind(root.join("short-provider.sock"))?;
+    let (_writer, handle) = start(
+        root,
+        "short",
+        "s2-short-parent-provider",
+        &[
+            root.join("short-descendant.sock").into_os_string(),
+            root.join("short-parent.sock").into_os_string(),
+            root.join("short-provider.sock").into_os_string(),
+        ],
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut descendant_stream =
+        fixture::fixture_accept(&descendant_listener, Duration::from_secs(5))?;
+    byte(&mut descendant_stream, b'R')?;
+    let descendant = process_identity(read_pid_line(&mut descendant_stream)?)?;
+    let mut parent_stream = fixture::fixture_accept(&parent_listener, Duration::from_secs(5))?;
+    byte(&mut parent_stream, b'R')?;
+    let parent = process_identity(read_pid_line(&mut parent_stream)?)?;
+    let mut provider_stream = fixture::fixture_accept(&provider_listener, Duration::from_secs(5))?;
+    byte(&mut provider_stream, b'R')?;
+    let reservation = root
+        .join("short-writer")
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    wait_for_descendant(&reservation, &parent)?;
+    wait_for_descendant(&reservation, &descendant)?;
+    drop(parent_stream);
+    wait_for_zombie(&parent)?;
+    descendant_stream.write_all(b"S")?;
+    byte(&mut descendant_stream, b'S')?;
+    let escaped = process_identity(descendant.pid)?;
+    assert_eq!(escaped, descendant);
+    assert_eq!(escaped.session_id, descendant.pid);
+    assert_eq!(escaped.group_id, descendant.pid);
+    drop(provider_stream);
+    let exit = exited(&handle)?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    assert!(exit.unresolved_pids.contains(&descendant.pid), "{exit:?}");
     drop(descendant_stream);
     wait_for_identity_absence(&descendant)?;
     Ok(())
@@ -2133,6 +2205,43 @@ fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
     ));
     Ok(())
 }
+fn guardian_exits_after_owner_and_tracked_descendant_are_gone(root: &Path) -> Result<()> {
+    let ready_listener = UnixListener::bind(root.join("orphan-descendant.sock"))?;
+    let gate_listener = UnixListener::bind(root.join("orphan-provider.sock"))?;
+    let owner_listener = UnixListener::bind(root.join("owner-ready.sock"))?;
+    let mut owner = fixture::ChildGuard::new(fixture::command("s2-owner-tree", root)?.spawn()?);
+    let mut descendant_stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut descendant_stream, b'R')?;
+    let descendant = process_identity(read_pid_line(&mut descendant_stream)?)?;
+    let mut provider_stream = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
+    byte(&mut provider_stream, b'R')?;
+    let mut owner_stream = fixture::fixture_accept(&owner_listener, Duration::from_secs(5))?;
+    byte(&mut owner_stream, b'R')?;
+    let writer = root.join("orphan-tree-writer");
+    wait_for_descendant(
+        &writer
+            .join(scope().attempt.to_string())
+            .join("reservation.json"),
+        &descendant,
+    )?;
+    let guardian = reservation_identity(&writer, "guardian")?;
+    owner.kill()?;
+    bounded_reap(&mut owner)?;
+    drop(owner_stream);
+    drop(provider_stream);
+    let handle = reattach(
+        Directory::open_anchor(&root.join("orphan-tree-attempt"))?,
+        scope(),
+    )?;
+    let exit = exited(&handle)?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    drop(descendant_stream);
+    wait_for_identity_absence(&descendant)?;
+    wait_for_identity_absence(&guardian)?;
+    let settled = exited(&handle)?;
+    assert!(!settled.unresolved_cleanup, "{settled:?}");
+    Ok(())
+}
 fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -> Result<()> {
     let descendant_socket = root.join("descendant.sock");
     let provider_socket = root.join("provider.sock");
@@ -2414,6 +2523,10 @@ const CASES: &[Case] = &[
         owner_death_keeps_guardian_and_writer_live,
     ),
     (
+        "guardian_exits_after_owner_and_tracked_descendant_are_gone",
+        guardian_exits_after_owner_and_tracked_descendant_are_gone,
+    ),
+    (
         "retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive",
         retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive,
     ),
@@ -2432,6 +2545,10 @@ const CASES: &[Case] = &[
     (
         "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative",
         setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative,
+    ),
+    (
+        "descendant_stays_attributed_after_parent_exit_and_session_change",
+        descendant_stays_attributed_after_parent_exit_and_session_change,
     ),
     #[cfg(target_os = "macos")]
     (
@@ -2640,6 +2757,11 @@ fn main() -> Result<()> {
         && args.get(1).is_some_and(|a| a == "s2-owner")
     {
         return owner_process(&std::env::current_dir()?);
+    }
+    if args.first().is_some_and(|a| a == "--fixture")
+        && args.get(1).is_some_and(|a| a == "s2-owner-tree")
+    {
+        return owner_with_descendant(&std::env::current_dir()?);
     }
     if fixture::dispatch()? {
         return Ok(());

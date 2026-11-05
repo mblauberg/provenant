@@ -624,6 +624,16 @@ pub fn fixture_ignore_term() -> io::Result<()> {
     Ok(())
 }
 
+/// Move only the dedicated fixture process into a new session.
+#[cfg(any(test, feature = "fixture"))]
+pub fn fixture_create_session() -> io::Result<()> {
+    // SAFETY: setsid takes no pointers and affects only the calling process.
+    if unsafe { libc::setsid() } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Used only in a dedicated, single-threaded fixture process before any spawn.
 #[cfg(any(test, feature = "fixture"))]
 pub fn fixture_wait_policy(mode: &str) -> io::Result<()> {
