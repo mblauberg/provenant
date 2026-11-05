@@ -30,6 +30,9 @@ pub(crate) mod peer_tests {
     #[test]
     fn tick_reports_unreadable_once_and_advances_another_graph()
     -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::tick_reports_unreadable_once_and_advances_another_graph")? {
+            return Ok(());
+        }
         use provenant_fabric_runtime::graph;
         struct Seed {
             actor: String,
