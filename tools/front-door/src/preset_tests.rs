@@ -442,6 +442,185 @@ fn declared_parallel_reduction_keeps_the_worst_verdict() {
 }
 
 #[test]
+fn quick_review_without_planning_runs_one_reduced_lens() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let mut layers = Layers::empty();
+    layers.review = Some(shapes());
+    let expansion = expand(
+        &layers,
+        "review",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.risk_tier='routine'".into(),
+            "parameters.subject.commit='0123456789abcdef0123456789abcdef01234567'".into(),
+        ],
+    )
+    .unwrap();
+    let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner::default();
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert_eq!(owner.launched, ["lenses--lens-correctness-spec"]);
+    let panel = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "lenses")
+        .unwrap();
+    assert_eq!(
+        panel
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.verdict.as_deref())
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token),
+        Some(provenant_records::workflow::ReviewVerdict::Approve)
+    );
+    assert_eq!(
+        panel
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.commit.as_deref()),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
+}
+
+#[test]
+fn quick_review_reduces_all_explicit_lenses() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let mut layers = Layers::empty();
+    layers.review = Some(Box::new(|query| {
+        let mut hint = shapes()(query)?;
+        hint.slots = vec!["junior".into(); 3];
+        Ok(hint)
+    }));
+    let expansion = expand(
+        &layers,
+        "review",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.risk_tier='routine'".into(),
+            "parameters.subject.commit='0123456789abcdef0123456789abcdef01234567'".into(),
+            "parameters.lenses=[{name='correctness-spec',tier='',when=''},{name='tests',tier='',when=''},{name='security-privacy',tier='',when=''}]".into(),
+        ],
+    ).unwrap();
+    let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner {
+        failing: vec!["lenses--lens-tests".into()],
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert_eq!(owner.launched.len(), 3);
+    assert!(
+        owner.launched.contains(&"lenses--lens-tests".into()),
+        "{:?}",
+        owner.launched
+    );
+    let outputs = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "lenses")
+        .unwrap()
+        .outputs
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        outputs
+            .verdict
+            .as_deref()
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token),
+        Some(provenant_records::workflow::ReviewVerdict::RequestChanges)
+    );
+    assert_eq!(
+        outputs.commit.as_deref(),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
+}
+
+#[test]
+fn unframed_model_synthesis_uses_the_commit_source() {
+    let mut layers = Layers::empty();
+    layers.review = Some(Box::new(|_| {
+        Ok(super::preset::ShapeHint {
+            name: "custom".into(),
+            source: "test".into(),
+            frame: false,
+            verifiers: 0,
+            synthesis: provenant_routing::ReviewSynthesis::Model,
+            slots: vec!["senior".into()],
+            ..Default::default()
+        })
+    }));
+    let expansion = expand(
+        &layers,
+        "review",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        node(&expansion.document, "synthesis")["source"],
+        json!({"type":"commit","commit":"HEAD"})
+    );
+}
+
+#[test]
+fn nested_quick_review_exports_its_verdict_and_commit() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let mut layers = Layers::empty();
+    layers.review = Some(shapes());
+    layers.insert("test", "nested-review", "stages=[{id='review',preset='review',parameters={worktree='/repo/lane',risk_tier='routine',subject={type='commit',commit='0123456789abcdef0123456789abcdef01234567'}}}]\n").unwrap();
+    let expansion = expand(&layers, "nested-review", "brief", &[]).unwrap();
+    let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner::default();
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert_eq!(owner.launched, ["review--lenses--lens-correctness-spec"]);
+    let review = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "review")
+        .unwrap();
+    let outputs = review.outputs.as_ref().unwrap();
+    assert_eq!(
+        outputs
+            .verdict
+            .as_deref()
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token),
+        Some(provenant_records::workflow::ReviewVerdict::Approve)
+    );
+    assert_eq!(
+        outputs.commit.as_deref(),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
+}
+
+#[test]
 fn raw_node_kinds_and_control_role_profiles_keep_their_configuration() {
     use provenant_fabric_runtime::graph::{GraphDocument, NodeKind};
     let cases = [
@@ -961,7 +1140,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             );
             std::fs::read_to_string(output_path).unwrap()
         } else if self.failing.contains(&key.node_id) {
-            "Blocked on the user.\nVERDICT: FAIL\n".into()
+            "Blocked on the user.\n```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: FAIL\n".into()
         } else if self.council_findings && key.node_id == "verify" {
             "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"summary\":\"fixture finding\",\"status\":\"open\"}]}\n```\nVERDICT: PASS\n".into()
         } else if self.council_findings && key.node_id == "synthesis" {
@@ -1964,6 +2143,13 @@ fn shapes() -> super::preset::ShapeSelector {
         Ok(super::preset::ShapeHint {
             name: name.into(),
             source: source.into(),
+            frame: name != "quick",
+            verifiers: usize::from(name != "quick"),
+            synthesis: if name == "quick" {
+                provenant_routing::ReviewSynthesis::Reduce
+            } else {
+                provenant_routing::ReviewSynthesis::Model
+            },
             slots: vec!["junior".into(); count],
             plan: provenant_routing::ReviewConfig::default().lens_plan(query.kind, &[], false),
             ..Default::default()
@@ -2412,7 +2598,7 @@ default = "Preset default policy."
 }
 
 fn lens_ids(document: &serde_json::Value) -> Vec<String> {
-    document["nodes"][1]["composite"]["nodes"]
+    node(document, "lenses")["composite"]["nodes"]
         .as_array()
         .unwrap()
         .iter()
@@ -2590,6 +2776,7 @@ fn a_path_added_lens_survives_its_risk_tag_condition_without_duplicating() {
             Ok(super::preset::ShapeHint {
                 name: "quick".into(),
                 source: "test".into(),
+                synthesis: provenant_routing::ReviewSynthesis::Reduce,
                 slots: vec!["junior".into()],
                 plan: provenant_routing::LensPlan {
                     add: vec!["tests".into()],

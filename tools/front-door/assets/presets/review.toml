@@ -1,3 +1,4 @@
+shape_stages = { frame = "subject", panel = "lenses", verifier = "verify", synthesis = "synthesis" }
 stages = [
   { id = "subject", role = "plan.review" },
   { id = "lenses", min_successful = "${min_reviews}", parallel = [

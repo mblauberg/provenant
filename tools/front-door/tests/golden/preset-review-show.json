@@ -83,6 +83,10 @@
       "roles.plan.review": "bundled",
       "roles.review.synthesis": "bundled",
       "roles.review.verify": "bundled",
+      "shape_stages.frame": "bundled",
+      "shape_stages.panel": "bundled",
+      "shape_stages.synthesis": "bundled",
+      "shape_stages.verifier": "bundled",
       "stages": "bundled"
     },
     "values": {
@@ -303,6 +307,12 @@
         "subject_types": [
           "commit"
         ]
+      },
+      "shape_stages": {
+        "frame": "subject",
+        "panel": "lenses",
+        "synthesis": "synthesis",
+        "verifier": "verify"
       },
       "stages": [
         {

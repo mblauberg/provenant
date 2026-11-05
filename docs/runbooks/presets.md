@@ -42,6 +42,13 @@ A parallel group can declare `zero_minimum = "all_but_one"` so a zero
 `min_successful` requires all but one member, at least one.
 It can declare `reduce_verdict = true` to export the worst successful member
 verdict; missing or invalid verdicts count as inconclusive.
+`export_first` adds outputs from the first member only; those outputs are
+unavailable if that member fails.
+
+For a commit-subject review, `shape_stages` names the frame, parallel panel,
+verifier and synthesis stages controlled by the selected review shape. When a
+plan is applied or the subject comes from another node, those stages are left
+to their existing planner or launch-time path.
 
 A `for_each` stage may declare `review_lenses = true` to apply the review
 shape and risk-tag selection to its list.
@@ -434,10 +441,13 @@ bound `batch_worktree`, then the project roots above. They do not resolve
 specs from the worktrees the planner may assign to lanes. Missing or unreadable
 files produce a named warning in explain and at launch, with guidance to pass
 an issue-number spec instead. Issue numbers are passed through unchanged. The
-subject node states both. Prompts live in
-`skills/code-review/references/lenses/`. After the lenses a verifier tries to
-falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
-finding one disposition: accepted, rejected or deferred, with a reason. The
+frame states both when the shape includes it. Prompts live in
+`skills/code-review/references/lenses/`. For a commit subject without an
+applied plan, the quick shape skips framing and uses a deterministic reduction
+of its lens verdicts; standard and deep run a verifier and synthesis by default.
+Kind, path and risk-tag additions can add lenses to quick. The verifier tries to
+falsify every finding, and synthesis gives each finding one disposition:
+accepted, rejected or deferred, with a reason. The
 `generator-evaluator` evaluator does the same over its lens findings. Its
 `min_lenses` parameter defaults to 0 (all selected lenses but one, at least
 one); set a positive number to require that many, including the full panel.

@@ -148,7 +148,7 @@ fn review_spec_states_only_what_the_stage_sets() {
             scope: "",
         }
         .review_spec(
-            json!({"min_successful":"${min_reviews}", "reduce_verdict":true})
+            json!({"min_successful":"${min_reviews}", "reduce_verdict":true, "export_first":["commit"]})
                 .as_object()
                 .unwrap(),
         )
@@ -172,6 +172,7 @@ fn review_spec_states_only_what_the_stage_sets() {
     assert!(spec_json["size"].is_null());
     assert_eq!(spec_json["min_successful"], 2);
     assert_eq!(spec_json["reduce_verdict"], true);
+    assert_eq!(spec_json["export_first"], json!(["commit"]));
     assert_eq!(spec_json["lenses"][0]["tier"], table);
     assert!(spec_json["lenses"][1]["tier"].is_null());
     assert_eq!(spec_json["lenses"][1]["when"], "security");

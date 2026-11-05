@@ -1058,6 +1058,9 @@ pub fn expand_with(
             )?);
         }
     }
+    if !plan.as_ref().is_some_and(|decision| decision.applied) {
+        apply_shape_stages(layers, name, &mut config, &origins, prompt)?;
+    }
     let mut nodes = Vec::new();
     build(
         layers,
@@ -1077,6 +1080,7 @@ pub fn expand_with(
     // Request bindings affect how inputs reach parameters, not the graph itself.
     origins.retain(|path, _| {
         !path.ends_with("$scope_read_only")
+            && !path.split('.').any(|part| part == "shape_stages")
             && !((path.ends_with(".bind")
                 || path.ends_with(".tracker_advice")
                 || path.ends_with(".inherit"))
@@ -1589,6 +1593,13 @@ fn lower_leaf(
             .resolve(role, roles, layers.exclude_repo.get())?;
         profile = resolved.profile.clone();
         resolved_role = Some(resolved);
+    }
+    // Source bindings are a tagged union. An explicit stage source replaces
+    // the role's binding rather than inheriting fields from another variant.
+    if entry.contains_key("source")
+        && let Some(map) = profile.as_object_mut()
+    {
+        map.remove("source");
     }
     merge(
         &mut profile,
@@ -2144,6 +2155,7 @@ fn build_stages(
                 "retry",
                 "pattern",
                 "plan",
+                "shape_stages",
             ]
             .contains(&key.as_str())
         })
@@ -2184,6 +2196,124 @@ fn build_stages(
         inherit_preset_retry(&mut nodes[start..], &retry);
     }
     Ok(ends)
+}
+
+/// Apply a resolved review shape to the stage names declared by a preset.
+/// Writer-sourced subjects are left for launch-time resolution.
+fn apply_shape_stages(
+    layers: &Layers,
+    name: &str,
+    config: &mut Value,
+    origins: &BTreeMap<String, String>,
+    prompt: &str,
+) -> Result<(), String> {
+    let Some(declaration) = config.get("shape_stages").cloned() else {
+        return Ok(());
+    };
+    let declaration = declaration
+        .as_object()
+        .ok_or("shape_stages must be a table")?;
+    if declaration
+        .keys()
+        .any(|key| !["frame", "panel", "verifier", "synthesis"].contains(&key.as_str()))
+    {
+        return Err("shape_stages has an unknown field".into());
+    }
+    let stage = |key: &str| -> Result<String, String> {
+        declaration
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("shape_stages needs {key}"))
+    };
+    let frame = stage("frame")?;
+    let panel = stage("panel")?;
+    let verifier = stage("verifier")?;
+    let synthesis = stage("synthesis")?;
+    if [&frame, &panel, &verifier, &synthesis]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != 4
+    {
+        return Err("shape_stages must name distinct stages".into());
+    }
+    let parameters = flatten_parameters(
+        name,
+        config.get("parameters").unwrap_or(&json!({})),
+        "",
+        origins,
+    )?;
+    let subject = parameters
+        .get("subject")
+        .cloned()
+        .ok_or("shape_stages needs a subject")?;
+    if subject.get("type").and_then(Value::as_str) != Some("commit") {
+        return Ok(());
+    }
+    let (mut stack, mut local, mut files) = (Vec::new(), origins.clone(), Vec::new());
+    let builder = StageBuilder {
+        layers,
+        name,
+        prompt,
+        parameters,
+        roles: config.get("roles"),
+        stack: &mut stack,
+        origins: &mut local,
+        repo_files: &mut files,
+        scope: "",
+    };
+    let Some(shape) = builder.shape_hint(false)? else {
+        return Ok(());
+    };
+    let explicit_verifiers = origins
+        .get("parameters.verifiers")
+        .is_some_and(|origin| !layers.is_initial_origin(name, "verifiers", origin));
+    let stages = config
+        .get_mut("stages")
+        .and_then(Value::as_array_mut)
+        .ok_or("shape_stages needs stages")?;
+    for id in [&frame, &panel, &verifier, &synthesis] {
+        if stages
+            .iter()
+            .filter(|stage| stage.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            .count()
+            != 1
+        {
+            return Err(format!("shape_stages needs exactly one stage {id}"));
+        }
+    }
+    if !shape.frame {
+        stages.retain(|stage| stage.get("id").and_then(Value::as_str) != Some(frame.as_str()));
+        for id in [&panel, &verifier, &synthesis] {
+            if let Some(stage) = stages
+                .iter_mut()
+                .find(|stage| stage.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            {
+                stage["source"] = subject.clone();
+            }
+        }
+    }
+    if !explicit_verifiers
+        && let Some(stage) = stages
+            .iter_mut()
+            .find(|stage| stage.get("id").and_then(Value::as_str) == Some(verifier.as_str()))
+    {
+        stage["count"] = json!(shape.verifiers);
+    }
+    if shape.synthesis == provenant_routing::ReviewSynthesis::Reduce {
+        stages.retain(|stage| stage.get("id").and_then(Value::as_str) != Some(synthesis.as_str()));
+        let stage = stages
+            .iter_mut()
+            .find(|stage| stage.get("id").and_then(Value::as_str) == Some(panel.as_str()))
+            .ok_or("missing review panel")?;
+        stage["reduce_verdict"] = json!(true);
+        stage["export_first"] = json!(["commit"]);
+        config["exports"] =
+            json!([{ "node": panel, "outputs": ["result", "findings", "verdict", "commit"] }]);
+    }
+    Ok(())
 }
 
 // Preserve the nearest preset default on lowered leaves, including composite
@@ -2279,6 +2409,9 @@ impl StageBuilder<'_> {
         let object = entry.as_object().ok_or("stage entries must be tables")?;
         if object.contains_key("reduce_verdict") && !object.contains_key("parallel") {
             return Err("reduce_verdict requires a parallel group".into());
+        }
+        if object.contains_key("export_first") && !object.contains_key("parallel") {
+            return Err("export_first requires a parallel group".into());
         }
         if let Some(mode) = object.get("zero_minimum")
             && (mode.as_str() != Some("all_but_one") || !object.contains_key("parallel"))
@@ -2489,6 +2622,7 @@ impl StageBuilder<'_> {
                         )?;
                     }
                 }
+                apply_shape_stages(self.layers, child, &mut config, &local, self.prompt)?;
                 if let Some(roles) = object.remove("roles") {
                     let roles = interpolate_inner(
                         &roles,
@@ -2549,6 +2683,7 @@ impl StageBuilder<'_> {
                     object.remove("min_successful");
                     object.remove("zero_minimum");
                     object.remove("reduce_verdict");
+                    object.remove("export_first");
                     object.remove("exports");
                     (deferred, true)
                 } else {
@@ -2563,9 +2698,27 @@ impl StageBuilder<'_> {
                             depth + 1,
                         )?);
                     }
-                    let exports = object
+                    let mut exports = object
                         .remove("exports")
                         .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
+                    if let Some(requested) = object.remove("export_first") {
+                        let requested =
+                            interpolate(&requested, &self.parameters, self.prompt, index as usize)?;
+                        let first = exports
+                            .as_array_mut()
+                            .and_then(|exports| exports.first_mut())
+                            .and_then(|export| export.get_mut("outputs"))
+                            .and_then(Value::as_array_mut)
+                            .ok_or("export_first requires at least one group export")?;
+                        for output in requested
+                            .as_array()
+                            .ok_or("export_first must be an array")?
+                        {
+                            if !first.contains(output) {
+                                first.push(output.clone());
+                            }
+                        }
+                    }
                     let all_but_one = object
                         .remove("zero_minimum")
                         .is_some_and(|mode| mode == "all_but_one");

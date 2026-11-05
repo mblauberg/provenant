@@ -154,6 +154,8 @@ pub struct ReviewSpec {
     pub min_successful: Option<usize>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reduce_verdict: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub export_first: Vec<OutputKind>,
     pub max_nodes: usize,
 }
 

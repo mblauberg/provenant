@@ -2,7 +2,7 @@
 //! selects, and the lenses that fill it.
 use super::StageBuilder;
 use provenant_fabric_runtime::graph::{ReviewLens, ReviewSpec};
-use provenant_routing::{LensPlan, ReviewConfig, ReviewReviewer, tier_is_set};
+use provenant_routing::{LensPlan, ReviewConfig, ReviewReviewer, ReviewSynthesis, tier_is_set};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -37,6 +37,9 @@ type GitRunner = dyn Fn(&std::path::Path, &[&str]) -> Result<String, String>;
 pub struct ShapeHint {
     pub name: String,
     pub source: String,
+    pub frame: bool,
+    pub verifiers: usize,
+    pub synthesis: ReviewSynthesis,
     /// Reviewer pools in shape order, one entry per reviewer.
     pub slots: Vec<String>,
     /// Lens names a shape reviewer group names explicitly, with its pool.
@@ -167,6 +170,9 @@ fn review_selector_with_git(
             .collect::<Vec<_>>();
         let mut hint = ShapeHint {
             name: selected.name.to_owned(),
+            frame: selected.shape.frame,
+            verifiers: selected.shape.verifiers,
+            synthesis: selected.shape.synthesis,
             source: format!(
                 "{}{}; size={}; kind={}; risk={}",
                 selected.source,
@@ -700,6 +706,14 @@ impl StageBuilder<'_> {
                 })
                 .transpose()?
                 .unwrap_or(false),
+            export_first: group
+                .get("export_first")
+                .map(|value| {
+                    let value = super::interpolate(value, &self.parameters, self.prompt, 1)?;
+                    serde_json::from_value(value).map_err(|error| format!("export_first: {error}"))
+                })
+                .transpose()?
+                .unwrap_or_default(),
             max_nodes: names.len().saturating_add(1).max(2),
         })
     }

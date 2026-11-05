@@ -4402,7 +4402,21 @@ impl BoundGraphOwner<'_> {
         }
         let exports: Vec<_> = members
             .iter()
-            .map(|member| serde_json::json!({"node": member.id, "outputs": ["result", "findings"]}))
+            .enumerate()
+            .map(|(index, member)| {
+                let mut outputs = vec![
+                    provenant_fabric_runtime::graph::OutputKind::Result,
+                    provenant_fabric_runtime::graph::OutputKind::Findings,
+                ];
+                if index == 0 {
+                    for output in &spec.export_first {
+                        if !outputs.contains(output) {
+                            outputs.push(*output);
+                        }
+                    }
+                }
+                serde_json::json!({"node": member.id, "outputs": outputs})
+            })
             .collect();
         let root: GraphNode = serde_json::from_value(serde_json::json!({
             "id": root_id,

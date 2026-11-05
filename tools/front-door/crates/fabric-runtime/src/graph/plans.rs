@@ -726,6 +726,7 @@ pub(super) fn validate_review_addition(
             composite.reduce_verdict != spec.reduce_verdict
                 || composite.min_successful != spec.min_successful.map(|n| if n == 0 { composite.exports.len().saturating_sub(1).max(1) } else { n })
                 || composite.exports.is_empty()
+                || composite.exports.first().is_none_or(|first| spec.export_first.iter().any(|output| !first.outputs.contains(output)))
                 || composite.exports.iter().any(|export| {
                     export.outputs.is_empty() || !exported.insert(&export.node)
                         || !addition.nodes.iter().any(|member| member.id == export.node && member.id != root.id)
