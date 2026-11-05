@@ -179,6 +179,8 @@ mod tests {
         for path in [&home, &checkout, &state] {
             std::fs::create_dir(path).unwrap();
         }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
         let common = checkout.join(".git");
         std::fs::create_dir(&common).unwrap();
         let mut inputs = RootInputs::new(home, checkout);

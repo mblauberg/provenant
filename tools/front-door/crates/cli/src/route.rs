@@ -1044,9 +1044,8 @@ fn with_context<T>(
     domains
         .quota
         .apply_calibration(&mut quota_records, timestamp.as_second());
-    // A verified login can replace older auth evidence. For OpenCode, a fresh
-    // executable observation leaves login unverified; release stale sign-out
-    // or expiry for this launch, but never an identity mismatch.
+    // Fresh login evidence can replace older sign-out or expiry evidence.
+    // Only an account-identifying check can clear an identity mismatch.
     let login_evidence = |adapter: &str, key: &str, now: i64| {
         if !revalidated_auth {
             return None;
@@ -1061,18 +1060,22 @@ fn with_context<T>(
             })
             .filter_map(|record| {
                 let at = record.observed_unix_seconds;
-                if adapter == "claude"
-                    || (matches!(adapter, "codex" | "agy" | "cursor")
-                        && record.fixture_ref == format!("installed/{adapter}/login-status"))
-                {
-                    Some(crate::quota::LoginEvidence::Verified(at))
-                } else if adapter == "opencode"
-                    && record.fixture_ref == "installed/opencode/login-unverified"
-                {
-                    Some(crate::quota::LoginEvidence::Unverified(at))
+                let spec = provenant_records::AdapterSpec::get(adapter)?;
+                let observed = match spec.login_observation {
+                    provenant_records::LoginObservation::AccountAvailability => true,
+                    provenant_records::LoginObservation::Reprobe => {
+                        record.fixture_ref == format!("installed/{adapter}/login-status")
+                    }
+                    provenant_records::LoginObservation::ExecutableOnly => {
+                        record.fixture_ref == format!("installed/{adapter}/login-unverified")
+                    }
+                    provenant_records::LoginObservation::None => false,
+                };
+                observed.then_some(if spec.login_check_names_account {
+                    crate::quota::LoginEvidence::Verified(at)
                 } else {
-                    None
-                }
+                    crate::quota::LoginEvidence::Unverified(at)
+                })
             })
             .max_by_key(|probe| probe.observed_at())
     };
