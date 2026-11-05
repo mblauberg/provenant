@@ -1,0 +1,112 @@
+{
+  "context": {
+    "pattern": "fan-out-synthesise",
+    "preset": "fan-out-synthesise"
+  },
+  "graph_id": "preset-1fac07a6da1f82eecb728e3ffc144519",
+  "nodes": [
+    {
+      "access": "read_only",
+      "depends_on": [],
+      "id": "branch-one",
+      "prompt": "first question",
+      "routes": [
+        {
+          "alias": "junior"
+        },
+        {
+          "alias": "junior"
+        }
+      ],
+      "title": "branch-one"
+    },
+    {
+      "access": "read_only",
+      "depends_on": [],
+      "id": "branch-two",
+      "prompt": "second question",
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
+      "title": "branch-two"
+    },
+    {
+      "access": "read_only",
+      "depends_on": [
+        "branch-one",
+        "branch-two"
+      ],
+      "id": "synthesis",
+      "inputs": [
+        {
+          "node": "branch-one",
+          "outputs": [
+            "result"
+          ]
+        },
+        {
+          "node": "branch-two",
+          "outputs": [
+            "result"
+          ]
+        }
+      ],
+      "kind": "synthesise",
+      "prompt": "brief",
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
+      "title": "synthesis"
+    }
+  ],
+  "provenance": {
+    "origins": {
+      "parameters.branches": "--params-file",
+      "parameters.branches.default": "bundled",
+      "parameters.branches.doc": "bundled",
+      "parameters.branches.max": "bundled",
+      "parameters.branches.type": "bundled",
+      "parameters.local_check_policy": "bundled",
+      "parameters.min_branches.doc": "bundled",
+      "parameters.min_branches.min": "bundled",
+      "parameters.min_branches.optional": "bundled",
+      "parameters.min_branches.type": "bundled",
+      "parameters.route.default": "bundled",
+      "parameters.route.doc": "bundled",
+      "parameters.route.type": "bundled",
+      "parameters.synthesis_route.doc": "bundled",
+      "parameters.synthesis_route.optional": "bundled",
+      "parameters.synthesis_route.type": "bundled",
+      "parameters.width.default": "bundled",
+      "parameters.width.doc": "bundled",
+      "parameters.width.max": "bundled",
+      "parameters.width.min": "bundled",
+      "parameters.width.type": "bundled",
+      "pattern.cost": "bundled",
+      "pattern.level": "bundled",
+      "pattern.select_when": "bundled",
+      "pattern.summary": "bundled",
+      "pattern.tags": "bundled",
+      "plan.explicit": "bundled",
+      "plan.guidance": "bundled",
+      "plan.patterns": "bundled",
+      "plan.replaces": "bundled",
+      "stages": "bundled"
+    },
+    "preset": "fan-out-synthesise",
+    "roles": {},
+    "substitutions": [],
+    "warnings": []
+  },
+  "schema_version": 1
+}

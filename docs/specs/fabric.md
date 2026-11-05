@@ -380,6 +380,12 @@ the fan-out presets also accept `parameters.width` (1 to 32, default 2). A
 chain passes the first result to the second; synthesis receives each branch
 result. A stage can run any preset.
 
+A settled graph reports `succeeded`, `partial` or `failed` alongside its
+settlement status. A partial graph has failures covered by successful groups
+that declared a minimum and no other unhandled failures. It returns success to
+the caller, but graph-level pull-request delivery still requires every node to
+succeed.
+
 A preset declares ordered `stages`. A stage selects a role, another
 preset or heterogeneous `parallel` entries. `count` repeats an entry, from 1
 to 32. Role profiles supply node defaults, and an entry may override them:

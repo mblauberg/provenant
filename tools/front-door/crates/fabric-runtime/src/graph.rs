@@ -69,6 +69,59 @@ pub use plans::{
     RemainingBudgets,
 };
 
+fn recover_minima(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) -> bool {
+    let mut recovered = false;
+    for (progress, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
+        if progress.min_successful.is_none()
+            && let Some(minimum) = planned
+                .composite
+                .as_ref()
+                .and_then(|spec| spec.min_successful)
+        {
+            progress.min_successful = Some(minimum);
+            recovered = true;
+        }
+    }
+    recovered
+}
+
+fn recover_status_minima(
+    document: &GraphDocument,
+    checkpoint: &mut GraphCheckpoint,
+) -> Result<(), ()> {
+    let limits = crate::config::GraphLimits {
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
+        ..plans::generous()
+    };
+    plans::validate_persisted_topology(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &limits,
+    )
+    .map_err(|_| ())?;
+    let expanded = plans::expand(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &limits,
+    )
+    .map_err(|_| ())?;
+    let (plan, _) = validate_flat_plan(&expanded, &limits).map_err(|_| ())?;
+    if checkpoint.nodes.len() != plan.nodes.len()
+        || checkpoint
+            .nodes
+            .iter()
+            .zip(&plan.nodes)
+            .any(|(progress, planned)| progress.id != planned.id)
+    {
+        return Err(());
+    }
+    recover_minima(checkpoint, &plan);
+    Ok(())
+}
+
 // Reserve the existing family-separation envelope for sibling groups too.
 fn bounded_envelope_plan(plan: &PlannedGraph) -> PlannedGraph {
     let mut bounded = plan.clone();
@@ -1039,6 +1092,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .map(|node| NodeProgress {
                         extra: Default::default(),
                         children: node.composite_members.clone(),
+                        min_successful: node
+                            .composite
+                            .as_ref()
+                            .and_then(|spec| spec.min_successful),
                         source_commit: None,
                         fragment: None,
                         handoff: None,
@@ -1068,6 +1125,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             checkpoint
         }
     };
+
+    if recover_minima(&mut checkpoint, &plan) {
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+    }
 
     if may_ask(&plan) && (checkpoint.instance_id.is_none() || checkpoint.ask_actor.is_none()) {
         asks::identity::<R, J::Error>(&mut checkpoint, owner)?;
@@ -1182,6 +1243,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     } else {
                         GraphStatus::Paused
                     },
+                    outcome: None,
                     checkpoint,
                     advance_error: None,
                 });
@@ -1302,6 +1364,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
                 return Ok(GraphRun {
                     status: GraphStatus::Cancelled,
+                    outcome: None,
                     checkpoint,
                     advance_error: None,
                 });
@@ -2960,6 +3023,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             .find_map(|node| node.advance_error.clone());
         return Ok(GraphRun {
             status,
+            outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
             checkpoint,
             advance_error,
         });

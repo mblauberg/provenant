@@ -156,7 +156,7 @@ fn receipt_replay_and_independent_effects() -> TestResult {
 }
 
 #[test]
-fn receipt_migration_copies_legacy_wal() -> TestResult {
+fn receipt_migration_snapshots_committed_wal() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = TestClock::new(WallTime::from_micros(100)?, MonoTime::from_micros(0));
@@ -171,7 +171,7 @@ fn receipt_migration_copies_legacy_wal() -> TestResult {
     drop(store);
     let db = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
     db.execute_batch(
-        "PRAGMA journal_mode=WAL; DROP TABLE settlement_receipts; PRAGMA user_version=6;",
+        "PRAGMA journal_mode=WAL; DROP TABLE admission_windows; PRAGMA user_version=7;",
     )?;
     let store = RunStore::open(&context, &call)?;
     assert_eq!(
@@ -184,7 +184,7 @@ fn receipt_migration_copies_legacy_wal() -> TestResult {
         rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3.bak-100"))?;
     let version: i64 = backup.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let rows: i64 = backup.query_row("SELECT count(*) FROM attempts", [], |row| row.get(0))?;
-    assert_eq!((version, rows), (6, 1));
+    assert_eq!((version, rows), (7, 1));
     Ok(())
 }
 

@@ -720,12 +720,12 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
 }
 
 #[test]
-fn retired_legacy_checkout_flag_is_rejected_without_writes() -> Result {
+fn unknown_install_flag_is_rejected_without_writes() -> Result {
     let rig = TestRig::new()?.without_state()?;
     let stage = staged(&rig)?;
     let mut install_args = args(&stage, false);
     install_args.extend([
-        "--legacy-checkout".into(),
+        "--unknown-install-option".into(),
         rig.project.clone().into_os_string(),
     ]);
     let output = rig.execute_os(
@@ -739,7 +739,7 @@ fn retired_legacy_checkout_flag_is_rejected_without_writes() -> Result {
         String::from_utf8_lossy(&output.stdout.bytes),
         String::from_utf8_lossy(&output.stderr.bytes)
     );
-    assert!(message.contains("--legacy-checkout"), "{message}");
+    assert!(message.contains("--unknown-install-option"), "{message}");
     assert!(!rig.state.exists());
     rig.assert_legacy_unchanged()
 }

@@ -469,7 +469,7 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
-const SPEC_KEYS: [&str; 6] = ["type", "default", "min", "max", "enum", "doc"];
+const SPEC_KEYS: [&str; 7] = ["type", "default", "min", "max", "enum", "doc", "optional"];
 const TYPE_NAMES: [&str; 6] = ["string", "integer", "number", "boolean", "list", "table"];
 /// Parameters every parent hands to a child preset that declares them.
 const AMBIENT: [&str; 3] = ["risk_tier", "subject", "local_check_policy"];
@@ -744,9 +744,18 @@ fn flatten_parameters(
         let fail = |message: String| {
             invalid_config(name, &format!("parameters.{key}"), &message, scope, origins)
         };
-        let default = value
-            .get("default")
-            .ok_or_else(|| fail("required parameter is missing".into()))?;
+        if value
+            .get("optional")
+            .is_some_and(|optional| !optional.is_boolean())
+        {
+            return Err(fail("optional must be a boolean".into()));
+        }
+        let absent = Value::Null;
+        let default = match value.get("default") {
+            Some(default) => default,
+            None if value.get("optional") == Some(&Value::Bool(true)) => &absent,
+            None => return Err(fail("required parameter is missing".into())),
+        };
         if let Some(kind) = value.get("type")
             && !kind.as_str().is_some_and(|kind| TYPE_NAMES.contains(&kind))
         {
@@ -773,6 +782,10 @@ fn flatten_parameters(
         ) && min > max
         {
             return Err(fail("min must not exceed max".into()));
+        }
+        if default.is_null() {
+            plain.insert(key.clone(), Value::Null);
+            continue;
         }
         if (value.get("min").is_some() || value.get("max").is_some())
             && !matches!(
@@ -2088,8 +2101,8 @@ struct StageBuilder<'a> {
 }
 
 impl StageBuilder<'_> {
-    /// Lenses that must succeed for a partial group. Zero takes the review
-    /// ladder minimum for `risk_tier`, and never less than one review.
+    /// Members that must succeed. Zero takes the configured review ladder's
+    /// minimum for `risk_tier`, and never less than one member.
     fn minimum_successful(&self, value: &Value) -> Result<u64, String> {
         let minimum = interpolate(value, &self.parameters, self.prompt, 1)?
             .as_u64()
@@ -2145,6 +2158,137 @@ impl StageBuilder<'_> {
             return Err(format!("preset composition depth exceeds {DEPTH}"));
         }
         let object = entry.as_object().ok_or("stage entries must be tables")?;
+        // A list can replace a counted stage when it contains explicit items.
+        if let Some(list) = object.get("for_each_if_nonempty") {
+            let values = interpolate(list, &self.parameters, self.prompt, 1)?;
+            let values = values
+                .as_array()
+                .ok_or("for_each_if_nonempty must name a list parameter")?;
+            let mut selected = object.clone();
+            selected.remove("for_each_if_nonempty");
+            let item_fields = selected.remove("item_fields");
+            if !values.is_empty() {
+                if let Some(field) = selected.remove("item_route_field") {
+                    let field = field.as_str().ok_or("item_route_field must be a string")?;
+                    if let Some(routes) = &self.layers.known_routes {
+                        for item in values {
+                            let tier = item
+                                .get(field)
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| format!("{list}: item needs {field}"))?;
+                            if !routes.contains(tier) {
+                                return Err(format!(
+                                    "{list}: unknown route {tier}; configured routes: {}",
+                                    routes.iter().cloned().collect::<Vec<_>>().join(", ")
+                                ));
+                            }
+                        }
+                    }
+                }
+                if let Some(count) = selected.remove("count")
+                    && let Some(parameter) = count
+                        .as_str()
+                        .and_then(|text| text.strip_prefix("${"))
+                        .and_then(|text| text.strip_suffix('}'))
+                {
+                    let current = self.parameters.get(parameter);
+                    let default = self.layers.resolve(self.name).ok().and_then(|(config, _)| {
+                        config
+                            .pointer(&format!("/parameters/{parameter}/default"))
+                            .cloned()
+                    });
+                    if current != default.as_ref() {
+                        self.layers.warnings.borrow_mut().push(format!(
+                            "{list} replaces {parameter}={}",
+                            current.map(scalar_text).unwrap_or_default()
+                        ));
+                    }
+                }
+                selected.insert("for_each".into(), list.clone());
+                if let Some(fields) = item_fields {
+                    for (key, value) in fields.as_object().ok_or("item_fields must be a table")? {
+                        selected.insert(key.clone(), value.clone());
+                    }
+                }
+            } else {
+                selected.remove("item_route_field");
+            }
+            return self.entry(&Value::Object(selected), default_id, deps, nodes, depth);
+        }
+        if (object.contains_key("count") || object.contains_key("for_each"))
+            && let Some(minimum) = object.get("min_successful")
+            && !interpolate(minimum, &self.parameters, self.prompt, 1)?.is_null()
+        {
+            let mut member = object.clone();
+            member.remove("min_successful");
+            let id = object
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or(default_id);
+            if !valid_name(id) {
+                return Err(format!("invalid stage node ID: {id}"));
+            }
+            if nodes.iter().any(|node| node["id"] == id) {
+                return Err(format!("duplicate stage node ID: {id}"));
+            }
+            let mut children = Vec::new();
+            let ends = self.entry(
+                &Value::Object(member),
+                default_id,
+                &[],
+                &mut children,
+                depth + 1,
+            )?;
+            let minimum = interpolate(minimum, &self.parameters, self.prompt, 1)?
+                .as_u64()
+                .filter(|minimum| *minimum > 0)
+                .ok_or("min_successful must be a positive integer")?;
+            if minimum as usize > ends.len() {
+                return Err(format!(
+                    "min_successful ({}) {minimum} exceeds group {id} width ({}) {}",
+                    object
+                        .get("min_successful")
+                        .and_then(Value::as_str)
+                        .unwrap_or("literal"),
+                    object
+                        .get("count")
+                        .and_then(Value::as_str)
+                        .unwrap_or("members"),
+                    ends.len()
+                ));
+            }
+            let outputs = interpolate(
+                object.get("outputs").unwrap_or(&json!(["result"])),
+                &self.parameters,
+                self.prompt,
+                1,
+            )?;
+            let exports = selected_inputs(&ends, &outputs);
+            let mut boundary_deps = deps.to_vec();
+            for child in &children {
+                if let Some(dependencies) = child.get("depends_on").and_then(Value::as_array) {
+                    for dependency in dependencies {
+                        let name = dependency
+                            .as_str()
+                            .ok_or("dependencies must be node names")?;
+                        if !children.iter().any(|child| child["id"] == name)
+                            && !boundary_deps.iter().any(|existing| existing == name)
+                        {
+                            boundary_deps.push(name.to_owned());
+                        }
+                    }
+                }
+            }
+            nodes.push(composite(
+                id,
+                children,
+                exports,
+                &boundary_deps,
+                &outputs,
+                Some(minimum),
+            ));
+            return Ok(vec![id.to_owned()]);
+        }
         let items: Vec<Option<Value>> = if let Some(list) = object.get("for_each") {
             if object.contains_key("count") {
                 return Err("for_each and count are exclusive".into());
@@ -2191,8 +2335,8 @@ impl StageBuilder<'_> {
             let index = position as u64 + 1;
             let id = match item {
                 Some(item) => {
-                    let name = item["name"].as_str().filter(|n| valid_name(n)).ok_or(
-                        "for_each items need a name of lowercase letters, digits and dashes",
+                    let name = item.get("name").or_else(|| item.get("id")).and_then(Value::as_str).filter(|n| valid_name(n)).ok_or(
+                        "for_each items need an id or name of lowercase letters, digits and dashes",
                     )?;
                     format!("{base}-{name}")
                 }
@@ -2200,7 +2344,13 @@ impl StageBuilder<'_> {
                 None => format!("{base}-{index}"),
             };
             if nodes.iter().any(|node| node["id"] == id) {
-                return Err(format!("duplicate stage node ID: {id}"));
+                return Err(format!(
+                    "duplicate stage node ID: {id} in {}",
+                    object
+                        .get("for_each")
+                        .and_then(Value::as_str)
+                        .unwrap_or("stage")
+                ));
             }
             if let Some(item) = item {
                 self.parameters["item"] = item.clone();
@@ -2208,7 +2358,19 @@ impl StageBuilder<'_> {
             let mut object = object.clone();
             object.remove("count");
             object.remove("for_each");
+            if object.get("min_successful").is_some_and(|value| {
+                interpolate(value, &self.parameters, self.prompt, 1)
+                    .is_ok_and(|value| value.is_null())
+            }) {
+                object.remove("min_successful");
+            }
             object.remove("id");
+            if object.get("tier").is_some_and(|value| {
+                interpolate(value, &self.parameters, self.prompt, index as usize)
+                    .is_ok_and(|value| value.is_null())
+            }) {
+                object.remove("tier");
+            }
             let fallback_stage = object.remove("fallback_stage");
             let distinct_families = object.remove("distinct_families");
             let outputs = interpolate(

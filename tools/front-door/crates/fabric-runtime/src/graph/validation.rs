@@ -906,6 +906,12 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 "composite children must match expanded plan membership",
             ),
             (
+                progress.min_successful.is_some()
+                    && progress.min_successful
+                        != node.composite.as_ref().and_then(|spec| spec.min_successful),
+                "composite minimum must match expanded plan",
+            ),
+            (
                 node.composite.is_some()
                     && (node.composite_members.is_empty()
                         || node
