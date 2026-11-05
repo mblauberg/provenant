@@ -1598,6 +1598,56 @@ stages = [
             .ok_or("missing submission refusal reason")?;
         assert_eq!(reason, submitted_reason, "{key}: {submitted_value}");
     }
+    // A group compiles to the same bounded expansion admission checks. Use a
+    // valid graph as the admission input, then vary only the relevant bound or
+    // parent ID for the two CLI calls.
+    let member = "b".repeat(32);
+    std::fs::write(
+        presets.join("limits.toml"),
+        format!(
+            "stages = [{{ id = 'group', stages = [{{ id = '{member}', prompt = 'work' }}], exports = [{{ node = '{member}', outputs = ['result'] }}] }}]\n"
+        ),
+    )?;
+    std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
+    let valid = run(true)?;
+    assert!(valid.status.success());
+    let valid: serde_json::Value = serde_json::from_slice(&valid.stdout)?;
+    let graph = valid["data"]["graph"].clone();
+    for case in ["nodes", "id"] {
+        let mut candidate = graph.clone();
+        let mut limits = provenant_fabric_runtime::config::GraphLimits::default();
+        if case == "nodes" {
+            limits.nodes = 1;
+            std::fs::write(
+                state.join("config.toml"),
+                "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 1\n",
+            )?;
+        } else {
+            std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
+            let parent = "a".repeat(32);
+            candidate["nodes"][0]["id"] = serde_json::json!(parent);
+            std::fs::write(
+                presets.join("limits.toml"),
+                format!(
+                    "stages = [{{ id = '{parent}', stages = [{{ id = '{member}', prompt = 'work' }}], exports = [{{ node = '{member}', outputs = ['result'] }}] }}]\n"
+                ),
+            )?;
+        }
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(candidate)?;
+        let reason = document
+            .admit(&limits)
+            .expect_err("admission must reject the composite");
+        for explain in [true, false] {
+            let output = run(explain)?;
+            assert!(!output.status.success(), "{case}, explain={explain}");
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            assert_eq!(
+                result["error"]["message"], reason,
+                "{case}, explain={explain}"
+            );
+        }
+    }
     fn has_graph_journal(path: &std::path::Path) -> std::io::Result<bool> {
         if !path.exists() {
             return Ok(false);
