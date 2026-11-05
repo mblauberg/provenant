@@ -4227,7 +4227,7 @@ fn render_lanes_omits_account_when_unresolved() -> Result<(), Box<dyn std::error
     );
     assert!(!human.contains("account="));
     assert!(data["lanes"][0].get("title").is_none());
-    assert_eq!(data["lanes"][0]["account"], json!("unknown"));
+    assert!(data["lanes"][0]["account"].is_null());
     assert_eq!(data["lanes"][0]["state"], "rejected");
     assert_eq!(data["lanes"][0]["reason"], json!(reason));
     assert!(data["lanes"][0]["applied_route"].is_null());

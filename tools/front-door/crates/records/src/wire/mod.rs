@@ -39,7 +39,9 @@ pub use cancel::{
     CANCEL_STATES, CancelData, CancelReceiptWire, CancelRecovered, CancelRow, CancelRowError,
 };
 pub use error::{CodeKind, EDGE_ERROR_CODES, EdgeErrorCode, error_schema};
-pub use lane::{LaneList, LaneRow, LaneSettlement, LaneTranscript, provider_seconds};
+pub use lane::{
+    LaneList, LaneProjectionFacts, LaneRow, LaneSettlement, LaneTranscript, provider_seconds,
+};
 pub use output::{ChunkBytes, OutputChunk, OutputData, ReviewerReceipt};
 
 /// Version of the planned typed wire contract; see the module notes.

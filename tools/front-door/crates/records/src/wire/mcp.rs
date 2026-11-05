@@ -5,24 +5,18 @@
 //! (`provider_seconds` instead of `provider_ms`, `AbsolutePath` as
 //! root-plus-path-wire) and let unknown members through.
 use super::schema::{
-    any, array, boolean, choices, constant, nullable, number, one_of, open, path_wire, string,
-    unsigned,
+    any, array, boolean, choices, constant, nullable, one_of, open, path_wire, string, unsigned,
 };
 use serde_json::Value;
 
-/// One attempt as MCP encodes it: the record with `provider_ms` replaced by
-/// `provider_seconds` (`provider_ms / 1000`, null when unknown).
+/// One projected attempt, with MCP's provider duration in seconds.
 pub fn mcp_attempt_schema() -> Value {
-    open(
-        &[
-            ("attempt_id", string()),
-            ("run_id", string()),
-            ("task_id", string()),
-            ("state", any()),
-            ("provider_seconds", nullable(number())),
-        ],
-        &[("provider_silent_for_ms", unsigned())],
-    )
+    let mut schema = super::lane::lane_row_schema();
+    schema["additionalProperties"] = true.into();
+    if let Some(required) = schema["required"].as_array_mut() {
+        required.push("provider_seconds".into());
+    }
+    schema
 }
 
 fn tagged(tag: &str, name: &str, required: &[(&str, Value)]) -> Value {
@@ -33,11 +27,16 @@ fn tagged(tag: &str, name: &str, required: &[(&str, Value)]) -> Value {
 
 /// `structuredContent` of `fabric_run`, tagged by `result`.
 pub fn run_result_schema() -> Value {
+    let lane = super::lane::lane_row_schema();
     let summary = open(
         &[
             ("attempt_id", string()),
             ("run_id", string()),
             ("task_id", string()),
+            ("state", lane["properties"]["state"].clone()),
+            ("retry_of", lane["properties"]["retry_of"].clone()),
+            ("superseded_by", lane["properties"]["superseded_by"].clone()),
+            ("cause", lane["properties"]["cause"].clone()),
         ],
         &[],
     );

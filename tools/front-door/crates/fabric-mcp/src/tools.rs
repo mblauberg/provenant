@@ -1117,7 +1117,7 @@ impl ToolCall {
                     Ok(run) => {
                         let mut run = serde_json::to_value(run)?;
                         if !detail {
-                            compact_run(&mut run)?;
+                            project_run(&mut run, false)?;
                         }
                         let timed_out = run
                             .get("timed_out")
@@ -1224,7 +1224,7 @@ impl ToolCall {
                     Ok(run) => serde_json::to_value(run)?,
                     Err(error) => expired_wait(error, wait, budget, service.clock.mono_now())?,
                 };
-                compact_run(&mut value)?;
+                project_run(&mut value, false)?;
                 if let Some(operation_id) = operation_id {
                     value["operation_id"] = serde_json::to_value(operation_id)?;
                 }
@@ -1244,6 +1244,7 @@ impl ToolCall {
                     Ok(run) => serde_json::to_value(run)?,
                     Err(error) => expired_wait(error, wait, budget, service.clock.mono_now())?,
                 };
+                project_run(&mut value, true)?;
                 if let Some(operation_id) = operation_id {
                     value["operation_id"] = serde_json::to_value(operation_id)?;
                 }
@@ -1452,8 +1453,9 @@ fn new_operation_id() -> Result<String, provenant_fabric_runtime::coordination::
     provenant_fabric_runtime::coordination::generated_operation_id("mcp")
 }
 
-fn compact_run(value: &mut Value) -> Result<(), ServiceError> {
-    fn compact(value: &mut Value) -> Result<(), ServiceError> {
+pub(crate) fn project_run(value: &mut Value, detailed: bool) -> Result<(), ServiceError> {
+    fn project(value: &mut Value, detailed: bool) -> Result<(), ServiceError> {
+        let raw = value.clone();
         let mut record = value.clone();
         let object = record.as_object_mut().ok_or(FacadeError::StateCorrupt)?;
         if let Some(seconds) = object.remove("provider_seconds") {
@@ -1469,17 +1471,68 @@ fn compact_run(value: &mut Value) -> Result<(), ServiceError> {
                 },
             );
         }
-        let record: provenant_records::run::AttemptRecord = serde_json::from_value(record)?;
-        *value =
-            serde_json::to_value(provenant_fabric_runtime::runs::AttemptSummary::from(record))?;
+        let mut record: provenant_records::run::AttemptRecord = serde_json::from_value(record)?;
+        if !detailed {
+            for route in [
+                &mut record.resolved_route,
+                &mut record.applied_route,
+                &mut record.observed_route,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                route.account_key = None;
+                route.source = None;
+                route.pool_selection = None;
+            }
+        }
+        let seconds = provenant_records::wire::provider_seconds(record.provider_ms);
+        let mut row = provenant_records::wire::LaneRow::project(
+            &record,
+            provenant_records::wire::LaneProjectionFacts {
+                provider_seconds: seconds,
+                ..Default::default()
+            },
+        );
+        if !detailed {
+            // Compact MCP observations do not expose local filesystem grants.
+            row.write_grants = Value::Null;
+            row.read_only_writable = Value::Null;
+            row.protected_paths = Value::Null;
+            row.delivery = Value::Null;
+        }
+        let row = serde_json::to_value(row)?;
+        *value = if detailed {
+            raw
+        } else {
+            Value::Object(Default::default())
+        };
+        if let (Some(object), Some(row)) = (value.as_object_mut(), row.as_object()) {
+            object.extend(row.clone());
+            object.entry("provider_seconds").or_insert(Value::Null);
+        }
+        if detailed {
+            value["prompt"]["path"] = serde_json::json!(
+                provenant_records::StructuredPathWire::from_wire(&record.prompt.path)
+            );
+            if let Some(result) = &record.result {
+                value["result"]["path"] = serde_json::json!(
+                    provenant_records::StructuredPathWire::from_wire(&result.path)
+                );
+            }
+            if let Some(exit) = &record.exit_evidence {
+                value["exit_evidence"]["path"] =
+                    serde_json::json!(provenant_records::StructuredPathWire::from_wire(&exit.path));
+            }
+        }
         Ok(())
     }
     if let Some(attempt) = value.get_mut("attempt") {
-        compact(attempt)?;
+        project(attempt, detailed)?;
     }
     if let Some(attempts) = value.get_mut("attempts").and_then(Value::as_array_mut) {
         for attempt in attempts {
-            compact(attempt)?;
+            project(attempt, detailed)?;
         }
     }
     Ok(())

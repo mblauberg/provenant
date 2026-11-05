@@ -30,7 +30,7 @@ fn row() -> LaneRow {
         finished_at: Value::Null,
         last_output_at: Value::Null,
         runtime_deadline: Value::Null,
-        overdue: false,
+        overdue: Some(false),
         stale: Some(false),
         partial_signals: json!([]),
         delivery_id: None,
@@ -456,10 +456,9 @@ fn path_encoding_and_provider_seconds_match_the_runtime_forms() {
 fn mcp_results_validate_by_tag_and_allow_unknown_members() {
     let run = mcp::run_result_schema();
     let id = "5".repeat(32);
-    let attempt = json!({
-        "attempt_id": id, "run_id": id, "task_id": id, "state": {"state": "running"},
-        "provider_seconds": 1.5, "future_member": true
-    });
+    let mut attempt = serde_json::to_value(row()).unwrap();
+    attempt["provider_seconds"] = json!(1.5);
+    attempt["future_member"] = json!(true);
     for value in [
         json!({"result": "status", "attempt": attempt}),
         json!({"result": "cancel", "attempt": attempt}),

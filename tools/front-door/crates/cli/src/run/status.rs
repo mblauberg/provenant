@@ -615,40 +615,38 @@ pub(super) fn render_lanes(
     render_lanes_with_lineage(lanes, waits, next, root, cooldowns, &Default::default())
 }
 
-fn project_route(route: Option<&run::RouteRecord>) -> Value {
-    let mut value = json!(route);
-    let Some(skills) = value.get_mut("user_skills") else {
-        return value;
-    };
-    let path = |value: &mut Value| {
-        let Some(text) = value.as_str() else {
-            return;
-        };
-        let path = Path::new(text);
-        let projected = if path.is_absolute() {
-            provenant_records::StructuredPathWire::from_path(path).ok()
-        } else if text.starts_with('~') {
-            None
-        } else {
-            provenant_core::RelativePath::parse(path)
-                .ok()
-                .and_then(|relative| {
-                    provenant_records::StructuredPathWire::from_relative(&relative).ok()
-                })
-        };
-        *value = json!(projected);
-    };
-    if let Some(directory) = skills.get_mut("directory") {
-        path(directory);
+/// Read one retained attempt without reaping or changing its history.
+pub fn project_retained_attempt(
+    target: &Target,
+    edge: &Edge<'_>,
+) -> Result<provenant_records::wire::LaneRow, Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let candidate = targets::resolve(edge, target, true)?;
+    let (session, target) = targets::read_resolved(edge, candidate, &call)?;
+    let id = target
+        .attempt
+        .ok_or_else(|| Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required"))?;
+    let record = session.store.record(id, &call)?;
+    if target.run.is_some_and(|run| run != record.run_id)
+        || target.task.is_some_and(|task| task != record.task_id)
+    {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::NotFound,
+            "attempt is not in that run/task",
+        ));
     }
-    if let Some(warnings) = skills.get_mut("warnings").and_then(Value::as_array_mut) {
-        for warning in warnings {
-            if let Some(value) = warning.get_mut("path") {
-                path(value);
-            }
-        }
-    }
-    value
+    let successors = policy_successors(&session, std::slice::from_ref(&record), &call)?;
+    Ok(project_lane(
+        &record,
+        &[],
+        session.context.state_root.as_path(),
+        &successors,
+        clock.wall_now().ok(),
+        false,
+    ))
 }
 
 pub fn project_lane(
@@ -659,34 +657,12 @@ pub fn project_lane(
     now_wall: Option<WallTime>,
     observe_host: bool,
 ) -> provenant_records::wire::LaneRow {
-    let (state, terminal_reason) = state_and_reason(&lane.state);
-    let (exit_code, finished_at) = match &lane.state {
-        run::AttemptState::Terminal {
-            exit_code,
-            finished_at,
-            ..
-        } => (*exit_code, Some(*finished_at)),
-        _ => (None, None),
-    };
-    let result = lane
-        .result
-        .as_ref()
-        .map(|_| artifact(root, lane, "result.md"));
-    let account = lane
-        .applied_route
-        .as_ref()
-        .and_then(|route| route.account_label.as_deref())
-        .unwrap_or("unknown");
     let wait = waits.iter().find(|wait| wait.attempt_id == lane.attempt_id);
-    let silence = lane
-        .provider_silent_for_ms
-        .0
-        .map(run::provider_silence_reason);
-    let reason = terminal_reason
-        .clone()
-        .or_else(|| wait.map(|wait| wait.waiting_for.clone()))
-        .or_else(|| silence.clone());
-    let waiting_for = wait.map(|wait| wait.waiting_for.clone()).or(silence);
+    let waiting_for = wait.map(|wait| wait.waiting_for.clone()).or_else(|| {
+        lane.provider_silent_for_ms
+            .0
+            .map(run::provider_silence_reason)
+    });
     let transcript = lane
         .applied_route
         .as_ref()
@@ -705,114 +681,32 @@ pub fn project_lane(
                     .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok()),
             }
         });
-    let write_grants: Vec<Value> =
-        lane.write_grants
-            .iter()
-            .map(|grant| {
-                let mut value = json!(grant);
-                value["path"] = json!(grant.path.to_path_buf().ok().and_then(|path| {
-                    provenant_records::StructuredPathWire::from_path(&path).ok()
-                }));
-                value
-            })
-            .collect();
-    let read_only_writable: Vec<Value> = lane
-        .read_only_writable
-        .iter()
-        .map(|path| {
-            let relative = provenant_core::RelativePath::parse(path).ok();
-            json!(relative.as_ref().and_then(|path| {
-                provenant_records::StructuredPathWire::from_relative(path).ok()
-            }))
+    let result_path = observe_host
+        .then(|| {
+            lane.result
+                .as_ref()
+                .map(|_| artifact(root, lane, "result.md"))
         })
-        .collect();
-    let protected_paths: Vec<_> = lane
-        .protected_paths
-        .iter()
-        .map(provenant_records::StructuredPathWire::from_wire)
-        .collect();
-    let mut delivery = json!(lane.delivery);
-    if let Some(acceptance) = lane
-        .delivery
-        .as_ref()
-        .and_then(|delivery| delivery.review_acceptance.as_ref())
-    {
-        delivery["review_acceptance"]["protected_paths"] = json!(
-            acceptance
-                .protected_paths
-                .iter()
-                .map(provenant_records::StructuredPathWire::from_wire)
-                .collect::<Vec<_>>()
-        );
-    }
-    let settlement = matches!(lane.state, run::AttemptState::Terminal { .. }).then_some(
-        provenant_records::wire::LaneSettlement {
-            reason: terminal_reason,
+        .flatten()
+        .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
+    provenant_records::wire::LaneRow::project(
+        lane,
+        provenant_records::wire::LaneProjectionFacts {
+            superseded_by: successors.get(&lane.attempt_id).copied(),
+            waiting_for,
+            lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
+            overdue: now_wall.map(|now| run::overdue_at(lane, now)),
+            stale: observe_host.then(|| run::holder_absent(root, lane)),
+            result_path,
+            transcript,
+            cache_read_share: provenant_routing::cache_read_share(
+                lane.usage.uncached_input,
+                lane.usage.cache_read,
+                lane.usage.cache_write,
+            ),
+            ..Default::default()
         },
-    );
-    provenant_records::wire::LaneRow {
-        run_id: lane.run_id.to_string(),
-        task_id: lane.task_id.to_string(),
-        attempt_id: lane.attempt_id.to_string(),
-        attempt_number: lane.attempt_number,
-        retry_of: lane.retry_of.map(|id| id.to_string()),
-        superseded_by: successors
-            .get(&lane.attempt_id)
-            .copied()
-            .or(lane.superseded_by)
-            .map(|id| id.to_string()),
-        cause: lane.settlement_reason,
-        state,
-        exit_code,
-        reason,
-        settlement,
-        lane_class: wait.map(|w| w.lane_class.as_str().to_owned()),
-        waiting_for,
-        requested_route: json!(lane.requested_route),
-        host: None,
-        resolved_route: Some(project_route(lane.resolved_route.as_ref())),
-        applied_route: project_route(lane.applied_route.as_ref()),
-        skipped_routes: json!(lane.skipped_routes),
-        account: json!(account),
-        observed_route: json!(lane.observed_route),
-        queued_at: json!(lane.queued_at),
-        started_at: json!(lane.started_at),
-        priority: lane.priority.map(i64::from),
-        finished_at: json!(finished_at),
-        last_output_at: json!(lane.last_output_at),
-        runtime_deadline: json!(lane.runtime_deadline),
-        overdue: now_wall.is_some_and(|now| run::overdue_at(lane, now)),
-        stale: observe_host.then(|| run::holder_absent(root, lane)),
-        partial_signals: json!(lane.partial_signals),
-        delivery_id: lane.delivery_id.map(|id| id.to_string()),
-        write_grants: json!(write_grants),
-        read_only_writable: json!(read_only_writable),
-        git_grants_digest: lane.git_grants_digest.map(|digest| digest.to_string()),
-        head: lane.head.map(|head| head.to_string()),
-        protected_paths: json!(protected_paths),
-        delivery,
-        continuation: json!(lane.continuation),
-        cache_read_share: provenant_routing::cache_read_share(
-            lane.usage.uncached_input,
-            lane.usage.cache_read,
-            lane.usage.cache_write,
-        ),
-        result_path: json!(
-            result
-                .as_deref()
-                .filter(|_| observe_host)
-                .and_then(|path| { provenant_records::StructuredPathWire::from_path(path).ok() })
-        ),
-        transcript,
-        title: lane.title.clone(),
-        requested_priority: lane
-            .requested_priority
-            .filter(|priority| Some(i32::from(*priority)) != lane.priority)
-            .map(i64::from),
-        provider_seconds: None,
-        handoff: None,
-        provider_error: None,
-    }
+    )
 }
 
 pub(super) fn render_lanes_with_lineage(

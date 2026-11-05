@@ -298,18 +298,7 @@ pub(super) fn projected_lanes(
                 task: None,
                 attempt: Some(contribution.attempt),
             };
-            let records = provenant_cli::run::status_wait_lanes(&target, &edge).ok()?;
-            let record = records
-                .into_iter()
-                .find(|record| record.attempt_id == contribution.attempt)?;
-            lanes.push(provenant_cli::run::project_lane(
-                &record,
-                &[],
-                resolved.roots.state.as_path(),
-                &Default::default(),
-                None,
-                false,
-            ));
+            lanes.push(provenant_cli::run::project_retained_attempt(&target, &edge).ok()?);
         }
     }
     Some(lanes)

@@ -177,8 +177,8 @@ fn attempt_summary_conversion_keeps_record_extensions() {
 fn run_reply_shapes_preserve_unknown_fields() {
     cases! {
         SubmissionReceipt => submitted(), ["", "/targets/0", "/worktree"];
-        AttemptSummary => summary(), ["", "/state", "/requested_route"];
-        RunResult => json!({"result":"list","page":{"items":[summary()],"truncated":false}}), ["", "/page", "/page/items/0", "/page/items/0/state", "/page/items/0/requested_route"];
+        AttemptSummary => summary(), ["", "/requested_route"];
+        RunResult => json!({"result":"list","page":{"items":[summary()],"truncated":false}}), ["", "/page", "/page/items/0", "/page/items/0/requested_route"];
         RunResult => json!({"result":"wait","condition":"all","attempts":[attempt()],"satisfied":false,"timed_out":true}), ["", "/attempts/0", "/attempts/0/state", "/attempts/0/usage", "/attempts/0/prompt"];
         OutputResult => output(), ["", "/target"];
         OutputResult => json!({"kind":"artifact","target":target(),"artifact":{"path":{"encoding":"utf8","path":"out"},"digest":null},"digest":digest(),"bytes":{"encoding":"base64","data":""}}), ["", "/target", "/artifact", "/artifact/path"];
