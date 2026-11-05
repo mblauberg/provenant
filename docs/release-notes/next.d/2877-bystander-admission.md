@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- A process in an unowned worktree no longer prevents a lane from claiming it when writer custody is available and its Git state is safe (#2877).
+- A bystander in a worktree produces a warning during lane admission, while available writer custody and safe Git state allow the claim (#2877).

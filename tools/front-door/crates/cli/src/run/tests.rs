@@ -3106,6 +3106,29 @@ fn worktree_census_warning_includes_scope_and_evidence() -> Result<(), Box<dyn s
     let warning = String::from_utf8(output)?;
     assert!(warning.contains("/repo/worktree"));
     assert!(warning.contains("census incomplete for pid 42"));
+    use provenant_confinement::worktrees::{Occupancy, OccupancyUnknownSource, WorktreeError};
+    let scope = PathBuf::from("/repo/worktree");
+    super::worktree::warn_advisory_occupancy(&scope, &Occupancy::Observed { process: None })?;
+    super::worktree::warn_advisory_occupancy(
+        &scope,
+        &Occupancy::Unknown {
+            scope: scope.clone(),
+            evidence: "census incomplete".into(),
+            source: OccupancyUnknownSource::Census,
+        },
+    )?;
+    assert!(matches!(
+        super::worktree::warn_advisory_occupancy(
+            &scope,
+            &Occupancy::Unknown {
+                scope: scope.clone(),
+                evidence: "owner unreadable".into(),
+                source: OccupancyUnknownSource::Custody,
+            },
+        ),
+        Err(WorktreeError::UnknownOccupancy { path, detail })
+            if path == scope && detail == "owner unreadable"
+    ));
     Ok(())
 }
 

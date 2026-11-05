@@ -1487,16 +1487,21 @@ pub(super) fn dispatch_inner(
                                 lock_budget,
                                 ..*context
                             };
-                            let info = worktrees::list(context, &cancel)?
+                            let observation = worktrees::list_with_observation(context, &cancel)?
                                 .into_iter()
-                                .find(|tree| tree.path == writer.worktree)
+                                .find(|tree| tree.info.path == writer.worktree)
                                 .ok_or(worktrees::WorktreeError::NotFound)?;
+                            let info = observation.info;
                             let branch =
                                 info.branch
                                     .ok_or(worktrees::WorktreeError::DetachedWorktree {
                                         head: info.head,
                                     })?;
                             if !replay {
+                                super::worktree::warn_advisory_occupancy(
+                                    &info.path,
+                                    &observation.occupancy,
+                                )?;
                                 match worktrees::cache_writer_probe(
                                     context.project_state,
                                     &info.path,

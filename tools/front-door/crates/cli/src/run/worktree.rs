@@ -51,6 +51,42 @@ fn warn_worktree_census(path: &Path, detail: &str) {
     let _ = write_worktree_census_warning(&mut std::io::stderr().lock(), path, detail);
 }
 
+/// Warn about process evidence while preserving custody uncertainty as a refusal.
+pub(super) fn warn_advisory_occupancy(
+    path: &Path,
+    occupancy: &provenant_confinement::worktrees::Occupancy,
+) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
+    use provenant_confinement::worktrees::{Occupancy, OccupancyUnknownSource, WorktreeError};
+    match occupancy {
+        Occupancy::Observed { process } => {
+            let detail = process.as_ref().map_or_else(
+                || "a process was observed".to_owned(),
+                |process| format!("process {process} ({})", process.kind),
+            );
+            warn_worktree_census(path, &detail);
+        }
+        Occupancy::Unknown {
+            scope,
+            evidence,
+            source: OccupancyUnknownSource::Census,
+        } => {
+            warn_worktree_census(scope, evidence);
+        }
+        Occupancy::Unknown {
+            scope,
+            evidence,
+            source: OccupancyUnknownSource::Custody,
+        } => {
+            return Err(WorktreeError::UnknownOccupancy {
+                path: scope.clone(),
+                detail: evidence.clone(),
+            });
+        }
+        Occupancy::Available | Occupancy::Held => {}
+    }
+    Ok(())
+}
+
 pub(super) fn write_worktree_census_warning(
     output: &mut impl std::io::Write,
     path: &Path,
