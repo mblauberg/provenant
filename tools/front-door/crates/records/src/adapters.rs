@@ -57,6 +57,13 @@ pub enum QuotaProbeKind {
     LocalLedger,
 }
 
+/// Installed cloud transport implementation, when supported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudTransport {
+    Claude,
+    Codex,
+}
+
 /// How preparation rechecks a recorded login failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginReprobe {
@@ -169,6 +176,7 @@ pub struct AdapterSpec {
     pub chair_switch: bool,
     /// The local hook can read pending answer offers for this adapter.
     pub local_offer_reader: bool,
+    pub cloud_transport: Option<CloudTransport>,
     /// Supports launching a transferred interactive session.
     pub session_handoff: bool,
     /// Refresh an account token through the authorised credential broker at launch.
@@ -390,6 +398,7 @@ adapter_specs! { $;
         require_catalogue_for_launch: true,
         chair_switch: true,
         local_offer_reader: true,
+        cloud_transport: Some(CloudTransport::Claude),
         session_handoff: true,
         launch_token_refresh: true,
         deduplicate_result: false,
@@ -468,6 +477,7 @@ adapter_specs! { $;
         require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
+        cloud_transport: Some(CloudTransport::Codex),
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
@@ -545,6 +555,7 @@ adapter_specs! { $;
         require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
+        cloud_transport: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
@@ -626,6 +637,7 @@ adapter_specs! { $;
         require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
+        cloud_transport: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: true,
@@ -705,6 +717,7 @@ adapter_specs! { $;
         require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
+        cloud_transport: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
@@ -775,6 +788,7 @@ adapter_specs! { $;
         require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
+        cloud_transport: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
@@ -847,6 +861,7 @@ adapter_specs! { $;
         require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
+        cloud_transport: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
@@ -918,6 +933,7 @@ adapter_specs! { $;
         require_catalogue_for_launch: false,
         chair_switch: false,
         local_offer_reader: false,
+        cloud_transport: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,

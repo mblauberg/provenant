@@ -1231,7 +1231,7 @@ fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
     let harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*\s*\.\s*spec\s*\(\s*\)\s*\.\s*name";
     let typed_harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*";
     regex::Regex::new(&format!(
-        r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness}|{typed_harness})|(?:{literal}|{harness}|{typed_harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*(?:\||=>|if\b)|matches!\s*\([^,]+,[^;{{}}\n]*(?:{literal}|{harness})|\.\s*(?:eq|ne|eq_ignore_ascii_case)\s*\(\s*(?:{literal}|{harness}|{typed_harness}))"
+        r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness}|{typed_harness})|(?:{literal}|{harness}|{typed_harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*(?:\||=>|if\b)|matches!\s*\([^,]+,[^;{{}}\n]*(?:{literal}|{harness})|\.\s*(?:eq|ne|eq_ignore_ascii_case)\s*\(\s*(?:{literal}|{harness}|{typed_harness})|{typed_harness}[^;{{}}]*=>|\blet\s+[^=;{{}}]*{typed_harness}[^=;{{}}]*=|matches!\s*\([^;{{}}]*{typed_harness})"
     ))
 }
 
@@ -1252,6 +1252,16 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     assert!(comparison.is_match("\"codex\" if ready => action()"));
     assert!(comparison.is_match("Harness::Agy.spec().name != adapter"));
     assert!(comparison.is_match("provider == Harness::Claude"));
+    for pattern in [
+        "Harness::Claude => action()",
+        "Harness::Claude | Harness::Codex => action()",
+        "if let Some(\n    Harness::Claude\n) = client {}",
+        "if let Some(Harness::Claude) = client {}",
+        "let Some(client @ Harness::Claude) = client else {}",
+        "matches!(client, Some(Harness::Claude))",
+    ] {
+        assert!(comparison.is_match(pattern), "{pattern}");
+    }
     assert!(!comparison.is_match("default_value = Harness::Claude.spec().name"));
     Ok(())
 }
