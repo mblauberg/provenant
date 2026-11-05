@@ -511,18 +511,18 @@ fn a_pending_land_is_observed_again_and_a_refusal_fails_the_node() {
 
 #[test]
 fn land_replay_after_journal_failure_observes_one_merge() {
-    struct FailMerged(GraphCheckpoint);
+    struct FailMerged(std::path::PathBuf);
     impl GraphJournal for FailMerged {
         type Error = std::io::Error;
         fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
-            Ok(Some(self.0.clone()))
+            let bytes = std::fs::read(&self.0)?;
+            Ok(Some(serde_json::from_slice(&bytes)?))
         }
         fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
             if node(checkpoint, "land").state == NodeState::Succeeded {
                 return Err(std::io::Error::other("injected save failure"));
             }
-            self.0 = checkpoint.clone();
-            Ok(())
+            std::fs::write(&self.0, serde_json::to_vec(checkpoint)?)
         }
     }
     let mut owner = owner();
@@ -552,15 +552,18 @@ fn land_replay_after_journal_failure_observes_one_merge() {
     }
     let prior = journal.0.unwrap();
     assert_eq!(node(&prior, "land").state, NodeState::Running);
-    let before = serde_json::to_vec(&prior).unwrap();
-    let mut failing = FailMerged(prior);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("checkpoint.json");
+    std::fs::write(&path, serde_json::to_vec(&prior).unwrap()).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let mut failing = FailMerged(path.clone());
     assert!(matches!(
         advance(&document, &mut owner, &mut failing),
         Err(GraphError::Journal(_))
     ));
-    assert_eq!(serde_json::to_vec(&failing.0).unwrap(), before);
+    assert_eq!(std::fs::read(path).unwrap(), before);
     assert_eq!(owner.merge_effects, 1);
-    let mut journal = Journal(Some(failing.0));
+    let mut journal = Journal(failing.load("fixture").unwrap());
     let recovered = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(
         node(&recovered.checkpoint, "land").state,
