@@ -14,21 +14,28 @@ current head before dispatch, including after restart; never treat the head in a
 unordered event as current without checking the forge. Observing a different head
 cancels older records atomically. A cancelled record cannot issue or retry an
 intent, and its verdict never transfers to another key. Reclaim an expired lease
-on the existing attempt rather than creating a second attempt.
-Before starting a successor, reconcile every unresolved intent on older heads.
+on the existing attempt. When a cancelled head returns, observing it archives its
+previous attempt and creates fresh work for that same exact key. Its archived
+intents without receipts remain available for reconciliation, including settled
+absences. On a return, archives whose intents all have receipts are pruned;
+compact ID tombstones prevent attempt and intent IDs from being reused within
+the key.
+Before starting an attempt, reconcile every unresolved intent on other heads and
+previous attempts of the same head.
 An unknown outcome blocks the start; a receipt or a settled, authoritative
-absence resolves it. Cancelled work cannot use that absence to retry.
+absence resolves it. Cancelled, archived or terminal work cannot use that absence
+to retry.
 
 | State | Entry and next step |
 | --- | --- |
-| needs-review | A new key; start its one attempt. |
+| needs-review | A new or returning key; start its current attempt. |
 | reviewing | Attempt holds a lease; record its verdict or fail. |
 | verdict | Persist a verdict publication intent, reconcile its receipt, then await checks; or fail. |
 | awaiting-checks | Adapter evaluates checks on the exact head; mark landable or fail. |
 | landable | Adapter applies landing policy and records a merge intent; or fail. |
 | landing | Reconcile the merge intent. |
 | landed | A remote merge receipt was observed. |
-| failed | Terminal for this key. |
+| failed | Terminal for this attempt. |
 
 Persist an intent before issuing an effect. After a crash or an unknown response,
 query the remote by the intent identity and exact head before retrying. `Unknown`

@@ -1146,6 +1146,7 @@ pub(crate) fn graph_land(
     state: &Path,
     branch: &str,
     head: &str,
+    pull_request: Option<u64>,
     merge: bool,
     workers: &dyn WorkerObserver,
 ) -> provenant_fabric_runtime::graph::LandObservation {
@@ -1160,34 +1161,52 @@ pub(crate) fn graph_land(
             reason: format!("{branch} is not a plain branch name"),
         };
     }
-    let pull = match super::pull_for_branch(project, branch, head) {
-        Ok(pull) => pull,
-        Err(error) => {
-            return LandObservation::Pending {
-                reason: format!("no pull request found for {branch} yet: {error}"),
-            };
-        }
-    };
-    let number = pull.number;
-    if !merge {
-        let next = format!("next: provenant land {number} --head {head}");
-        return match pull.state.as_str() {
-            "MERGED" if pull.head == head => LandObservation::Merged {
-                pull_request: Some(number),
-                note: None,
+    let Some(number) = pull_request else {
+        return match super::pull_for_branch(project, branch, head) {
+            Ok(pull) => LandObservation::Identified {
+                pull_request: pull.number,
             },
-            _ if pull.head != head => LandObservation::Refused {
+            Err(error) => LandObservation::Pending {
+                reason: format!("no pull request found for {branch} yet: {error}"),
+            },
+        };
+    };
+    if !merge {
+        let pull = match super::rest_pull(
+            &|argv| super::execute(project, argv, false),
+            &number.to_string(),
+        ) {
+            Ok(pull) => pull,
+            Err(error) => {
+                return LandObservation::Pending {
+                    reason: format!("could not read pull request #{number}: {error}"),
+                };
+            }
+        };
+        let next = format!("next: provenant land {number} --head {head}");
+        return if pull.head.sha != head {
+            LandObservation::Refused {
                 reason: format!(
                     "HEAD_MOVED: pull request #{number} head moved to {}",
-                    pull.head
+                    pull.head.sha
                 ),
-            },
-            "OPEN" => LandObservation::Pending {
+            }
+        } else if pull.merged_at.is_some() {
+            LandObservation::Merged {
+                pull_request: Some(number),
+                note: None,
+            }
+        } else if pull.state.eq_ignore_ascii_case("open") {
+            LandObservation::Pending {
                 reason: format!("pull request #{number} awaits the chair; {next}"),
-            },
-            state => LandObservation::Refused {
-                reason: format!("PR_CLOSED: pull request #{number} is {state} without merging"),
-            },
+            }
+        } else {
+            LandObservation::Refused {
+                reason: format!(
+                    "PR_CLOSED: pull request #{number} is {} without merging",
+                    pull.state
+                ),
+            }
         };
     }
     let globals = provenant_cli::Globals {
@@ -1925,12 +1944,14 @@ mod graph_land_tests {
                 &project,
                 "feature",
                 HEAD,
+                None,
                 false,
                 &provenant_confinement::worktrees::SystemWorkerObserver,
             );
-            assert!(
-                matches!(observed, LandObservation::Pending { reason } if reason.contains("#7 awaits"))
-            );
+            assert!(matches!(
+                observed,
+                LandObservation::Identified { pull_request: 7 }
+            ));
             let calls = std::fs::read_to_string(project.join("calls")).unwrap();
             assert!(rest_calls::rest_only(&calls), "{calls}");
             assert!(!rest_calls::rest_only(&format!(

@@ -1920,3 +1920,35 @@ fn unknown_domain_knob_is_an_unknown_key_not_misplaced() {
     ));
     assert!(!error.to_string().contains("outside [knobs]"));
 }
+
+#[test]
+fn launch_retry_knobs_are_listed_with_defaults_bounds_and_sources() {
+    let config = load::<&[u8]>(&roots(), None).unwrap();
+    let schema = schema(&config, &domains::NO_DOMAINS, "fixture".into()).unwrap();
+    for (name, default, min, max) in [
+        ("lanes.launch_retry_limit", 3, 0, 20),
+        ("lanes.launch_retry_first_seconds", 5, 1, 3600),
+        ("lanes.launch_retry_max_seconds", 600, 1, 86400),
+    ] {
+        let field = schema
+            .fields
+            .iter()
+            .find(|field| field.path == name)
+            .unwrap();
+        assert_eq!(
+            (field.kind, field.default.as_i64(), field.min, field.max),
+            ("int", Some(default), Some(min), Some(max))
+        );
+        assert_eq!(field.source, Layer::Default);
+    }
+    let config = load(
+        &roots(),
+        Some(b"schema_version=1\n[knobs]\n'lanes.launch_retry_limit'=1\n".as_slice()),
+    )
+    .unwrap();
+    assert_eq!(config.knobs["lanes.launch_retry_limit"].value, 1);
+    assert_eq!(
+        config.knobs["lanes.launch_retry_limit"].source,
+        KnobSource::Override
+    );
+}

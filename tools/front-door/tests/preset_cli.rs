@@ -4,6 +4,182 @@
 )]
 use std::{path::PathBuf, process::Command};
 
+fn graph_journal_files(path: &std::path::Path) -> std::io::Result<Vec<(PathBuf, Vec<u8>)>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            files.extend(graph_journal_files(&entry.path())?);
+        } else if entry.file_name().to_string_lossy().starts_with("graph-") {
+            files.push((entry.path(), std::fs::read(entry.path())?));
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+#[test]
+fn preset_secret_inputs_are_refused_before_publication() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let project = temp.path().join("project");
+    let graphs = project.join(".provenant/scratch/graphs");
+    let state = temp.path().join("state");
+    std::fs::create_dir_all(&graphs)?;
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(graphs.join("existing"), "graph sentinel")?;
+    std::fs::write(state.join("graph-existing.json"), "journal sentinel")?;
+    let prompt = temp.path().join("prompt");
+    let params = temp.path().join("params.toml");
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    // TOML escapes ensure scanning operates on decoded values.
+    let encoded = secret.replacen('g', "\\u0067", 1);
+    for (source, explain) in [
+        ("prompt", false),
+        ("set", false),
+        ("file", false),
+        ("prompt", true),
+        ("set", true),
+        ("file", true),
+    ] {
+        std::fs::write(
+            &prompt,
+            if source == "prompt" {
+                &secret
+            } else {
+                "ordinary brief"
+            },
+        )?;
+        std::fs::write(
+            &params,
+            format!("branches = [{{ brief = \"{encoded}\" }}]\n"),
+        )?;
+        let mut command = fixture_cli();
+        command
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--preset", "fan-out-synthesise", "--prompt-file"])
+            .arg(&prompt);
+        if source == "set" {
+            command.args([
+                "--set",
+                &format!("parameters.branches=[{{brief=\"{encoded}\"}}]"),
+            ]);
+        }
+        if source == "file" {
+            command.arg("--params-file").arg(&params);
+        }
+        if explain {
+            command.arg("--explain");
+        }
+        let output = command.output()?;
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert!(
+            !output.status.success(),
+            "{source}, explain={explain}: {result}"
+        );
+        assert_eq!(
+            result["error"]["code"], "SECRET_INPUT",
+            "{source}, explain={explain}: {result}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+        assert_eq!(std::fs::read_dir(&graphs)?.count(), 1);
+        assert_eq!(std::fs::read(graphs.join("existing"))?, b"graph sentinel");
+        assert_eq!(
+            graph_journal_files(&state)?,
+            vec![(
+                state.join("graph-existing.json"),
+                b"journal sentinel".to_vec()
+            )]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn expanded_role_and_rule_secrets_are_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let presets = project.join(".provenant/presets");
+    let graphs = project.join(".provenant/scratch/graphs");
+    let state = temp.path().join("state");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::create_dir_all(&graphs)?;
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(graphs.join("existing"), "sentinel")?;
+    std::fs::write(state.join("graph-existing.json"), "sentinel")?;
+    let prompt = temp.path().join("prompt");
+    std::fs::write(
+        &prompt,
+        "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. Verification uses cargo test. Design decision is settled.",
+    )?;
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for source in ["role", "rule"] {
+        std::fs::write(
+            presets.join("probe.toml"),
+            "stages = [{ id = 'task', role = 'lens.house' }]\n",
+        )?;
+        std::fs::write(
+            project.join(".provenant/roles.toml"),
+            format!(
+                "[roles.\"lens.house\"]\ntier = 'senior'\ncard = '{}'\n",
+                if source == "role" {
+                    &secret
+                } else {
+                    "ordinary card"
+                }
+            ),
+        )?;
+        std::fs::write(
+            project.join(".provenant/preset-rules.toml"),
+            if source == "rule" {
+                format!(
+                    "[select]\ndefault = {{ preset = 'fan-out-synthesise', parameters = {{ branches = [{{ id = 'branch', brief = '{secret}', tier = 'senior' }}] }} }}\n"
+                )
+            } else {
+                "[select]\ndefault = { preset = 'probe' }\n".to_owned()
+            },
+        )?;
+        for explain in [false, true] {
+            let mut command = fixture_cli();
+            command
+                .current_dir(&project)
+                .env("PROVENANT_ROOT", &root)
+                .env("XDG_CONFIG_HOME", temp.path().join("config"))
+                .args(["--json", "--state-dir"])
+                .arg(&state)
+                .args(["run", "--prompt-file"])
+                .arg(&prompt);
+            if explain {
+                command.arg("--explain");
+            }
+            let output = command.output()?;
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            assert!(
+                !output.status.success(),
+                "{source}, explain={explain}: {result}"
+            );
+            assert_eq!(
+                result["error"]["code"], "SECRET_INPUT",
+                "{source}, explain={explain}: {result}"
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
+            assert_eq!(std::fs::read_dir(&graphs)?.count(), 1);
+            assert_eq!(std::fs::read(graphs.join("existing"))?, b"sentinel");
+            assert_eq!(
+                graph_journal_files(&state)?,
+                vec![(state.join("graph-existing.json"), b"sentinel".to_vec())]
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn fan_out_branch_parameters_validate_and_route_synthesis() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -237,6 +413,103 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
 }
 
 #[test]
+fn big_batch_default_subject_follows_each_lane_worktree() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    let git = |directory: &std::path::Path,
+               args: &[&str]|
+     -> Result<String, Box<dyn std::error::Error>> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(directory)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    git(&repo, &["init", "-q"])?;
+    git(&repo, &["commit", "--allow-empty", "-qm", "base"])?;
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "first",
+            first.to_str().ok_or("path")?,
+        ],
+    )?;
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "second",
+            second.to_str().ok_or("path")?,
+        ],
+    )?;
+    git(&first, &["commit", "--allow-empty", "-qm", "first"])?;
+    git(&second, &["commit", "--allow-empty", "-qm", "second"])?;
+    let first_head = git(&first, &["rev-parse", "HEAD"])?;
+    let second_head = git(&second, &["rev-parse", "HEAD"])?;
+    assert_ne!(first_head, second_head);
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "Implement the batch")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let lanes = format!(
+        "parameters.lanes=[{{name='one',worktree='{}',scope=['one'],spec=''}},{{name='two',worktree='{}',scope=['two'],spec=''}}]",
+        first.display(),
+        second.display()
+    );
+    let output = fixture_cli()
+        .current_dir(&repo)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args(["--json", "run", "--preset", "big-batch", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--explain", "--set"])
+        .arg(lanes)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    fn find_writer<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+        if value["access"] == "worktree_write" && value["worktree"] == path {
+            return Some(value);
+        }
+        match value {
+            serde_json::Value::Array(values) => values.iter().find_map(|v| find_writer(v, path)),
+            serde_json::Value::Object(values) => values.values().find_map(|v| find_writer(v, path)),
+            _ => None,
+        }
+    }
+    let graph = &result["data"]["graph"];
+    assert_eq!(
+        find_writer(graph, first.to_str().ok_or("path")?).ok_or("first writer")?["source"]["commit"],
+        first_head
+    );
+    assert_eq!(
+        find_writer(graph, second.to_str().ok_or("path")?).ok_or("second writer")?["source"]["commit"],
+        second_head
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("differs from bound worktree HEAD"));
+    Ok(())
+}
+
+#[test]
 fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -293,6 +566,7 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
         .arg(&invoking)
         .args(["--explain", "--set"])
         .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .args(["--set", "parameters.base='HEAD'"])
         .output()?;
     assert!(
         output.status.success(),
@@ -302,6 +576,15 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
     );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let graph = &result["data"]["graph"];
+    // Both the subject and review base bind in the review worktree, not the invoking checkout.
+    let pinned_bases: Vec<_> = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node.get("review_base").and_then(serde_json::Value::as_str))
+        .collect();
+    assert!(!pinned_bases.is_empty());
+    assert!(pinned_bases.iter().all(|base| *base == worktree_head));
     // The subject lane (node 0) source equals the bound worktree HEAD (the subject commit).
     assert_eq!(graph["nodes"][0]["source"]["commit"], worktree_head);
     assert_eq!(
@@ -3329,6 +3612,177 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
             stderr.contains("pass an issue-number spec instead"),
             "{stderr}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn deliver_spec_secret_is_not_printed_by_advice() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    std::fs::write(project.join("spec.md"), format!("missing/{secret}#symbol"))?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "ordinary brief")?;
+    for explain in [false, true] {
+        let mut command = fixture_cli();
+        command
+            .current_dir(&project)
+            .env(
+                "PROVENANT_ROOT",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            )
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "deliver", "--prompt-file"])
+            .arg(&prompt)
+            .args(["--set", "parameters.spec='spec.md'"]);
+        if explain {
+            command.arg("--explain");
+        }
+        let output = command.output()?;
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(result["error"]["code"], "SECRET_INPUT", "{result}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
+    }
+    Ok(())
+}
+
+#[test]
+fn deliver_advice_suppresses_secret_beyond_spec_excerpt() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    std::fs::write(
+        project.join("spec.md"),
+        format!("{}\nmissing/{secret}#symbol", "ordinary ".repeat(3000)),
+    )?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "ordinary brief")?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let output = fixture_cli()
+        .current_dir(&project)
+        .env(
+            "PROVENANT_ROOT",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        )
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", "deliver", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--set", "parameters.spec='spec.md'", "--wait", "1s"])
+        .output()?;
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_ne!(result["error"]["code"], "SECRET_INPUT", "{result}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
+    Ok(())
+}
+
+#[test]
+fn preset_bound_path_is_not_a_secret_but_prompt_is() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let token = format!("sk-{}", "a".repeat(48));
+    let project = temp.path().join(&token);
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'task', role = 'lens.house' }]\n",
+    )?;
+    std::fs::write(
+        project.join(".provenant/roles.toml"),
+        "[roles.\"lens.house\"]\ntier = 'senior'\ncard = 'ordinary card'\n",
+    )?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let prompt = temp.path().join("brief");
+    for secret in [false, true] {
+        std::fs::write(&prompt, if secret { &token } else { "ordinary brief" })?;
+        for explain in [false, true] {
+            let mut command = fixture_cli();
+            command
+                .current_dir(&project)
+                .env(
+                    "PROVENANT_ROOT",
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                )
+                .env("XDG_CONFIG_HOME", temp.path().join("config"))
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .args(["--json", "--state-dir"])
+                .arg(temp.path().join("state"))
+                .args(["run", "--preset", "gate-only", "--prompt-file"])
+                .arg(&prompt)
+                .arg("--read-root")
+                .arg(&project);
+            if explain {
+                command.arg("--explain");
+            }
+            let output = command.output()?;
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            if secret {
+                assert_eq!(result["error"]["code"], "SECRET_INPUT", "{result}");
+                assert!(!String::from_utf8_lossy(&output.stdout).contains(&token));
+                assert!(!String::from_utf8_lossy(&output.stderr).contains(&token));
+            } else if explain {
+                assert!(output.status.success(), "{result}");
+            } else {
+                // The graph starts; the isolated fixture has no provider adapter.
+                assert!(result["data"]["graph_id"].is_string(), "{result}");
+                assert_eq!(
+                    result["data"]["graph"]["checkpoint"]["nodes"][0]["attempts"][0]["outcome"],
+                    "adapter_unavailable",
+                    "{result}"
+                );
+            }
+        }
     }
     Ok(())
 }

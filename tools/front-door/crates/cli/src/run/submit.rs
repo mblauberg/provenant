@@ -314,6 +314,8 @@ pub(super) fn lane_access_checked(
         read_roots: resolve(&access.read_root, "--read-root")?,
         write_roots,
         inputs_root: None,
+        source_root: None,
+        source_identity: None,
     })
 }
 

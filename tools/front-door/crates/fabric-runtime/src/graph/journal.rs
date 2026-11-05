@@ -244,10 +244,25 @@ impl FileJournal {
         if execution.document.graph_id != self.graph_id || !execution.directory.is_absolute() {
             return Err(JournalError::GraphMismatch);
         }
-        if self.integration_base().is_some()
-            && self.integration_base() != execution.integration_base
+        if execution
+            .document
+            .review_base
+            .as_deref()
+            .is_some_and(|base| !base.is_empty())
+            && execution.review_base.is_none()
         {
-            return Err(JournalError::GraphMismatch);
+            return Err(JournalError::BadEnvelope);
+        }
+        if let Some(bound) = &self.execution {
+            if bound.integration_base != execution.integration_base
+                || bound.review_base != execution.review_base
+            {
+                return Err(JournalError::GraphMismatch);
+            }
+            // The original host execution is part of the checkpoint. A caller
+            // may resume from another checkout, but cannot replace that binding
+            // or discard fields retained by a newer writer.
+            return Ok(());
         }
         self.execution = Some(execution);
         Ok(())
@@ -1005,6 +1020,16 @@ fn decode_verified_checkpoint(
     )?;
     if digest.to_string() != stored.digest {
         return Err(JournalError::BadDigest);
+    }
+    if stored
+        .execution
+        .document
+        .review_base
+        .as_deref()
+        .is_some_and(|base| !base.is_empty())
+        && stored.execution.review_base.is_none()
+    {
+        return Err(JournalError::BadEnvelope);
     }
     if stored.checkpoint.graph_id != graph_id
         || stored.execution.document.graph_id != graph_id
