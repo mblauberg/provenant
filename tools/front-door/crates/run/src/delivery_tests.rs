@@ -3228,16 +3228,13 @@ impl PrepareFixture {
                 "resumed settlement owner",
                 Duration::from_secs(5),
                 || {
-                    let result = crate::settlement::Guard::claim(&attempt, scope, &clock);
+                    let result = crate::settlement::Guard::claim_observed(&attempt, scope, &clock);
                     let observation = match &result {
-                        Ok(None) => format!(
-                            "claim refused: {:?}",
-                            crate::settlement::refusal(&attempt, scope, &clock)
-                        ),
-                        Ok(Some(_)) => "claimed".to_owned(),
+                        Ok((None, reason)) => format!("claim refused: {reason:?}"),
+                        Ok((Some(_), _)) => "claimed".to_owned(),
                         Err(error) => format!("claim error: {error}"),
                     };
-                    resumed = Some(result);
+                    resumed = Some(result.map(|(driver, _)| driver));
                     observation
                 },
                 |observation| !observation.starts_with("claim refused:"),
