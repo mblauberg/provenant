@@ -805,26 +805,30 @@ fn disk_report_json_and_human_output_leave_missing_state_absent() -> support::Re
 
 #[test]
 fn preset_reader_uses_writer_checkout_from_another_checkout() -> Result {
+    preset_reader_checkout_case(false)
+}
+
+#[test]
+fn preset_reader_honours_explicit_source_from_another_checkout() -> Result {
+    preset_reader_checkout_case(true)
+}
+
+fn preset_reader_checkout_case(explicit: bool) -> Result {
     use provenant_core::Clock;
     use provenant_fabric_runtime::graph::{self, AttemptOwner};
-    use std::convert::Infallible;
-
     struct CompletedWriter {
         head: String,
     }
     impl AttemptOwner for CompletedWriter {
-        type Error = Infallible;
+        type Error = provenant_os::fs::FsError;
         fn actor(&self) -> String {
             provenant_core::ActorId::from_bytes([34; 16]).to_string()
         }
         fn bind_writer_worktree(
             &mut self,
             path: &str,
-        ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Infallible> {
-            let metadata = provenant_os::fs::Directory::open_anchor(Path::new(path))
-                .unwrap()
-                .metadata()
-                .unwrap();
+        ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Self::Error> {
+            let metadata = provenant_os::fs::Directory::open_anchor(Path::new(path))?.metadata()?;
             Ok(Some(graph::WriterWorktreeBinding {
                 extra: [(
                     "source_directory_identity".into(),
@@ -843,7 +847,7 @@ fn preset_reader_uses_writer_checkout_from_another_checkout() -> Result {
             _: graph::AccessMode,
             _: Option<&str>,
             _: graph::Replay<'_>,
-        ) -> std::result::Result<graph::AttemptObservation, Infallible> {
+        ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
             if key.node_id == "writer" {
                 Ok(graph::AttemptObservation::Terminal {
                     attempt_ref: None,
@@ -933,11 +937,11 @@ stages = [
 ]
 [parameters]
 worktree = { type = "string", default = "" }
-head = { type = "string", default = "" }
+subject = { type = "table", default = { type = "commit", commit = "HEAD" } }
 [roles.write]
 access = "worktree_write"
 worktree = "${worktree}"
-source = { type = "commit", commit = "${head}" }
+source = "${subject}"
 tier = { adapter = "fixture", model = "fixture/model" }
 [roles.read]
 access = "read_only"
@@ -951,8 +955,8 @@ routes = [{ adapter = "command", name = "source-check" }]
         "parameters.worktree={}",
         serde_json::to_string(writer.to_str().ok_or("writer path")?)?
     );
-    let head_setting = format!("parameters.head=\"{head}\"");
-    let args = [
+    let explicit_setting = "parameters.subject.commit=\"HEAD\"";
+    let mut args = vec![
         "run",
         "--preset",
         "bound-reader",
@@ -960,11 +964,12 @@ routes = [{ adapter = "command", name = "source-check" }]
         prompt.to_str().ok_or("prompt path")?,
         "--set",
         &worktree_setting,
-        "--set",
-        &head_setting,
         "--plan",
         "off",
     ];
+    if explicit {
+        args.extend(["--set", explicit_setting]);
+    }
     let mut explain_args = args.to_vec();
     explain_args.extend(["--explain", "--json"]);
     let explain = rig.command(&explain_args)?;
@@ -977,6 +982,19 @@ routes = [{ adapter = "command", name = "source-check" }]
     let explanation: Value = serde_json::from_slice(&explain.stdout.bytes)?;
     let document: graph::GraphDocument =
         serde_json::from_value(explanation["data"]["graph"].clone())?;
+    let invoking_head = {
+        let out = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+        String::from_utf8(out.stdout.bytes)?.trim().to_owned()
+    };
+    let expected_head = if explicit { &invoking_head } else { &head };
+    assert_eq!(
+        explanation["data"]["graph"]["nodes"][0]["source"]["commit"],
+        *expected_head
+    );
+    assert_eq!(
+        explanation["data"]["graph"]["nodes"][0]["worktree"],
+        writer.to_str().ok_or("writer path")?
+    );
     let project: provenant_core::ProjectId = {
         let identity = rig.command(&["fabric", "identity", "--json"])?;
         assert_eq!(code(&identity), 0);
@@ -1001,7 +1019,9 @@ routes = [{ adapter = "command", name = "source-check" }]
             review_base: None,
             integration_base: None,
         })?;
-        let mut owner = CompletedWriter { head: head.clone() };
+        let mut owner = CompletedWriter {
+            head: expected_head.clone(),
+        };
         let config = provenant_fabric_runtime::config::GraphConfig::default();
         let mut result = graph::advance_with_budget(
             &document,
@@ -1066,7 +1086,12 @@ routes = [{ adapter = "command", name = "source-check" }]
     let excerpt = reader["outputs"]["result"]["excerpt"]
         .as_str()
         .ok_or("result excerpt")?;
-    assert!(excerpt.contains("writer checkout"), "{excerpt}");
-    assert!(!excerpt.contains("invoking checkout"), "{excerpt}");
+    let (expected, other) = if explicit {
+        ("invoking checkout", "writer checkout")
+    } else {
+        ("writer checkout", "invoking checkout")
+    };
+    assert!(excerpt.contains(expected), "{excerpt}");
+    assert!(!excerpt.contains(other), "{excerpt}");
     Ok(())
 }

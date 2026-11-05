@@ -1,7 +1,12 @@
 //! Bounded decoding of Git tree entries for an attempt-owned source view.
 use provenant_confinement::repo::RepoPath;
 use provenant_core::GitOid;
-use std::{collections::HashSet, ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    ffi::OsString,
+    os::unix::ffi::OsStringExt,
+    path::PathBuf,
+};
 
 const MAX_ENTRIES: usize = 100_000;
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
@@ -104,8 +109,99 @@ pub(super) fn materialise_source_tree(
     use std::io::Write;
     use std::path::{Component, Path};
 
-    for entry in entries {
+    // Resolve against the complete, immutable Git tree, not the host filesystem.
+    // A later symlink may change the meaning of an earlier link's target.
+    let mut links = HashMap::new();
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.kind == SourceKind::Symlink)
+    {
         let bytes = read_blob(entry.oid)?;
+        if u64::try_from(bytes.len()).ok() != Some(entry.size) {
+            return Err("source object size changed".into());
+        }
+        let target = PathBuf::from(OsString::from_vec(bytes));
+        if target.as_os_str().is_empty()
+            || target.as_os_str().as_encoded_bytes().contains(&0)
+            || target.is_absolute()
+        {
+            return Err("unsafe source symlink".into());
+        }
+        links.insert(entry.path.as_path().to_owned(), target);
+    }
+    // On macOS the source volume can match ASCII names without regard to
+    // case. Non-ASCII filesystem equivalence is volume-dependent; fail closed
+    // if it could affect a parent traversal after a named component.
+    let non_ascii = links.iter().any(|(path, target)| {
+        !path.as_os_str().as_encoded_bytes().is_ascii()
+            || !target.as_os_str().as_encoded_bytes().is_ascii()
+    });
+    if cfg!(target_os = "macos") && non_ascii {
+        for target in links.values() {
+            let mut named = false;
+            for component in target.components() {
+                match component {
+                    Component::Normal(_) => named = true,
+                    Component::ParentDir if named => return Err("unsafe source symlink".into()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let folded: HashMap<_, _> = links
+        .iter()
+        .map(|(path, target)| {
+            (
+                path.as_os_str().as_encoded_bytes().to_ascii_lowercase(),
+                target,
+            )
+        })
+        .collect();
+    for path in links.keys() {
+        let mut resolved = PathBuf::new();
+        let mut pending: VecDeque<OsString> = path
+            .components()
+            .map(|c| c.as_os_str().to_owned())
+            .collect();
+        let mut expansions = 0;
+        while let Some(component) = pending.pop_front() {
+            match Path::new(&component).components().next() {
+                Some(Component::CurDir) => {}
+                Some(Component::ParentDir) => {
+                    if !resolved.pop() {
+                        return Err("unsafe source symlink".into());
+                    }
+                }
+                Some(Component::Normal(name)) => {
+                    resolved.push(name);
+                    let target = if cfg!(target_os = "macos") {
+                        folded
+                            .get(&resolved.as_os_str().as_encoded_bytes().to_ascii_lowercase())
+                            .copied()
+                    } else {
+                        links.get(&resolved)
+                    };
+                    if let Some(target) = target {
+                        expansions += 1;
+                        if expansions > 40 {
+                            return Err("unsafe source symlink".into());
+                        }
+                        resolved.pop();
+                        for part in target.components().rev() {
+                            pending.push_front(part.as_os_str().to_owned());
+                        }
+                    }
+                }
+                _ => return Err("unsafe source symlink".into()),
+            }
+        }
+    }
+    for entry in entries {
+        let bytes = if let Some(target) = links.get(entry.path.as_path()) {
+            target.as_os_str().as_encoded_bytes().to_vec()
+        } else {
+            read_blob(entry.oid)?
+        };
         if u64::try_from(bytes.len()).ok() != Some(entry.size) {
             return Err("source object size changed".into());
         }
@@ -140,17 +236,6 @@ pub(super) fn materialise_source_tree(
             }
             SourceKind::Symlink => {
                 let target = PathBuf::from(OsString::from_vec(bytes));
-                if target.as_os_str().is_empty()
-                    || target.as_os_str().as_encoded_bytes().contains(&0)
-                {
-                    return Err("unsafe source symlink".into());
-                }
-                for component in target.components() {
-                    match component {
-                        Component::Normal(_) | Component::CurDir => {}
-                        _ => return Err("unsafe source symlink".into()),
-                    }
-                }
                 parent
                     .symlink(Path::new(&target), name)
                     .map_err(|error| error.to_string())?;
@@ -513,6 +598,82 @@ mod tests {
         let unsafe_link = format!("120000 blob {oid} 9\tlink\0");
         let entries = parse_source_tree(unsafe_link.as_bytes())?;
         assert!(materialise_source_tree(&root, &entries, |_| Ok(b"../escape".to_vec())).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn source_tree_symlinks_stay_inside_through_chains() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        // Expanding a directory link before .. is necessary to detect escape.
+        for (links, safe) in [
+            (vec![("src/current", "../shared/current")], true),
+            (vec![("src/current", "../../outside")], false),
+            (
+                vec![("src/current", "../alias"), ("alias", "shared/current")],
+                true,
+            ),
+            (
+                vec![("src/current", "../alias"), ("alias", "../outside")],
+                false,
+            ),
+            (
+                vec![("dir", "nested/deeper"), ("link", "dir/../../../outside")],
+                false,
+            ),
+            (vec![("a", "b"), ("b", "a")], false),
+            (vec![("link", "/outside")], false),
+        ] {
+            let temp = tempfile::tempdir()?;
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+            std::fs::create_dir(temp.path().join("shared"))?;
+            std::fs::write(temp.path().join("shared/current"), b"inside")?;
+            let root = provenant_os::fs::Directory::open_anchor(temp.path())?;
+            let mut blobs = HashMap::new();
+            let mut listing = String::new();
+            for (index, (path, target)) in links.iter().enumerate() {
+                let oid = format!("{:040x}", index + 1);
+                listing.push_str(&format!("120000 blob {oid} {}\t{path}\0", target.len()));
+                blobs.insert(oid.parse::<GitOid>()?, target.as_bytes().to_vec());
+            }
+            let entries = parse_source_tree(listing.as_bytes())?;
+            let result = materialise_source_tree(&root, &entries, |oid| {
+                blobs
+                    .get(&oid)
+                    .cloned()
+                    .ok_or_else(|| "missing blob".into())
+            });
+            assert_eq!(result.is_ok(), safe, "{links:?}: {result:?}");
+            if safe {
+                assert_eq!(std::fs::read(temp.path().join("src/current"))?, b"inside");
+                for (path, target) in links {
+                    assert_eq!(
+                        std::fs::read_link(temp.path().join(path))?,
+                        PathBuf::from(target)
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn source_tree_refuses_case_aliased_directory_escape() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = provenant_os::fs::Directory::open_anchor(temp.path())?;
+        let first = "1".repeat(40);
+        let second = "2".repeat(40);
+        let listing = format!("120000 blob {first} 1\tdir\0120000 blob {second} 14\tlink\0");
+        let entries = parse_source_tree(listing.as_bytes())?;
+        let result = materialise_source_tree(&root, &entries, |oid| {
+            if oid.to_string() == first {
+                Ok(b".".to_vec())
+            } else {
+                Ok(b"DIR/../outside".to_vec())
+            }
+        });
+        assert!(result.is_err());
         Ok(())
     }
 
