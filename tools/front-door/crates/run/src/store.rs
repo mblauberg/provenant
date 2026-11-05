@@ -83,7 +83,9 @@ pub(crate) struct Withdrawal<'a> {
 
 impl RunStore {
     /// Persist a pre-admission refusal under its operation identity. Replays
-    /// return the first refusal; a different request remains a conflict.
+    /// return the first refusal; a different request remains a conflict. The
+    /// caller supplies a remote-safe diagnostic projection, never a raw error,
+    /// because stored refusals may be shown to another host or in a notice.
     pub fn record_refusal(
         &self,
         record: &OperationRecord,
@@ -584,6 +586,15 @@ impl RunStore {
         })
     }
     fn create_exact(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
+        // A recorded refusal replays without depending on the cause still being present.
+        if let Some(op) = self.operation(&input.operation_id, call)?
+            && let Some(refusal) = op.refusal
+        {
+            if op.request_digest != input.request.digest()? {
+                return Err(RunError::OperationConflict);
+            }
+            return Err(RunError::RecordedRefusal(Box::new(refusal.diagnostic)));
+        }
         // Configuration and volume probes happen before the store transaction.
         let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)?
             .free_floor_bytes(&self.writer_registry)?;
@@ -593,6 +604,11 @@ impl RunStore {
         if let Some(op) = &existing {
             if op.request_digest != digest {
                 return Err(RunError::OperationConflict);
+            }
+            if let Some(refusal) = &op.refusal {
+                return Err(RunError::RecordedRefusal(Box::new(
+                    refusal.diagnostic.clone(),
+                )));
             }
             if op.state != OperationState::Prepared {
                 return self.run(op.run_id, call);
@@ -646,6 +662,11 @@ impl RunStore {
         if let Some(op) = self.operation(&input.operation_id, call)? {
             if op.request_digest != digest {
                 return Err(RunError::OperationConflict);
+            }
+            if let Some(refusal) = &op.refusal {
+                return Err(RunError::RecordedRefusal(Box::new(
+                    refusal.diagnostic.clone(),
+                )));
             }
             if op.state != OperationState::Prepared {
                 return self.run(op.run_id, call);

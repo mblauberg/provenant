@@ -718,6 +718,11 @@ impl ErrorKind {
 impl From<&RunError> for ErrorKind {
     fn from(error: &RunError) -> Self {
         match error {
+            RunError::RecordedRefusal(diagnostic) => ErrorKind::ALL
+                .iter()
+                .copied()
+                .find(|kind| kind.code() == diagnostic.code)
+                .unwrap_or(ErrorKind::Refused),
             RunError::Input { kind, .. } => *kind,
             RunError::InvalidTaskTitle(_) | RunError::AttemptReservationRetained => Self::Invalid,
             RunError::WorktreeMissing(_) => Self::WorktreeMissing,

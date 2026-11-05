@@ -318,6 +318,8 @@ impl std::fmt::Display for ArtifactProvenance {
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("dispatch refused: {}", .0.code)]
+    RecordedRefusal(Box<provenant_records::diagnostic::Diagnostic>),
     #[error("{0}")]
     InvalidTaskTitle(String),
     #[error("{message}")]
@@ -527,6 +529,9 @@ impl RunError {
     ) -> provenant_records::diagnostic::Diagnostic {
         use provenant_confinement::{permissions::PermissionError, worktrees::WorktreeError};
         use provenant_records::diagnostic::{Diagnostic, DiagnosticFact, safe_path, shell_path};
+        if let Self::RecordedRefusal(diagnostic) = self {
+            return diagnostic.as_ref().clone();
+        }
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {

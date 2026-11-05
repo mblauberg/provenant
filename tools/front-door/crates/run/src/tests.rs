@@ -3296,3 +3296,38 @@ fn refused_operation_write_failure_keeps_writer_reservation() -> TestResult {
     drop(lease);
     Ok(())
 }
+
+#[test]
+fn refused_operation_create_replay_returns_the_saved_projection() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut prepared = input();
+    let mut refusal = refused_operation(&context);
+    prepared.operation_id = refusal.operation_id.clone();
+    refusal.request_digest = prepared.request.digest()?;
+    store.record_refusal(&refusal, &call)?;
+    let error = store
+        .create(&prepared, &call)
+        .expect_err("recorded refusal");
+    assert!(matches!(error, RunError::RecordedRefusal(_)));
+    assert_eq!(ErrorKind::from(&error), ErrorKind::WriterScope);
+    assert_eq!(
+        error.diagnostic(provenant_records::diagnostic::Destination::Local),
+        refusal.refusal.as_ref().unwrap().diagnostic
+    );
+    prepared.request.tasks[0].prompt_digest = CanonicalV1::file_digest(b"different");
+    prepared.attempts[0].prompt = "different".into();
+    assert!(matches!(
+        store.create(&prepared, &call),
+        Err(RunError::OperationConflict)
+    ));
+    assert_eq!(
+        store.operation(&refusal.operation_id, &call)?,
+        Some(refusal)
+    );
+    Ok(())
+}
