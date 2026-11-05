@@ -59,6 +59,28 @@ fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
     rig.assert_legacy_unchanged()?;
     Ok(value)
 }
+
+#[test]
+fn config_retains_registry_only_account_and_quota_policy() -> Result {
+    let rig = rig()?;
+    let account = rig.home.join("fixture-account");
+    fs::create_dir_all(&account)?;
+    support::register_account(&rig, "fixture-provider", "work", "key-one", &account)?;
+    let config = rig.state.join("config.toml");
+    let mut text = fs::read_to_string(&config)?;
+    text.push_str("\n[domains.quota.polling_intervals.fixture-provider]\ntimer_seconds=17\n");
+    fs::write(config, text)?;
+    let result = call(&rig, &["config", "show"], 0)?;
+    assert_eq!(
+        result["data"]["domains"]["accounts"]["entries"]["fixture-provider-work"]["adapter"],
+        "fixture-provider"
+    );
+    assert_eq!(
+        result["data"]["domains"]["quota"]["polling_intervals"]["fixture-provider"]["timer_seconds"],
+        17
+    );
+    Ok(())
+}
 #[test]
 fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     use provenant_core::Clock;
