@@ -292,9 +292,6 @@ impl Admission<'_> {
             .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
         let snapshot = self.fresh_snapshot(&route.adapter, record);
         if let Some(snapshot) = snapshot {
-            if snapshot.status == QuotaStatus::AuthRequired {
-                return Err(QuotaError::Refused("authentication required"));
-            }
             match partial_headroom(
                 snapshot,
                 &route.adapter,
@@ -617,6 +614,8 @@ mod admission_tests {
         assert!(admission(&[]).check(&route).is_ok());
         let exhausted = [record(QuotaStatus::Available)];
         assert!(admission(&exhausted).check(&route).is_err());
+        let auth = [record(QuotaStatus::AuthRequired)];
+        assert!(admission(&auth).check(&route).is_ok());
     }
     #[test]
     fn account_mismatch_blocks_until_identity_verifies_again() {

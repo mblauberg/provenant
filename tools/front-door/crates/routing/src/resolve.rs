@@ -1069,8 +1069,6 @@ fn account_reason<'q>(
             && !context.config.allow_unknown_partial_headroom
         {
             Some(RouteExclusionReason::UnknownPartialHeadroom)
-        } else if q.snapshot.status == QuotaStatus::AuthRequired {
-            Some(RouteExclusionReason::AuthRequired)
         } else {
             None
         };
@@ -1177,6 +1175,7 @@ fn readiness_reason(
                     reason:
                         RouteExclusionReason::UnknownAvailability
                         | RouteExclusionReason::StaleAvailability
+                        | RouteExclusionReason::AuthRequired
                         | RouteExclusionReason::LoginExpired,
                     ..
                 } => None,
@@ -1199,30 +1198,44 @@ fn uncertainty(
     {
         return Some(format!("{reason:?}"));
     }
-    let lookup = context.readiness?;
-    let read = lookup(
-        &provenant_quota::ReadinessScope {
-            host: provenant_quota::LOCAL_HOST.into(),
-            adapter: model.adapter().into(),
-            account_key: availability.account_key.clone()?,
-            route: format!("{}/{}", model.adapter(), model.model()),
-        },
-        context.now_seconds(),
-    );
-    if read.state == provenant_quota::ReadinessState::Unknown
-        || matches!(
-            read.project(),
-            RouteReadiness::Unavailable {
-                reason: RouteExclusionReason::UnknownAvailability
-                    | RouteExclusionReason::StaleAvailability
-                    | RouteExclusionReason::LoginExpired,
-                ..
-            }
-        )
+    if latest_reading(model, availability, context, true)
+        .is_some_and(|q| q.snapshot.status == QuotaStatus::AuthRequired)
     {
-        return Some(format!("{:?}", read.reason));
+        return Some("authentication unverified".into());
     }
-    None
+    if latest_reading(model, availability, context, false).is_some()
+        && latest_reading(model, availability, context, true).is_none()
+    {
+        return Some("stale quota".into());
+    }
+    let lookup = context.readiness?;
+    let account_key = availability.account_key.as_ref()?;
+    std::iter::once(format!("{}/{}", model.adapter(), model.model()))
+        .chain(context.catalogue.admission_pools(model))
+        .enumerate()
+        .find_map(|(index, route)| {
+            let read = lookup(
+                &provenant_quota::ReadinessScope {
+                    host: provenant_quota::LOCAL_HOST.into(),
+                    adapter: model.adapter().into(),
+                    account_key: account_key.clone(),
+                    route,
+                },
+                context.now_seconds(),
+            );
+            ((index == 0 && read.state == provenant_quota::ReadinessState::Unknown)
+                || matches!(
+                    read.project(),
+                    RouteReadiness::Unavailable {
+                        reason: RouteExclusionReason::UnknownAvailability
+                            | RouteExclusionReason::StaleAvailability
+                            | RouteExclusionReason::AuthRequired
+                            | RouteExclusionReason::LoginExpired,
+                        ..
+                    }
+                ) && (index == 0 || read.observed_scope.is_some()))
+            .then(|| format!("{:?}", read.reason))
+        })
 }
 /// The account's latest reading for this model, only a fresh one when
 /// `fresh`. Only a fresh reading may refuse the route; a stale one still ranks

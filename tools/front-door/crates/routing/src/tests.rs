@@ -5341,6 +5341,9 @@ fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::err
         one(State::Ready, None, fresh),
         one(State::Unknown, Some(Why::SignedOut), fresh),
         one(State::Unknown, Some(Why::UnreachablePeer), fresh),
+        one(State::Unavailable, Some(Why::LoginExpired), fresh),
+        one(State::Unavailable, Some(Why::SignedOut), fresh),
+        one(State::Unavailable, Some(Why::CommandFailure), fresh),
     ] {
         assert!(
             matches!(status(observed.clone())?, RouteReadiness::Ready { .. }),
@@ -5349,8 +5352,6 @@ fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::err
     }
     // Unavailable excludes with the projected reason.
     for (why, expected) in [
-        (Why::SignedOut, RouteExclusionReason::AuthRequired),
-        (Why::LoginExpired, RouteExclusionReason::LoginExpired),
         (
             Why::MissingExecutable,
             RouteExclusionReason::MissingExecutable,
@@ -5358,10 +5359,6 @@ fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::err
         (Why::AccountMismatch, RouteExclusionReason::AccountMismatch),
         (Why::Exhausted, RouteExclusionReason::ProviderRefused),
         (Why::ProviderRefusal, RouteExclusionReason::ProviderRefused),
-        (
-            Why::CommandFailure,
-            RouteExclusionReason::UnknownAvailability,
-        ),
     ] {
         match status(one(State::Unavailable, Some(why), fresh))? {
             RouteReadiness::Unavailable { reason, .. } => assert_eq!(reason, expected, "{why:?}"),
@@ -5466,7 +5463,15 @@ fn unavailable_account_moves_selection_to_an_alternate_account()
             Some(Why::LoginExpired),
             (80, 120),
         );
-        let chosen = pick(vec![expired])?;
+        let known = observation(
+            "codex",
+            other,
+            "codex/gpt-6-luna",
+            State::Ready,
+            None,
+            (80, 120),
+        );
+        let chosen = pick(vec![expired, known])?;
         assert_eq!(chosen.account_key.as_deref(), Some(other));
         assert!(matches!(chosen.readiness, RouteReadiness::Ready { .. }));
     }

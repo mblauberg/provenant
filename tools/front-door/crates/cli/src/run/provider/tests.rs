@@ -1589,6 +1589,31 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     } else {
         format!("{adapter_name}/test")
     };
+    let readiness_dir = state.join("readiness").join(account_key);
+    std::fs::create_dir_all(&readiness_dir)?;
+    let stale = provenant_quota::ReadinessFile {
+        schema_version: 1,
+        login: None,
+        records: vec![provenant_quota::RouteReadiness {
+            schema_version: 1,
+            scope: provenant_quota::ReadinessScope {
+                host: provenant_quota::LOCAL_HOST.into(),
+                adapter: adapter_name.into(),
+                account_key: account_key.into(),
+                route: model.clone(),
+            },
+            state: provenant_quota::ReadinessState::Ready,
+            reason: None,
+            observed_unix_seconds: 1,
+            expires_unix_seconds: 2,
+            reset_unix_seconds: None,
+            evidence_ref: Some("fixture".into()),
+        }],
+    };
+    std::fs::write(
+        readiness_dir.join(format!("{adapter_name}.json")),
+        serde_json::to_vec(&stale)?,
+    )?;
     assert!(super::super::catalogued(&model, None).is_ok());
     let task = run::TaskRequest {
         cloud: None,
@@ -1649,6 +1674,14 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     assert_eq!(prepared.route.provider.as_deref(), Some(adapter_name));
     assert_eq!(prepared.route.account_key.as_deref(), Some(account_key));
     assert!(!prepared.argv.is_empty());
+    assert!(
+        prepared
+            .route
+            .extra
+            .get("availability_warning")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v.contains("Stale"))
+    );
     Ok(())
 }
 

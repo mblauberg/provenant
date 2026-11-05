@@ -3459,10 +3459,7 @@ mod route_tests {
         let before = resolve(&available)?;
         assert!(matches!(
             before.readiness,
-            provenant_records::RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::AuthRequired,
-                ..
-            }
+            provenant_records::RouteReadiness::Ready { ref extra, .. } if extra.contains_key("availability_warning")
         ));
         available.fixture_ref = "installed/codex/login-status".into();
         let after = resolve(&available)?;
@@ -3557,10 +3554,7 @@ mod route_tests {
         };
         assert!(matches!(
             resolve(&available)?.readiness,
-            provenant_records::RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::AuthRequired,
-                ..
-            }
+            provenant_records::RouteReadiness::Ready { ref extra, .. } if extra.contains_key("availability_warning")
         ));
         available.fixture_ref = "installed/opencode/login-unverified".into();
         assert!(matches!(
@@ -3628,10 +3622,7 @@ mod route_tests {
         )?;
         assert!(matches!(
             zen_result.readiness,
-            provenant_records::RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::AuthRequired,
-                ..
-            }
+            provenant_records::RouteReadiness::Ready { ref extra, .. } if extra.contains_key("availability_warning")
         ));
         Ok(())
     }
