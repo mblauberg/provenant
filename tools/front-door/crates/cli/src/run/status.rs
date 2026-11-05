@@ -969,6 +969,11 @@ pub fn lanes_streaming(
     json: bool,
     out: &mut dyn FnMut(&str) -> Result<(), Fail>,
 ) -> Reply {
+    if command.session_stream {
+        let mut result = reply("lanes", session_lane_page(&command, edge, out));
+        result.read_only = true;
+        return result;
+    }
     let result = if let Some(seconds) = command.wait {
         lanes_wait_entry(&command, edge, json, out, seconds)
     } else {
@@ -984,6 +989,78 @@ pub fn lanes_streaming(
     }
     out.read_only = true;
     out
+}
+
+/// A read-only page for the hook. Emit each record before reading the next so
+/// a timed-out child still leaves complete, bounded records in its output.
+fn session_lane_page(
+    command: &Lanes,
+    edge: &Edge<'_>,
+    out: &mut dyn FnMut(&str) -> Result<(), Fail>,
+) -> Result<(Value, String), Fail> {
+    if !command.id.is_empty()
+        || command.host.is_some()
+        || command.session.is_some()
+        || command.cursor.is_some()
+        || command.wait.is_some()
+        || command.watch.is_some()
+        || !command.states.is_empty()
+        || command.since.is_some()
+    {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "invalid session lane stream",
+        ));
+    }
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let (context, store) = open_read_only(edge, &call)?;
+    let Some(store) = store else {
+        out("{\"total\":0,\"next\":null}\n")?;
+        return Ok((json!({}), String::new()));
+    };
+    let session = Session { store, context };
+    // Match the normal listing's recovery of a dead guardian before observing
+    // the page; the hook reports only records this read actually completed.
+    let _ = session.store.reap(&call);
+    let mut query = lane_query(&session, &[], command.all, command.limit, 0, &call)?;
+    query.newest_first = command.all;
+    let mut failed = false;
+    session.store.lanes_streaming(&query, &call, |total, entry, next| {
+        if failed { return; }
+        let event = match entry {
+            None => json!({"total": total, "next": next}),
+            Some((cursor, lane)) => {
+                let (state, reason) = state_and_reason(&lane.state);
+                let reason = reason.or_else(|| {
+                    (!command.all)
+                        .then(|| session.store.lane_waits(std::slice::from_ref(lane), &call))
+                        .and_then(|waits| waits.first().map(|wait| wait.waiting_for.clone()))
+                });
+                let finished = match &lane.state {
+                    run::AttemptState::Terminal { finished_at, .. } => Some(*finished_at),
+                    _ => None,
+                };
+                json!({"cursor": cursor, "lane": {
+                    "run_id": lane.run_id, "task_id": lane.task_id, "attempt_id": lane.attempt_id,
+                    "state": state, "reason": reason, "finished_at": finished,
+                    "requested_route": lane.requested_route, "applied_route": lane.applied_route,
+                    "delivery": lane.delivery,
+                }})
+            }
+        };
+        failed = out(&format!("{event}\n")).is_err();
+    })?;
+    if failed {
+        return Err(Fail::new(
+            Status::Error,
+            ErrorKind::Io,
+            "cannot write session lane stream",
+        ));
+    }
+    Ok((json!({}), String::new()))
 }
 
 #[allow(clippy::disallowed_methods)]

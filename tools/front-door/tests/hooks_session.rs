@@ -597,6 +597,39 @@ fn session_worktree_stream_reports_inventory_rows() -> Result {
     Ok(())
 }
 
+#[test]
+fn session_lane_stream_reports_inventory_rows() -> Result {
+    let rig = TestRig::new()?;
+    let lane = create_lane(&rig)?;
+    let output = rig.command(&["lanes", "--session-stream", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let events: Vec<Value> = output
+        .stdout
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(events[0]["total"], 1);
+    let row = &events[1]["lane"];
+    assert!(row["reason"].is_string(), "{row}");
+    assert_eq!(
+        format!(
+            "{}/{}/{}",
+            row["run_id"].as_str().ok_or("run")?,
+            row["task_id"].as_str().ok_or("task")?,
+            row["attempt_id"].as_str().ok_or("attempt")?
+        ),
+        lane
+    );
+    Ok(())
+}
+
 fn worktree_input(rig: &TestRig, name: &str) -> Value {
     json!({"hook_event_name":"WorktreeCreate","session_id":"wt-session","cwd":rig.project,"name":name})
 }

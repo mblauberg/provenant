@@ -901,6 +901,9 @@ impl LaneState {
 }
 #[derive(Debug, Clone, Args)]
 pub struct Lanes {
+    /// Stream a bounded page for the SessionStart collector.
+    #[arg(long, hide = true)]
+    pub session_stream: bool,
     /// Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)
     #[arg(long)]
     pub id: Vec<Target>,

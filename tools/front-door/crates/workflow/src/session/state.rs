@@ -191,6 +191,9 @@ pub struct SessionState {
     /// command exists. The count shown is then partial.
     pub active_more: Option<String>,
     pub settled_more: Option<String>,
+    /// Records in the selected page not inspected before the deadline.
+    pub active_skipped: usize,
+    pub settled_skipped: usize,
     pub prs: Vec<PrLine>,
     /// PR numbers the chair named whose status could not be read.
     pub prs_unread: Vec<PrUnread>,
@@ -212,7 +215,7 @@ struct Section {
 impl SessionState {
     fn sections(&self, worktrees: bool) -> Vec<Section> {
         let mut sections = Vec::new();
-        let lanes = |title: &str, lanes: &[LaneLine], next: &Option<String>| {
+        let lanes = |title: &str, lanes: &[LaneLine], next: &Option<String>, skipped: usize| {
             Section {
             title: format!("{title} ({}{})", lanes.len(), plus(next.is_some())),
             lines: lanes
@@ -239,19 +242,29 @@ impl SessionState {
                         "the paging command is too long or unsafe to show; run provenant lanes with this hook's --state-dir and --cursor {cursor}"
                     )
                 };
-                format!("more lanes exist beyond the page read, so this count is partial; {how}")
+                if skipped > 0 {
+                    format!("{skipped} lane record{} not inspected in this page; {how}", if skipped == 1 { " was" } else { "s were" })
+                } else {
+                    format!("more lanes exist beyond the page read, so this count is partial; {how}")
+                }
             }),
         }
         };
         // A lane section with no lanes and no partial note is omitted: an empty
         // count says nothing the agent can act on.
         if !self.active.is_empty() || self.active_more.is_some() {
-            sections.push(lanes("Lanes in flight", &self.active, &self.active_more));
+            sections.push(lanes(
+                "Lanes in flight",
+                &self.active,
+                &self.active_more,
+                self.active_skipped,
+            ));
         }
         let mut settled = lanes(
             "Lanes settled since the last chair save",
             &self.settled,
             &self.settled_more,
+            self.settled_skipped,
         );
         let mut counts = std::collections::BTreeMap::new();
         for lane in &self.settled {

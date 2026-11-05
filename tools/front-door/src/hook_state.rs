@@ -140,6 +140,37 @@ impl<'a> Cli<'a> {
             }
         })
     }
+
+    #[allow(clippy::disallowed_methods)]
+    fn lane_listing(
+        &self,
+        deadline: Instant,
+        settled_after: Option<i64>,
+    ) -> Result<(Vec<LaneLine>, Option<String>, usize), String> {
+        let time = LISTING_TIME.min(deadline.saturating_duration_since(Instant::now()));
+        if time < Duration::from_millis(50) {
+            return Err("hook deadline reached".into());
+        }
+        let mut args = vec!["lanes", "--session-stream", "--limit", LANE_PAGE];
+        if settled_after.is_some() {
+            args.push("--all");
+        }
+        let argv = self.argv(&args);
+        let mut options = ExecOptions::new(&argv, self.cwd, time);
+        options.stdout = StreamPolicy::Capture { limit: OUTPUT_CAP };
+        options.stderr = StreamPolicy::Capture { limit: 2048 };
+        let out = self
+            .executor
+            .execute(options)
+            .map_err(|_| "could not start".to_owned())?;
+        parse_lane_stream(&out.stdout.bytes, settled_after).ok_or_else(|| {
+            if out.timed_out {
+                "timed out".into()
+            } else {
+                "inventory unavailable".into()
+            }
+        })
+    }
 }
 
 fn unavailable_sources(state: &mut SessionState, want: &Want, reason: String) {
@@ -182,15 +213,11 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             return state;
         }
     };
-    let mut terminal_args = vec!["lanes", "--all", "--limit", LANE_PAGE];
-    for outcome in TERMINAL {
-        terminal_args.extend(["--state", outcome]);
-    }
-    let (cli, terminal_args) = (&cli, &terminal_args);
+    let cli = &cli;
     std::thread::scope(|scope| {
-        let active =
-            scope.spawn(move || cli.data(&["lanes", "--limit", LANE_PAGE], LISTING_TIME, deadline));
-        let settled = scope.spawn(move || cli.data(terminal_args, LISTING_TIME, deadline));
+        let active = scope.spawn(move || cli.lane_listing(deadline, None));
+        let settled =
+            scope.spawn(move || cli.lane_listing(deadline, Some(want.settled_after_unix)));
         let worktrees = want
             .worktrees
             .then(|| scope.spawn(move || cli.worktree_listing(deadline)));
@@ -209,10 +236,10 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             })
             .collect();
         match active.join() {
-            Ok(Ok(active)) => {
-                let (lanes, next) = parse_lanes(&active, None);
+            Ok(Ok((lanes, next, skipped))) => {
                 state.active = lanes;
                 state.active_more = next.map(|cursor| next_page(&cursor, false, &state.commands));
+                state.active_skipped = skipped;
             }
             Ok(Err(reason)) => state.unavailable.push(Unavailable {
                 source: "active lanes".into(),
@@ -224,10 +251,10 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             }),
         }
         match settled.join() {
-            Ok(Ok(settled)) => {
-                let (lanes, next) = parse_lanes(&settled, Some(want.settled_after_unix));
+            Ok(Ok((lanes, next, skipped))) => {
                 state.settled = lanes;
                 state.settled_more = next.map(|cursor| next_page(&cursor, true, &state.commands));
+                state.settled_skipped = skipped;
             }
             Ok(Err(reason)) => state.unavailable.push(Unavailable {
                 source: "settled lanes".into(),
@@ -336,6 +363,12 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
     let rows = data["lanes"].as_array().map_or(&[][..], Vec::as_slice);
     for lane in rows {
         if let Some(after) = settled_after_unix {
+            if !lane["state"]
+                .as_str()
+                .is_some_and(|state| TERMINAL.contains(&state))
+            {
+                continue;
+            }
             let finished = lane["finished_at"]
                 .as_str()
                 .and_then(|at| at.parse::<jiff::Timestamp>().ok())
@@ -360,6 +393,51 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
         });
     }
     (lanes, data["next_cursor"].as_str().map(str::to_owned))
+}
+
+/// The header describes one page; a timed-out partial page resumes after its
+/// last complete record rather than skipping the unread tail of that page.
+fn parse_lane_stream(
+    bytes: &[u8],
+    settled_after: Option<i64>,
+) -> Option<(Vec<LaneLine>, Option<String>, usize)> {
+    let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
+    let header = lines.next()?;
+    if !header.ends_with(b"\n") {
+        return None;
+    }
+    let header: Value = serde_json::from_slice(header).ok()?;
+    let total = usize::try_from(header.get("total")?.as_u64()?).ok()?;
+    if total > 100 {
+        return None;
+    }
+    let next = header.get("next").and_then(Value::as_u64);
+    let mut rows = Vec::new();
+    let mut last = None;
+    for line in lines {
+        if !line.ends_with(b"\n") || rows.len() >= total {
+            break;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            break;
+        };
+        let Some(cursor) = event.get("cursor").and_then(Value::as_u64) else {
+            break;
+        };
+        let Some(lane) = event.get("lane") else {
+            break;
+        };
+        rows.push(lane.clone());
+        last = Some(cursor);
+    }
+    let skipped = total.saturating_sub(rows.len());
+    let continuation = if skipped > 0 {
+        Some(last.map_or_else(String::new, |n| n.to_string()))
+    } else {
+        next.map(|n| n.to_string())
+    };
+    let (lanes, _) = parse_lanes(&serde_json::json!({"lanes": rows}), settled_after);
+    Some((lanes, continuation, skipped))
 }
 /// Registered worktrees other than the primary checkout, which `git` lists first.
 fn parse_worktrees(data: &Value) -> Vec<WorktreeLine> {
@@ -440,6 +518,63 @@ fn pr_status(data: &Value) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn lane_collector_keeps_rows_when_child_times_out() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("lanes");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '{\"total\":3,\"next\":7}' '{\"cursor\":20,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"a\",\"state\":\"running\"}}'\n/bin/sleep 5\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executor = SystemExecutor::new(1).unwrap();
+        let cli = Cli {
+            exe: script,
+            state_dir: None,
+            cwd: temp.path(),
+            executor: &executor,
+        };
+        let (lanes, next, skipped) = cli
+            .lane_listing(Instant::now() + Duration::from_secs(1), None)
+            .unwrap();
+        assert_eq!(lanes[0].id, "r/t/a");
+        assert_eq!(next.as_deref(), Some("20"));
+        assert_eq!(skipped, 2);
+    }
+
+    #[test]
+    fn lane_stream_preserves_partial_page_and_resumes_after_last_record() {
+        use super::*;
+        let bytes = b"{\"total\":3,\"next\":7}\n{\"cursor\":20,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"a\",\"state\":\"running\"}}\n{\"cursor\":19";
+        let (lanes, next, skipped) = parse_lane_stream(bytes, None).unwrap();
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].id, "r/t/a");
+        assert_eq!(next.as_deref(), Some("20"));
+        assert_eq!(skipped, 2);
+        let state = SessionState {
+            active: lanes,
+            active_more: next.map(|cursor| next_page(&cursor, false, &CommandPrefix::default())),
+            active_skipped: skipped,
+            ..Default::default()
+        };
+        let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(digest.contains("r/t/a"), "{digest}");
+        assert!(
+            digest.contains("2 lane records were not inspected"),
+            "{digest}"
+        );
+        assert!(digest.contains("--cursor 20"), "{digest}");
+        let (_, next, skipped) = parse_lane_stream(b"{\"total\":1,\"next\":null}\n", None).unwrap();
+        assert_eq!(next.as_deref(), Some(""));
+        assert_eq!(skipped, 1);
+        let settled = b"{\"total\":2,\"next\":null}\n{\"cursor\":2,\"lane\":{\"state\":\"running\"}}\n{\"cursor\":1,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"done\",\"state\":\"failed\",\"finished_at\":\"2026-10-27T01:00:00Z\"}}\n";
+        let (lanes, next, skipped) = parse_lane_stream(settled, Some(0)).unwrap();
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].id, "r/t/done");
+        assert_eq!(next, None);
+        assert_eq!(skipped, 0);
+    }
 
     #[test]
     #[allow(clippy::disallowed_methods)]
