@@ -39,6 +39,50 @@ pub enum Admission {
     Rejected,
 }
 
+/// Result of interpreting a webhook request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WebhookResponse {
+    /// A new marker is durable or the delivery was already admitted.
+    Accepted,
+    /// Headers or authenticated payload were invalid.
+    Rejected,
+}
+
+/// Interpret webhook headers and admit the body. Header names are case
+/// insensitive; duplicate security-sensitive headers are rejected. The HTTP
+/// transport must bound body size before calling this function.
+pub fn receive(
+    intake: &mut Intake,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    now: u64,
+) -> io::Result<WebhookResponse> {
+    fn unique_header<'a>(headers: &'a [(&str, &'a str)], name: &str) -> Option<&'a str> {
+        let mut values = headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(name));
+        let value = values.next()?.1;
+        if values.next().is_some() {
+            None
+        } else {
+            Some(value)
+        }
+    }
+    let Some(delivery) = unique_header(headers, "X-GitHub-Delivery") else {
+        return Ok(WebhookResponse::Rejected);
+    };
+    let Some(event) = unique_header(headers, "X-GitHub-Event") else {
+        return Ok(WebhookResponse::Rejected);
+    };
+    let Some(signature) = unique_header(headers, "X-Hub-Signature-256") else {
+        return Ok(WebhookResponse::Rejected);
+    };
+    match intake.admit(delivery, event, Some(signature), body, now)? {
+        Admission::Accepted | Admission::Duplicate => Ok(WebhookResponse::Accepted),
+        Admission::Rejected => Ok(WebhookResponse::Rejected),
+    }
+}
+
 /// Single-owner persistent event admission queue.
 pub struct Intake {
     path: PathBuf,
@@ -249,6 +293,61 @@ fn valid_signature(secret: &[u8], signature: Option<&str>, body: &[u8]) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn webhook_headers_require_one_valid_signature_and_deduplicate() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut intake = Intake::open(
+            dir.path().join("state.json"),
+            "o/r".into(),
+            b"secret".to_vec(),
+        )?;
+        let body = br#"{"repository":{"full_name":"o/r"},"pull_request":{"number":12}}"#;
+        let signature = "sha256=db4061419529a8addfd7db7f148ff8677579ec4723d46ba890f9c7c80f8629ab";
+        let missing = [
+            ("X-GitHub-Delivery", "id"),
+            ("X-GitHub-Event", "pull_request"),
+        ];
+        assert_eq!(
+            receive(&mut intake, &missing, body, 1)?,
+            WebhookResponse::Rejected
+        );
+        let bad = [
+            ("X-GitHub-Delivery", "id"),
+            ("X-GitHub-Event", "pull_request"),
+            ("X-Hub-Signature-256", "sha256=bad"),
+        ];
+        assert_eq!(
+            receive(&mut intake, &bad, body, 1)?,
+            WebhookResponse::Rejected
+        );
+        let ambiguous = [
+            ("X-GitHub-Delivery", "id"),
+            ("X-GitHub-Event", "pull_request"),
+            ("X-Hub-Signature-256", signature),
+            ("x-hub-signature-256", signature),
+        ];
+        assert_eq!(
+            receive(&mut intake, &ambiguous, body, 1)?,
+            WebhookResponse::Rejected
+        );
+        let valid = [
+            ("x-github-delivery", "id"),
+            ("x-github-event", "pull_request"),
+            ("x-hub-signature-256", signature),
+        ];
+        assert_eq!(
+            receive(&mut intake, &valid, body, 2)?,
+            WebhookResponse::Accepted
+        );
+        assert_eq!(
+            receive(&mut intake, &valid, body, 3)?,
+            WebhookResponse::Accepted
+        );
+        assert_eq!(intake.markers().len(), 1);
+        assert_eq!(intake.markers()["id"].received_at, 2);
+        assert_eq!(intake.pending_targets(), vec![Target::PullRequest(12)]);
+        Ok(())
+    }
     #[test]
     fn authenticated_delivery_survives_reopen_and_deduplicates() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
