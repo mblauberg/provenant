@@ -1337,6 +1337,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     assert_eq!(result["data"]["selection_source"], "override");
     let reviewers = result["data"]["reviewers"].as_array().ok_or("reviewers")?;
     assert_eq!(reviewers.len(), 2);
+    assert_eq!(result["data"]["verdicts"]["approve"], 2);
     assert_eq!(reviewers[0]["run_id"], timed_rows[0]["run_id"]);
     for (index, lens) in ["correctness", "tests"].iter().enumerate() {
         let row = &reviewers[index];
