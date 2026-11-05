@@ -52,6 +52,6 @@ boundary = "unclassified"
 reason = "Invalid paths or a fixed wire-size limit refuse launch while recording applied grants."
 
 [[guard]]
-site = "run/src/launch.rs#start_queued"
+site = "run/src/launch.rs#start_inner"
 boundary = "unclassified"
 reason = "Stored prompt, priority, policy, provider preparation and handoff can refuse; enumerate their originating guards."
