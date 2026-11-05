@@ -3024,27 +3024,9 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let command = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
         let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-            .chain(
-                [
-                    "-c",
-                    "core.hooksPath=/dev/null",
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.test",
-                ]
-                .into_iter()
-                .chain(args.iter().copied())
-                .map(OsString::from),
-            )
+            .chain(args.iter().map(OsString::from))
             .collect();
-        let env = vec![
-            (OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1")),
-            (
-                OsString::from("GIT_CONFIG_GLOBAL"),
-                OsString::from("/dev/null"),
-            ),
-        ];
+        let env = provenant_os::fixture::fixture_git_settings();
         let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(10));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 65536 };
