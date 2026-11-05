@@ -1,5 +1,8 @@
 # Tracker lint
 
+Owner: `src/tracker.rs`, `crates/cli/src/tracker.rs`
+Anchor: `tests/tracker.rs`
+
 `provenant tracker lint 12 34` checks selected issues. `provenant tracker lint
 --file issue.md --kind task` also works without a tracker; `--kind` accepts
 `task`, `feature`, `bug` and `epic` and defaults to `task`. Use `--project` to
