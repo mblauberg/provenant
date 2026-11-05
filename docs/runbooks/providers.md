@@ -559,6 +559,13 @@ scripts, prompts or result artifacts.
 This checklist does not dispatch or monitor cloud jobs. Cloud execution remains
 advisory and does not replace exact-head required CI.
 
+`scripts/cloud-verify` can run a named verification command in a checkout and
+emit a JSON result with its actual commit, exit status, test name, log location
+and tracked-file status. It records the model as unknown; only the provider can
+attest which model ran. The caller must supply a log destination outside the
+checkout and deliver the result through a channel authorised for the job. This
+helper alone does not provide a result channel or dispatch a cloud job.
+
 Named cloud target settings can be recorded under `domains.lanes.cloud_targets`
 with `provider`, `environment`, `repository`, `model` and optional `effort`.
 `domains.lanes.projects.<project>.cloud_target` names a target. These settings

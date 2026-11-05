@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Run a named verification command and emit a cloud result as JSON.
+
+The caller must deliver the result over a channel authorised for the job.
+The log and result location should be outside the checkout.
+"""
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+
+def git(*args):
+    return subprocess.check_output(["git", *args], text=True).strip()
+
+
+def tracked_changed():
+    return bool(git("status", "--porcelain", "--untracked-files=no"))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--commit", required=True, help="full expected commit object ID")
+    parser.add_argument("--test", required=True, help="name of the test or tier")
+    parser.add_argument("--log", required=True, type=Path, help="local log file")
+    parser.add_argument("--log-location", required=True, help="location to report for the log")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command or not args.test.strip() or not args.log_location.strip():
+        parser.error("a command, test name and log location are required")
+    before = git("rev-parse", "--verify", "HEAD^{commit}")
+    if len(args.commit) not in (40, 64) or before.lower() != args.commit.lower():
+        parser.error("checkout does not match the full requested commit")
+    changed_before = tracked_changed()
+    with args.log.open("wb") as log:
+        completed = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, check=False)
+    after = git("rev-parse", "--verify", "HEAD^{commit}")
+    changed = changed_before or tracked_changed() or before != after
+    status = completed.returncode if completed.returncode >= 0 else 128 - completed.returncode
+    result = {
+        "commit": after,
+        "exit_status": status,
+        "tests_run": [args.test],
+        "tests_failed": [args.test] if status else [],
+        "log_location": args.log_location,
+        "tracked_files_changed": changed,
+        "observed_model": None,
+    }
+    print(json.dumps(result, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

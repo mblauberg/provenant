@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Exercise the cloud verification receipt against a real Git checkout."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+HELPER = Path(__file__).resolve().with_name("cloud-verify")
+
+
+class CloudVerify(unittest.TestCase):
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q")
+        self.git("config", "user.name", "Test")
+        self.git("config", "user.email", "test@example.invalid")
+        (self.repo / "tracked").write_text("before\n")
+        self.git("add", "tracked")
+        self.git("commit", "-qm", "fixture")
+        self.commit = self.git("rev-parse", "HEAD").strip()
+
+    def git(self, *args):
+        return subprocess.check_output(["git", *args], cwd=self.repo, text=True)
+
+    def run_helper(self, command, commit=None):
+        return subprocess.run(
+            [sys.executable, str(HELPER), "--commit", commit or self.commit,
+             "--test", "tier 1", "--log", str(self.root / "log"),
+             "--log-location", "https://example.invalid/log", "--", *command],
+            cwd=self.repo, capture_output=True, text=True, env=os.environ.copy(),
+        )
+
+    def test_clean_success_and_failure(self):
+        ok = self.run_helper([sys.executable, "-c", "print('hello')"])
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        result = json.loads(ok.stdout)
+        self.assertEqual(result["commit"], self.commit)
+        self.assertEqual(result["tests_run"], ["tier 1"])
+        self.assertEqual(result["tests_failed"], [])
+        self.assertFalse(result["tracked_files_changed"])
+        self.assertIsNone(result["observed_model"])
+        self.assertEqual((self.root / "log").read_text(), "hello\n")
+        failed = self.run_helper([sys.executable, "-c", "raise SystemExit(3)"])
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        result = json.loads(failed.stdout)
+        self.assertEqual(result["exit_status"], 3)
+        self.assertEqual(result["tests_failed"], ["tier 1"])
+
+    def test_changed_checkout_and_wrong_head(self):
+        changed = self.run_helper([sys.executable, "-c", "open('tracked','w').write('changed')"])
+        self.assertEqual(changed.returncode, 0, changed.stderr)
+        self.assertTrue(json.loads(changed.stdout)["tracked_files_changed"])
+        marker = self.root / "ran"
+        wrong = self.run_helper([sys.executable, "-c", f"open({str(marker)!r},'w').close()"], "a" * 40)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertFalse(marker.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
