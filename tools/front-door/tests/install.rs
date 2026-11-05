@@ -2788,6 +2788,7 @@ fn an_unregistered_account_is_orphaned_not_synced_and_prune_removes_it() -> Resu
         fs::read_to_string(pro.join("settings.json"))?
     );
     assert!(fs::symlink_metadata(work.join("skills/example")).is_ok());
+    assert!(fs::read_to_string(work.join("settings.json"))?.contains("'hook' 'claude'"));
     Ok(())
 }
 

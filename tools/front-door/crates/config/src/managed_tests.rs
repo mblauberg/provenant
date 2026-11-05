@@ -3358,6 +3358,21 @@ fn claude_config_dir_moves_its_mcp_registration() {
         alternate.join(".claude.json")
     );
     assert_eq!(f.targets.harnesses[0].skills_dir, alternate.join("skills"));
+    let mut direct = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    direct
+        .apply_account_environment(Harness::Claude, &alternate)
+        .unwrap();
+    assert_eq!(
+        direct.harnesses[0].skills_dir,
+        f.targets.harnesses[0].skills_dir
+    );
+    assert_eq!(
+        direct.harnesses[0].mcp_file,
+        f.targets.harnesses[0].mcp_file
+    );
+    direct
+        .apply_account_environment(Harness::Codex, Path::new("relative-unused"))
+        .unwrap();
 }
 
 #[test]

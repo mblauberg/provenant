@@ -607,24 +607,41 @@ fn orphaned_targets(
         .harness_targets
         .iter()
         .filter(|record| {
-            let base_dir = match record.harness {
-                Harness::Claude => ".claude",
-                Harness::Codex => ".codex",
-                _ => return false,
+            if !record.harness.spec().account_config_dir {
+                return false;
+            }
+            let mut defaults = Targets::new(environment.roots.clone(), &home, &[record.harness]);
+            let Some(default_dir) = defaults
+                .harnesses
+                .first()
+                .and_then(|target| target.skills_dir.parent())
+                .map(canonical)
+            else {
+                return false;
             };
+            if defaults
+                .apply_environment(
+                    environment.claude_config.as_deref(),
+                    environment.codex_home.as_deref(),
+                )
+                .is_err()
+            {
+                return false;
+            }
+            let environment_dir = defaults
+                .harnesses
+                .first()
+                .and_then(|target| target.skills_dir.parent())
+                .map(canonical);
             let Ok(skills) = record.skills_dir.to_path_buf() else {
                 return false;
             };
             let Some(directory) = skills.parent().map(canonical) else {
                 return false;
             };
-            let env_dir = match record.harness {
-                Harness::Claude => environment.claude_config.as_deref(),
-                _ => environment.codex_home.as_deref(),
-            };
             base.accounts.iter().any(|a| a.harness == record.harness)
-                && directory != home.join(base_dir)
-                && env_dir.is_none_or(|dir| canonical(dir) != directory)
+                && directory != default_dir
+                && environment_dir.is_none_or(|dir| dir != directory)
                 && !base
                     .accounts
                     .iter()
@@ -1173,11 +1190,9 @@ fn prune_orphans(globals: &cli::Globals) -> Result<Vec<String>, String> {
         let mut targets = receipt_targets(globals, &[record.harness])
             .map_err(|e| Refused::from(e).message())?
             .0;
-        match record.harness {
-            Harness::Claude => targets.apply_environment(Some(&directory), None),
-            _ => targets.apply_environment(None, Some(&directory)),
-        }
-        .map_err(|e| e.to_string())?;
+        targets
+            .apply_account_environment(record.harness, &directory)
+            .map_err(|e| e.to_string())?;
         let mut reporter = PreviewReporter {
             home: Some(targets.home.clone()),
         };
@@ -1601,6 +1616,76 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn orphan_detection_keeps_default_environment_and_registered_targets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_records::{
+            AbsolutePath, FileDigest, InstallReceipt, ResolvedHarnessTarget, SourceDigest,
+        };
+        let tmp = tempfile::tempdir()?;
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&project)?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(tmp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let environment = Resolved {
+            assets: home.clone(),
+            home: home.clone(),
+            project,
+            roots: roots.clone(),
+            claude_config: Some(home.join("environment")),
+            codex_home: None,
+        };
+        let mut base = Targets::new(roots, &home, &[]);
+        base.accounts.push(provenant_config::AccountHome {
+            harness: Harness::Claude,
+            label: "registered".into(),
+            home: home.join("registered"),
+        });
+        let target =
+            |directory: &str| -> Result<ResolvedHarnessTarget, Box<dyn std::error::Error>> {
+                let dir = home.join(directory);
+                Ok(ResolvedHarnessTarget {
+                    extra: Default::default(),
+                    harness: Harness::Claude,
+                    skills_dir: AbsolutePath::new(&dir.join("skills"))?,
+                    mcp_file: AbsolutePath::new(&dir.join("mcp.json"))?,
+                    hook_file: None,
+                    instruction: None,
+                    hooks_relinquished: false,
+                })
+            };
+        let receipt = InstallReceipt {
+            extra: Default::default(),
+            schema_version: 1,
+            source_digest: SourceDigest::from_bytes([1; 32]),
+            manifest_digest: FileDigest::from_bytes([2; 32]),
+            asset_digest: SourceDigest::from_bytes([3; 32]),
+            target: "fixture".into(),
+            toolchain: "fixture".into(),
+            bin_dir: AbsolutePath::new(&home.join("bin"))?,
+            harnesses: vec![Harness::Claude],
+            harness_targets: vec![
+                target(".claude")?,
+                target("environment")?,
+                target("registered")?,
+                target("orphan")?,
+            ],
+            entries: vec![],
+            legacy: None,
+        };
+        let orphans = orphaned_targets(&environment, &base, &receipt);
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(
+            orphans[0].skills_dir.to_path_buf()?,
+            home.join("orphan/skills")
+        );
+        Ok(())
+    }
+
     #[test]
     fn peer_agent_registry_name_uses_the_worktree_registry_key() {
         let path = std::path::Path::new("/worktrees/project-a");
