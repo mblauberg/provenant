@@ -45,6 +45,7 @@ struct Owner {
     head: Option<String>,
     /// The verdict line reviewers end with; PASS when unset.
     review_verdict: Option<&'static str>,
+    equal_review_range: bool,
     wall_seconds: i64,
     tick: bool,
     backoff: CiPollBackoff,
@@ -71,6 +72,16 @@ impl CiStatus for Owner {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn review_range(&mut self, _: &str, _: bool) -> Result<ReviewRange, Self::Error> {
+        Ok(if self.equal_review_range {
+            ReviewRange::Resolved {
+                base: WRITE_HEAD.into(),
+                head: WRITE_HEAD.into(),
+            }
+        } else {
+            ReviewRange::Unknown
+        })
+    }
     fn actor(&self) -> String {
         "fixture".into()
     }
@@ -156,7 +167,7 @@ impl AttemptOwner for Owner {
             self.head = Some(commit.into());
         }
         Ok(AttemptObservation::Terminal {
-            attempt_ref: None,
+            attempt_ref: self.equal_review_range.then(|| "fixture-attempt".into()),
             outcome: AttemptOutcome::Succeeded,
             launched: true,
             result: result.map(Box::new),
@@ -564,6 +575,34 @@ fn a_failed_review_routed_to_land_never_calls_the_host() {
         land.advance_error_code.as_deref(),
         Some("land_review_required")
     );
+}
+
+#[test]
+fn empty_review_range_cannot_pass_deliver_gate_or_land() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1, "graph_id": "empty-review-land", "nodes": [
+            {"id":"write", "access":"worktree_write", "worktree":"/wt/feature", "delivery":"pr",
+             "prompt":"write it", "route":{"alias":"senior"}},
+            {"id":"review", "role":"lens.correctness-spec", "access":"read_only", "prompt":"review",
+             "depends_on":["write"], "route":{"alias":"senior"}},
+            {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["review"],
+             "inputs":[{"node":"review", "outputs":["verdict"]}],
+             "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}},
+            {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["write"],
+             "condition":{"type":"ci", "target":"feature/x"}},
+            {"id":"land", "kind":"land", "access":"read_only", "depends_on":["accepted", "ci"],
+             "land":{"node":"write", "tier":"routine"}}
+        ]
+    }))
+    .unwrap();
+    let mut owner = owner();
+    owner.equal_review_range = true;
+    let checkpoint = run(&document, &mut owner, &mut Journal::default());
+    let review = node(&checkpoint, "review").outputs.as_ref().unwrap();
+    assert_eq!(review.verdict.as_deref(), Some("VERDICT: INCONCLUSIVE"));
+    assert!(!node(&checkpoint, "accepted").gate.as_ref().unwrap().passed);
+    assert!(owner.lands.is_empty());
+    assert!(node(&checkpoint, "land").land.is_none());
 }
 
 #[test]
