@@ -710,7 +710,7 @@ pub(crate) mod peer_tests {
                 "timeout_seconds":factory.context.config.limits.graph_timeout_seconds
             }], "concurrency":1, "knobs":["routing.graph_exclude=[\"codex/gpt-6-luna\"]"]
         }))?;
-        let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default())?;
+        let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default(), None)?;
         let target = receipt.targets.first().ok_or("target")?;
         let mut graph_owner = BoundGraphOwner {
             factory: &factory,
