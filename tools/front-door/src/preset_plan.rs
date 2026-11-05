@@ -312,6 +312,43 @@ pub fn decide(
             _ => Ok(None),
         };
     };
+    if let Some(stage) = catalogue.get("delegate").and_then(Value::as_str) {
+        if !config
+            .get("stages")
+            .and_then(Value::as_array)
+            .is_some_and(|stages| {
+                stages.iter().enumerate().any(|(index, entry)| {
+                    stage_id(entry, index) == stage && entry.get("preset").is_some()
+                })
+            })
+        {
+            return Err(format!(
+                "preset {name}: plan.delegate must name a preset stage"
+            ));
+        }
+        let wanted = ctx.mode == PlanMode::On;
+        let applied = wanted && ctx.unavailable.is_none();
+        let reason = if applied {
+            "review panel planned at launch".to_owned()
+        } else if wanted {
+            format!(
+                "planner unavailable; review panel uses deterministic selection: {}",
+                ctx.unavailable.as_deref().unwrap_or_default()
+            )
+        } else if ctx.mode == PlanMode::Auto {
+            "review panel uses deterministic selection in auto mode".to_owned()
+        } else {
+            "planning turned off".to_owned()
+        };
+        return Ok(Some(Decision {
+            requested: ctx.mode,
+            applied,
+            reason,
+            route: ctx.route.clone(),
+            degraded: ctx.unavailable.clone().filter(|_| wanted),
+            warnings: Vec::new(),
+        }));
+    }
     let parameters = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),
@@ -753,6 +790,57 @@ fn bind_item(value: &Value, item: &Value) -> Value {
         ),
         other => other.clone(),
     }
+}
+
+/// Lower the review catalogue before its subject is known. The launch host
+/// narrows it to the measured panel and binds its leaves to the pinned commit.
+pub(super) fn deferred_review_catalogue(
+    builder: &StageBuilder<'_>,
+    names: &[String],
+) -> Result<Value, String> {
+    let (config, _) = builder.layers.resolve(builder.name)?;
+    let catalogue = config
+        .get("plan")
+        .ok_or("review preset needs a plan catalogue")?;
+    let patterns = catalogue
+        .get("patterns")
+        .and_then(Value::as_array)
+        .ok_or("review plan needs patterns")?;
+    let mut values = builder.parameters.clone();
+    values["subject"] = json!({"type":"commit", "commit":"HEAD"});
+    let mut lowered = Vec::new();
+    for pattern in patterns {
+        if pattern.get("for_each").and_then(Value::as_str) != Some("lenses") {
+            return Err("deferred review patterns must iterate lenses".into());
+        }
+        for name in names {
+            let item = json!({"name": name, "tier": "senior"});
+            let mut entry = bind_item(pattern, &item);
+            let map = entry
+                .as_object_mut()
+                .ok_or("review pattern must be a table")?;
+            map.remove("for_each");
+            for node in map
+                .get_mut("nodes")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                node.as_object_mut()
+                    .ok_or("review pattern node must be a table")?
+                    .entry("item")
+                    .or_insert_with(|| item.clone());
+            }
+            lowered.push(lower_pattern(
+                builder.layers,
+                builder.roles,
+                &values,
+                builder.prompt,
+                &entry,
+            )?);
+        }
+    }
+    Ok(json!({"patterns":lowered,"guidance":catalogue.get("guidance")}))
 }
 
 /// One catalogue entry per item of `list`. The `lenses` list is first narrowed

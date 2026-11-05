@@ -892,6 +892,7 @@ Catalogues shipped today:
 | --- | --- | --- |
 | `big-batch` | `writer-lane`, `wave-barrier` | Lanes, scopes, waves, routes, budgets. |
 | `review` | `lens-<name>` per panel-selected lens | Which of the panel's lenses run, and each tier. |
+| `deliver` | The `review` lens catalogue | Its review panel and tiers at review launch. |
 | `scout-swarm` | `scout`, `external-scout` | Scout count, each question, each route. |
 | `fan-out`, `fan-out-synthesise` | `worker` | Worker count, each question, each route. |
 | `scope-then-run` | `scout`, `external-scout`, `no-scout` | Whether to scout, the width, each question. |
@@ -904,11 +905,14 @@ the planner's result. `scope-then-run` runs a synthesis of its planned scouts
 before scoping; `scout-swarm` keeps its own synthesis. `external = 0` removes
 the external scout from the catalogue (`enabled_by = "external"`), and a
 preset's `after` lists stages inserted behind the planner. Planned scouts keep
-the caller's `read_roots`. `deliver` has
-no catalogue by decision: one `write` stage is named by the CI gate, the review
-and land, so planned delivery stays with `big-batch`. The chair plans when the brief
-already fixes the shape (pass the parameter); leave `--plan auto` when the
-brief leaves it open.
+the caller's `read_roots`. `deliver --plan on` plans its review when the writer's
+head is pinned, using the measured panel's catalogue and path floors. The
+planner's rationale and chosen lenses are recorded in the graph; if it fails,
+the deterministic panel runs. The CI gate and landing stages are unchanged.
+`--plan off` retains the deferred deterministic panel. The chair plans when the brief
+already fixes the shape (pass the parameter); for other catalogues leave
+`--plan auto` when the brief leaves it open. For `deliver`, `auto` leaves the
+review deterministic; use `--plan on` to request launch-time planning.
 
 ## Observe and resume
 

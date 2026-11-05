@@ -1792,6 +1792,16 @@ fn review_catalogue_binds_every_lens_to_the_pinned_commit() {
 }
 
 #[test]
+fn review_catalogue_pins_nested_pattern_leaves() {
+    let mut doc = planner(1);
+    let plan = doc.nodes[0].plan.as_mut().unwrap();
+    plan.patterns.push(serde_json::from_value(json!({"name":"nested","nodes":[{"id":"group","composite":{"nodes":[{"id":"lens","source":{"type":"head","node":"writer"}}],"exports":[{"node":"lens","outputs":["result"]}]}}],"exports":[{"node":"group","outputs":["result"]}]})).unwrap());
+    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    plan.pin_review_subject(head).unwrap();
+    assert_eq!(plan.patterns[0].nodes[0]["composite"]["nodes"][0]["source"], json!({"type":"commit","commit":head}));
+}
+
+#[test]
 fn planned_review_expands_only_the_lens_legs_the_catalogue_lists() {
     let doc = planned_fixture("review");
     let leg = |lens: &str, tier: &str| {
