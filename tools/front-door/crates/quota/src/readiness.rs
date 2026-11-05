@@ -116,6 +116,8 @@ impl LoginObservation {
 pub struct ReadinessRead {
     pub state: ReadinessState,
     pub reason: Option<ReadinessReason>,
+    /// Time of the matching, valid scoped evidence, including stale observations.
+    pub observed_unix_seconds: Option<i64>,
     pub expires_unix_seconds: Option<i64>,
     pub reset_unix_seconds: Option<i64>,
     pub evidence_ref: Option<String>,
@@ -131,6 +133,7 @@ impl ReadinessRead {
         Self {
             state: ReadinessState::Unknown,
             reason: Some(reason),
+            observed_unix_seconds: None,
             expires_unix_seconds: None,
             reset_unix_seconds: None,
             evidence_ref: None,
@@ -244,14 +247,23 @@ impl ReadinessFile {
                 return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
             }
             if now >= r.expires_unix_seconds {
-                return ReadinessRead::unknown(ReadinessReason::Stale);
+                return ReadinessRead {
+                    observed_unix_seconds: Some(r.observed_unix_seconds),
+                    expires_unix_seconds: Some(r.expires_unix_seconds),
+                    ..ReadinessRead::unknown(ReadinessReason::Stale)
+                };
             }
             if r.state == ReadinessState::Unknown {
-                return ReadinessRead::unknown(r.reason.unwrap_or(ReadinessReason::NotProbed));
+                return ReadinessRead {
+                    observed_unix_seconds: Some(r.observed_unix_seconds),
+                    expires_unix_seconds: Some(r.expires_unix_seconds),
+                    ..ReadinessRead::unknown(r.reason.unwrap_or(ReadinessReason::NotProbed))
+                };
             }
             ReadinessRead {
                 state: r.state,
                 reason: r.reason,
+                observed_unix_seconds: Some(r.observed_unix_seconds),
                 expires_unix_seconds: Some(r.expires_unix_seconds),
                 reset_unix_seconds: r.reset_unix_seconds,
                 evidence_ref: r.evidence_ref.clone(),
@@ -279,6 +291,7 @@ impl ReadinessFile {
             return ReadinessRead {
                 state: ReadinessState::Unavailable,
                 reason: Some(ReadinessReason::LoginExpired),
+                observed_unix_seconds: Some(login.observed_unix_seconds),
                 expires_unix_seconds: Some(login.valid_until_unix_seconds),
                 reset_unix_seconds: None,
                 evidence_ref: Some("login-expiry".into()),
@@ -573,12 +586,18 @@ mod tests {
         ] {
             let read = file.get(&scope, now);
             if let Some(reason) = reason {
-                assert_eq!(read, ReadinessRead::unknown(reason));
+                assert_eq!(read.state, ReadinessState::Unknown);
+                assert_eq!(read.reason, Some(reason));
+                assert_eq!(
+                    read.observed_unix_seconds,
+                    (reason == ReadinessReason::Stale).then_some(10)
+                );
                 if reason == ReadinessReason::Stale {
                     assert_eq!(read.project(), provenant_records::RouteReadiness::stale());
                 }
             } else {
                 assert_eq!(read.state, ReadinessState::Unavailable);
+                assert_eq!(read.observed_unix_seconds, Some(10));
             }
         }
         let mut other = scope.clone();
@@ -628,6 +647,9 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(file.get(&scope, 10).state, ReadinessState::Ready);
+        assert_eq!(file.get(&scope, 10).observed_unix_seconds, Some(10));
+        assert_eq!(file.get(&scope, 9).observed_unix_seconds, None);
+        assert_eq!(file.get(&scope, 20).observed_unix_seconds, Some(10));
         assert_eq!(file.get(&scope, 9).state, ReadinessState::Unknown);
         assert_eq!(file.get(&scope, 20).state, ReadinessState::Unknown);
         for other in [
