@@ -140,7 +140,7 @@ fn review_preset_launches_read_only_from_detached_head() -> Result {
     fs::create_dir_all(&settings)?;
     fs::write(
         settings.join("roles.toml"),
-        "[roles.\"lens.correctness-spec\"]\nroutes = [{ adapter = 'command', name = 'review-pass' }]\n",
+        "[roles.\"lens.correctness-spec\"]\ntier = [{ adapter = 'command', name = 'review-pass' }]\n",
     )?;
     let brief = rig.root.join("review-brief");
     fs::write(&brief, "Review the pinned subject")?;
