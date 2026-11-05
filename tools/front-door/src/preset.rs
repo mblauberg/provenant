@@ -1705,52 +1705,52 @@ fn lower_leaf(
     }
     let mut node = interpolate(&profile, &effective_parameters, prompt, index)?;
     let map = node.as_object_mut().ok_or("leaf must be a table")?;
-    for key in map.keys() {
-        if ![
-            "id",
-            "role",
-            "tier",
-            "effort",
-            "outputs",
-            "access",
-            "worktree",
-            "deadline_seconds",
-            "title",
-            "prompt",
-            "kind",
-            "plan",
-            "loop",
-            "composite",
-            "condition",
-            "on_fail",
-            "delivery",
-            "write_scope",
-            "acceptance_checks",
-            "inputs",
-            "depends_on",
-            "routes",
-            "read_roots",
-            "capabilities",
-            "source",
-            "prompt_file",
-            "distinct_from",
-            "card",
-            "references",
-            "family",
-            "family_strength",
-            "fallback_tier",
-            "purpose",
-            "dispositions",
-            "require_findings",
-            "advisory",
-            "continues",
-            "land",
-            "retry",
-            "family_group",
-        ]
-        .contains(&key.as_str())
-        {
-            return Err(format!("node {id}: unknown leaf field: {key}"));
+    // Compiler-only fields are consumed below; GraphNode owns the remaining
+    // field vocabulary. Its flattened extras are retained for graph records,
+    // but a preset must not introduce an unknown node field through them.
+    let mut probe = map.clone();
+    for key in [
+        "tier",
+        "effort",
+        "outputs",
+        "prompt_file",
+        "card",
+        "references",
+        "family",
+        "family_strength",
+        "fallback_tier",
+        "purpose",
+        "retry",
+    ] {
+        probe.remove(key);
+    }
+    probe.insert("id".into(), json!(id));
+    probe.entry("access").or_insert_with(|| json!("read_only"));
+    let unknown = match serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(
+        Value::Object(probe.clone()),
+    ) {
+        Ok(node) => node.extra.keys().next().cloned(),
+        Err(_) => probe.iter().find_map(|(key, value)| {
+            if key == "id" || key == "access" {
+                return None;
+            }
+            let candidate = json!({"id": id, "access": "read_only", (key): value});
+            serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(candidate)
+                .ok()
+                .and_then(|node| node.extra.contains_key(key).then(|| key.clone()))
+        }),
+    };
+    if let Some(key) = unknown {
+        return Err(format!("node {id}: unknown leaf field: {key}"));
+    }
+    for alias in ["goal", "brief"] {
+        if let Some(value) = map.remove(alias) {
+            if map.contains_key("prompt") {
+                return Err(format!(
+                    "node {id}: prompt and {alias} are mutually exclusive"
+                ));
+            }
+            map.insert("prompt".into(), value);
         }
     }
     map.insert("id".into(), json!(id));
@@ -1994,10 +1994,15 @@ fn lower_leaf(
         map.entry("prompt").or_insert_with(|| json!(prompt));
         let tier = map.remove("tier");
         let effort = map.remove("effort");
-        if tier.is_some() && map.contains_key("routes") {
+        if tier.is_some() && (map.contains_key("route") || map.contains_key("routes")) {
             return Err(format!("node {id}: tier and routes are mutually exclusive"));
         }
-        if map.contains_key("routes") {
+        if map.contains_key("route") && map.contains_key("routes") {
+            return Err(format!(
+                "node {id}: route and routes are mutually exclusive"
+            ));
+        }
+        if map.contains_key("route") || map.contains_key("routes") {
             if effort.is_some() {
                 return Err(format!("node {id}: routes cannot be combined with effort"));
             }

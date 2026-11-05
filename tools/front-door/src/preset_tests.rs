@@ -2772,6 +2772,39 @@ message = 'explicit'
 }
 
 #[test]
+fn leaf_fields_follow_graph_node_type_and_report_unknown_fields() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "typed-field",
+            "stages = [{ id = 'check', skip_without_findings = true, route = { alias = 'senior' }, goal = 'Check it' }]\n",
+        )
+        .unwrap();
+    let expansion = expand(&layers, "typed-field", "brief", &[]).unwrap();
+    assert_eq!(
+        expansion.document["nodes"][0]["skip_without_findings"],
+        true
+    );
+    assert_eq!(expansion.document["nodes"][0]["route"]["alias"], "senior");
+    assert_eq!(expansion.document["nodes"][0]["prompt"], "Check it");
+    assert!(expansion.document["nodes"][0].get("routes").is_none());
+
+    layers
+        .insert(
+            "test",
+            "unknown-field",
+            "stages = [{ id = 'check', distinct_from = 'bad', misspelled_field = true }]\n",
+        )
+        .unwrap();
+    let error = expand(&layers, "unknown-field", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("check") && error.contains("misspelled_field"),
+        "{error}"
+    );
+}
+
+#[test]
 fn composite_exports_are_checked_when_a_preset_is_compiled() {
     let mut layers = Layers::empty();
     layers.insert("test", "invalid-export", "stages = [{ id = 'group', stages = [{ id = 'member', prompt = 'work' }], exports = [{ node = 'missing', outputs = ['result'] }] }]\n").unwrap();
