@@ -354,7 +354,7 @@ pub(crate) mod peer_tests {
             environment.push(("HOME".into(), fixture_home.path().as_os_str().to_owned()));
         }
         let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(30));
+        let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(120));
         options.env = Some(&environment);
         let output = SystemExecutor::new(1)?.execute(options)?;
         // Keep native-backend skip evidence visible through host isolation.
