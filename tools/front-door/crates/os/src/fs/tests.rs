@@ -1,5 +1,21 @@
 use super::*;
 
+#[test]
+fn retired_owner_lock_refuses_stale_and_shared_guards() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let name = OsStr::new("graph.lock");
+    let shared = directory.try_lock(name, LockMode::Shared).unwrap();
+    assert!(directory.retire_owner_lock(name, &shared).is_err());
+    drop(shared);
+    let guard = directory.try_lock(name, LockMode::Exclusive).unwrap();
+    directory.retire_owner_lock(name, &guard).unwrap();
+    let replacement = directory.try_lock(name, LockMode::Exclusive).unwrap();
+    assert!(directory.verify_held_lock(name, &guard).is_err());
+    assert!(directory.retire_owner_lock(name, &guard).is_err());
+    assert!(directory.verify_held_lock(name, &replacement).is_ok());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn clone_file_refuses_existing_destination() {

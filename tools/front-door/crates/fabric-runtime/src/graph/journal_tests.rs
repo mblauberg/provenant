@@ -5,6 +5,75 @@ use std::{convert::Infallible, os::unix::fs::PermissionsExt};
 struct Owner;
 
 #[test]
+fn checkpoint_collection_keeps_pending_and_recent_graphs() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    fixture.checkpoint.nodes[0].state = NodeState::Running;
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        0
+    );
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
+    journal.save(&fixture.checkpoint).unwrap();
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        0
+    );
+    fixture.checkpoint.asks.push(
+        serde_json::from_value(serde_json::json!({
+            "ask_id":"open", "kind":"pause", "session":"chair", "title":"question",
+            "body":"waiting", "options":[], "resolved":false, "closed":false
+        }))
+        .unwrap(),
+    );
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        0
+    );
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    fixture.checkpoint.asks.clear();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, 0, &cancel, &clock).unwrap(),
+        0
+    );
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        1
+    );
+    assert!(
+        FileJournal::read_checkpoint(&root, project, "g-test")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !base
+            .join("fabric/graphs")
+            .join(project.to_string())
+            .join("graph-g-test.lock")
+            .exists()
+    );
+}
+
+#[test]
 fn pending_markers_follow_saves_and_rebuild_after_loss() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();

@@ -272,6 +272,72 @@ impl FileJournal {
         Self::rebuild_pending_in(root, project, &directory, &markers)
     }
 
+    /// Collect old terminal checkpoints under their individual graph locks.
+    pub fn collect_terminal(
+        root: &StateRoot,
+        project: ProjectId,
+        before_ns: i128,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<usize, JournalError> {
+        let mut removed = 0;
+        for id in Self::graph_ids(root, project)? {
+            let journal = match Self::open(
+                root,
+                project,
+                &id,
+                WaitBudget::nonblocking(clock.mono_now()),
+                cancel,
+                clock,
+            ) {
+                Ok(journal) => journal,
+                Err(JournalError::Filesystem(FsError::LockTimeout { .. })) => continue,
+                Err(error) if error.is_unreadable() => continue,
+                Err(error) => return Err(error),
+            };
+            let Some(stored) = load_checkpoint(&journal.directory, &id)? else {
+                continue;
+            };
+            let checkpoint = &stored.checkpoint;
+            if stored_pending(&stored)
+                || checkpoint.asks.iter().any(|ask| !ask.closed)
+                || checkpoint.wake_at.is_some()
+                || checkpoint.nodes.iter().any(|node| {
+                    node.land
+                        .as_ref()
+                        .is_some_and(|land| land.wake_at.is_some())
+                })
+            {
+                continue;
+            }
+            let name = journal.checkpoint_name();
+            let metadata = journal.directory.metadata_at(&name, false)?;
+            if metadata.modified_ns >= before_ns {
+                continue;
+            }
+            journal.directory.unlink(&name)?;
+            for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
+                match journal.directory.unlink(&sidecar) {
+                    Ok(()) => {}
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            let markers = open_or_create(&journal.directory, OsStr::new("pending"))?;
+            remove_pending_marker(&markers, &id)?;
+            journal
+                .directory
+                .sync()
+                .map_err(JournalError::DurabilityUnconfirmed)?;
+            // No checkpoint mutation may follow lock retirement.
+            journal
+                .directory
+                .retire_owner_lock(OsStr::new(&format!("graph-{id}.lock")), &journal._lock)?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
     fn rebuild_pending_in(
         root: &StateRoot,
         project: ProjectId,

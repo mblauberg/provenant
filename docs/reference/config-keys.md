@@ -158,6 +158,14 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | `limits.fan_out_width` | 32 | Graph fan out width limit. (1 or more). |
 | `limits.concurrency` | 0 | Graph concurrency limit. Zero uses host lane caps. (0 or more). |
 
+## Host GC settings
+
+Set these in `[gc]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `graph_checkpoint_days` | 90 | Retain terminal graph checkpoints for at least this many days after their last save (1 to 3650 days). |
+
 ## Host store settings
 
 Set these in `[domains.fabric.limits]` in the host configuration. Omit a key for its default.

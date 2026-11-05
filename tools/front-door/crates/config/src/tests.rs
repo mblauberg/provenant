@@ -284,15 +284,17 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
     let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
     assert_eq!(defaults["gc"]["schedule"], true);
     assert_eq!(defaults["gc"]["idle_days"], 7);
+    assert_eq!(defaults["gc"]["graph_checkpoint_days"], 90);
     assert!(defaults["gc"]["free_floor"].is_null());
     let config = load(
         &roots(),
-        Some(&b"schema_version=1\n[gc]\nschedule=false\nidle_days=14\nfree_floor='20G'"[..]),
+        Some(&b"schema_version=1\n[gc]\nschedule=false\nidle_days=14\ngraph_checkpoint_days=30\nfree_floor='20G'"[..]),
     )
     .unwrap();
     let value = serde_json::to_value(&config).unwrap();
     assert_eq!(value["gc"]["schedule"], false);
     assert_eq!(value["gc"]["idle_days"], 14);
+    assert_eq!(value["gc"]["graph_checkpoint_days"], 30);
     assert_eq!(value["gc"]["free_floor"], "20G");
     test_support::assert_leaf_origins(&config);
     let configured = load(&roots(), Some(b"schema_version=1\n[gc]\nalert_below='20G'\n[gc.projects.example]\nregenerable=['target','node_modules']\nkeep=['web/target']".as_slice())).unwrap();
@@ -305,6 +307,8 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
     for (field, rule) in [
         ("idle_days=0", "idle_days_range"),
         ("idle_days=3651", "idle_days_range"),
+        ("graph_checkpoint_days=0", "graph_checkpoint_days_range"),
+        ("graph_checkpoint_days=3651", "graph_checkpoint_days_range"),
         ("schedule='yes'", "type"),
         ("free_floor='bad'", "invalid_cache_size"),
         ("alert_below='bad'", "invalid_cache_size"),

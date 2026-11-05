@@ -165,6 +165,21 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
                     binding.project_id(),
                 )
                 .map_err(|error| error.to_string())?;
+                let before_ns = i128::from(
+                    clock
+                        .wall_now()
+                        .map_err(|error| error.to_string())?
+                        .as_micros(),
+                ) * 1_000
+                    - i128::from(config.gc.graph_checkpoint_days) * 86_400 * 1_000_000_000;
+                provenant_fabric_runtime::graph::FileJournal::collect_terminal(
+                    &resolved.roots.state,
+                    binding.project_id(),
+                    before_ns,
+                    &CancelToken::new(),
+                    &clock,
+                )
+                .map_err(|error| error.to_string())?;
             }
             crate::worktrees::scheduled_gc(globals, config.gc.idle_days, workers)
         })();

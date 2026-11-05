@@ -537,6 +537,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     for key in [
         "gc.schedule",
         "gc.idle_days",
+        "gc.graph_checkpoint_days",
         "gc.free_floor",
         "gc.alert_below",
         "gc.projects",
