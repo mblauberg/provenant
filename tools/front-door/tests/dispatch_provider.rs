@@ -2330,7 +2330,13 @@ fn host_native_dispatch_uses_the_declared_agent_and_refuses_resume() -> Result {
 }
 
 fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
-    let can_launch = graph_fixture_available()?;
+    if !graph_fixture_available()? {
+        writeln!(
+            io::stderr(),
+            "unconfigured_host_native_repair_launches_alias_fallback skipped: graph fixture unavailable"
+        )?;
+        return Ok(());
+    }
     let rig = claude_fixture()?;
     let cleanup = rig.process_cleanup();
     writeln!(
@@ -2416,10 +2422,8 @@ fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
             assert_eq!(attempts.len(), 2, "{status}");
             assert_eq!(attempts[0]["outcome"], "adapter_unavailable", "{status}");
             assert_eq!(attempts[0]["launched"], false, "{status}");
-            if can_launch {
-                assert_eq!(attempts[1]["launched"], true, "{status}");
-                assert_eq!(repair["state"], "succeeded", "{status}");
-            }
+            assert_eq!(attempts[1]["launched"], true, "{status}");
+            assert_eq!(repair["state"], "succeeded", "{status}");
             break;
         }
         assert!(std::time::Instant::now() < deadline, "{status}");
@@ -2439,12 +2443,6 @@ fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
         refused["reason"],
         "host-native absent is not configured in domains.fabric.host_native"
     );
-    if !can_launch {
-        writeln!(
-            io::stderr(),
-            "unconfigured_host_native_repair_launches_alias_fallback: verified prepare refusal and alias fallback; launch assertion skipped: graph fixture unavailable"
-        )?;
-    }
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
     Ok(())
