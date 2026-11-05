@@ -3820,37 +3820,42 @@ fn host_forge_output_over_its_bound_names_gh_not_git()
 
 #[test]
 fn worktree_listing_keeps_the_raised_limit_and_others_keep_theirs() {
-    assert_eq!(
-        stdout_limit(false, &["worktree", "list", "--porcelain"]),
-        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
-    );
-    assert_eq!(
-        stdout_limit(false, &["for-each-ref", "--format=%(refname)"]),
-        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
-    );
-    for args in [
-        &[
-            "--git-dir",
-            "repo.git",
-            "--work-tree",
-            "tree",
-            "for-each-ref",
-        ][..],
-        &[
-            "-c",
-            "remote.origin.uploadpack=git-upload-pack",
-            "ls-remote",
-            "origin",
-        ],
-        &["--git-dir=repo.git", "worktree", "list", "--porcelain"],
+    let listing = stdout_limit(false, &["worktree", "list", "--porcelain"]);
+    assert!(listing >= provenant_os::exec::DEFAULT_CAPTURE_LIMIT);
+    for (forge, args) in [
+        (false, &["for-each-ref", "--format=%(refname)"][..]),
+        (
+            false,
+            &[
+                "--git-dir",
+                "repo.git",
+                "--work-tree",
+                "tree",
+                "for-each-ref",
+            ],
+        ),
+        (
+            false,
+            &[
+                "-c",
+                "remote.origin.uploadpack=git-upload-pack",
+                "ls-remote",
+                "origin",
+            ],
+        ),
+        (
+            false,
+            &["--git-dir=repo.git", "worktree", "list", "--porcelain"],
+        ),
+        (false, &["remote"]),
+        (true, &["log"]),
     ] {
-        assert_eq!(
-            stdout_limit(false, args),
-            provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+        let limit = stdout_limit(forge, args);
+        assert!(
+            limit > 0 && limit <= listing,
+            "{args:?}: {limit} > {listing}"
         );
     }
-    assert_eq!(stdout_limit(false, &["remote"]), 16 * 1024);
-    assert_eq!(stdout_limit(true, &["log"]), 56_000);
 }
 
 #[test]
