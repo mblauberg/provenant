@@ -1,6 +1,6 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":2,"edges":6,"limit_reason":null,"max_attempts":12,"nodes":7,"prompt_bytes":5964}
+Inspection: {"dependency_depth":2,"edges":6,"limit_reason":null,"max_attempts":12,"nodes":7,"prompt_bytes":6542}
 Preset selection: scout-swarm (override)
 plan: off -> off (planning turned off)
 Pending "route_readiness": "Route readiness and quota are checked before launch."

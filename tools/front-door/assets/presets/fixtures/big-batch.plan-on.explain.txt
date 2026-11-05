@@ -1,6 +1,6 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":26,"edges":69,"limit_reason":null,"max_attempts":51,"nodes":38,"prompt_bytes":57958}
+Inspection: {"dependency_depth":26,"edges":69,"limit_reason":null,"max_attempts":51,"nodes":38,"prompt_bytes":58536}
 Preset selection: big-batch (override)
 Review shape: deep (by_kind; size=unknown; kind=integration; risk=unknown), standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: on -> on (planning requested)
