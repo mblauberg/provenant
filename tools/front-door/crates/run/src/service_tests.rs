@@ -635,6 +635,10 @@ fn each_refusal_has_its_own_stable_code() {
             "WRITER_REF_LOCKED",
         ),
         (
+            RunError::SetupLockTimeout { seconds: 1 },
+            "SETUP_LOCK_TIMEOUT",
+        ),
+        (
             RunError::ObjectImportLimit("fixture"),
             "OBJECT_IMPORT_LIMIT",
         ),

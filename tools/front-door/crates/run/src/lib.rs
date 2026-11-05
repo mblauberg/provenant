@@ -646,6 +646,11 @@ impl RunError {
                 diagnostic =
                     diagnostic.next("wait for an active lane to finish or adjust the lane limit")
             }
+            Self::SetupLockTimeout { seconds } => {
+                diagnostic = diagnostic
+                    .detail(format!("provenant-lane-setup.lock was held for the {seconds}s wait"))
+                    .next("retry after the current Git setup finishes, or increase domains.fabric.lanes.setup_lock_wait_seconds");
+            }
             _ => {}
         }
         diagnostic
