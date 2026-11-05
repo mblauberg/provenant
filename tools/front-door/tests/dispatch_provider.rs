@@ -571,6 +571,23 @@ fn fixture() -> Result {
         )
     } else if prompt.contains("fixture policy result") && policy_model == Some("gpt-6-luna") {
         String::new()
+    } else if prompt.contains("fixture slow result")
+        || prompt.contains("fixture unknown verdict")
+        || prompt.contains("check renamed path")
+    {
+        let lens = prompt
+            .lines()
+            .find(|line| line.starts_with("Lens: "))
+            .unwrap_or("Lens: unknown");
+        let denied = fs::write("review-write-sentinel", b"forbidden").is_err();
+        let verdict = if prompt.contains("fixture unknown verdict") {
+            "No recognised verdict"
+        } else {
+            "VERDICT: PASS"
+        };
+        format!(
+            "{lens}\nwrite denied: {denied}\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\n{verdict}{DONE_FENCE}"
+        )
     } else if prompt.contains("Review commit ") {
         let lens = prompt
             .lines()
@@ -1395,7 +1412,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         // two reviewers of three attempts each can outlast the rig's
         // ten-second watchdog. Retry chains are covered by
         // `capacity_settlement_resumes_the_same_session` and the run store.
-        "\n[domains.routing]\nsettlement_retries = 0\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low', efforts = ['low'] }}]\n[domains.routing.review.shapes.fixture]\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'"
+        "\n[domains.routing]\nsettlement_retries = 0\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low', efforts = ['low'] }}]\n[domains.routing.review.shapes.fixture]\nframe = false\nverifiers = 0\nsynthesis = 'reduce'\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness-spec', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'"
     )?;
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
@@ -1416,8 +1433,29 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     ] {
         assert_eq!(code(&rig.execute(&git, args, None)?), 0);
     }
+    let changed = rig.execute(&git, &["commit", "--allow-empty", "-qm", "Change"], None)?;
+    assert_eq!(code(&changed), 0);
     let brief = rig.root.join("review-brief.txt");
     fs::write(&brief, "Check this change; fixture slow result")?;
+    let explained = rig.command(&[
+        "review",
+        "HEAD",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--shape",
+        "fixture",
+        "--explain",
+        "--json",
+    ])?;
+    assert_eq!(code(&explained), 0);
+    let explained: Value = serde_json::from_slice(&explained.stdout.bytes)?;
+    let shape = explained["data"]["review_shape"]
+        .as_str()
+        .ok_or("review shape")?;
+    assert!(
+        shape.contains("fixture") && shape.contains("override"),
+        "{shape}"
+    );
     let timed = rig.command(&[
         "review",
         "HEAD",
@@ -1436,11 +1474,17 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         String::from_utf8_lossy(&timed.stdout.bytes)
     );
     let timed: Value = serde_json::from_slice(&timed.stdout.bytes)?;
+    assert_eq!(timed["status"], "waiting");
     let timed_rows = timed["data"]["reviewers"]
         .as_array()
         .ok_or("timed reviewers")?;
     assert_eq!(timed_rows.len(), 2);
-    assert!(timed_rows[0]["run_id"].is_string());
+    assert!(
+        timed_rows
+            .iter()
+            .all(|row| row["run_id"].is_null() || row["run_id"].is_string())
+    );
+    assert!(timed_rows.iter().any(|row| row["run_id"].is_string()));
     assert!(timed_rows.iter().all(|row| row["state"].is_string()));
     let out = rig.command(&[
         "review",
@@ -1449,8 +1493,6 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         brief.to_str().ok_or("brief")?,
         "--shape",
         "fixture",
-        "--range",
-        "missing-ref..HEAD",
         "--wait",
         "60s",
         "--json",
@@ -1463,23 +1505,25 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         String::from_utf8_lossy(&out.stderr.bytes)
     );
     let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(result["data"]["shape"], "fixture");
-    assert_eq!(result["data"]["selection_source"], "override");
+    assert_eq!(result["data"]["graph_id"], timed["data"]["graph_id"]);
     let reviewers = result["data"]["reviewers"].as_array().ok_or("reviewers")?;
     assert_eq!(reviewers.len(), 2);
-    assert_eq!(result["data"]["verdicts"]["approve"], 2);
-    assert_eq!(reviewers[0]["run_id"], timed_rows[0]["run_id"]);
-    for (index, lens) in ["correctness", "tests"].iter().enumerate() {
+    assert_eq!(result["data"]["graph"]["status"], "complete");
+    assert_eq!(result["data"]["graph"]["outcome"], "succeeded");
+    for (index, lens) in ["correctness-spec", "tests"].iter().enumerate() {
         let row = &reviewers[index];
+        assert_eq!(row["node_id"], format!("lenses--lens-{lens}"));
+        assert_eq!(row["lens"], *lens);
         assert_eq!(row["state"], "succeeded", "{row}");
         assert_eq!(row["verdict"], "approve", "{row}");
-        assert_eq!(row["lens"], *lens);
-        assert_eq!(row["substitution"], index == 1);
+        assert_eq!(row["substitution"], index == 1, "{row}");
         assert!(row["run_id"].is_string());
         assert_eq!(row["applied_route"]["model"], "codex/gpt-6-luna");
-        let path: provenant_records::StructuredPathWire =
-            serde_json::from_value(row["result_path"].clone())?;
-        let output = fs::read_to_string(path.to_path_buf()?)?;
+        assert!(row["result"]["path"].is_string(), "{row}");
+        if timed_rows[index]["run_id"].is_string() {
+            assert_eq!(row["run_id"], timed_rows[index]["run_id"]);
+        }
+        let output = fs::read_to_string(row["result"]["path"].as_str().ok_or("result path")?)?;
         assert!(output.contains(&format!("Lens: {lens}")), "{output}");
         assert!(output.contains("write denied: true"), "{output}");
     }
@@ -1503,7 +1547,13 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         String::from_utf8_lossy(&unknown.stdout.bytes)
     );
     let unknown: Value = serde_json::from_slice(&unknown.stdout.bytes)?;
-    assert_eq!(unknown["data"]["verdicts"]["unknown"], 2);
+    assert!(
+        unknown["data"]["reviewers"]
+            .as_array()
+            .ok_or("unknown reviewers")?
+            .iter()
+            .all(|row| row["verdict"].is_null())
+    );
     fs::create_dir_all(rig.project.join(".github/workflows"))?;
     fs::write(rig.project.join(".github/workflows/check.yml"), "fixture")?;
     let added = rig.execute(&git, &["add", ".github/workflows/check.yml"], None)?;
@@ -1540,8 +1590,34 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         String::from_utf8_lossy(&renamed.stdout.bytes)
     );
     let renamed: Value = serde_json::from_slice(&renamed.stdout.bytes)?;
-    assert_eq!(renamed["data"]["shape"], "fixture");
-    assert_eq!(renamed["data"]["selection_source"], "by_paths");
+    let explained = rig.command(&[
+        "review",
+        "HEAD",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--risk",
+        "low",
+        "--range",
+        "HEAD~1..HEAD",
+        "--explain",
+        "--json",
+    ])?;
+    assert_eq!(code(&explained), 0);
+    let explained: Value = serde_json::from_slice(&explained.stdout.bytes)?;
+    let shape = explained["data"]["review_shape"]
+        .as_str()
+        .ok_or("review shape")?;
+    assert!(
+        shape.contains("fixture") && shape.contains("by_paths"),
+        "{shape}"
+    );
+    assert_eq!(
+        renamed["data"]["reviewers"]
+            .as_array()
+            .ok_or("renamed reviewers")?
+            .len(),
+        2
+    );
     fs::write(&brief, "fixture capacity")?;
     let failed = rig.command(&[
         "review",

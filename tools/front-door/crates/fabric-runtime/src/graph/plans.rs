@@ -487,6 +487,12 @@ fn derive_topology(
                     "composite topology requires a planner specification",
                 )
             })?;
+        let spec = planner.plan.as_ref().ok_or_else(|| {
+            (
+                addition.source.clone(),
+                "composite topology requires a planner specification",
+            )
+        })?;
         if !fallback
             && let Some(required) = spec
                 .extra
