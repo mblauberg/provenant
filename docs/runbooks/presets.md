@@ -53,6 +53,11 @@ for its supplied spec before a run.
 A stage may declare `read_only_floor = true` to keep its preset read-only,
 including through inheritance.
 
+A leaf stage or role may declare `conditional_parameters`: each entry names a
+source `parameter`, an `equals_any` list, a `value` and an `otherwise` value.
+Interpolation uses the matching value when the destination parameter is absent;
+an explicitly supplied parameter takes precedence.
+
 Typed parameters without defaults are required. Missing-value errors name the
 parameter; `--set` and parameter files satisfy it and retain type validation.
 Injected `read_roots` is optional for a nested preset that does not declare it;
@@ -60,8 +65,9 @@ other unknown parameters remain errors. `${index}` in nested role overrides
 resolves for each child count copy. Node titles default to the concrete node ID;
 stage titles and user or preset role overrides can supply a title.
 
-Only `for_each = "${lenses}"` is governed by the review shape's slot count and
-conditional risk tags. Other lists, including `big-batch` lanes, expand in full.
+Only a stage declaring `review_lenses = true` is governed by the review shape's
+slot count and conditional risk tags. Other lists, including `big-batch` lanes,
+expand in full.
 Every omitted lens appears in graph provenance, `run --explain` and a warning.
 
 ## Select a preset by rules

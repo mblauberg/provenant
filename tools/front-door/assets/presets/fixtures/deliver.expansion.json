@@ -3,7 +3,7 @@
     "pattern": "deliver",
     "preset": "deliver"
   },
-  "graph_id": "preset-2bbaa436b1e066a345d5acf973776d72",
+  "graph_id": "preset-f85f8e6fd863ded6ea597015233e7640",
   "nodes": [
     {
       "acceptance_checks": [
@@ -309,7 +309,7 @@
                   ],
                   "require_findings": true,
                   "role": "lens.tests",
-                  "role_digest": "sha256:1acffad6d7ba2cf1a0d514ee9310a7a39e6d077695178d7cb63c2baf19f793d0",
+                  "role_digest": "sha256:cf57b7e9bc1807f396b3cc95bd166f9141e55beaf03c0870b24ac147d32b53ad",
                   "routes": [
                     {
                       "alias": "senior"
@@ -976,7 +976,7 @@
         ]
       },
       "lens.tests": {
-        "digest": "sha256:1acffad6d7ba2cf1a0d514ee9310a7a39e6d077695178d7cb63c2baf19f793d0",
+        "digest": "sha256:cf57b7e9bc1807f396b3cc95bd166f9141e55beaf03c0870b24ac147d32b53ad",
         "extends": [
           "lens.tests",
           "lens"

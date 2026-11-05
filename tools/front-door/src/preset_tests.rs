@@ -1990,6 +1990,34 @@ fn tests_lens_includes_mutation_testing_only_for_crucial_or_terminal_risk() {
 }
 
 #[test]
+fn conditional_stage_values_follow_the_declared_parameter() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "conditional-stage", r#"
+stages = [{ id = 'task', prompt = '${message}', conditional_parameters = { message = { parameter = 'level', equals_any = ['high'], value = 'selected', otherwise = 'fallback' } } }]
+[parameters]
+level = 'low'
+"#).unwrap();
+    for (value, expected) in [("low", "fallback"), ("high", "selected")] {
+        let expansion = expand(
+            &layers,
+            "conditional-stage",
+            "brief",
+            &[format!("parameters.level='{value}'")],
+        )
+        .unwrap();
+        assert_eq!(node(&expansion.document, "task")["prompt"], expected);
+    }
+    layers.insert("test", "conditional-override", r#"
+stages = [{ id = 'task', prompt = '${message}', conditional_parameters = { message = { parameter = 'level', equals_any = ['high'], value = 'selected', otherwise = 'fallback' } } }]
+[parameters]
+level = 'high'
+message = 'explicit'
+"#).unwrap();
+    let expansion = expand(&layers, "conditional-override", "brief", &[]).unwrap();
+    assert_eq!(node(&expansion.document, "task")["prompt"], "explicit");
+}
+
+#[test]
 fn preset_explain_big_batch_shows_targeted_checks_policy_and_origin() {
     let layers = Layers::empty();
     let explained = layers.explain("big-batch").unwrap();

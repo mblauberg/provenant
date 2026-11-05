@@ -1343,21 +1343,6 @@ pub(crate) fn find_prompt(nodes: &Value, role: &str) -> Option<String> {
     None
 }
 
-const MUTATION_TESTING_PROMPT: &str = r#"
-
-Diff-scoped mutation evidence (optional; crucial or terminal risk only):
-generate the PR patch with `git diff --relative=<workspace> <base>...<PR head>` and run
-`cargo mutants --in-diff <workspace-relative diff of the PR head> --workspace`.
-Copy any required out-of-workspace includes into the workspace before running.
-Skip tests that fail on the unmutated baseline and list them as skipped. If
-`cargo-mutants` is unavailable or the diff matches no mutants, say so and
-continue. Report mutant, caught, missed and timed-out counts plus wall time, and
-classify every survivor as a gap or noise. Cap the run (`cargo mutants
---timeout` per mutant and stop after about 15 minutes); report partial counts as
-timed-out or skipped, and still end with the verdict. This evidence is optional
-and never gates delivery.
-"#;
-
 fn interpolate_inner(
     value: &Value,
     parameters: &Value,
@@ -1371,14 +1356,6 @@ fn interpolate_inner(
                 "prompt" => Ok(json!(prompt)),
                 "index" if defer_index => Ok(json!("${index}")),
                 "index" => Ok(json!(index)),
-                "mutation_testing" if parameters.get(name).is_none() => Ok(json!(if matches!(
-                    parameters.get("risk_tier").and_then(Value::as_str),
-                    Some("crucial" | "terminal")
-                ) {
-                    MUTATION_TESTING_PROMPT
-                } else {
-                    ""
-                })),
                 _ => {
                     let mut parts = name.split('.');
                     let first = parts.next().unwrap_or_default();
@@ -1615,7 +1592,60 @@ fn lower_leaf(
         "entry",
         &mut BTreeMap::new(),
     )?;
-    let mut node = interpolate(&profile, parameters, prompt, index)?;
+    // Conditional values belong to the role or stage that uses them. Explicit
+    // parameters win, just as they did for ordinary interpolation.
+    let mut effective_parameters = parameters.clone();
+    if let Some(rules) = profile
+        .as_object_mut()
+        .and_then(|map| map.remove("conditional_parameters"))
+    {
+        let rules = rules
+            .as_object()
+            .ok_or_else(|| format!("node {id}: conditional_parameters must be a table"))?;
+        let target = effective_parameters
+            .as_object_mut()
+            .ok_or("parameters must be a table")?;
+        for (key, rule) in rules {
+            let rule = rule
+                .as_object()
+                .ok_or_else(|| format!("node {id}: conditional parameter {key} must be a table"))?;
+            if rule.keys().any(|key| {
+                !["parameter", "equals_any", "value", "otherwise"].contains(&key.as_str())
+            }) {
+                return Err(format!(
+                    "node {id}: conditional parameter {key} has an unknown field"
+                ));
+            }
+            let source = rule
+                .get("parameter")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("node {id}: conditional parameter {key} needs parameter"))?;
+            let choices = rule
+                .get("equals_any")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!("node {id}: conditional parameter {key} needs equals_any")
+                })?;
+            let value = rule
+                .get("value")
+                .ok_or_else(|| format!("node {id}: conditional parameter {key} needs value"))?;
+            let otherwise = rule
+                .get("otherwise")
+                .ok_or_else(|| format!("node {id}: conditional parameter {key} needs otherwise"))?;
+            let selected = if target
+                .get(source)
+                .is_some_and(|actual| choices.contains(actual))
+            {
+                value
+            } else {
+                otherwise
+            };
+            if !target.contains_key(key) {
+                target.insert(key.clone(), selected.clone());
+            }
+        }
+    }
+    let mut node = interpolate(&profile, &effective_parameters, prompt, index)?;
     let map = node.as_object_mut().ok_or("leaf must be a table")?;
     for key in map.keys() {
         if ![
