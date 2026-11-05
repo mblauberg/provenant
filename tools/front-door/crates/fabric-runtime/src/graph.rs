@@ -624,20 +624,21 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
 /// retry observes an already accepted attempt instead of launching twice.
 fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
     use crate::coordination::facade::FacadeError;
-    let Some(error) = error.downcast_ref::<FacadeError>() else {
-        return false;
-    };
-    matches!(
-        error,
-        FacadeError::Busy
-            | FacadeError::Timeout
-            | FacadeError::HomeUnavailable
+    use provenant_core::retry::{RetryCause, is_transient};
+    let cause = match error.downcast_ref::<FacadeError>() {
+        Some(FacadeError::Busy | FacadeError::WriterUnknown) => RetryCause::Contention,
+        Some(FacadeError::Timeout) => RetryCause::Timeout,
+        Some(
+            FacadeError::HomeUnavailable
             | FacadeError::Io { .. }
             | FacadeError::DispatchUnobserved { .. }
             | FacadeError::HostDeliveryStage { .. }
             | FacadeError::HostDeliveryLimit { .. }
-            | FacadeError::LaunchUnknown { .. }
-    )
+            | FacadeError::LaunchUnknown { .. },
+        ) => RetryCause::Transport,
+        _ => RetryCause::Permanent,
+    };
+    is_transient(cause)
 }
 
 fn launch_diagnostic(error: &(dyn Error + 'static)) -> provenant_records::diagnostic::Diagnostic {
@@ -662,21 +663,9 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     let retrying = launch_retry_kind(error);
     if retrying {
         let Some(now) = clock else {
-            let retry = checkpoint.nodes[index]
-                .launch_retry
-                .get_or_insert_with(|| LaunchRetry {
-                    extra: Default::default(),
-                    failures: 0,
-                    deadline: None,
-                    wake_at: None,
-                    reason: None,
-                });
-            retry.failures = retry.failures.saturating_add(1);
-            retry.wake_at = None;
-            retry.reason =
-                Some("wall clock unavailable; launch retry timing is unavailable".into());
-            asks::refresh_wake(checkpoint);
-            return journal.save(checkpoint).map_err(GraphError::Journal);
+            return Err(GraphError::Refused(
+                "wall clock unavailable; cannot record a launch retry wake".into(),
+            ));
         };
         let retry = checkpoint.nodes[index]
             .launch_retry
@@ -695,12 +684,9 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                     .ok()
                     .and_then(|duration| now.checked_add(duration).ok())
                 else {
-                    retry.wake_at = None;
-                    retry.reason = Some(
-                        "launch retry deadline unavailable; retry timing is unavailable".into(),
-                    );
-                    asks::refresh_wake(checkpoint);
-                    return journal.save(checkpoint).map_err(GraphError::Journal);
+                    return Err(GraphError::Refused(
+                        "launch retry deadline unavailable; cannot record a retry wake".into(),
+                    ));
                 };
                 retry.deadline = Some(deadline);
                 deadline
