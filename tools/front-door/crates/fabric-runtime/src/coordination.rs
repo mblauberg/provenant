@@ -32,6 +32,8 @@ pub enum CoordinationError {
     Peer(#[from] crate::hosts::PeerError),
     #[error("invalid coordination input: {0}")]
     InvalidInput(&'static str),
+    #[error("invalid coordination input: landing lock required")]
+    LandingLockRequired,
     #[error(transparent)]
     Input(#[from] InputError),
     #[error("coordination request was cancelled")]
@@ -1194,7 +1196,7 @@ impl LocalCoordination<'_> {
                 value.validate_input(WaitTransport::Cli)?;
                 let guard = guard
                     .as_ref()
-                    .ok_or(CoordinationError::InvalidInput("landing lock required"))?;
+                    .ok_or(CoordinationError::LandingLockRequired)?;
                 record!(Landing, self.landing_locked(value, guard, &request))
             }
         }

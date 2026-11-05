@@ -652,7 +652,7 @@ fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
     assert!(!encoded.contains("TOKEN_SENTINEL"));
     assert!(!encoded.contains("/private/host"));
     let error = ServiceError::Facade(FacadeError::InvalidInput {
-        detail: Some(format!("schema version\u{1b}{}", "é".repeat(2000))),
+        detail: Some(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema),
     })
     .structured_error();
     let detail = error["detail"].as_str().unwrap();

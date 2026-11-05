@@ -9346,9 +9346,7 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
         errors: [(
             1,
             crate::coordination::facade::FacadeError::InvalidInput {
-                detail: Some(
-                    "graph document schema_version is invalid TOKEN_SENTINEL\u{1b}".into(),
-                ),
+                detail: Some(crate::coordination::facade::InvalidInputDetail::Schema),
             },
         )]
         .into(),
@@ -9364,6 +9362,32 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
     assert!(reason.contains("check the named input field"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(!reason.chars().any(char::is_control));
+}
+
+#[test]
+fn admitted_invalid_launch_reports_input_failure_reason() {
+    use crate::coordination::facade::{FacadeError, InvalidInputDetail};
+    for (detail, expected) in [
+        (InvalidInputDetail::InputTooLarge, "1 MiB"),
+        (InvalidInputDetail::InputUnreadable, "unreadable"),
+    ] {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: [(1, FacadeError::invalid(detail))].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let node = &run.checkpoint.nodes[0];
+        assert_eq!(node.state, NodeState::Blocked);
+        let reason = node.advance_error.as_deref().unwrap();
+        assert!(reason.contains("invalid_input"));
+        assert!(reason.contains("input"));
+        assert!(reason.contains(expected));
+        assert!(reason.contains("retry"));
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+    }
 }
 
 #[test]

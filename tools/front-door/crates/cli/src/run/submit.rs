@@ -52,10 +52,11 @@ pub(super) struct ManifestTask {
 
 pub(super) fn read_bounded(path: &Path) -> Result<String, Fail> {
     let invalid = |error: &dyn std::fmt::Display| {
-        Fail::new(
+        input_failure(
             Status::Invalid,
             ErrorKind::Invalid,
             format!("{}: {error}", path.display()),
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputUnreadable,
         )
     };
     // A FIFO or device would block or never end.
@@ -65,6 +66,53 @@ pub(super) fn read_bounded(path: &Path) -> Result<String, Fail> {
     read_text(std::fs::File::open(path).map_err(|e| invalid(&e))?)
 }
 
+fn input_failure(
+    status: Status,
+    kind: ErrorKind,
+    message: impl Into<String>,
+    detail: provenant_fabric_runtime::coordination::facade::InvalidInputDetail,
+) -> Fail {
+    let error = provenant_fabric_runtime::coordination::facade::FacadeError::invalid(detail);
+    let mut diagnostic = error.diagnostic();
+    diagnostic.code = kind.code().into();
+    let mut fail = Fail::new(status, kind, message);
+    fail.projection = Some(Box::new(diagnostic));
+    fail.detail = Some(Box::new(error));
+    fail
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn input_failures_keep_refusals_and_project_safe_reasons() {
+        let oversized = vec![b'x'; (PROMPT_LIMIT + 1) as usize];
+        let Err(too_large) = read_text(oversized.as_slice()) else {
+            panic!("accepted oversized input")
+        };
+        assert_eq!(too_large.kind, ErrorKind::Invalid);
+        assert_eq!(too_large.message, "input exceeds 1 MiB");
+        let detail = too_large.detail.unwrap().diagnostic();
+        assert!(detail.detail.unwrap().contains("1 MiB"));
+        assert!(detail.next.is_some());
+
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("TOKEN_SENTINEL-no-such-input");
+        let Err(unreadable) = read_bounded(&missing) else {
+            panic!("accepted missing input")
+        };
+        assert_eq!(unreadable.kind, ErrorKind::Invalid);
+        let projected = unreadable.detail.unwrap().diagnostic();
+        assert!(projected.detail.as_ref().unwrap().contains("unreadable"));
+        assert!(
+            !serde_json::to_string(&projected)
+                .unwrap()
+                .contains("TOKEN_SENTINEL")
+        );
+    }
+}
+
 pub(super) fn read_text(source: impl Read) -> Result<String, Fail> {
     let mut bytes = Vec::new();
     source
@@ -72,14 +120,21 @@ pub(super) fn read_text(source: impl Read) -> Result<String, Fail> {
         .read_to_end(&mut bytes)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
     if bytes.len() as u64 > PROMPT_LIMIT {
-        return Err(Fail::new(
+        return Err(input_failure(
             Status::Invalid,
             ErrorKind::Invalid,
             "input exceeds 1 MiB",
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputTooLarge,
         ));
     }
-    String::from_utf8(bytes)
-        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "input is not UTF-8"))
+    String::from_utf8(bytes).map_err(|_| {
+        input_failure(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "input is not UTF-8",
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputInvalidUtf8,
+        )
+    })
 }
 
 /// `ADAPTER/NAME` for a model-less adapter such as `command/fmt-check`.

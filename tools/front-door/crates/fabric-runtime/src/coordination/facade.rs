@@ -186,6 +186,34 @@ pub enum DispatchRefusalFact {
     GraphOutputKind(crate::graph::GraphOutputField),
 }
 
+/// Facts the input owner has explicitly approved for disclosure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidInputDetail {
+    Schema,
+    LandingLock,
+    Field(String),
+    InputUnreadable,
+    InputTooLarge,
+    InputInvalidUtf8,
+}
+
+impl InvalidInputDetail {
+    fn safe_text(&self) -> Option<String> {
+        match self {
+            Self::Schema => Some("graph document schema_version is invalid".into()),
+            Self::LandingLock => Some("landing lock required".into()),
+            Self::InputUnreadable => {
+                Some("input file is unreadable or is not a regular file".into())
+            }
+            Self::InputTooLarge => Some("input exceeds the 1 MiB limit".into()),
+            Self::InputInvalidUtf8 => Some("input is not UTF-8".into()),
+            Self::Field(path) => {
+                safe_input_field(path).map(|path| format!("invalid input field `{path}`"))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum FacadeError {
@@ -198,9 +226,10 @@ pub enum FacadeError {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            serialize_with = "serialise_invalid_detail"
+            serialize_with = "serialise_invalid_detail",
+            deserialize_with = "deserialise_invalid_detail"
         )]
-        detail: Option<String>,
+        detail: Option<InvalidInputDetail>,
     },
     #[error("record not found")]
     NotFound,
@@ -492,7 +521,7 @@ impl FacadeError {
         let mut projected = Diagnostic::new(self.code());
         match self {
             Self::InvalidInput { detail: Some(detail) } => {
-                if let Some(detail) = safe_invalid_detail(detail) {
+                if let Some(detail) = detail.safe_text() {
                     projected = projected.detail(detail);
                 }
                 projected = projected.next("check the named input field and retry");
@@ -591,30 +620,12 @@ impl FacadeError {
 
 /// The ": reason" suffix of an invalid-input message, control characters
 /// escaped so a detail echoing caller text cannot forge terminal output.
-fn invalid_detail(detail: &Option<String>) -> String {
+fn invalid_detail(detail: &Option<InvalidInputDetail>) -> String {
     detail
-        .as_deref()
-        .and_then(safe_invalid_detail)
+        .as_ref()
+        .and_then(InvalidInputDetail::safe_text)
         .map(|detail| format!(": {detail}"))
         .unwrap_or_default()
-}
-
-fn safe_invalid_detail(detail: &str) -> Option<String> {
-    if detail.starts_with("graph document schema_version")
-        || detail.starts_with("schema_version")
-        || detail.starts_with("schema version")
-        || detail.starts_with("graph schema version")
-    {
-        return Some("graph document schema_version is invalid".into());
-    }
-    if detail == "landing lock required" {
-        return Some(detail.to_owned());
-    }
-    let field = detail
-        .strip_prefix("invalid input field `")?
-        .split('`')
-        .next()?;
-    safe_input_field(field).map(|field| format!("invalid input field `{field}`"))
 }
 
 pub(super) fn safe_input_field(field: &str) -> Option<&str> {
@@ -688,20 +699,40 @@ pub(super) fn safe_input_field(field: &str) -> Option<&str> {
 }
 
 fn serialise_invalid_detail<S: serde::Serializer>(
-    detail: &Option<String>,
+    detail: &Option<InvalidInputDetail>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     detail
-        .as_deref()
-        .and_then(safe_invalid_detail)
+        .as_ref()
+        .and_then(InvalidInputDetail::safe_text)
         .serialize(serializer)
+}
+
+fn deserialise_invalid_detail<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<InvalidInputDetail>, D::Error> {
+    let detail = Option::<String>::deserialize(deserializer)?;
+    Ok(detail.and_then(|detail| match detail.as_str() {
+        "graph document schema_version is invalid" => Some(InvalidInputDetail::Schema),
+        "landing lock required" => Some(InvalidInputDetail::LandingLock),
+        "input file is unreadable or is not a regular file" => {
+            Some(InvalidInputDetail::InputUnreadable)
+        }
+        "input exceeds the 1 MiB limit" => Some(InvalidInputDetail::InputTooLarge),
+        "input is not UTF-8" => Some(InvalidInputDetail::InputInvalidUtf8),
+        _ => detail
+            .strip_prefix("invalid input field `")
+            .and_then(|field| field.strip_suffix('`'))
+            .and_then(safe_input_field)
+            .map(|field| InvalidInputDetail::Field(field.to_owned())),
+    }))
 }
 
 impl FacadeError {
     /// An invalid-input refusal naming the field path or reason that failed.
-    pub fn invalid(detail: impl Into<String>) -> Self {
+    pub fn invalid(detail: InvalidInputDetail) -> Self {
         Self::InvalidInput {
-            detail: Some(detail.into()),
+            detail: Some(detail),
         }
     }
 
@@ -764,7 +795,7 @@ impl From<&crate::hosts::PeerError> for FacadeError {
                 expected: *expected,
             },
             PeerError::Project | PeerError::SourceHost | PeerError::RequestTooLarge => {
-                Self::invalid(error.to_string())
+                Self::InvalidInput { detail: None }
             }
             PeerError::Unavailable | PeerError::Failed(_) => Self::HomeUnavailable,
             PeerError::Unknown { operation_id } => Self::LaunchUnknown {
@@ -783,8 +814,15 @@ impl From<&super::CoordinationError> for FacadeError {
         match error {
             CoordinationError::LaneMutation => Self::LaneCoordinationRefused,
             CoordinationError::Peer(error) => Self::from(error),
-            CoordinationError::InvalidInput(reason) => Self::invalid(*reason),
-            CoordinationError::Input(error) => Self::invalid(error.to_string()),
+            CoordinationError::InvalidInput(_) => Self::InvalidInput { detail: None },
+            CoordinationError::LandingLockRequired => {
+                Self::invalid(InvalidInputDetail::LandingLock)
+            }
+            CoordinationError::Input(error) => Self::InvalidInput {
+                detail: error
+                    .safe_path()
+                    .map(|path| InvalidInputDetail::Field(path.to_owned())),
+            },
             CoordinationError::Time(_) | CoordinationError::ResponseEncoding(_) => {
                 Self::StateCorrupt
             }
@@ -811,9 +849,9 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             | Error::Overlap { .. } => Self::Conflict,
             Error::Busy => Self::Busy,
             Error::Cancelled => Self::Cancelled,
-            Error::Invalid(reason) => Self::invalid(*reason),
+            Error::Invalid(_) => Self::InvalidInput { detail: None },
             Error::PathEncoding | Error::ViewerLimit | Error::ViewerNotOpen => {
-                Self::invalid(error.to_string())
+                Self::InvalidInput { detail: None }
             }
             Error::Decode(provenant_records::DecodeError::UnsupportedVersion { found, .. })
                 if *found > 1 =>
@@ -1136,7 +1174,7 @@ mod diagnostic_tests {
             serde_json::to_value(&bare).unwrap(),
             serde_json::json!({"code": "invalid_input"})
         );
-        let detailed = FacadeError::invalid("schema version\n\u{1b}[31m");
+        let detailed = FacadeError::invalid(super::InvalidInputDetail::Schema);
         assert_eq!(detailed.code(), "invalid_input");
         assert_eq!(
             detailed.to_string(),
@@ -1145,17 +1183,32 @@ mod diagnostic_tests {
         let wire = serde_json::to_value(&detailed).unwrap();
         assert_eq!(wire["detail"], "graph document schema_version is invalid");
         assert!(!wire.to_string().contains("31m"));
-        let untrusted = FacadeError::InvalidInput {
-            detail: Some("TOKEN_SENTINEL".into()),
-        };
+        let untrusted: FacadeError = serde_json::from_value(serde_json::json!({
+            "code": "invalid_input", "detail": "schema version TOKEN_SENTINEL\u{1b}"
+        }))
+        .unwrap();
         assert!(
             !serde_json::to_string(&untrusted)
                 .unwrap()
                 .contains("TOKEN_SENTINEL")
         );
         assert!(!untrusted.to_string().contains("TOKEN_SENTINEL"));
+        for input in [
+            format!("schema version TOKEN_SENTINEL\u{1b}{}", "é".repeat(2048)),
+            "invalid input field `scope.paths` TOKEN_SENTINEL".to_owned(),
+        ] {
+            let received: FacadeError = serde_json::from_value(serde_json::json!({
+                "code": "invalid_input", "detail": input
+            }))
+            .unwrap();
+            let diagnostic = received.diagnostic();
+            let wire = serde_json::to_string(&diagnostic).unwrap();
+            assert!(!wire.contains("TOKEN_SENTINEL"));
+            assert!(wire.len() < 4096);
+            assert!(diagnostic.next.is_some());
+        }
         let fake_field = FacadeError::InvalidInput {
-            detail: Some("invalid input field `secret_token`".into()),
+            detail: Some(super::InvalidInputDetail::Field("secret_token".into())),
         };
         assert!(
             !serde_json::to_string(&fake_field)
@@ -1169,11 +1222,11 @@ mod diagnostic_tests {
             from_field.to_string().contains("scope.paths"),
             "{from_field}"
         );
+        let received: FacadeError =
+            serde_json::from_value(serde_json::to_value(&from_field).unwrap()).unwrap();
+        assert_eq!(received.diagnostic(), from_field.diagnostic());
         assert_eq!(
-            FacadeError::from(&super::super::CoordinationError::InvalidInput(
-                "landing lock required"
-            ))
-            .to_string(),
+            FacadeError::from(&super::super::CoordinationError::LandingLockRequired).to_string(),
             "invalid input: landing lock required"
         );
     }

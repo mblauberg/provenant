@@ -1210,7 +1210,7 @@ fn landing_error(error: &(dyn std::error::Error + 'static)) -> FacadeError {
             }
             E::Store(error) => FacadeError::from(error),
             E::PushNotFound { .. } => FacadeError::NotFound,
-            E::Invalid(_) | E::InvalidRemote => FacadeError::invalid(error.to_string()),
+            E::Invalid(_) | E::InvalidRemote => FacadeError::InvalidInput { detail: None },
             E::DirtyWorktree
             | E::IncompleteRepository
             | E::OidMismatch
@@ -3387,13 +3387,14 @@ fn decode_graph_document(
 ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
     let value: serde_json::Value =
         provenant_records::decode(bytes, provenant_records::Limits::default())
-            .map_err(|_| FacadeError::invalid("graph document is not a valid record"))?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
     match value
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
     {
-        Some(1 | 2) => serde_json::from_value(value)
-            .map_err(|error| FacadeError::invalid(format!("graph document: {error}"))),
+        Some(1 | 2) => {
+            serde_json::from_value(value).map_err(|_| FacadeError::InvalidInput { detail: None })
+        }
         Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
             reader_release: env!("CARGO_PKG_VERSION").into(),
             writer_release: "unknown".into(),
@@ -3401,7 +3402,7 @@ fn decode_graph_document(
             version,
         }),
         _ => Err(FacadeError::invalid(
-            "graph document schema_version must be 1 or 2",
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema,
         )),
     }
 }
@@ -5993,7 +5994,11 @@ impl Factory {
         };
         input
             .validate_input(provenant_core::WaitTransport::Cli)
-            .map_err(|error| FacadeError::invalid(error.to_string()))?;
+            .map_err(|error| {
+                FacadeError::from(
+                    &provenant_fabric_runtime::coordination::CoordinationError::Input(error),
+                )
+            })?;
         let resume = matches!(&input, GraphInput::Resume { .. });
         let mut scratch_source = None;
         let document = match &input {
@@ -6384,12 +6389,12 @@ impl Factory {
             };
             let run = run.map_err(|error| match error {
                 provenant_fabric_runtime::graph::GraphError::Run(error) => error,
-                provenant_fabric_runtime::graph::GraphError::Invalid(reason) => {
-                    FacadeError::invalid(format!("graph {reason}"))
+                provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
+                    FacadeError::InvalidInput { detail: None }
                 }
                 provenant_fabric_runtime::graph::GraphError::Admission(reason) => match reason {
                     provenant_fabric_runtime::graph::AdmissionError::Schema(_) => {
-                        FacadeError::invalid("graph schema version")
+                        FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema)
                     }
                     _ => FacadeError::InvalidInput { detail: None },
                 },
