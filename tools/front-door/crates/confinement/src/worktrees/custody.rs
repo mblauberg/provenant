@@ -274,7 +274,9 @@ pub(super) fn lock_worktree(
         Some(writer)
     };
     let canonical = canonicalize(verified.path())?;
-    context.workers.invalidate();
+    if !preview {
+        context.workers.invalidate();
+    }
     let (observations, details) = context
         .workers
         .observe_roots_with_details(std::slice::from_ref(&canonical));

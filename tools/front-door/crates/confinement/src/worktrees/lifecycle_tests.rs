@@ -35,6 +35,63 @@ use std::os::unix::fs::PermissionsExt;
 pub(super) struct FreeWorkers;
 
 #[test]
+fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting(AtomicUsize);
+    impl WorkerObserver for Counting {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+    let fixture = Fixture::new()?;
+    fs::write(fixture.root.join(".git/info/exclude"), "target/\n")?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    for index in 0..40 {
+        let path = fixture.root.join(format!("foreign-{index}"));
+        fixture.run(&["worktree", "add", "--detach", path.to_str().ok_or("path")?])?;
+        fs::create_dir(path.join("target"))?;
+        fs::write(path.join("target/artifact"), "output")?;
+    }
+    let mut lanes = list(&context, &cancel())?;
+    for lane in &mut lanes {
+        lane.writer = WriterState::Unknown;
+    }
+    let observer = Counting(AtomicUsize::new(0));
+    let session = CensusSession::new(&observer, &test.clock);
+    context.workers = &session;
+    let report = collect(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| false,
+            no_live_lanes: &|_| true,
+            regenerable: &["target".into()],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(observer.0.load(Ordering::SeqCst), 1);
+    assert_eq!(report.idle_output.len(), 40, "{report:?}");
+    assert!(
+        report
+            .idle_output
+            .iter()
+            .all(|entry| !entry.removed && entry.reason == "would_remove")
+    );
+    Ok(())
+}
+
+#[test]
 fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Error>> {
     for scenario in [
         "preview", "idle", "aged", "unowned", "recent", "index", "live", "unknown",

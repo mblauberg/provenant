@@ -46,6 +46,12 @@ pub fn collect(
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
         read_worktrees(context, cancel)?
     };
+    // Preview all candidates against one census snapshot. Applying still
+    // refreshes under custody immediately before each mutation.
+    if policy.dry_run {
+        let roots: Vec<_> = lanes.iter().map(|lane| lane.path.clone()).collect();
+        context.workers.observe_roots(&roots);
+    }
     let primary = canonicalize(context.repo.root_path())?;
     let managed = primary.join(WORKTREE_ROOT);
     let mut report = WorktreeGcReport {
@@ -347,7 +353,13 @@ fn prune_unknown_output(
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
         tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
     }
-    census_free(context, &lane.path)?;
+    if policy.dry_run {
+        if let Some(detail) = census_refusal_detail(context, &lane.path) {
+            return Err(WorktreeError::IncompleteCensus { detail });
+        }
+    } else {
+        census_free(context, &lane.path)?;
+    }
     if !(policy.no_live_lanes)(&lane.path) {
         return Err(WorktreeError::UnknownWriter);
     }
@@ -1104,7 +1116,6 @@ fn preview_foreign(
     let recheck = || -> Result<(), WorktreeError> {
         verified.repo().revalidate()?;
         tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
-        context.workers.invalidate();
         if let Some(detail) = census_refusal_detail(context, &lane.path) {
             return Err(WorktreeError::IncompleteCensus { detail });
         }
