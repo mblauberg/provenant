@@ -25,7 +25,7 @@ pub(super) fn main() -> TestResult {
     if args.first().is_some_and(|arg| arg == "internal") {
         let holder = RunHolder {
             providers: &PinnedWriter,
-            resources: &SystemResources,
+            resources: &FixtureResources,
             clock: &SystemClock,
         };
         provenant_supervisor::supervise(
@@ -71,6 +71,25 @@ pub(super) fn main() -> TestResult {
         |_| launches().map_err(|error| std::io::Error::other(error.to_string())),
     )?;
     Ok(())
+}
+/// Admission facts owned by the driver, so the host disk and memory cannot
+/// decide whether the guardian admits the successor. The guardian identity is
+/// observed against the recorded boot its reservation carries.
+struct FixtureResources;
+impl Resources for FixtureResources {
+    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+        use provenant_supervisor::census::ProcessObserver;
+        provenant_supervisor::fixture::RecordedBootObserver.observe(pid)
+    }
+    fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
+        Ok(provenant_os::sys::resources::MemorySample {
+            available_bytes: 100,
+            total_bytes: 100,
+        })
+    }
+    fn disk(&self, _: &provenant_os::fs::Directory) -> std::io::Result<u64> {
+        Ok(u64::MAX)
+    }
 }
 const HANDOFF: &str = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"pinned writer fixture\"}\n```";
 struct NoChildren;
