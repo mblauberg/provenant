@@ -146,7 +146,11 @@ impl RunStore {
         // Keep the shared config lock until custody confirms the child launch.
         let mut _git_setup_lock = None;
         if let Some(confinement) = &mut plan.confinement {
-            _git_setup_lock = match confinement.prepare_git() {
+            _git_setup_lock = match retry_setup_lock(
+                record.retry_of.is_some(),
+                || confinement.prepare_git(),
+                || call.check(),
+            ) {
                 Ok(lock) => lock,
                 Err(error) => {
                     lease
@@ -257,5 +261,57 @@ impl RunStore {
         )
         .map_err(|failure| HandOff::Uncertain(failure.error.to_string()))?;
         Ok(())
+    }
+}
+
+// A setup lock timeout occurs before Git preparation and before any guardian
+// launch. Keep the same attempt and custody while waiting for another turn.
+fn retry_setup_lock<T>(
+    continuation: bool,
+    mut prepare: impl FnMut() -> Result<T>,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<T> {
+    loop {
+        match prepare() {
+            Err(RunError::LaneSetupLockTimeout) if continuation => check()?,
+            result => return result,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuation_retries_only_setup_lock_timeouts() {
+        let mut calls = 0;
+        let result = retry_setup_lock(
+            true,
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Err(RunError::LaneSetupLockTimeout)
+                } else {
+                    Ok(42)
+                }
+            },
+            || Ok(()),
+        );
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls, 2);
+        let mut calls = 0;
+        let result: Result<()> = retry_setup_lock(
+            false,
+            || {
+                calls += 1;
+                Err(RunError::LaneSetupLockTimeout)
+            },
+            || Ok(()),
+        );
+        assert!(matches!(result, Err(RunError::LaneSetupLockTimeout)));
+        assert_eq!(calls, 1);
+        let result: Result<()> = retry_setup_lock(true, || Err(RunError::Conflict), || Ok(()));
+        assert!(matches!(result, Err(RunError::Conflict)));
     }
 }

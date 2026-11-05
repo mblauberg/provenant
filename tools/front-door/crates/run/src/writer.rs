@@ -611,7 +611,10 @@ fn prepare_writer_git(
             &cancel,
             &clock,
         )
-        .map_err(|failure| anchored_error(failure, writer.worktree.repo().common_git_dir()))?;
+        .map_err(|failure| match failure {
+            FsError::LockTimeout { .. } => RunError::LaneSetupLockTimeout,
+            other => anchored_error(other, writer.worktree.repo().common_git_dir()),
+        })?;
     let old_repo = writer.worktree.repo();
     let project = old_repo
         .common_git_dir()
@@ -1723,7 +1726,9 @@ impl WriterLaunch {
         attempt: &Directory,
         scope: provenant_supervisor::custody::Scope,
     ) -> Result<()> {
-        let owned = worktrees::load_owner(&self.worktree)?
+        let owner = worktrees::load_owner(&self.worktree)?;
+        let owned = owner
+            .as_ref()
             .is_some_and(|owner| owner.origin == worktrees::WorktreeOrigin::Lane);
         crate::artifacts::seal(
             attempt,
@@ -1731,6 +1736,7 @@ impl WriterLaunch {
             &crate::db::bytes(&WriterOwnership {
                 schema_version: 1,
                 lane_owned: owned,
+                owner,
             })?,
             crate::RECORD_LIMIT,
         )?;
@@ -2192,4 +2198,6 @@ pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
 pub(crate) struct WriterOwnership {
     pub schema_version: u64,
     pub lane_owned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<worktrees::WorktreeOwner>,
 }
