@@ -8096,6 +8096,27 @@ fn retry_of(checkpoint: &GraphCheckpoint) -> &LaunchRetry {
 }
 
 #[test]
+fn launch_retry_backoff_cap_is_at_least_the_first_delay() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: busy_times(2),
+        retry_policy: Some(LaunchRetryPolicy {
+            limit: 2,
+            first_seconds: 10,
+            max_seconds: 2,
+        }),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(retry_of(&first.checkpoint).wake_at, Some(at(10)));
+    owner.now = Some(at(10));
+    let second = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(retry_of(&second.checkpoint).wake_at, Some(at(20)));
+}
+
+#[test]
 fn writer_lock_contention_retries_the_same_attempt() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
@@ -8403,26 +8424,75 @@ fn launch_wake_is_capped_by_the_original_deadline() {
 }
 
 #[test]
-fn launch_with_an_admission_window_continues_without_a_wall_clock() {
+fn launch_disposition_write_failure_keeps_persisted_checkpoint() {
+    struct FailSave(GraphCheckpoint);
+    impl GraphJournal for FailSave {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(Some(self.0.clone()))
+        }
+        fn save(&mut self, _: &GraphCheckpoint) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("injected checkpoint failure"))
+        }
+    }
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
+        now: Some(at(0)),
         errors: busy_times(1),
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
-    let waiting = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
-    assert!(
-        retry_of(&waiting.checkpoint)
-            .reason
-            .as_deref()
-            .unwrap()
-            .contains("wall clock unavailable")
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let original = journal.0.unwrap();
+    let bytes = serde_json::to_vec(&original).unwrap();
+    let mut failing = FailSave(original.clone());
+    let mut working = original;
+    let result = launch_disposition::<ErrorLauncher, FailSave>(
+        &mut working,
+        0,
+        &crate::coordination::facade::FacadeError::Busy,
+        Some(at(5)),
+        3600,
+        LaunchRetryPolicy::default(),
+        &mut failing,
     );
-    let result = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(result.checkpoint.nodes[0].state, NodeState::Succeeded);
-    assert_eq!(owner.calls.len(), 2);
+    assert!(matches!(result, Err(GraphError::Journal(_))));
+    let persisted = failing.load("g").unwrap().unwrap();
+    assert_eq!(serde_json::to_vec(&persisted).unwrap(), bytes);
+    assert_eq!(persisted.nodes[0].state, NodeState::Running);
+    assert_eq!(
+        persisted.nodes[0].launch_retry.as_ref().unwrap().failures,
+        1
+    );
+}
+
+#[test]
+fn launch_retry_without_wall_clock_refuses_without_changing_checkpoint() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: busy_times(1),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let before = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
+    let mut checkpoint = journal.0.clone().unwrap();
+    let result = launch_disposition::<ErrorLauncher, MemoryJournal>(
+        &mut checkpoint,
+        0,
+        &crate::coordination::facade::FacadeError::Busy,
+        None,
+        3600,
+        LaunchRetryPolicy::default(),
+        &mut journal,
+    );
+    assert!(matches!(result, Err(GraphError::Refused(_))));
+    assert_eq!(serde_json::to_vec(&checkpoint).unwrap(), before);
+    assert_eq!(
+        serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap(),
+        before
+    );
 }
 
 #[test]

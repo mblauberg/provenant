@@ -775,21 +775,26 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     let retrying = launch_retry_kind(error);
     if retrying {
         let Some(now) = clock else {
-            let retry = checkpoint.nodes[index]
-                .launch_retry
-                .get_or_insert_with(|| LaunchRetry {
-                    extra: Default::default(),
-                    failures: 0,
-                    deadline: None,
-                    wake_at: None,
-                    reason: None,
-                });
-            retry.failures = retry.failures.saturating_add(1);
-            retry.wake_at = None;
-            retry.reason =
-                Some("wall clock unavailable; launch retry timing is unavailable".into());
-            asks::refresh_wake(checkpoint);
-            return journal.save(checkpoint).map_err(GraphError::Journal);
+            return Err(GraphError::Refused(format!(
+                "node {}: no wall clock to set its launch retry deadline; retry the advance",
+                checkpoint.nodes[index].id
+            )));
+        };
+        let deadline = match checkpoint.nodes[index]
+            .launch_retry
+            .as_ref()
+            .and_then(|retry| retry.deadline)
+        {
+            Some(deadline) => deadline,
+            None => DurationMicros::from_seconds(admission_seconds)
+                .ok()
+                .and_then(|duration| now.checked_add(duration).ok())
+                .ok_or_else(|| {
+                    GraphError::Refused(format!(
+                        "node {}: launch retry deadline is unavailable; retry the advance",
+                        checkpoint.nodes[index].id
+                    ))
+                })?,
         };
         let retry = checkpoint.nodes[index]
             .launch_retry
@@ -801,24 +806,7 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                 reason: None,
             });
         retry.failures = retry.failures.saturating_add(1);
-        let deadline = match retry.deadline {
-            Some(deadline) => deadline,
-            None => {
-                let Some(deadline) = DurationMicros::from_seconds(admission_seconds)
-                    .ok()
-                    .and_then(|duration| now.checked_add(duration).ok())
-                else {
-                    retry.wake_at = None;
-                    retry.reason = Some(
-                        "launch retry deadline unavailable; retry timing is unavailable".into(),
-                    );
-                    asks::refresh_wake(checkpoint);
-                    return journal.save(checkpoint).map_err(GraphError::Journal);
-                };
-                retry.deadline = Some(deadline);
-                deadline
-            }
-        };
+        retry.deadline = Some(deadline);
         if now < deadline && u32::from(retry.failures) <= policy.limit {
             let delay = provenant_core::retry::Backoff::new(
                 std::time::Duration::from_secs(policy.first_seconds),
