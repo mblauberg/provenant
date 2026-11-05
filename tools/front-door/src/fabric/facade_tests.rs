@@ -589,7 +589,7 @@ pub(crate) mod peer_tests {
             let run = provenant_run::Service::new(&store).dispatch(
                 provenant_run::DispatchRequest {
                     chair: None,
-                    operation_id: "settlement-original".parse()?,
+                    operation_id: if graph_id.is_some() { operation } else { "settlement-original" }.parse()?,
                     concurrency: 1,
                     lane_depth: 1,
                     parent_attempt: None,
@@ -1100,6 +1100,58 @@ pub(crate) mod peer_tests {
         let call = provenant_run::Request { clock: &clock, cancel: &cancel };
         let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("receipt")?;
         assert_eq!(receipt["state"], "retained");
+        Ok(())
+    }
+
+    #[test]
+    fn incorrect_graph_hints_defer_owning_graph_to_tick() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::incorrect_graph_hints_defer_owning_graph_to_tick")? { return Ok(()); }
+        use provenant_fabric_runtime::graph::{self, GraphJournal};
+        struct Seed { reference: String, actor: String }
+        impl graph::AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String { self.actor.clone() }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
+                _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: Some(self.reference.clone()) })
+            }
+        }
+        for hint in ["wrong", "unknown"] {
+            let mut fixture = SettlementFixture::settled_fixture("graph-mismatch", Some(hint))?;
+            let clock = SystemClock;
+            let cancel = CancelToken::new();
+            let identity = Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?.identity;
+            let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+            for id in ["owner", "wrong"] {
+                let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+                    "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK",
+                    "access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
+                }))?;
+                let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id, id, budget, &cancel, &clock)?;
+                journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+                    directory: fixture.rig.project.clone(), document: document.clone() })?;
+                let reference = if id == "owner" { format!("{}/{}", identity.host, fixture.settled.attempt_id) }
+                    else { format!("{}/{}", identity.host, AttemptId::from_bytes([99;16])) };
+                let mut seed = Seed { reference, actor: identity.inbox.actor.to_string() };
+                let mut run = graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default())?;
+                if id == "wrong" { run.checkpoint.nodes[0].state = graph::NodeState::Succeeded; journal.save(&run.checkpoint)?; }
+            }
+            fixture.settled.launch = Some(provenant_run::HostLaunchContext {
+                configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
+                executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, codex_home: None,
+                cargo_build_jobs: None, fixture_state_write: false,
+            });
+            advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
+            let before = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "owner")?.ok_or("owner")?;
+            assert_eq!(before.nodes[0].state, graph::NodeState::Running);
+            let resolved = crate::roots::Resolved { assets: fixture.rig.project.clone(), home: fixture.rig.home.clone(),
+                project: fixture.rig.project.clone(), roots: fixture.roots.clone(), claude_config: None, codex_home: None };
+            let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            let after = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "owner")?.ok_or("owner")?;
+            assert_eq!(after.nodes[0].state, graph::NodeState::Succeeded);
+            assert!(fixture.worktree.exists());
+        }
         Ok(())
     }
 
