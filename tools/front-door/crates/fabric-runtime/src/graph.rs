@@ -1866,6 +1866,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .attempts
                     .last()
                     .is_none_or(|last| last.state == AttemptState::Terminal);
+                let mut prepared_inputs = None;
                 if needs_record {
                     let cap = limits.node_prompt_bytes;
                     if node.access == AccessMode::WorktreeWrite
@@ -2062,6 +2063,33 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
+                    // File pointers are part of the prompt cap too. Stage them
+                    // before recording an attempt so a delivery that cannot fit
+                    // fails the consumer without launching it.
+                    let requests = upstream_results(node, &plan, &checkpoint, &positions);
+                    let materialised = if requests.is_empty() {
+                        None
+                    } else {
+                        owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
+                    };
+                    let files = materialised.as_ref().map_or_else(String::new, |files| {
+                        render_files(&files.entries, &requests, files.index.as_deref())
+                    });
+                    let prompt_bytes = render_input(node, &plan, &checkpoint, &positions, cap)
+                        .0
+                        .len();
+                    if !node.inputs.is_empty() && prompt_bytes.saturating_add(files.len()) > cap {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some("upstream_outputs_too_large".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: selected upstream file notices do not fit; increase node_prompt_bytes and restart the graph",
+                            node.id
+                        ));
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
+                    prepared_inputs = Some((requests, materialised));
                     let mut initial_manifest =
                         attempt_input_manifest(node, &plan, &checkpoint, &positions, &[], None);
                     for input in &mut initial_manifest.inputs {
@@ -2120,26 +2148,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .and_then(|attempt| attempt.input_cap)
                     .unwrap_or(limits.node_prompt_bytes);
                 let mut prompt = render_input(node, &plan, &checkpoint, &positions, input_cap).0;
-                // An accepted attempt is only observed, so its files exist
-                // already and its prompt is not sent again.
-                let requests = if stored_ref.is_some() {
-                    Vec::new()
+                let accepted = if stored_ref.is_some() {
+                    true
                 } else {
-                    upstream_results(node, &plan, &checkpoint, &positions)
-                };
-                let materialised = if requests.is_empty() {
-                    None
-                } else {
-                    owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
-                };
-                if let Some(materialised) = &materialised {
-                    prompt.push_str(&render_files(
-                        &materialised.entries,
-                        &requests,
-                        materialised.index.as_deref(),
-                    ));
-                }
-                if stored_ref.is_none() {
                     let attempt =
                         checkpoint.nodes[node_index]
                             .attempts
@@ -2148,26 +2159,54 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 node: node.id.clone(),
                                 invariant: "an observed attempt must have a checkpoint row",
                             })?;
-                    if !owner.launch_accepted(attempt).map_err(GraphError::Run)? {
-                        let manifest = attempt_input_manifest(
-                            node,
-                            &plan,
-                            &checkpoint,
-                            &positions,
-                            &requests,
-                            materialised.as_ref(),
-                        );
-                        checkpoint.nodes[node_index]
-                            .attempts
-                            .last_mut()
-                            .ok_or_else(|| GraphError::BadCheckpoint {
-                                node: node.id.clone(),
-                                invariant: "an observed attempt must have a checkpoint row",
-                            })?
-                            .input_manifest = Some(manifest);
-                        // Evidence is durable before the owner can submit the attempt.
-                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    }
+                    owner.launch_accepted(attempt).map_err(GraphError::Run)?
+                };
+                // Accepted attempts are observed with their immutable run input.
+                let (requests, materialised) = if stored_ref.is_some() {
+                    (Vec::new(), None)
+                } else if let Some(prepared) = prepared_inputs {
+                    prepared
+                } else {
+                    let requests = upstream_results(node, &plan, &checkpoint, &positions);
+                    let materialised = if requests.is_empty() {
+                        None
+                    } else {
+                        owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
+                    };
+                    (requests, materialised)
+                };
+                if let Some(materialised) = &materialised {
+                    prompt.push_str(&render_files(
+                        &materialised.entries,
+                        &requests,
+                        materialised.index.as_deref(),
+                    ));
+                }
+                if !accepted && !node.inputs.is_empty() && prompt.len() > input_cap {
+                    return Err(GraphError::Refused(format!(
+                        "node {}: selected upstream file notices no longer fit the saved node_prompt_bytes; restore the original delivery or restart with a larger limit",
+                        node.id
+                    )));
+                }
+                if !accepted {
+                    let manifest = attempt_input_manifest(
+                        node,
+                        &plan,
+                        &checkpoint,
+                        &positions,
+                        &requests,
+                        materialised.as_ref(),
+                    );
+                    checkpoint.nodes[node_index]
+                        .attempts
+                        .last_mut()
+                        .ok_or_else(|| GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "an observed attempt must have a checkpoint row",
+                        })?
+                        .input_manifest = Some(manifest);
+                    // Evidence is durable before the owner can submit the attempt.
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
                 // The writer is the nearest writing node along the source chain,
                 // so a framing node between a lens and the writer is skipped.

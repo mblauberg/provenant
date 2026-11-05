@@ -5303,6 +5303,48 @@ fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() 
 }
 
 #[test]
+fn file_notices_must_fit_the_prompt_before_a_consumer_attempt() {
+    let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        directory: Some("/inputs".into()),
+        index: None,
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::File {
+                label: request.label.clone(),
+                path: format!("/inputs/{}", "x".repeat(1000)).into(),
+                bytes: 20,
+                omitted: 0,
+            })
+            .collect(),
+    }));
+    let limits = crate::config::GraphLimits {
+        node_prompt_bytes: 500,
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    let consumer = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "child")
+        .unwrap();
+    assert_eq!(consumer.state, NodeState::Failed);
+    assert_eq!(
+        consumer.advance_error_code.as_deref(),
+        Some("upstream_outputs_too_large")
+    );
+    assert!(consumer.attempts.is_empty());
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
 fn a_remote_upstream_is_named_unavailable_and_the_node_still_runs() {
     let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
         index: None,
