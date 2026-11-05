@@ -2908,10 +2908,41 @@ pub(crate) fn bind_run_context(
     if !request.route.exclude.is_empty() {
         expansion.document["exclude"] = json!(request.route.exclude);
     }
+    // Resolve review references in the checkout bound to this execution, and
+    // carry their OIDs in the graph document. A later advance may run from a
+    // different checkout or after a named ref moves.
+    let review_directory = bound_worktree_path(expansion, request.access.worktree.as_deref())
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                directory.join(path)
+            }
+        })
+        .unwrap_or_else(|| directory.to_path_buf());
+    let pin_review_base = |value: &mut Value| -> Result<(), String> {
+        let Some(reference) = value.as_str().filter(|reference| !reference.is_empty()) else {
+            return Ok(());
+        };
+        if reference.parse::<provenant_core::GitOid>().is_err() {
+            let git = provenant_os::git::git_executable()
+                .ok_or("Git unavailable for review base binding")?;
+            let oid = provenant_run::resolve_git_base(&git, &review_directory, reference)
+                .map_err(|error| error.to_string())?;
+            *value = json!(oid);
+        }
+        Ok(())
+    };
+    if let Some(base) = expansion.document.get_mut("review_base") {
+        pin_review_base(base)?;
+    }
     let nodes = expansion.document["nodes"]
         .as_array_mut()
         .ok_or("missing graph nodes")?;
     visit_nodes(nodes, &mut |node| {
+        if let Some(base) = node.get_mut("review_base") {
+            pin_review_base(base)?;
+        }
         confine_pattern_roots(node, policy)?;
         let container = node.get("composite").is_some() || node.get("loop").is_some();
         if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {

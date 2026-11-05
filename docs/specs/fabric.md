@@ -339,7 +339,8 @@ while raw documents retain their authored version. Version 2 carries deferred
 review configuration (`review` and `family_group` on nodes, and `review_base`
 on the document); a version 1 document must not carry these fields. The host
 pins `review_base` in the execution and can record review resolution in an
-expansion. Checkpoint and envelope versions remain 1. A review specification
+expansion. Rebinding an existing journal retains its original execution
+directory and its persisted execution fields. Checkpoint and envelope versions remain 1. A review specification
 requires a read-only plan node with a source and no ordinary plan specification.
 Older hosts reject version 2 and require an upgrade.
 

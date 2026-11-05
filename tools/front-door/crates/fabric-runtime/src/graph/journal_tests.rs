@@ -159,7 +159,7 @@ fn tick_reports_undecodable_checkpoint_once_and_recovers() {
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
 }
 #[test]
-fn advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory() {
+fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     let root = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(root.path()).unwrap();
@@ -187,6 +187,11 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory() {
             })
             .unwrap();
     }
+    advance(&document, &mut Owner, &mut journal).unwrap();
+    let execution = FileJournal::execution(&root, project, "errors")
+        .unwrap()
+        .unwrap();
+    assert_eq!(execution.directory, base);
     // Recording takes no graph lock, so it works while the journal is held.
     let set = |error| FileJournal::set_advance_error(&root, project, "errors", error).unwrap();
     set(Some("first"));
@@ -199,6 +204,25 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory() {
     set(None);
     assert_eq!(read(), None);
     set(None);
+    drop(journal);
+    let mut journal = FileJournal::open(&root, project, "errors", budget, &cancel, &clock).unwrap();
+    journal
+        .bind(GraphExecution {
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: base.join("state"),
+            document: document.clone(),
+        })
+        .unwrap();
+    advance(&document, &mut Owner, &mut journal).unwrap();
+    assert_eq!(
+        FileJournal::execution(&root, project, "errors")
+            .unwrap()
+            .unwrap()
+            .directory,
+        base
+    );
 }
 #[test]
 fn version_two_checkpoint_without_v2_fields_reloads() {

@@ -256,6 +256,7 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
         .arg(&invoking)
         .args(["--explain", "--set"])
         .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .args(["--set", "parameters.base='HEAD'"])
         .output()?;
     assert!(
         output.status.success(),
@@ -265,6 +266,15 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
     );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let graph = &result["data"]["graph"];
+    // Both the subject and review base bind in the review worktree, not the invoking checkout.
+    let pinned_bases: Vec<_> = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node.get("review_base").and_then(serde_json::Value::as_str))
+        .collect();
+    assert!(!pinned_bases.is_empty());
+    assert!(pinned_bases.iter().all(|base| *base == worktree_head));
     // The subject lane (node 0) source equals the bound worktree HEAD (the subject commit).
     assert_eq!(graph["nodes"][0]["source"]["commit"], worktree_head);
     assert_eq!(

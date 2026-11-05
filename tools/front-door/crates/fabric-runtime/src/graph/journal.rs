@@ -191,10 +191,16 @@ impl FileJournal {
         if execution.document.graph_id != self.graph_id || !execution.directory.is_absolute() {
             return Err(JournalError::GraphMismatch);
         }
-        if self.integration_base().is_some()
-            && self.integration_base() != execution.integration_base
-        {
-            return Err(JournalError::GraphMismatch);
+        if let Some(bound) = &self.execution {
+            if bound.integration_base != execution.integration_base
+                || bound.review_base != execution.review_base
+            {
+                return Err(JournalError::GraphMismatch);
+            }
+            // The original host execution is part of the checkpoint. A caller
+            // may resume from another checkout, but cannot replace that binding
+            // or discard fields retained by a newer writer.
+            return Ok(());
         }
         self.execution = Some(execution);
         Ok(())
