@@ -3,7 +3,7 @@
     "pattern": "fan-out-synthesise",
     "preset": "fan-out-synthesise"
   },
-  "graph_id": "preset-6129f1dfb71fdf97a55874723c0c47a4",
+  "graph_id": "preset-e6c2e5bd80465e7658d9cd2f39ee9593",
   "nodes": [
     {
       "access": "read_only",
@@ -103,7 +103,11 @@
               "route": {
                 "default": "senior",
                 "doc": "Route alias for the worker.",
-                "enum": [],
+                "enum": [
+                  "junior",
+                  "principal",
+                  "senior"
+                ],
                 "type": "string"
               }
             }
@@ -112,7 +116,7 @@
         "patterns_only": true,
         "wire_exports": true
       },
-      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nChoose how many workers to run and give each one distinct question to answer, on a route that suits its difficulty. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
+      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, principal, senior). Registered writer\nworktrees you may assign: none registered.\nChoose how many workers to run and give each one distinct question to answer, on a route that suits its difficulty. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
       "role": "plan.shape",
       "role_digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
       "routes": [

@@ -3,7 +3,7 @@
     "pattern": "review",
     "preset": "review"
   },
-  "graph_id": "preset-16160934caca3204df91e6faa7518800",
+  "graph_id": "preset-7d41b28de713c07724e04eaf0d25f68c",
   "nodes": [
     {
       "access": "read_only",
@@ -662,7 +662,7 @@
         "patterns_only": true,
         "wire_exports": true
       },
-      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nEach catalogue pattern is one lens the review panel allows for this subject. Instantiate the lenses the change needs, at most once each, and choose a tier for each: a lower tier for mechanical checks, a higher one where a miss would be costly. Always include the correctness lens. You cannot add a lens the catalogue does not list.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
+      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, principal, senior). Registered writer\nworktrees you may assign: none registered.\nEach catalogue pattern is one lens the review panel allows for this subject. Instantiate the lenses the change needs, at most once each, and choose a tier for each: a lower tier for mechanical checks, a higher one where a miss would be costly. Always include the correctness lens. You cannot add a lens the catalogue does not list.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
       "role": "plan.shape",
       "role_digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
       "routes": [
@@ -699,10 +699,10 @@
       "role_digest": "sha256:b75588f0df936a48eac96c80f835c3155478444dd2be7bdbcc11445f8349dbab",
       "routes": [
         {
-          "alias": "verifier"
+          "alias": "senior"
         },
         {
-          "alias": "verifier"
+          "alias": "senior"
         }
       ],
       "source": {
@@ -1004,7 +1004,14 @@
         "references": []
       }
     },
-    "substitutions": [],
+    "substitutions": [
+      {
+        "node": "verify",
+        "reason": "route verifier is not defined in the routing configuration",
+        "requested": "verifier",
+        "used": "senior"
+      }
+    ],
     "warnings": [
       "preset review: omitted lens conventions-readability: review shape has 5 slots",
       "preset review: omitted lens refactor-cleanup: review shape has 5 slots",

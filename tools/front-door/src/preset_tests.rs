@@ -5946,7 +5946,11 @@ mod planner_front_end {
             ("fan-out-synthesise", Vec::new()),
             ("scope-then-run", scoped),
         ] {
-            let expansion = run(&layers(PlanMode::On, None), name, "brief", params);
+            // Patterns that pick a route need a closed list, as real planning has.
+            let mut planned = layers(PlanMode::On, None);
+            planned.known_routes =
+                Some(["junior", "senior", "principal"].map(str::to_owned).into());
+            let expansion = run(&planned, name, "brief", params);
             let mut actual = serde_json::to_string_pretty(&expansion.document).unwrap();
             actual.push('\n');
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

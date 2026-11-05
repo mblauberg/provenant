@@ -578,9 +578,9 @@ fn fixture() -> Result {
             .unwrap_or("Lens: unknown");
         let denied = fs::write("review-write-sentinel", b"forbidden").is_err();
         if prompt.contains("fixture unknown verdict") {
-            format!("No recognised verdict\n{lens}\nwrite denied: {denied}")
+            format!("No recognised verdict\n{lens}\nwrite denied: {denied}{DONE_FENCE}")
         } else {
-            format!("Verdict: approve\n{lens}\nwrite denied: {denied}")
+            format!("{lens}\nwrite denied: {denied}\nVERDICT: APPROVE{DONE_FENCE}")
         }
     } else {
         format!("OK{DONE_FENCE}")

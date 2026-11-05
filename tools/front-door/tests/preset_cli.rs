@@ -1927,7 +1927,8 @@ fn review_explain_shows_lenses_tiers_families_and_the_verifier()
 }
 
 #[test]
-fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
+fn scout_swarm_and_generator_evaluator_explain_admission_and_inspection()
+-> Result<(), Box<dyn std::error::Error>> {
     for (name, args, nodes, edges, max_attempts) in [
         ("scout-swarm", &["--plan", "off"][..], 7, 6, 12),
         (

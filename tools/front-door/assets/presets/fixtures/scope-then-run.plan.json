@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-e0c5c5457880daaad00a9bc2e2ccbfe3",
+  "graph_id": "preset-9bf20a2b264747e9b25efa684c338094",
   "nodes": [
     {
       "access": "read_only",
@@ -160,10 +160,10 @@
                           "role_digest": "sha256:6a06d9ece1c9bb403d70e93ee5fcbfd439f2cbfbb9517f5b8cfc8164f87859bc",
                           "routes": [
                             {
-                              "alias": "web"
+                              "alias": "junior"
                             },
                             {
-                              "alias": "web"
+                              "alias": "junior"
                             }
                           ],
                           "title": "external"
@@ -305,10 +305,10 @@
                 "role_digest": "sha256:6a06d9ece1c9bb403d70e93ee5fcbfd439f2cbfbb9517f5b8cfc8164f87859bc",
                 "routes": [
                   {
-                    "alias": "web"
+                    "alias": "junior"
                   },
                   {
-                    "alias": "web"
+                    "alias": "junior"
                   }
                 ],
                 "title": "scout"
@@ -363,7 +363,7 @@
         "patterns_only": true,
         "wire_exports": true
       },
-      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nDecide whether to scout at all: when the brief and the spec already answer what the scope stage needs, instantiate no-scout once and say why. Otherwise choose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and, when the catalogue offers one, an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
+      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, principal, senior). Registered writer\nworktrees you may assign: none registered.\nDecide whether to scout at all: when the brief and the spec already answer what the scope stage needs, instantiate no-scout once and say why. Otherwise choose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and, when the catalogue offers one, an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
       "role": "plan.shape",
       "role_digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
       "routes": [
@@ -907,10 +907,10 @@
                       "role_digest": "sha256:b75588f0df936a48eac96c80f835c3155478444dd2be7bdbcc11445f8349dbab",
                       "routes": [
                         {
-                          "alias": "verifier"
+                          "alias": "senior"
                         },
                         {
-                          "alias": "verifier"
+                          "alias": "senior"
                         }
                       ],
                       "source": {
@@ -1632,7 +1632,26 @@
         "references": []
       }
     },
-    "substitutions": [],
+    "substitutions": [
+      {
+        "node": "scout",
+        "reason": "route web is not defined in the routing configuration",
+        "requested": "web",
+        "used": "junior"
+      },
+      {
+        "node": "external",
+        "reason": "route web is not defined in the routing configuration",
+        "requested": "web",
+        "used": "junior"
+      },
+      {
+        "node": "verify",
+        "reason": "route verifier is not defined in the routing configuration",
+        "requested": "verifier",
+        "used": "senior"
+      }
+    ],
     "warnings": []
   },
   "schema_version": 2

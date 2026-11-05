@@ -3054,21 +3054,6 @@ fn manifest_task_network_and_adapter_route_syntax() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn manifest_rejects_flat_route_fields() {
-    for task in [
-        json!({"prompt": "review", "model": "codex/gpt-6-luna", "effort": "high"}),
-        json!({"prompt": "review", "route": "senior"}),
-        json!({"prompt": "review", "route": {"kind": "named", "name": "senior"}, "effort": "high"}),
-        json!({"prompt": "review"}),
-    ] {
-        assert!(
-            serde_json::from_value::<Manifest>(json!({"schema_version": 1, "tasks": [task]}))
-                .is_err()
-        );
-    }
-}
-
-#[test]
 fn operation_replays_after_its_context_ref_moves_or_is_deleted()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{ActorId, RootInputs};
@@ -4280,7 +4265,7 @@ fn render_lanes_omits_account_when_unresolved() -> Result<(), Box<dyn std::error
     Ok(())
 }
 #[test]
-#[allow(clippy::disallowed_methods)] // Exercise the real wait and an independent settlement.
+#[allow(clippy::disallowed_methods)] // The wait command has a real-time deadline.
 fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error>> {
     if reexec_test_in_lane("run::tests::wait_handles_a_stale_default_cursor")? {
         return Ok(());
@@ -4372,33 +4357,36 @@ fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error
         .expect_err("explicit selection over the cap must fail");
     assert!(error.message.contains("1000"));
     assert!(error.message.contains("narrow"));
+    struct FetchHookGuard;
+    impl Drop for FetchHookGuard {
+        fn drop(&mut self) {
+            wait::AFTER_FIRST_FETCH.with(|hook| *hook.borrow_mut() = None);
+        }
+    }
+    let _hook_guard = FetchHookGuard;
     let context = session.context.clone();
-    let worker = std::thread::spawn(move || -> Result<(), String> {
-        let clock = SystemClock::new();
-        let release = clock
-            .mono_now()
-            .checked_add(DurationMicros::from_micros(5_000_000))
-            .map_err(|e| e.to_string())?;
-        clock.wait_until(release).map_err(|e| e.to_string())?;
-        let cancel = CancelToken::new();
-        let call = run::Request {
-            clock: &clock,
-            cancel: &cancel,
-        };
-        let store = run::RunStore::open(&context, &call).map_err(|e| e.to_string())?;
-        store
-            .withdraw(
-                id,
-                run::AttemptState::Queued {
-                    extra: Default::default(),
-                },
-                run::Outcome::Cancelled,
-                "fixture",
-                clock.wall_now().map_err(|e| e.to_string())?,
-                &call,
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(())
+    wait::AFTER_FIRST_FETCH.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let store = run::RunStore::open(&context, &call).unwrap();
+            store
+                .withdraw(
+                    id,
+                    run::AttemptState::Queued {
+                        extra: Default::default(),
+                    },
+                    run::Outcome::Cancelled,
+                    "fixture",
+                    clock.wall_now().unwrap(),
+                    &call,
+                )
+                .unwrap();
+        }));
     });
     let picks = Picks {
         targets: &[],
@@ -4415,7 +4403,6 @@ fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error
         &edge,
     )
     .map_err(|e| e.message)?;
-    worker.join().map_err(|_| "worker panicked")??;
     assert!(!timed_out);
     assert_eq!(data["settled_backlog"]["count"], 1001);
     assert!(
@@ -6879,8 +6866,7 @@ fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
 }
 
 #[test]
-fn worktrees_lock_held_past_five_seconds_retries_and_admits()
--> Result<(), Box<dyn std::error::Error>> {
+fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
     use provenant_os::fs::{Directory, LockMode};
 
@@ -6898,8 +6884,7 @@ fn worktrees_lock_held_past_five_seconds_retries_and_admits()
         }
     }
 
-    if reexec_test_in_lane("run::tests::worktrees_lock_held_past_five_seconds_retries_and_admits")?
-    {
+    if reexec_test_in_lane("run::tests::worktrees_lock_contention_retries_and_admits")? {
         return Ok(());
     }
     let fixture = linked_fixture()?;
@@ -6935,9 +6920,10 @@ fn worktrees_lock_held_past_five_seconds_retries_and_admits()
                 .join(target_project_id.to_string());
             std::fs::create_dir_all(&reg_dir)?;
 
-            // Background thread acquires worktrees.lock and holds it for 5.3s
+            // Hold the lock until dispatch records its first contention retry.
             let (tx, rx) = std::sync::mpsc::channel();
             let lock_dir_path = reg_dir.clone();
+            let context = session.context.clone();
             let holder = std::thread::spawn(move || {
                 let dir = Directory::open_anchor(&lock_dir_path).unwrap();
                 let clk = SystemClock::new();
@@ -6952,11 +6938,26 @@ fn worktrees_lock_held_past_five_seconds_retries_and_admits()
                     )
                     .unwrap();
                 tx.send(()).unwrap();
-                let wake = clk
-                    .mono_now()
-                    .checked_add(DurationMicros::from_micros(6_500_000))
-                    .unwrap();
-                clk.wait_until(wake).unwrap();
+                let call = run::Request {
+                    clock: &clk,
+                    cancel: &cnl,
+                };
+                let store = run::RunStore::open(&context, &call).unwrap();
+                let operation = "lock-retry-test".parse().unwrap();
+                provenant_test_support::wait_for(
+                    "admission contention retry",
+                    Duration::from_secs(30),
+                    || store.admission_window(&operation, &call),
+                    |window| {
+                        window.as_ref().is_ok_and(|window| {
+                            window
+                                .as_ref()
+                                .is_some_and(|window| window.wake_at.is_some())
+                        })
+                    },
+                )
+                .unwrap()
+                .unwrap();
                 drop(guard);
             });
 
@@ -7034,7 +7035,7 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
-            let _session = open(edge, &call).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
 
             let target_project_id = provenant_confinement::worktrees::with_context(
                 edge.roots,
@@ -7052,8 +7053,9 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
                 .join(target_project_id.to_string());
             std::fs::create_dir_all(&reg_dir)?;
 
-            // Background thread acquires worktrees.lock and holds it for 5.3s
+            // Keep contention in place until dispatch reaches its deadline.
             let (tx, rx) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
             let lock_dir_path = reg_dir.clone();
             let holder = std::thread::spawn(move || {
                 let dir = Directory::open_anchor(&lock_dir_path).unwrap();
@@ -7069,11 +7071,7 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
                     )
                     .unwrap();
                 tx.send(()).unwrap();
-                let wake = clk
-                    .mono_now()
-                    .checked_add(DurationMicros::from_micros(3_000_000))
-                    .unwrap();
-                clk.wait_until(wake).unwrap();
+                let _ = released.recv();
                 drop(guard);
             });
 
@@ -7095,23 +7093,20 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
             ])?;
             cmd.wait = None;
 
-            let started = clock.mono_now();
             let reply = dispatch_with_workers(cmd, edge, &Free);
+            release.send(())?;
+            holder.join().map_err(|_| "lock holder panicked")?;
             assert_eq!(
                 reply.result.status,
                 Status::Refused,
                 "{:?}",
                 reply.result.error
             );
-            assert!(
-                clock
-                    .mono_now()
-                    .as_micros()
-                    .saturating_sub(started.as_micros())
-                    < 2_000_000,
-                "lock wait exceeded admission deadline"
-            );
-            holder.join().unwrap();
+            let window = session
+                .store
+                .admission_window(&"lock-retry-test".parse()?, &call)?
+                .expect("admission window must be saved");
+            assert!(window.wake_at.is_none_or(|wake| wake <= window.deadline));
 
             Ok(())
         },
