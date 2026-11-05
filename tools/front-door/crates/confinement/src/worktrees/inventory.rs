@@ -48,13 +48,58 @@ impl RepoFacts {
         cancel: &CancelToken,
     ) -> Result<GitOid, WorktreeError> {
         validate_binding(context)?;
-        context.repo.revalidate()?;
-        let budget = context.utility_budget.with_stdout_cap(self.scalar_limit)?;
-        let outcome = run_utility(
-            context.executor,
-            GitRead::ResolveRef { name },
+        self.resolve_repo_commit(
             context.repo,
+            context.executor,
             context.utility,
+            context.utility_budget,
+            name,
+            cancel,
+        )
+    }
+
+    fn resolve_repo_commit(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        name: GitRefName,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        repo.revalidate()?;
+        let budget = budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = run_utility(
+            executor,
+            GitRead::ResolveRef { name },
+            repo,
+            utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
+    /// Resolve a commit through a read-only repository, including native
+    /// alternates, with the same session cap as protected repository reads.
+    pub fn resolve_read_commit(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        name: GitRefName,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        let budget = budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = crate::utility::run_read_utility(
+            executor,
+            GitRead::ResolveRef { name },
+            repo,
+            utility,
             budget,
             cancel,
         )?;

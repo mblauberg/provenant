@@ -65,33 +65,30 @@ fn default_branch(project: &Path) -> Result<String> {
 
 /// Resolve the remote-tracking base through the command's bounded facts session.
 fn base_commit(
-    roots: &provenant_core::Roots,
-    home: &Path,
+    facts: &provenant_confinement::worktrees::RepoFacts,
     project: &Path,
     remote: &str,
     base: &str,
 ) -> Result<Option<String>> {
     use provenant_confinement::{
         repo::GitRefName,
-        worktrees::{self, WorktreeError},
+        utility::{UtilityBudget, UtilityRuntime},
+        worktrees::WorktreeError,
     };
     let Ok(reference) = GitRefName::remote_tracking(format!("{remote}/{base}")) else {
         return Ok(None);
     };
-    let clock = provenant_os::clock::SystemClock::new();
+    let git = provenant_os::git::git_executable().ok_or("Git executable is unavailable")?;
+    let runtime = UtilityRuntime::read_only(git)?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let budget = UtilityBudget::bounded(super::git::GIT_TIMEOUT)?;
     let cancel = provenant_core::CancelToken::new();
-    Ok(worktrees::with_context(
-        roots,
-        home,
-        project,
-        &clock,
-        &cancel,
-        |context| match context.facts.resolve_commit(context, reference, &cancel) {
-            Ok(oid) => Ok(Some(oid.to_string())),
-            Err(WorktreeError::NotFound) => Ok(None),
-            Err(error) => Err(error),
-        },
-    )?)
+    let repo = runtime.open_read_repo(&executor, project, budget, &cancel)?;
+    match facts.resolve_read_commit(&repo, &executor, &runtime, budget, reference, &cancel) {
+        Ok(oid) => Ok(Some(oid.to_string())),
+        Err(WorktreeError::NotFound) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn plan(
@@ -164,7 +161,8 @@ fn plan(
     }
     let git = Git::new()?;
     let remote = git.remote_of(project, &base)?;
-    let base_sha = base_commit(&resolved.roots, &resolved.home, project, &remote, &base)?;
+    let facts = provenant_confinement::worktrees::RepoFacts::default();
+    let base_sha = base_commit(&facts, project, &remote, &base)?;
     if !command.dry_run {
         // The body states this head, so refuse a branch that is elsewhere.
         let listed = git
@@ -314,14 +312,9 @@ mod tests {
     #[test]
     fn base_commit_uses_bounded_repository_facts() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let home = temp.path().join("home");
-        let state = temp.path().join("state");
+        let facts = provenant_confinement::worktrees::RepoFacts::default();
         let project = temp.path().join("project");
-        for path in [&home, &state, &project] {
-            std::fs::create_dir_all(path)?;
-        }
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir_all(&project)?;
         provenant_os::fixture::run_git(&project, &["init", "-q"])?;
         provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
         provenant_os::fixture::run_git(
@@ -332,23 +325,62 @@ mod tests {
             &project,
             &["rev-parse", "HEAD"],
         )?)?;
-        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
-        inputs.state_dir = Some(state);
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         assert_eq!(
-            base_commit(&roots, &home, &project, "origin", "main")?,
+            base_commit(&facts, &project, "origin", "main")?,
             Some(expected.trim().to_owned())
         );
-        assert_eq!(
-            base_commit(&roots, &home, &project, "origin", "missing")?,
-            None
-        );
+        assert_eq!(base_commit(&facts, &project, "origin", "missing")?, None);
         provenant_os::fixture::run_git(
             &project,
             &["update-ref", "refs/remotes/origin/équipe", "HEAD"],
         )?;
         assert_eq!(
-            base_commit(&roots, &home, &project, "origin", "équipe")?,
+            base_commit(&facts, &project, "origin", "équipe")?,
+            Some(expected.trim().to_owned())
+        );
+        let separate = temp.path().join("separate");
+        let gitdir = temp.path().join("separate.git");
+        std::fs::create_dir(&separate)?;
+        provenant_os::fixture::run_git(
+            &separate,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                gitdir.to_str().ok_or("gitdir")?,
+            ],
+        )?;
+        provenant_os::fixture::run_git(&separate, &["commit", "--allow-empty", "-qm", "base"])?;
+        provenant_os::fixture::run_git(
+            &separate,
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        )?;
+        let separate_head = String::from_utf8(provenant_os::fixture::run_git(
+            &separate,
+            &["rev-parse", "HEAD"],
+        )?)?;
+        assert_eq!(
+            base_commit(&facts, &separate, "origin", "main")?,
+            Some(separate_head.trim().to_owned())
+        );
+        let shared = temp.path().join("shared");
+        provenant_os::fixture::run_git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                "--shared",
+                project.to_str().ok_or("project")?,
+                shared.to_str().ok_or("shared")?,
+            ],
+        )?;
+        assert!(shared.join(".git/objects/info/alternates").is_file());
+        provenant_os::fixture::run_git(
+            &shared,
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        )?;
+        assert_eq!(
+            base_commit(&facts, &shared, "origin", "main")?,
             Some(expected.trim().to_owned())
         );
         Ok(())

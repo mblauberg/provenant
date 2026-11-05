@@ -3,7 +3,7 @@ use super::{Result, execute_for};
 use provenant_os::exec::Termination;
 use std::{path::Path, time::Duration};
 
-const GIT_TIMEOUT: Duration = Duration::from_secs(300);
+pub(super) const GIT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A branch or remote name that cannot be read as an option or a revision
 /// expression, so it is safe as a Git argument.

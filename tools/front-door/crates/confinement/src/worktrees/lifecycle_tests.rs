@@ -232,6 +232,25 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
             stream: "stdout"
         }))
     ));
+    let read_only = context.utility.open_read_repo(
+        context.executor,
+        fixture.repo.root_path(),
+        context.utility_budget,
+        &cancel(),
+    )?;
+    assert!(matches!(
+        limited.resolve_read_commit(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            GitRefName::branch("facts-ref")?,
+            &cancel(),
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
     assert!(matches!(
         limited.resolve_revision(&context, GitRevision::new("facts-ref")?, &cancel()),
         Err(WorktreeError::Utility(UtilityError::Truncated {
