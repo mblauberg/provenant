@@ -2453,6 +2453,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     let mut codex = provenant_providers::Adapter::prepare(
         &provenant_providers::codex::Codex,
         provenant_providers::PrepareInput {
+            images: &[],
             command: None,
             route: &codex_route,
             confined: &confinement.plan,
@@ -3908,6 +3909,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 home.join(".codex"),
             )?;
             let launch = Codex.prepare(PrepareInput {
+                images: &[],
                 command: None,
                 route: &route,
                 confined: &plan,

@@ -167,6 +167,7 @@ pub(super) fn prepare_command(
     let prompt = Prompt::new(String::new());
     let mut spec = adapter
         .prepare(PrepareInput {
+            images: &[],
             route: &route,
             command: Some(provenant_providers::command::Invocation {
                 argv: &command.argv,

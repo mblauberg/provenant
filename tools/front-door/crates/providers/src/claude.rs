@@ -704,10 +704,20 @@ fn prepare(
             &mut env,
         );
     }
+    let mut prompt = input.prompt.text().to_owned();
+    if !input.images.is_empty() {
+        prompt.push_str("\n\nAttached images:\n");
+        for image in input.images {
+            prompt.push_str(&format!("- {}\n", image.display()));
+            if let Some(parent) = image.parent() {
+                argv.extend(["--add-dir".into(), parent.as_os_str().to_owned()]);
+            }
+        }
+    }
     let mut spec = LaunchSpec {
         argv,
         env,
-        stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
+        stdin: Stdin::Bytes(prompt.into_bytes()),
         secret_input: Some(provenant_os::exec::SecretInput {
             descriptor_env: "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR".into(),
             bytes: token.access.as_bytes().to_vec(),

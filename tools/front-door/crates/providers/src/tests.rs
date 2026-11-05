@@ -2344,6 +2344,7 @@ pub(super) fn fixture_input<'a>(
 ) -> PrepareInput<'a> {
     let executable = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0/bin/provider");
     PrepareInput {
+        images: &[],
         command: None,
         route,
         confined,
@@ -2413,6 +2414,58 @@ fn spilled_prompts_reach_argv_adapters_with_file_read_permissions() -> Result<()
                         .any(|arg| arg == "--dangerously-skip-permissions")
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn image_attachments_reach_codex_and_claude() -> Result<(), ProviderError> {
+    let images = vec![
+        Path::new("/outside/first image.png").to_owned(),
+        Path::new("/outside/second.png").to_owned(),
+    ];
+    let prompt = Prompt::new("Describe the images".into());
+    let token = fixture_token();
+    for id in ["codex", "claude"] {
+        let plan = fixture_access_plan(Access::ReadOnly, (id == "codex").then_some("login"), false);
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
+        let mut input = fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            (id == "claude").then_some(&token),
+        );
+        input.images = &images;
+        let adapter = REGISTRY
+            .iter()
+            .find(|entry| entry.adapter.id() == id)
+            .unwrap()
+            .adapter;
+        let spec = adapter.prepare(input)?;
+        if id == "codex" {
+            for image in &images {
+                assert!(
+                    spec.argv
+                        .windows(2)
+                        .any(|pair| pair[0] == "--image" && pair[1] == image.as_os_str())
+                );
+            }
+        } else {
+            let Stdin::Bytes(bytes) = spec.stdin else {
+                panic!("expected prompt on stdin")
+            };
+            let text = String::from_utf8(bytes).unwrap();
+            for image in &images {
+                assert!(text.contains(&image.display().to_string()));
+            }
+            assert!(
+                spec.argv
+                    .windows(2)
+                    .any(|pair| pair[0] == "--add-dir" && pair[1] == "/outside")
+            );
         }
     }
     Ok(())

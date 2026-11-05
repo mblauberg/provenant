@@ -1510,6 +1510,7 @@ pub(super) fn prepare_candidates(
         let grant_digest = task.authority_digest.to_string();
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
+                images: &[],
                 command: None,
                 route: provider_route,
                 confined: &plan,
