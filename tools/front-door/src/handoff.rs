@@ -106,13 +106,7 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     let mut options = ExecOptions::new(&argv, dir, timeout);
     options.env = Some(&environment);
     options.stdin = Some(b"");
-    // A worktree listing grows with the linked worktrees, so it gets the same
-    // capture default as delivery. Any other output keeps its bound.
-    let limit = if args.starts_with(&["worktree", "list"]) {
-        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
-    } else {
-        64 * 1024
-    };
+    let limit = provenant_os::git::fact_capture_limit(args, 64 * 1024);
     options.stdout = StreamPolicy::Capture { limit };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let out = SystemExecutor::new(1)?.execute(options)?;

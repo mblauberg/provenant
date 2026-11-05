@@ -9,6 +9,26 @@ use std::{
     time::Duration,
 };
 
+/// Capture bound for Git repository facts. Inventory output grows with the
+/// number of worktrees; other Git output retains the caller's ordinary bound.
+/// Global Git options may precede the subcommand.
+pub fn fact_capture_limit(args: &[&str], ordinary_limit: usize) -> usize {
+    let mut words = args.iter().copied();
+    while let Some(word) = words.next() {
+        match word {
+            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" => {
+                words.next();
+            }
+            _ if word.starts_with('-') => {}
+            "worktree" if words.next() == Some("list") => {
+                return crate::exec::DEFAULT_CAPTURE_LIMIT;
+            }
+            _ => break,
+        }
+    }
+    ordinary_limit
+}
+
 /// Git path to discover from a checkout using an isolated environment.
 #[derive(Clone, Copy)]
 pub enum RepositoryPath {
@@ -237,6 +257,26 @@ mod tests {
     use super::*;
     use crate::exec::{CapturedStream, ExecError, ExecOutcome};
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn worktree_inventory_capture_bound_handles_global_options() {
+        for args in [
+            &["worktree", "list", "--porcelain"][..],
+            &["-C", "checkout", "--git-dir=admin", "worktree", "list"][..],
+        ] {
+            assert_eq!(
+                fact_capture_limit(args, 1024),
+                crate::exec::DEFAULT_CAPTURE_LIMIT
+            );
+        }
+        for args in [
+            &["worktree", "add", "list"][..],
+            &["rev-parse", "--verify", "HEAD"][..],
+            &["-c", "worktree", "list"][..],
+        ] {
+            assert_eq!(fact_capture_limit(args, 1024), 1024);
+        }
+    }
 
     struct DiscoveryExecutor {
         output: Vec<u8>,
