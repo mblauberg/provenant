@@ -46,8 +46,8 @@ base = { type = "string", default = "", doc = "Diff reference the change is meas
 spec_max_bytes = { type = "integer", default = 16384, min = 1, max = 65536, doc = "Maximum bytes of a file spec included in each review brief." }
 spec = { type = "string", default = "", doc = "Issue number or file the change answers." }
 review_shape = { type = "string", default = "", doc = "Review depth override from routing review shapes (quick, standard, deep)." }
-risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
-kind = { type = "string", default = "", doc = "Change kind, for example refactor, integration, or docs." }
+risk_tier = { type = "string", bind = "risk_tier", default = "", doc = "Risk tier that selects the review shape." }
+kind = { type = "string", bind = "kind", default = "", doc = "Change kind, for example refactor, integration, or docs." }
 size = { type = "string", default = "", doc = "Review size override: small, medium, or large." }
 min_reviews = { type = "integer", default = 0, min = 0, max = 32, doc = "Lenses that must succeed. Fewer fails the lens group, which stops the council for the chair to substitute a lens or decide. 0 takes the review ladder minimum for risk_tier, at least 1." }
 verifiers = { type = "integer", default = 1, min = 0, max = 1, doc = "Verifier stages between the lenses and the synthesis, preferably from another model family; 0 skips verification." }

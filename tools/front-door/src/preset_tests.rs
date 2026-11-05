@@ -1,4 +1,4 @@
-use super::preset::{Expansion, Layers, expand, find_prompt};
+use super::preset::{Expansion, Layers, expand, find_prompt, request_bindings};
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 
@@ -5783,4 +5783,20 @@ fn five_and_seven_lane_big_batches_fit_the_checkpoint_envelope() {
         );
         document.admit(&Default::default()).unwrap();
     }
+}
+
+#[test]
+fn request_bindings_follow_declarations_and_warn_when_missing() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "custom-bindings", "stages = []\n[parameters]\npriority = { type = 'string', default = '', bind = 'risk_tier' }\ncategory = { type = 'string', default = '', bind = 'kind' }\n").unwrap();
+    let (values, warnings) =
+        request_bindings(&layers, "custom-bindings", Some("crucial"), Some("docs")).unwrap();
+    assert!(warnings.is_empty());
+    assert!(values.contains(&("priority".into(), json!("crucial"))));
+    assert!(values.contains(&("category".into(), json!("docs"))));
+    let (values, warnings) =
+        request_bindings(&layers, "single", Some("routine"), Some("docs")).unwrap();
+    assert!(values.is_empty());
+    assert!(warnings.iter().any(|w| w.contains("--risk-tier")));
+    assert!(warnings.iter().any(|w| w.contains("--task-kind")));
 }

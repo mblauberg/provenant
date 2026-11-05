@@ -465,7 +465,7 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
-const SPEC_KEYS: [&str; 6] = ["type", "default", "min", "max", "enum", "doc"];
+const SPEC_KEYS: [&str; 7] = ["type", "default", "min", "max", "enum", "doc", "bind"];
 const TYPE_NAMES: [&str; 6] = ["string", "integer", "number", "boolean", "list", "table"];
 /// Parameters every parent hands to a child preset that declares them.
 const AMBIENT: [&str; 3] = ["risk_tier", "subject", "local_check_policy"];
@@ -487,6 +487,37 @@ fn is_fragment(value: &Value) -> bool {
 /// A typed parameter: `{ type, default, min, max, enum, doc }`.
 fn is_spec(value: &Value) -> bool {
     is_fragment(value)
+}
+
+/// Offer request values only to parameters that explicitly bind them.
+pub(super) fn request_bindings(
+    layers: &Layers,
+    name: &str,
+    risk: Option<&str>,
+    kind: Option<&str>,
+) -> Result<(Vec<(String, Value)>, Vec<String>), String> {
+    let (config, _) = layers.resolve(name)?;
+    let mut bindings = Vec::new();
+    let mut warnings = Vec::new();
+    for (key, flag, value) in [
+        ("risk_tier", "--risk-tier", risk),
+        ("kind", "--task-kind", kind),
+    ] {
+        let Some(value) = value else { continue };
+        let mut bound = false;
+        if let Some(parameters) = config.get("parameters").and_then(Value::as_object) {
+            for (parameter, spec) in parameters {
+                if spec.get("bind").and_then(Value::as_str) == Some(key) {
+                    bindings.push((parameter.clone(), json!(value)));
+                    bound = true;
+                }
+            }
+        }
+        if !bound {
+            warnings.push(format!("{flag} ignored: preset {name} declares no binding"));
+        }
+    }
+    Ok((bindings, warnings))
 }
 
 fn list_is_lenses(value: Option<&Value>) -> bool {
@@ -750,6 +781,13 @@ fn flatten_parameters(
                 "type must be one of {}",
                 TYPE_NAMES.join(", ")
             )));
+        }
+        if let Some(binding) = value.get("bind")
+            && !binding
+                .as_str()
+                .is_some_and(|binding| ["risk_tier", "kind"].contains(&binding))
+        {
+            return Err(fail("bind must be risk_tier or kind".into()));
         }
         for bound in ["min", "max"] {
             if let Some(limit) = value.get(bound)
@@ -3825,16 +3863,13 @@ pub fn run(
         }
         let name = selection.choice.preset.as_str();
         let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
-        if matches!(name, "review-council" | "big-batch")
-            && let Some(risk) = &request.risk_tier
-        {
-            params.push(("risk_tier".into(), json!(risk)));
-        }
-        if name == "review-council"
-            && let Some(kind) = &request.task_kind
-        {
-            params.push(("kind".into(), json!(kind)));
-        }
+        let (bindings, binding_warnings) = request_bindings(
+            &layers,
+            name,
+            request.risk_tier.as_deref(),
+            request.task_kind.as_deref(),
+        )?;
+        params.extend(bindings);
         file_params.into_iter().for_each(|(key, value)| {
             if let Some(existing) = params.iter_mut().find(|(name, _)| name == &key) {
                 existing.1 = value;
@@ -3849,6 +3884,8 @@ pub fn run(
                 })
             });
         let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
+        expansion.warnings.extend(binding_warnings);
+        expansion.document["provenance"]["warnings"] = json!(expansion.warnings);
         let mut spec = None;
         if name == "deliver" && !request.explain {
             spec = params

@@ -45,9 +45,9 @@ ci_timeout_seconds = { type = "integer", default = 7200, min = 1, max = 604800, 
 max_iterations = { type = "integer", default = 3, min = 1, max = 32, doc = "Repair rounds before the loop pauses and asks to stop, extend or accept." }
 repair_tier = { default = "senior", doc = "Routing pool, route table or ordered route tables for each repair agent." }
 decision_session = { type = "string", default = "", doc = "Inbox session for the exhaustion and land asks. Empty pauses an exhausted loop for graph resume, and fails a land whose tier asks." }
-risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
+risk_tier = { type = "string", bind = "risk_tier", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
-kind = { type = "string", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
+kind = { type = "string", bind = "kind", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
 size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty defers the choice: the host measures the pinned reviewed commit against base when the review starts, so the panel fits the work actually written; pass a size to fix it now." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 land = { type = "integer", default = 1, min = 0, max = 1, doc = "1 lands the reviewed head; 0 stops after review and leaves the pull request open." }
