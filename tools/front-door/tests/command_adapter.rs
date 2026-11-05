@@ -108,6 +108,80 @@ fn configure_commands(rig: &TestRig, commands: Value) -> Result {
     Ok(())
 }
 
+#[test]
+fn review_preset_launches_read_only_from_detached_head() -> Result {
+    if !available()? {
+        return Ok(());
+    }
+    let mut rig = rig(
+        json!({"review-pass":{"argv":["/bin/sh","-c", "printf '```findings\\n{\"schema_version\":1,\"findings\":[]}\\n```\\nVERDICT: PASS\\n'"]}}),
+    )?;
+    let _cleanup = rig.process_cleanup();
+    let product = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))?;
+    for (key, value) in &mut rig.env {
+        if key == "PROVENANT_ROOT" {
+            *value = product.clone().into_os_string();
+        }
+    }
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let base = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+    let base = String::from_utf8(base.stdout.bytes)?.trim().to_owned();
+    assert_eq!(
+        code(&rig.execute(&git, &["commit", "--allow-empty", "-qm", "subject"], None)?),
+        0
+    );
+    let head = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+    let head = String::from_utf8(head.stdout.bytes)?.trim().to_owned();
+    assert_eq!(
+        code(&rig.execute(&git, &["checkout", "--detach", &head], None)?),
+        0
+    );
+    let settings = rig.project.join(".provenant");
+    fs::create_dir_all(&settings)?;
+    fs::write(
+        settings.join("roles.toml"),
+        "[roles.\"lens.correctness-spec\"]\nroutes = [{ adapter = 'command', name = 'review-pass' }]\n",
+    )?;
+    let brief = rig.root.join("review-brief");
+    fs::write(&brief, "Review the pinned subject")?;
+    let output = rig.command(&[
+        "run",
+        "--preset",
+        "review",
+        "--prompt-file",
+        brief.to_str().ok_or("brief")?,
+        "--set",
+        &format!("parameters.subject.commit='{head}'"),
+        "--set",
+        &format!("parameters.base='{base}'"),
+        "--set",
+        "parameters.review_shape='quick'",
+        "--plan",
+        "off",
+        "--wait",
+        "30s",
+        "--json",
+    ])?;
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(code(&output), 0, "{value}");
+    let nodes = value["data"]["graph"]["checkpoint"]["nodes"]
+        .as_array()
+        .ok_or("nodes")?;
+    let lens = nodes
+        .iter()
+        .find(|n| {
+            n["id"]
+                .as_str()
+                .is_some_and(|id| id.contains("lens-correctness-spec"))
+        })
+        .ok_or("lens")?;
+    assert_eq!(lens["state"], "succeeded", "{value}");
+    assert_eq!(lens["outputs"]["verdict"], "VERDICT: PASS", "{value}");
+    let branch = rig.execute(&git, &["symbolic-ref", "-q", "HEAD"], None)?;
+    assert_ne!(code(&branch), 0, "review must leave HEAD detached");
+    Ok(())
+}
+
 /// How a test names the command lane: a manifest task or `--route command/NAME`.
 #[derive(Clone, Copy)]
 enum Via {
