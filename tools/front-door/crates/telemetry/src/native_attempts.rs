@@ -1,7 +1,10 @@
 //! Metadata for explicitly tracked native Claude sub-agents. No transcript
 //! content or credential data is accepted by this store.
-use provenant_core::Roots;
-use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
+use provenant_core::{CancelToken, Clock, DurationMicros, Roots, WaitBudget};
+use provenant_os::{
+    clock::SystemClock,
+    fs::{Directory, FsError, LockMode, PublishMode},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{ffi::OsStr, io::Read, path::Path};
@@ -158,7 +161,14 @@ fn update(
     f: impl FnOnce(&mut Vec<Attempt>) -> Result<(), AttemptError>,
 ) -> Result<(), AttemptError> {
     let directory = Directory::open_anchor(roots.state.as_path())?;
-    let _lock = directory.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
+    let clock = SystemClock::new();
+    let _lock = directory.lock(
+        OsStr::new(LOCK),
+        LockMode::Exclusive,
+        WaitBudget::up_to(clock.mono_now(), DurationMicros::from_micros(5_000_000)),
+        &CancelToken::new(),
+        &clock,
+    )?;
     let mut attempts = load(&directory)?;
     f(&mut attempts)?;
     let bytes = serde_json::to_vec(&Store {

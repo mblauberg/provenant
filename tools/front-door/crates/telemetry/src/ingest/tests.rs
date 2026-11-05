@@ -713,3 +713,53 @@ fn native_attempt_store_preserves_unknown_versions_and_rejects_ambiguous_links()
     assert_eq!(std::fs::read(&path)?, future);
     Ok(())
 }
+
+#[test]
+fn concurrent_native_attempt_updates_wait_and_preserve_both() -> Result {
+    use crate::native_attempts::{self, Attempt};
+    use provenant_os::fs::{Directory, LockMode};
+    use std::{ffi::OsStr, sync::mpsc, time::Duration};
+
+    let f = Fixture::new()?;
+    let directory = Directory::open_anchor(f.roots.state.as_path())?;
+    let lock = directory.try_lock(OsStr::new("native-attempts.lock"), LockMode::Exclusive)?;
+    std::thread::scope(|scope| {
+        let (tx, rx) = mpsc::channel();
+        let handles: Vec<_> = (0..2)
+            .map(|i| {
+                let tx = tx.clone();
+                let roots = &f.roots;
+                scope.spawn(move || {
+                    tx.send(()).unwrap();
+                    native_attempts::start(
+                        roots,
+                        Attempt {
+                            id: format!("tool-{i}"),
+                            alias: "alias".into(),
+                            model: "model".into(),
+                            effort: None,
+                            session: "session".into(),
+                            config: "a".repeat(64),
+                            started_at: "2026-10-01T00:00:00Z".into(),
+                            ended_at: None,
+                            settlement: None,
+                            agent_id: None,
+                        },
+                    )
+                })
+            })
+            .collect();
+        rx.recv().unwrap();
+        rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        drop(lock);
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+    });
+    let attempts = native_attempts::read(&f.roots)?;
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts.iter().any(|a| a.id == "tool-0"));
+    assert!(attempts.iter().any(|a| a.id == "tool-1"));
+    Ok(())
+}
