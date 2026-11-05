@@ -3,6 +3,7 @@
 Canonical questions: [review-lenses.md](../review-lenses.md), section
 "Ownership and structure" (simplicity, YAGNI, the 1,000-line cap).
 
+- Where does over-engineering add complexity beyond the current need?
 - What can be deleted while keeping behaviour? Name the lines.
 - Flag speculative or rigid abstraction, thin wrappers that only move
   complexity, options nothing uses, and layers with one caller.

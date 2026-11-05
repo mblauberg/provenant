@@ -125,17 +125,17 @@
             "when": ""
           },
           {
+            "name": "reliability",
+            "tier": "",
+            "when": ""
+          },
+          {
             "name": "conventions-readability",
             "tier": "",
             "when": ""
           },
           {
             "name": "refactor-cleanup",
-            "tier": "",
-            "when": ""
-          },
-          {
-            "name": "reliability",
             "tier": "",
             "when": ""
           },

@@ -1768,7 +1768,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     );
     assert_eq!(
         layered.domains.routing.review.shapes["standard"].reviewers[0].count,
-        3
+        5
     );
     assert_eq!(
         layered.domains.routing.review.select.by_risk["routine"],
@@ -4956,6 +4956,23 @@ fn a_malformed_persisted_exclusion_fails_closed_for_its_row_only()
     let receipt = route.pool_selection.ok_or("pool selection")?;
     assert!(receipt.candidates.iter().any(|candidate| candidate.model == "codex/gpt-6-luna"
         && candidate.exclusion.is_some()));
+    Ok(())
+}
+
+#[test]
+fn review_project_overrides_order_and_shape_slots_through_loader()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = load_routing(
+        "schema_version=1\n[domains.routing.review.lenses]\norder=['flexibility','tests','reliability']\n[domains.routing.review.shapes.standard]\nreviewers=[{pool='junior',count=2}]\n",
+    )??;
+    let review = &config.domains.routing.review;
+    let panel = review.panel(&review.shapes["standard"], None, &[], false, &[]);
+    let lenses: Vec<_> = panel
+        .reviewers
+        .iter()
+        .flat_map(|r| r.lenses.iter().map(String::as_str))
+        .collect();
+    assert_eq!(lenses, ["flexibility", "tests"]);
     Ok(())
 }
 
