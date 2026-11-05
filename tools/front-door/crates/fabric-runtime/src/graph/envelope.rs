@@ -354,6 +354,7 @@ fn node_bound(
                 }),
                 verdict: Some(String::new()),
                 findings: Vec::new(),
+                findings_available: Some(false),
                 branch: Some(String::new()),
                 commit: Some(String::new()),
                 warnings: Vec::new(),

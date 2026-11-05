@@ -327,6 +327,7 @@ const NOT_SCHEDULED: &str =
 
 pub(super) fn outputs(passed: bool, ci: Option<&CiEvidence>) -> NodeOutputs {
     let mut outputs = gate_outputs(passed);
+    outputs.findings_available = Some(ci.is_some_and(|evidence| !evidence.truncated));
     if let Some(ci) = ci.filter(|_| !passed) {
         outputs.findings = ci
             .failed_checks

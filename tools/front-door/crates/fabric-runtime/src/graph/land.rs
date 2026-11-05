@@ -516,6 +516,7 @@ fn outputs(record: &LandRecord) -> NodeOutputs {
         }),
         verdict: Some(LANDED.into()),
         findings: Vec::new(),
+        findings_available: None,
         branch: Some(record.branch.clone()),
         commit: Some(record.head.clone()),
         warnings: Vec::new(),

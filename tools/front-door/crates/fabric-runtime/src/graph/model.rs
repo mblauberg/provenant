@@ -617,6 +617,10 @@ pub struct NodeOutputs {
     pub result: Option<ResultOutput>,
     pub verdict: Option<String>,
     pub findings: Vec<Finding>,
+    /// Whether the full findings selection was observed and parsed. Missing
+    /// evidence in older checkpoints remains unknown on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings_available: Option<bool>,
     pub branch: Option<String>,
     pub commit: Option<String>,
     pub warnings: Vec<String>,

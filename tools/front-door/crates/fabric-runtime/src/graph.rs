@@ -2462,6 +2462,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             }
                             outputs.warnings.truncate(MAX_WARNINGS);
                             if outcome == AttemptOutcome::UsageLimited {
+                                outputs.findings_available = Some(false);
                                 outputs
                                     .warnings
                                     .retain(|warning| !warning.starts_with(FINDINGS_INVALID));
@@ -2887,6 +2888,7 @@ fn gate_outputs(passed: bool) -> NodeOutputs {
         result: None,
         verdict: Some(if passed { "PASS" } else { "FAIL" }.to_owned()),
         findings: Vec::new(),
+        findings_available: Some(true),
         branch: None,
         commit: None,
         warnings: Vec::new(),

@@ -82,6 +82,12 @@ pub(super) fn make_outputs_with_upstream(
         .and_then(findings_block)
         .map_err(str::to_owned)
         .and_then(|block| parse_findings(block, upstream));
+    let findings_available = Some(
+        result.is_some_and(|capture| !capture.source_truncated)
+            && parsed
+                .as_ref()
+                .is_ok_and(|(_, skipped, _)| skipped.is_empty()),
+    );
     let findings = parsed
         .map(|(findings, skipped, trimmed)| {
             if trimmed > 0 {
@@ -165,6 +171,7 @@ pub(super) fn make_outputs_with_upstream(
         result,
         verdict: verdict.map(|value| bounded(&value, OUTPUT_FIELD_BYTES)),
         findings,
+        findings_available,
         branch: branch.map(|value| bounded(&value, OUTPUT_FIELD_BYTES)),
         commit: commit.map(|value| bounded(&value, OUTPUT_FIELD_BYTES)),
         warnings,
@@ -1012,24 +1019,24 @@ pub(super) fn render_input(
             }
         }
         for kind in &input.outputs {
+            if *kind == OutputKind::Findings && outputs.findings_available != Some(true) {
+                let section = format!("{} findings availability: unavailable\n", input.node);
+                if section.len() + INPUT_CLOSE.len() > cap.saturating_sub(prompt.len()) {
+                    return (prompt, true);
+                }
+                prompt.push_str(&section);
+            }
             let value = match kind {
                 OutputKind::Result => serde_json::to_string(&outputs.result.as_ref().map(|result| serde_json::json!({"digest": result.digest, "excerpt": result.excerpt, "truncated": result.truncated}))),
                 OutputKind::Verdict => serde_json::to_string(&outputs.verdict),
                 OutputKind::Findings => {
-                    let generated = positions.get(&input.node).is_some_and(|index| {
-                        checkpoint.nodes[*index].gate.is_some()
-                            || plan.nodes[*index].composite.is_some()
+                    // A composite may retain a useful partial selection. Its
+                    // explicit availability line prevents it being mistaken
+                    // for complete evidence.
+                    let partial = positions.get(&input.node).is_some_and(|index| {
+                        plan.nodes[*index].composite.is_some() && !outputs.findings.is_empty()
                     });
-                    let quota_stopped = positions.get(&input.node).is_some_and(|index| {
-                        checkpoint.nodes[*index]
-                            .attempts
-                            .last()
-                            .is_some_and(|attempt| attempt.outcome == Some(AttemptOutcome::UsageLimited))
-                    });
-                    let available = generated
-                        || (outputs.result.is_some()
-                            && !quota_stopped
-                            && !outputs.warnings.iter().any(|warning| warning.starts_with(FINDINGS_INVALID)));
+                    let available = outputs.findings_available == Some(true) || partial;
                     let findings = available.then(|| {
                         selected.iter().filter(|(source, _)| source == &input.node)
                             .map(|(_, finding)| finding).collect::<Vec<_>>()

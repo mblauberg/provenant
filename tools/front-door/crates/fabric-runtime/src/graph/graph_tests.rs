@@ -1518,6 +1518,10 @@ fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
             .iter()
             .find(|node| node.id == "reviews")
             .unwrap();
+        assert_eq!(
+            composite.outputs.as_ref().unwrap().findings_available,
+            Some(true)
+        );
         let ids: Vec<_> = composite
             .outputs
             .as_ref()
@@ -3418,6 +3422,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     );
     assert_eq!(node("verify").state, NodeState::Succeeded);
     let lenses = node("lenses").outputs.as_ref().unwrap();
+    assert_eq!(lenses.findings_available, Some(false));
     assert_eq!(lenses.findings.len(), 1);
     let excerpt = &lenses.result.as_ref().unwrap().excerpt;
     assert!(excerpt.starts_with("Unavailable lenses:"), "{excerpt}");
@@ -3429,6 +3434,7 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     assert!(excerpt.contains("LENS-A-OK"));
     assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
     let verify_input = &owner.prompts[3];
+    assert!(verify_input.contains("lenses findings availability: unavailable"));
     assert!(verify_input.contains("LENS-A-OK") && verify_input.contains("lens-c"));
     assert!(!verify_input.contains("LENS-B-NO-FINDINGS"));
 }
@@ -6172,12 +6178,13 @@ fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
 
 #[test]
 fn optional_findings_distinguish_missing_invalid_and_valid_empty() {
-    for (result, expected) in [
-        ("no findings", "parent findings: null"),
-        ("```findings\nnot json\n```", "parent findings: null"),
+    for (result, expected, available) in [
+        ("no findings", "parent findings: null", false),
+        ("```findings\nnot json\n```", "parent findings: null", false),
         (
             "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
             "parent findings: []",
+            true,
         ),
     ] {
         let mut child = node("child", route("fixture"));
@@ -6196,8 +6203,35 @@ fn optional_findings_distinguish_missing_invalid_and_valid_empty() {
             ..Default::default()
         };
         let mut journal = MemoryJournal::default();
-        advance(&document, &mut owner, &mut journal).unwrap();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
         assert!(owner.prompts[1].contains(expected), "{}", owner.prompts[1]);
+        let output = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "parent")
+            .unwrap()
+            .outputs
+            .as_ref()
+            .unwrap();
+        assert_eq!(output.findings_available, Some(available));
+        let mut stored = serde_json::to_value(output).unwrap();
+        let decoded: NodeOutputs = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(decoded.findings_available, Some(available));
+        stored.as_object_mut().unwrap().remove("findings_available");
+        let older: NodeOutputs = serde_json::from_value(stored).unwrap();
+        assert_eq!(older.findings_available, None);
+        let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        let replayed = replay
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "parent")
+            .unwrap();
+        assert_eq!(
+            replayed.outputs.as_ref().unwrap().findings_available,
+            Some(available)
+        );
     }
 }
 
@@ -7752,6 +7786,7 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
             .unwrap();
         assert_eq!(composite.state, NodeState::Succeeded);
         let outputs = composite.outputs.as_ref().unwrap();
+        assert_eq!(outputs.findings_available, Some(false));
         assert!(outputs.findings.len() < 2 * count);
         assert!(outputs.findings.len() <= MAX_FINDINGS);
         assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);

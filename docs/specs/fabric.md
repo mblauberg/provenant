@@ -1315,8 +1315,13 @@ unfinished work across a clipped `result` excerpt. Decision (#2279): the
 earlier closing-window selector is removed rather than kept as a fallback,
 because handoff v2 is bounded, structured and parsed from the complete stream;
 a provider that emits no handoff gets the head excerpt and digest only. Each dependency and output selector
-may occur only once. Findings from a direct attempt render as `null` when its
-findings are unavailable or invalid, and as `[]` for a valid empty block.
+may occur only once. The output record retains whether findings were observed
+and parsed completely. Unknown or unavailable findings are labelled as such;
+they render as `null` when no partial composite findings are retained, while a
+valid empty block renders as `[]`. Replay does not infer missing evidence.
+Composite findings are complete only when every selected member's findings are
+available and the aggregate was not truncated; partial findings remain usable
+with their availability and truncation notices.
 The selected data is rendered into its brief, which is
 bounded by the effective per-node prompt byte limit. If the node prompt leaves
 no room for the block, or the selected outputs do not fit, the node fails
