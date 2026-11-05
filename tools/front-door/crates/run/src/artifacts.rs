@@ -96,6 +96,8 @@ impl RunStore {
         call: &Request<'_>,
         operation: impl FnOnce(&Directory) -> T,
     ) -> Result<T> {
+        // The callback may publish an observation in either mode, so use the
+        // durable record even when opening existing cloud storage.
         let record = self.record(id, call)?;
         let attempt = self.attempt_dir(record.run_id, id, false)?;
         let lock_name = OsStr::new("cloud.lock");
