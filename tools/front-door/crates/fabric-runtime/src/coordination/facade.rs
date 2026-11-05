@@ -235,6 +235,8 @@ pub enum FacadeError {
     ConfinementRefused,
     #[error("writer lock or writer is busy")]
     WriterBusy,
+    #[error("writer lock is busy")]
+    WriterLockBusy,
     #[error("writer custody is unknown")]
     WriterUnknown,
     #[error("a requested credential-root grant was refused")]
@@ -452,6 +454,7 @@ impl FacadeError {
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy => projected = projected.next("wait for the current writer or lock holder to finish"),
+            Self::WriterLockBusy => projected = projected.next("wait for the writer lock holder to finish, then retry"),
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
             Self::ConfinementRefused => projected = projected.next("inspect the requested access and confinement policy"),
             Self::CredentialRoot { access } => {
@@ -483,6 +486,7 @@ impl FacadeError {
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused => "confinement_refused",
             Self::WriterBusy => "writer_busy",
+            Self::WriterLockBusy => "writer_lock_busy",
             Self::WriterUnknown => "writer_unknown",
             Self::CredentialRoot { .. } => "credential_root",
             Self::DispatchRefused { .. } => "dispatch_refused",

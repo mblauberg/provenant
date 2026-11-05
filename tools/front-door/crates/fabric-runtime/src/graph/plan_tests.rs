@@ -1111,7 +1111,7 @@ fn plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once() {
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.successful());
     assert_eq!(owner.deliveries, 1);
-    assert!(owner.permissions[1..5].iter().all(|p| *p == (AccessMode::WorktreeWrite, Some(".worktrees/a".into()))));
+    assert!(owner.permissions[1..5].iter().all(|p| *p == (AccessMode::WorktreeWrite, Some("/fixture/.worktrees/a".into()))));
     assert!(owner.delivery_modes[1..5].iter().all(|mode| *mode == Some(provenant_records::run::DeliveryMode::Integrate("integration".into()))));
     let encoded = serde_json::to_vec(&run.checkpoint).unwrap();
     journal.0 = Some(serde_json::from_slice(&encoded).unwrap());
@@ -1174,7 +1174,7 @@ fn writer_graph() -> GraphDocument {
 #[test]
 fn honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract() {
     let mut doc = writer_graph();
-    doc.nodes[1].inputs = vec![GraphInput {extra: Default::default(),  node: "write".into(), outputs: vec![OutputKind::Result] }];
+    doc.nodes[1].inputs = vec![GraphInput { required_outputs: Vec::new(),extra: Default::default(),  node: "write".into(), outputs: vec![OutputKind::Result] }];
     let mut owner = fixture_owner(&[STOP, "VERDICT: PASS", "checked"]);
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
@@ -1298,7 +1298,18 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
     assert_eq!(owner.calls[3].0.node_id, "after");
     assert_eq!(run.checkpoint.expansions.len(), 2);
     let recursive: GraphCheckpoint = serde_json::from_str(include_str!("nested-plan-recursive.json")).unwrap();
-    assert_eq!(run.checkpoint, recursive);
+    let mut comparable = run.checkpoint.clone();
+    for node in &mut comparable.nodes {
+        for attempt in &mut node.attempts {
+            assert!(attempt.input_manifest.is_some());
+            assert!(attempt.input_cap.is_some());
+            assert!(attempt.input_cap_source.is_some());
+            attempt.input_manifest = None;
+            attempt.input_cap = None;
+            attempt.input_cap_source = None;
+        }
+    }
+    assert_eq!(comparable, recursive);
     let (base, _) = validate_plan(&doc).unwrap();
     assert_eq!(run.checkpoint.plan_digest, CanonicalV1::record_digest("fabric-graph-plan", 1, &base).unwrap().to_string());
 }
@@ -1370,7 +1381,7 @@ fn sibling_planners_share_overlapping_writer_checkout_and_wait() {
     assert_eq!(run.checkpoint.expansions[1].nodes[0].worktree.as_deref(), Some(".worktrees/a"));
     owner.observations.clear(); owner.observations.extend([terminal_with_result(AttemptOutcome::Succeeded, "done"), terminal_with_result(AttemptOutcome::Succeeded, "done")]);
     assert!(advance(&doc, &mut owner, &mut journal).unwrap().checkpoint.successful());
-    assert_eq!(owner.permissions.last().unwrap().1.as_deref(), Some(".worktrees/a"));
+    assert_eq!(owner.permissions.last().unwrap().1.as_deref(), Some("/fixture/.worktrees/a"));
 }
 
 #[test]
@@ -1823,7 +1834,7 @@ fn planned_workers_and_the_no_scout_note_expand_and_feed_their_consumers() {
 #[test]
 fn a_hand_written_plan_keeps_its_consumers_declared_inputs() {
     let mut doc = pattern_planner(4);
-    doc.nodes[1].inputs = vec![GraphInput {
+    doc.nodes[1].inputs = vec![GraphInput { required_outputs: Vec::new(),
         extra: Default::default(),
         node: "plan".into(),
         outputs: vec![OutputKind::Result],

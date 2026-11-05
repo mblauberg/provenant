@@ -50,6 +50,38 @@ pub(crate) mod peer_tests {
     use provenant_run::{AttemptState, Outcome, RunStore};
 
     #[test]
+    fn graph_factory_reopens_the_retained_directory() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_factory_reopens_the_retained_directory")? {
+            return Ok(());
+        }
+        let rig = crate::worktree_tests::support::TestRig::new().map_err(|e| format!("fixture: {e}"))?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone()).map_err(|e| format!("roots: {e}"))?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project).map_err(|e| format!("context: {e}"))?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let retained = rig.project.join("retained-directory");
+        std::fs::create_dir(&retained)?;
+        let rebound = factory
+            .for_graph_directory(&retained)
+            .map_err(|error| format!("rebind retained directory: {error}"))?;
+        assert_eq!(rebound.cwd, retained);
+        assert_eq!(rebound.context.identity.project, factory.context.identity.project);
+        let foreign = crate::worktree_tests::support::TestRig::new()?;
+        assert!(factory.for_graph_directory(&foreign.project).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn tick_reports_unreadable_once_and_advances_another_graph()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::tick_reports_unreadable_once_and_advances_another_graph")? {
@@ -956,6 +988,162 @@ pub(crate) mod peer_tests {
                 assert_eq!(range, graph::ReviewRange::Resolved { base: expected_base.clone(), head: head.clone() });
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn pinned_review_range_survives_moved_ref_and_another_checkout() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::pinned_review_range_survives_moved_ref_and_another_checkout")? { return Ok(()); }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::repository()?;
+        let git = |args: &[&str]| crate::worktree_tests::git(&rig, args);
+        let base = git(&["rev-parse", "HEAD"])?;
+        git(&["branch", "review-pin", &base])?;
+        std::fs::write(rig.project.join("source-change"), "source")?;
+        git(&["add", "source-change"])?;
+        git(&["commit", "-qm", "original source"])?;
+        let original = git(&["rev-parse", "HEAD"])?;
+        std::fs::write(rig.project.join("predecessor-change"), "predecessor")?;
+        git(&["add", "predecessor-change"])?;
+        git(&["commit", "-qm", "predecessor"])?;
+        let head = git(&["rev-parse", "HEAD"])?;
+        assert_ne!(base, original);
+        assert_ne!(original, head);
+        let other = rig.root.join("other-checkout");
+        git(&["worktree", "add", "--detach", other.to_str().ok_or("other path")?, &base])?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?, project_attribution: false,
+            clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
+            host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None,
+            capability_overrides: (Vec::new(), Vec::new()),
+            integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
+        let pinned = owner.resolve_review_base("review-pin", Some(rig.project.to_str().ok_or("project")?))?.ok_or("base")?;
+        assert_eq!(pinned, base);
+        let actor = owner.actor();
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"pinned-range","node_id":"review","route_index":0}))?;
+        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture","model":"fixture/model"}))?;
+        let source_roots = vec![rig.project.to_str().ok_or("source path")?.to_owned()];
+        let node = || graph::NodeInput { capabilities: None, capability_sources: None, require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
+            read_roots: &source_roots, distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
+            review_base: Some(&pinned), title: "review", prompt: "review", required_verdict: None, deadline_seconds: None, inputs_dir: None };
+        let first = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
+            graph::Replay { delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor }).map_err(|error| format!("first launch: {error:?}"))?;
+        let reference = match first { graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("attempt reference")? };
+        git(&["branch", "-f", "review-pin", &head])?;
+        git(&["commit", "--allow-empty", "-qm", "move source checkout"])?;
+        assert_ne!(git(&["rev-parse", "HEAD"])?, head);
+        let reattached = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
+            graph::Replay { delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor }).map_err(|error| format!("operation replay: {error:?}"))?;
+        let replayed = match reattached { graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("replay reference")? };
+        assert_eq!(replayed, reference);
+        let other_factory = factory.for_graph_directory(&other)?;
+        let mut replay_owner = BoundGraphOwner { factory: &other_factory, integration_base: None,
+            capability_overrides: (Vec::new(), Vec::new()),
+            integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
+        replay_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
+            graph::Replay { delivery: None, branch: None, fast_forward_only: false, stored_ref: Some(&reference), launch_actor: &actor })?;
+        let run_owner = BinaryRunOwner { factory: &other_factory, allow_remote: true, actor: None, chair: None };
+        let call = run_owner.call(&cancel);
+        let store = run_owner.store(&cancel)?;
+        let operation = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.ok_or("operation")?;
+        let request = store.request(operation.run_id, &call)?;
+        assert_eq!(request.tasks[0].base.as_deref(), Some(base.as_str()));
+        assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+        assert_eq!(request.tasks[0].access.source_root.as_deref(), Some(rig.project.as_path()));
+        assert!(request.tasks[0].access.read_roots.is_empty());
+        let scratch = rig.root.join("review-evidence");
+        std::fs::create_dir(&scratch)?;
+        let directory = provenant_os::fs::Directory::open_anchor(&scratch)?;
+        let git_path = provenant_os::git::git_executable().ok_or("git")?;
+        provenant_run::GitContext::capture_at(&git_path, &other, &base, &head)?.write_to(&directory, &scratch)?;
+        let stat = std::fs::read_to_string(scratch.join("git-diff.stat"))?;
+        assert!(stat.contains("source-change"), "{stat}");
+        assert!(stat.contains("predecessor-change"), "{stat}");
+        Ok(())
+    }
+
+    #[test]
+    fn implicit_writer_binding_uses_verified_worktree_head() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::implicit_writer_binding_uses_verified_worktree_head")? { return Ok(()); }
+        use provenant_fabric_runtime::graph::AttemptOwner;
+        let rig = crate::worktree_tests::repository()?;
+        let git = |args: &[&str]| crate::worktree_tests::git(&rig, args);
+        let initial = git(&["rev-parse", "HEAD"])?;
+        let lane = rig.root.join("lane");
+        git(&["worktree", "add", "-qb", "lane", lane.to_str().ok_or("lane path")?])?;
+        git(&["commit", "--allow-empty", "-qm", "move invoking checkout"])?;
+        assert_ne!(git(&["rev-parse", "HEAD"])?, initial);
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?, project_attribution: false,
+            clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
+            host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None,
+            capability_overrides: (Vec::new(), Vec::new()),
+            integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel,
+            prices: None, tick: false };
+        let binding = owner.bind_writer_worktree(lane.to_str().ok_or("lane path")?)?.ok_or("binding")?;
+        assert_eq!(binding.worktree, std::fs::canonicalize(&lane)?.to_string_lossy());
+        assert_eq!(binding.head, initial);
+        let metadata = provenant_os::fs::Directory::open_anchor(&lane)?.metadata()?;
+        assert_eq!(binding.extra["source_directory_identity"]["device"], metadata.device);
+        assert_eq!(binding.extra["source_directory_identity"]["inode"], metadata.inode);
+        git(&["-C", lane.to_str().ok_or("lane path")?, "checkout", "--detach", "-q"])?;
+        assert!(owner.bind_writer_worktree(lane.to_str().ok_or("lane path")?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::integrating_graph_writer_refuses_a_source_outside_the_pinned_base")? { return Ok(()); }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::repository()?;
+        let git = |args: &[&str]| crate::worktree_tests::git(&rig, args);
+        let base = git(&["rev-parse", "HEAD"])?;
+        let tree = git(&["rev-parse", "HEAD^{tree}"])?;
+        let unrelated = git(&["commit-tree", &tree, "-m", "unrelated"])?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BoundGraphOwner { factory: &factory,
+            capability_overrides: (Vec::new(), Vec::new()),
+            integration_base: Some(BoundGraphBases { integration: Some(base.parse()?), review: None }),
+            integration_branch: Some("batch".into()), network: None, exclude: Vec::new(),
+            budget, cancel: &cancel, prices: None, tick: false };
+        let actor = owner.actor();
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"batch", "node_id":"lane-outside", "route_index":0}))?;
+        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
+        let delivery = provenant_records::run::DeliveryMode::Integrate("batch".into());
+        let error = owner.observe_or_start(&key, graph::NodeInput {
+            capabilities: None,
+            capability_sources: None,
+            require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
+            read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
+            source_commit: Some(&unrelated), review_base: None, title: "lane", prompt: "write",
+            required_verdict: None, deadline_seconds: None, inputs_dir: None,
+        }, &route, graph::AccessMode::WorktreeWrite, None, graph::Replay {
+            delivery: Some(&delivery), branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+        }).err().ok_or("unrelated lane was accepted")?;
+        assert!(error.to_string().contains("lane-outside"));
+        assert!(error.to_string().contains(&base));
+        let binary = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
+        assert!(binary.store(&cancel)?.operation(&graph_operation("graph-attempt-operation", &key)?, &binary.call(&cancel))?.is_none());
         Ok(())
     }
 
@@ -2152,13 +2340,13 @@ pub(crate) mod peer_tests {
                 {"id":"writer", "prompt":"write", "access":"worktree_write", "worktree":fixture.worktree,
                     "route":{"adapter":"codex","model":"gpt-6-luna"}},
                 {"id":"one", "prompt":"review", "access":"read_only", "depends_on":["writer"],
-                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "distinct_from":"dependencies", "distinct_strength":"require",
                     "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
                 {"id":"two", "prompt":"review", "access":"read_only", "depends_on":["writer","one"],
-                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "distinct_from":"dependencies", "distinct_strength":"require",
                     "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
                 {"id":"three", "prompt":"review", "access":"read_only", "depends_on":["writer","two"],
-                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "distinct_from":"dependencies", "distinct_strength":"require",
                     "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
                 {"id":"synthesis", "prompt":"synthesise", "access":"read_only", "depends_on":["one","two","three"],
                     "route":{"adapter":"codex","model":"gpt-6-luna"}}
@@ -2203,10 +2391,15 @@ pub(crate) mod peer_tests {
                     RequestedRoute::Model { model, .. } => model.clone(),
                     RequestedRoute::Review { name, effort, excluded_families, preferred_families, require_distinct, distinct_families, .. } => {
                         assert!(*require_distinct && *distinct_families);
-                        assert_eq!(excluded_families, &["openai"]);
                         let peers: Vec<_> = ["one", "two", "three"].into_iter().take_while(|id| *id != node.id)
                             .flat_map(|id| picked.get(id).into_iter().flatten().map(|(family, _)| family.clone()))
                             .fold(Vec::new(), |mut out, family| { if !out.contains(&family) { out.push(family); } out });
+                        let mut expected = vec!["openai".to_owned()];
+                        expected.extend(peers.iter().cloned());
+                        expected.sort();
+                        let mut excluded = excluded_families.clone();
+                        excluded.sort();
+                        assert_eq!(excluded, expected);
                         assert_eq!(preferred_families, &peers);
                         let prior: Vec<String> = task.profile.overrides.iter().find_map(|value|
                             value.strip_prefix("routing.graph_exclude=")).map(serde_json::from_str).transpose()?.unwrap_or_default();
@@ -2915,6 +3108,9 @@ pub(crate) mod peer_tests {
         let head_oid = provenant_core::GitOid::parse(&head)?;
         bound.integration_base = Some(BoundGraphBases { integration: Some(head_oid), review: Some(base) });
         assert_eq!(bound.measure_review(&review_node, &head)?.base, base);
+        let mut node_override = review_node.clone();
+        node_override.extra.insert("review_base".into(), serde_json::json!(head));
+        assert_eq!(bound.measure_review(&node_override, &head)?.base, head_oid);
         bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
         // A deferred council resolves from the diff at the pinned subject: the
         // small change is `quick`, a risk floor raises it, and a large one is `deep`.

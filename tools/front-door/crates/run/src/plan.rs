@@ -51,6 +51,26 @@ pub fn read_only_plan(
     binding: &provenant_config::ProjectBinding,
     request: PlanRequest,
 ) -> Result<ConfinedPlan> {
+    read_only_plan_for_view(state, repo, binding, request, false)
+}
+
+/// A read-only plan whose source files are in an independent attempt-owned tree.
+pub fn isolated_read_only_plan(
+    state: &provenant_core::StateRoot,
+    repo: &ReadOnlyRepo,
+    binding: &provenant_config::ProjectBinding,
+    request: PlanRequest,
+) -> Result<ConfinedPlan> {
+    read_only_plan_for_view(state, repo, binding, request, true)
+}
+
+fn read_only_plan_for_view(
+    state: &provenant_core::StateRoot,
+    repo: &ReadOnlyRepo,
+    binding: &provenant_config::ProjectBinding,
+    request: PlanRequest,
+    isolated: bool,
+) -> Result<ConfinedPlan> {
     if request.scope != WorkScope::Project(binding.project_id()) {
         return Err(RunError::Refused);
     }
@@ -72,7 +92,11 @@ pub fn read_only_plan(
         .transpose()
         .map_err(RunError::Confinement)?
         .unwrap_or_default();
-    let request = request.with_read_only_repo(repo, binding, &policy)?;
+    let request = if isolated {
+        request.with_isolated_read_only_repo(repo, binding, &policy)?
+    } else {
+        request.with_read_only_repo(repo, binding, &policy)?
+    };
     ConfinedPlan::new(request).map_err(RunError::Plan)
 }
 

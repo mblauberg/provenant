@@ -18,6 +18,7 @@ const CLAIM_BACKOFF: Backoff = Backoff::new(Duration::from_secs(5), 6, Duration:
 #[cfg(test)]
 thread_local! {
     static TEST_PROCESS_STATE: std::cell::Cell<Option<std::result::Result<provenant_os::pid::ProcessState, std::io::ErrorKind>>> = const { std::cell::Cell::new(None) };
+    static TEST_FAIL_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn process_state(
@@ -99,6 +100,12 @@ fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
 }
 
 fn write(attempt: &Directory, journal: &Journal) -> Result<()> {
+    #[cfg(test)]
+    if TEST_FAIL_WRITE.with(|fail| fail.replace(false)) {
+        return Err(RunError::Io(std::io::Error::other(
+            "injected settlement write failure",
+        )));
+    }
     attempt
         .atomic_write(
             OsStr::new(FILE),
@@ -1702,6 +1709,25 @@ mod tests {
             }
             assert_eq!(journal.retry_after_ms, dropped_at + backoff_ms(expected));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_phase_write_failure_preserves_checkpoint_and_lease() -> TestResult {
+        let clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let mut driver = Guard::claim(&attempt, scope(), &clock)?.ok_or("initial claim")?;
+        let before = std::fs::read(temp.path().join(FILE))?;
+        TEST_FAIL_WRITE.with(|fail| fail.set(true));
+        assert!(matches!(
+            driver.advance(Phase::Publish),
+            Err(RunError::Io(_))
+        ));
+        assert_eq!(driver.phase(), Phase::Import);
+        assert_eq!(std::fs::read(temp.path().join(FILE))?, before);
+        assert_eq!(read(&attempt, scope())?.phase, Phase::Import);
+        assert!(Guard::claim(&attempt, scope(), &clock)?.is_none());
         Ok(())
     }
 

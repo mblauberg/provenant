@@ -563,7 +563,9 @@ When a preset's default subject is `HEAD` and a writer or review worktree is
 bound, the front door resolves that default against the worktree. An explicit
 `subject` continues to take precedence, and a preset without a bound worktree
 resolves `HEAD` from the invoking checkout. `--explain` warns when a node's
-resolved commit source differs from the bound worktree's HEAD.
+resolved commit source differs from the bound worktree's HEAD. A preset review
+base expressed as a Git ref is resolved in the bound worktree before submission;
+the resulting object ID stays in the graph when the ref later moves.
 The runtime pins the source before launch and retains it on replay. A review
 uses that exact subject. A later writer starts in an existing registered
 worktree at that head, or a clean ancestor context fast-forwards to it while

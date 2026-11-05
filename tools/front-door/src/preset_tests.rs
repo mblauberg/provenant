@@ -1343,6 +1343,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
     fn actor(&self) -> String {
         "preset-test-chair".into()
     }
+    fn bind_writer_worktree(
+        &mut self,
+        worktree: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
+        Ok(Some(
+            provenant_fabric_runtime::graph::WriterWorktreeBinding {
+                extra: Default::default(),
+                worktree: if std::path::Path::new(worktree).is_absolute() {
+                    worktree.to_owned()
+                } else {
+                    format!("/fixture/{worktree}")
+                },
+                head: "0123456789abcdef0123456789abcdef01234567".into(),
+            },
+        ))
+    }
 
     fn ci_status(&mut self) -> Option<&mut dyn provenant_fabric_runtime::graph::CiStatus> {
         if self.deferred_shape.is_some() {

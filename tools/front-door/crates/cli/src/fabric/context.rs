@@ -26,6 +26,8 @@ pub struct Context {
     pub roots: Roots,
     pub identity: Identity,
     pub config: FabricConfig,
+    /// Origin captured with the effective graph configuration.
+    pub graph_prompt_limit_source: provenant_fabric_runtime::graph::InputCapSource,
     /// Captured once from the host-set MCP entry, never from tool arguments.
     pub in_lane: bool,
     pub(super) executor: SystemExecutor,
@@ -107,12 +109,23 @@ pub fn current_session() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn prompt_limit_source(
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+) -> provenant_fabric_runtime::graph::InputCapSource {
+    use provenant_fabric_runtime::graph::InputCapSource;
+    match origins.get("domains.fabric.graph.limits.node_prompt_bytes") {
+        Some(provenant_config::Origin::Compiled { .. }) => InputCapSource::Default,
+        Some(provenant_config::Origin::User { .. }) => InputCapSource::Configured,
+        None => InputCapSource::EffectiveGraphLimits,
+    }
+}
+
 impl Context {
     pub fn open(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         // Validate configuration before allocating identities or opening SQLite.
-        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
-            .domains
-            .fabric;
+        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let config = resolved.domains.fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_root = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
             .map(PathBuf::from)
@@ -158,6 +171,7 @@ impl Context {
             roots,
             identity,
             config,
+            graph_prompt_limit_source,
             in_lane: lane,
             executor,
             home: home.to_path_buf(),
@@ -166,9 +180,9 @@ impl Context {
     }
     /// Resolve existing identity and configuration without creating state.
     pub fn open_read_only(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
-        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
-            .domains
-            .fabric;
+        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
         let executor = SystemExecutor::new(1)?;
@@ -199,6 +213,7 @@ impl Context {
             roots,
             identity,
             config,
+            graph_prompt_limit_source,
             in_lane: in_lane(),
             executor,
             home: home.to_path_buf(),
@@ -214,9 +229,9 @@ impl Context {
     ) -> Result<Self, EdgeError> {
         // Its working directory is the project's, as if started there.
         let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
-        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
-            .domains
-            .fabric;
+        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let config = resolved.domains.fabric;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
         let key = match CrossHostProjectKey::from_home(home, binding.common_dir()) {
             Ok(key) => Some(key),
@@ -236,6 +251,7 @@ impl Context {
             roots,
             identity,
             config,
+            graph_prompt_limit_source,
             in_lane: in_lane(),
             executor: SystemExecutor::new(1)?,
             home: home.to_path_buf(),
@@ -482,6 +498,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
         FacadeError::ConfinementRefused => (Outcome::Refused, ErrorKind::Refused),
         FacadeError::WriterBusy => (Outcome::Refused, ErrorKind::WriterBusy),
+        FacadeError::WriterLockBusy => (Outcome::Refused, ErrorKind::WriterLockBusy),
         FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),
         FacadeError::CredentialRoot { .. } => (Outcome::Refused, ErrorKind::CredentialRoot),
         FacadeError::DispatchRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
@@ -548,6 +565,43 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prompt_limit_origin_distinguishes_default_from_explicit_same_value()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::InputCapSource;
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("repo"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let default = provenant_config::load_with_domains::<&[u8], _>(
+            &roots,
+            None,
+            &crate::domains::SECTIONS,
+        )?;
+        assert_eq!(
+            super::prompt_limit_source(&default.origins),
+            InputCapSource::Default
+        );
+        let configured = b"schema_version = 1
+[domains.fabric.graph.limits]
+node_prompt_bytes = 262144
+";
+        let resolved = provenant_config::load_with_domains(
+            &roots,
+            Some(configured.as_slice()),
+            &crate::domains::SECTIONS,
+        )?;
+        assert_eq!(
+            resolved.domains.fabric.graph.limits.node_prompt_bytes,
+            default.domains.fabric.graph.limits.node_prompt_bytes
+        );
+        assert_eq!(
+            super::prompt_limit_source(&resolved.origins),
+            InputCapSource::Configured
+        );
+        Ok(())
+    }
     #[test]
     fn protocol_mismatch_keeps_both_versions_and_the_cli_code() {
         let failure = super::peer_failure(

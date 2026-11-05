@@ -298,6 +298,11 @@ fn expand_loops(
             }
             let mut selected = std::collections::BTreeSet::new();
             for input in &child.inputs {
+                if input.node.starts_with("previous.") && !input.required_outputs.is_empty() {
+                    return Err(
+                        "required previous-round outputs cannot be enforced in the first round",
+                    );
+                }
                 let mut kinds = Vec::new();
                 if !selected.insert(&input.node) || input.outputs.is_empty() {
                     return Err("duplicate or empty loop input");
@@ -512,6 +517,11 @@ fn expand_loops(
                                     own.outputs.push(*kind);
                                 }
                             }
+                            for kind in &input.required_outputs {
+                                if !own.required_outputs.contains(kind) {
+                                    own.required_outputs.push(*kind);
+                                }
+                            }
                         } else {
                             child.inputs.push(input.clone());
                         }
@@ -578,7 +588,16 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 extra: Default::default(),
                 children: n.composite_members.clone(),
                 min_successful: n.composite.as_ref().and_then(|spec| spec.min_successful),
-                source_commit: None,
+                source_binding: n.source.clone(),
+                source_commit: match &n.source {
+                    Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+                    _ => None,
+                },
+                writer_binding: None,
+                writer_binding_pending: plans::writer(n),
+                review_base: None,
+                review_base_pending: n.access == AccessMode::ReadOnly
+                    && n.extra.contains_key("review_base"),
                 fragment: None,
                 handoff: None,
                 expansion_pause: None,
@@ -598,6 +617,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 advance_error: None,
                 advance_error_code: None,
                 launch_retry: None,
+                last_launch_retry: None,
                 outputs: None,
                 attempts: vec![],
             })
@@ -649,14 +669,20 @@ pub(super) fn validate_progress(
     let stopped = checkpoint
         .extensions
         .contains(&format!("loop.{}.decision=stop", node.id));
-    let valid = match progress.state {
-        NodeState::Succeeded => {
-            !failed
-                && settled
-                && (passed || accepted)
-                && progress.outputs == Some(gate_outputs(true))
+    let matches_output = |passed| {
+        let mut expected = gate_outputs(passed);
+        if progress
+            .outputs
+            .as_ref()
+            .is_some_and(|outputs| outputs.findings_available.is_none())
+        {
+            expected.findings_available = None;
         }
-        NodeState::Failed => (failed || stopped) && progress.outputs == Some(gate_outputs(false)),
+        progress.outputs == Some(expected)
+    };
+    let valid = match progress.state {
+        NodeState::Succeeded => !failed && settled && (passed || accepted) && matches_output(true),
+        NodeState::Failed => (failed || stopped) && matches_output(false),
         NodeState::Pending => progress.outputs.is_none(),
         NodeState::Blocked | NodeState::Skipped => {
             progress.outputs.is_none()

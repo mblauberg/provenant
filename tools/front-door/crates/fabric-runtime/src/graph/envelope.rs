@@ -177,6 +177,8 @@ pub(super) fn checkpoint_bound(
     plan: &PlannedGraph,
 ) -> usize {
     let skeleton = GraphCheckpoint {
+        bound_review_base: Some("f".repeat(64)),
+        bound_integration_base: Some("f".repeat(64)),
         extra: Default::default(),
         expansions: expansions.to_vec(),
         remaining: Some(RemainingBudgets {
@@ -313,8 +315,13 @@ fn node_bound(
         .into_iter()
         .collect(),
         children: node.composite_members.clone(),
+        source_binding: node.source.clone(),
         min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
         source_commit: node.source.as_ref().map(|_| String::new()),
+        writer_binding: None,
+        writer_binding_pending: plans::writer(node),
+        review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
+        review_base_pending: false,
         fragment: (node.plan.is_some() && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
         expansion_pause: expands.then(String::new),
@@ -385,6 +392,7 @@ fn node_bound(
                 }),
                 verdict: Some(String::new()),
                 findings: Vec::new(),
+                findings_available: Some(false),
                 branch: Some(String::new()),
                 commit: Some(String::new()),
                 warnings: Vec::new(),
@@ -399,6 +407,7 @@ fn node_bound(
         }),
         attempts: Vec::new(),
         launch_retry: None,
+        last_launch_retry: None,
     };
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
@@ -412,7 +421,7 @@ fn node_bound(
     }
     // The node's own bounded launch retry wait, kept while it is running.
     if !boundary && node.composite.is_none() && node.decide.is_none() && node.land.is_none() {
-        bytes += MAX_ADVANCE_ERROR_BYTES + 128; // launch retry reason and deadline
+        bytes += MAX_ADVANCE_ERROR_BYTES + 320; // retry reason, timing and bounded policy
     }
     if expands {
         bytes += MAX_ADVANCE_ERROR_BYTES; // expansion pause
@@ -481,6 +490,9 @@ fn node_bound(
                 .saturating_add(OUTPUT_FIELD_BYTES + 512);
         }
     }
+    if plans::writer(node) {
+        bytes = bytes.saturating_add(6 * 4096 + 256);
+    }
     if !boundary {
         let excerpt = if node.composite.is_some() {
             COMPOSITE_EXCERPT_BYTES
@@ -528,6 +540,8 @@ fn node_bound(
             outcome: Some(AttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),
             input_cap: Some(usize::MAX),
+            input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
+            input_manifest: None,
             settled: u64::MAX,
             usage: Some(AttemptUsage {
                 extra: Default::default(),
@@ -539,7 +553,27 @@ fn node_bound(
                 cost_unknown_reason: Some(String::new()),
             }),
         };
-        bytes += canonical_len(&attempt) + 2 * HOST_ID_BYTES + NOTE_BYTES + 1;
+        // A manifest records at most MANIFEST_INPUT_LIMIT selected values. Each
+        // entry carries two bounded identifiers, a digest and an optional OID.
+        let selections = node
+            .inputs
+            .iter()
+            .map(|input| input.outputs.len())
+            .sum::<usize>()
+            .min(MANIFEST_INPUT_LIMIT);
+        bytes += canonical_len(&attempt)
+            + 2 * HOST_ID_BYTES
+            + NOTE_BYTES
+            + 1
+            + 1536 // fixed manifest fields, graph OIDs and four applied-route fields
+            + if node.source.is_some() || plans::writer(node) { 512 } else { 0 }
+            + node
+                .depends_on
+                .iter()
+                .take(MANIFEST_INPUT_LIMIT)
+                .map(|id| canonical_len(id) + 1)
+                .sum::<usize>()
+            + selections * 768;
         // A resolved panel can also record this route as a substitution.
         if node.access == AccessMode::ReadOnly
             && node.role.as_deref().is_some_and(|role| {

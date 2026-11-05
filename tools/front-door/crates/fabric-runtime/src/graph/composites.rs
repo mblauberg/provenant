@@ -193,6 +193,11 @@ fn children(
                             own.outputs.push(*kind);
                         }
                     }
+                    for kind in &input.required_outputs {
+                        if !own.required_outputs.contains(kind) {
+                            own.required_outputs.push(*kind);
+                        }
+                    }
                 } else {
                     node.inputs.push(input.clone());
                 }
@@ -351,6 +356,7 @@ fn outputs(
         verdict: None,
         verdict_error: None,
         findings: Vec::new(),
+        findings_available: None,
         branch: None,
         commit: None,
         warnings: Vec::new(),
@@ -364,6 +370,24 @@ fn outputs(
     let mut family_notices = Vec::new();
     let partial = spec.min_successful.is_some() || spec.reduce_verdict;
     let unavailable = unavailable_with_wording(spec, checkpoint, positions, legacy);
+    let finding_exports: Vec<_> = spec
+        .exports
+        .iter()
+        .filter(|export| export.outputs.contains(&OutputKind::Findings))
+        .collect();
+    if !finding_exports.is_empty() {
+        selected.findings_available = Some(finding_exports.iter().all(|export| {
+            positions.get(&export.node).is_some_and(|index| {
+                let member = &checkpoint.nodes[*index];
+                (!partial || member.state == NodeState::Succeeded)
+                    && member
+                        .outputs
+                        .as_ref()
+                        .and_then(|outputs| outputs.findings_available)
+                        == Some(true)
+            })
+        }));
+    }
     for export in &spec.exports {
         let member = &checkpoint.nodes[positions[&export.node]];
         // A partial composite exports only members that succeeded: a failed
@@ -500,6 +524,7 @@ fn outputs(
     }
     let total = selected.findings.len();
     if total > MAX_FINDINGS || canonical_len(&selected.findings) > FINDINGS_BYTES {
+        selected.findings_available = Some(false);
         selected.findings = bounded_findings(std::mem::take(&mut selected.findings));
         let dropped = total - selected.findings.len();
         let members = finding_members
@@ -537,6 +562,7 @@ fn outputs(
         truncation_header = Some(warning);
     }
     if !inherited_notices.is_empty() {
+        selected.findings_available = Some(false);
         let inherited = inherited_notices.join("\n");
         for notice in &inherited_notices {
             if selected.warnings.len() < MAX_WARNINGS {
@@ -934,10 +960,19 @@ pub(super) fn validate_progress(
                         .map(|reason| bounded(&reason, MAX_ADVANCE_ERROR_BYTES))
                 })
                 .is_some_and(|legacy| progress.advance_error.as_ref() == Some(&legacy)));
-    let export = node
+    let mut export = node
         .composite
         .as_ref()
         .map(|spec| outputs(spec, plan, checkpoint, positions, false));
+    if progress
+        .outputs
+        .as_ref()
+        .is_some_and(|outputs| outputs.findings_available.is_none())
+        && let Some(Ok(expected)) = &mut export
+    {
+        // An older checkpoint retains unknown availability on replay.
+        expected.findings_available = None;
+    }
     let failed_for_export = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && shortfall.is_none()
