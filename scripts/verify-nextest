@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Build nextest binaries under a build slot, then run them without one."""
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+def main(args):
+    if "--profile" not in args:
+        sys.exit("verify-nextest requires --profile NAME")
+    index = args.index("--profile")
+    if index + 1 >= len(args):
+        sys.exit("verify-nextest requires --profile NAME")
+    profile = args[index + 1]
+    args = list(args)
+    test_filters = []
+    if "--" in args:
+        index = args.index("--")
+        test_filters = args[index + 1:]
+        del args[index:]
+    metadata_options = []
+    for flag in ("--features", "--target", "--manifest-path", "--config"):
+        positions = [i for i, arg in enumerate(args) if arg == flag]
+        for position in positions:
+            if position + 1 >= len(args):
+                sys.exit(f"{flag} requires a value")
+            metadata_options.extend(["--filter-platform" if flag == "--target" else flag, args[position + 1]])
+    metadata_options.extend(arg for arg in args if arg in ("--all-features", "--no-default-features", "--offline", "--frozen"))
+    run_options = []
+    for flag in ("--stress-count", "-E", "--filter-expr"):
+        while flag in args:
+            index = args.index(flag)
+            if index + 1 >= len(args):
+                sys.exit(f"{flag} requires a value")
+            run_options.extend(args[index:index + 2])
+            del args[index:index + 2]
+    if threads := os.environ.get("VERIFY_TIER_TEST_THREADS"):
+        run_options.extend(["--test-threads", threads])
+    with tempfile.TemporaryDirectory(prefix="provenant-nextest-") as scratch:
+        metadata = Path(scratch) / "cargo.json"
+        binaries = Path(scratch) / "binaries.json"
+        with metadata.open("w") as out:
+            status = subprocess.run(["cargo", "metadata", "--format-version", "1", "--locked", *metadata_options], stdout=out).returncode
+        if status:
+            return status
+        with binaries.open("w") as out:
+            status = subprocess.run(["cargo", "nextest", "list", "--list-type", "binaries-only", "--message-format", "json", *args], stdout=out).returncode
+        if status:
+            return status
+        return subprocess.run(["cargo", "nextest", "run", "--profile", profile, "--cargo-metadata", str(metadata), "--binaries-metadata", str(binaries), *run_options, *test_filters]).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

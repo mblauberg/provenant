@@ -149,6 +149,58 @@ pub(crate) fn children(pid: u32) -> ObservationResult<Vec<u32>> {
     }
 }
 
+/// List members of one process group without describing unrelated processes.
+#[cfg(target_os = "macos")]
+pub(crate) fn group(pid: u32) -> ObservationResult<Vec<u32>> {
+    unsafe extern "C" {
+        fn proc_listpgrppids(
+            pid: libc::pid_t,
+            buffer: *mut libc::c_void,
+            size: libc::c_int,
+        ) -> libc::c_int;
+    }
+    let pid = i32::try_from(pid).map_err(|_| ObservationError::Unavailable)?;
+    let mut slots = 32_usize;
+    loop {
+        let mut pids = vec![0_i32; slots];
+        // SAFETY: __error returns the calling thread's errno slot.
+        let errno = unsafe { libc::__error() };
+        // SAFETY: this slot is thread-local and valid for this call.
+        unsafe { *errno = 0 };
+        // SAFETY: pids is writable for exactly the given byte count; the
+        // kernel does not retain the buffer.
+        let count = unsafe {
+            proc_listpgrppids(
+                pid,
+                pids.as_mut_ptr().cast(),
+                (slots * std::mem::size_of::<i32>()) as i32,
+            )
+        };
+        // SAFETY: errno is the same thread-local slot obtained above.
+        let error = unsafe { *errno };
+        if count < 0 || (count == 0 && error != 0) {
+            return Err(query_error(Some(error)));
+        }
+        if count as usize >= slots {
+            if slots > MAX_PROCESSES {
+                return Err(ObservationError::SizeLimit);
+            }
+            slots = (slots * 2).min(MAX_PROCESSES + 1);
+            continue;
+        }
+        pids.truncate(count as usize);
+        return pids
+            .into_iter()
+            .map(|pid| {
+                u32::try_from(pid)
+                    .ok()
+                    .filter(|pid| *pid > 0)
+                    .ok_or(ObservationError::Unavailable)
+            })
+            .collect();
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn member(_: u32, _: &std::ffi::CStr) -> ObservationResult<bool> {
     Err(ObservationError::Unavailable)

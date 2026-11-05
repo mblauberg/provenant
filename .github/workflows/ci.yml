@@ -363,7 +363,7 @@ jobs:
         # cargo test invocations did.
         run: >-
           ../../scripts/run-native-test-group dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --test-threads 1
-          -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state) | test(=lane_prepare_isolates_nested_writer_state) | test(=lane_prepare_isolates_nested_publishing_state)
+          -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state) | test(=lane_prepare_isolates_nested_publishing_state)
           | test(=lane_builds_and_tests_swift_in_a_registered_worktree)
           | test(=read_only_lane_builds_and_tests_swift_in_scratch)
           | test(=read_only_lane_builds_and_tests_cargo_in_scratch)
@@ -375,6 +375,13 @@ jobs:
           | test(=writer_production_plan_denies_outside_writes)
           | test(=writer_protected_changes_wait_for_review_and_ignore_upstream)
           | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))'
+      - name: Run native writer capability probes
+        if: ${{ !cancelled() }}
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+          PROVENANT_LANE_TOOLS_REQUIRED: "1"
+        run: ../../scripts/run-native-test-group capability cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=worktrees) & test(=lane_prepare_isolates_nested_writer_state)'
       - name: Run provider dispatch integration tests
         working-directory: tools/front-door
         env:
@@ -518,10 +525,11 @@ jobs:
       - name: Check shell scripts
         run: |
           { git ls-files '*.sh'; grep -lE '^#!.*\b(ba)?sh\b' scripts/* 2>/dev/null; } | sort -u | xargs -r shellcheck
-      - name: Test macOS path selector
+      - name: Test CI and verification scripts
         run: |
           scripts/test-select-macos-checks
           scripts/test-check-ci-status
+          scripts/test-verify-tier
       - name: Test native inventory evidence
         run: scripts/test-check-native-inventory
       - name: Test flaky-test quarantine

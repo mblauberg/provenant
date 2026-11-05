@@ -13,6 +13,22 @@ inspect metadata only. Recognised missing or expired provider logins settle as
 `auth_required`, including when every candidate is skipped before launch.
 Read-only graph nodes can then try their next declared route.
 
+Quota probes use the selected Claude account's directory only and check its
+registered fingerprint before and after reading the credential. A separately
+registered directory can contain a copied single-use refresh token. Quota does
+not automatically rotate it because it cannot establish independence without
+reading another account's secrets. Sign in interactively in that directory
+when it needs attention. Where the
+registration is known, `provenant quota` gives the account-specific command;
+otherwise it says the remedy is unavailable. A recorded expired credential is
+reported as `login_expired`; a failed probe alone does not establish expiry.
+Quota shows expiry as unknown when no fresh selected-account metadata is
+available. `domains.quota.login_expiry_warning_seconds` sets the advance
+warning window (default 3600 seconds; zero disables advance warnings). A quota
+tick sends a deduplicated notice for a known expiring or expired login to each
+registered local chair session. The notice contains the account label and expiry,
+not credential contents or provider output; `provenant quota` supplies recovery.
+
 ## Launch capabilities
 
 One declared table per adapter (`AdapterSpec::launch` in
@@ -508,6 +524,22 @@ Git may report that it could not update its local tracking ref after a successfu
 push, or set an upstream with `-u`, because shared Git state is read-only. The host
 best-effort refreshes the lane branch's `origin` tracking ref at settlement;
 shared upstream configuration remains read-only.
+
+## Native lane probes
+
+The macOS native writer capability invocation runs named socket, credential,
+Git (including stash and rebase), ripgrep, Cargo, nextest, Swift, Python, shell and
+Node/pnpm probes independently and reports their failures together. It also
+removes the compiled scratch execution grant and checks that the temporary
+script fails while Python and the here-document still pass. It currently
+exercises the Claude writer profile; it is not yet a complete adapter and
+access-mode matrix.
+
+When a lane's decoded answer or captured stdout or stderr contains a path-bearing
+permission error, the result includes a bounded excerpt identifying the path whose
+access grant may be missing. The error alone does not establish which rule denied
+the operation: filesystem permissions or another sandbox may be responsible.
+Errors kept only in an unreported provider transcript are not visible there.
 
 ## General guidance
 

@@ -120,6 +120,11 @@ is an unknown launch, never permission to launch again.
   The unknown-launch rule has no test (gap).
 - Owner: `crates/supervisor/src/guardian/`, `crates/run/src/launch.rs`
 
+While a provider is live, the guardian walks its scoped process tree at most
+once per 100 ms, coalescing process events. A full census backs up missed
+notifications every five seconds and follows an overflow or observation
+failure on the next walk. Cleanup and lease release always use full censuses.
+
 ### Quiescence before release
 
 A writer stays fenced until three things hold: the provider is reaped; two
@@ -140,6 +145,11 @@ only a PID whose boot ID, PID and start time match the record, or that macOS
 places in the attempt sandbox; anything else is named, never signalled.
 Uncertainty never clears a fence; only a recorded decision with matching
 authority may do so, and that decision permits no signal.
+If the original lock inode has been unlinked, a guardian can retire without
+settling after two complete clear censuses and a fresh nonblocking lock on an
+independently opened descriptor for that original inode. It leaves any
+reservation and unresolved exit in place; a replacement lock never proves
+the old inode idle.
 - Why: recovery must not kill a reused PID or free a busy worktree.
 - Test: `crates/supervisor/src/custody/orphans.rs::an_unprovable_pid_is_never_signalled_and_is_named`;
   `crates/supervisor/src/custody_tests.rs::reconcile_requires_matching_authority_and_records_before_release`

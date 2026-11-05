@@ -15,6 +15,7 @@ mod experiment;
 mod fabric;
 mod tick;
 mod tick_agent;
+mod tracker;
 
 mod chair_log_retention;
 mod gc_support;
@@ -1291,6 +1292,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Gc(command) => worktrees::run_gc(command, globals, process.workers()),
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
         Command::Bench(command) => bench::run(command, globals),
+        Command::Tracker(command) => tracker::run(command, globals),
         Command::Check(check) => checks::run(check, globals),
         Command::Hook(hook) => hooks::run(hook, globals),
     }

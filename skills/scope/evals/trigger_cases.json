@@ -154,6 +154,19 @@
         "primary_skill": "diagnose",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q2885",
+      "relation": "positive",
+      "prompt": "Scope a new change and make its acceptance criteria verifiable against the existing tree.",
+      "tags": [
+        "specification",
+        "acceptance"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": []
+      }
     }
   ]
 }

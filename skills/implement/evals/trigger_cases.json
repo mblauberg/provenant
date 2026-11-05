@@ -117,6 +117,19 @@
           "orchestrate"
         ]
       }
+    },
+    {
+      "id": "q2885",
+      "relation": "positive",
+      "prompt": "Implement the approved change described by this issue and carry it through verification.",
+      "tags": [
+        "issue",
+        "entry"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": []
+      }
     }
   ]
 }

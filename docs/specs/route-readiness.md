@@ -10,7 +10,7 @@ unknown), typed reason, observation and expiry times, optional reset time and a
 bounded non-secret evidence reference. Providers supply facts; quota publishes
 verdicts. Selection gates for access, confinement, effort and pacing remain
 contextual. Reasons include not probed, stale, probe timeout, command failure,
-missing executable, signed out, account mismatch, exhausted, provider refusal,
+missing executable, signed out, expired login, account mismatch, exhausted, provider refusal,
 uncalibrated partial coverage, invalid evidence, unreachable peer and
 unsupported peer version. Existing exclusion reason wire names stay stable.
 
@@ -30,9 +30,19 @@ most 64, and is written under the quota lock with the same private atomic
 replacement as the account JSON. Readers take no lock. No existing reader
 rejects an unknown top-level state directory: the disk report counts it as
 other state and the other state walkers visit only the directories they name.
-An absent file reads as unknown and schedules a probe. Reuse the quota probe
-interval. A changed agy fingerprint makes the old account unavailable and
-registers the new identity.
+An absent file reads as unknown and schedules a probe. Login-failure readiness
+expires at the quota probe interval; authentication backoff does not extend it.
+A changed agy fingerprint makes the old account unavailable and registers the
+new identity.
+
+Each account's readiness file also holds its latest non-secret login-expiry
+observation. It is scoped to that host and account and uses the configured quota
+polling interval as its freshness period. Missing, stale or future observations
+and providers that do not expose expiry report unknown. A current expiry reports
+fresh, expiring or expired relative to the clock and
+`domains.quota.login_expiry_warning_seconds`. An expiring login warns without
+excluding the route; a current, expired observation makes the account unavailable.
+Neither state creates or clears quota refusals.
 
 Scope. An observation's route is a canonical `adapter/model`, a verified pool,
 or `*` for every route of the account. A pool refusal covers its pool only, a
@@ -63,9 +73,17 @@ variant, because an older reader rejects an unrecognised status. Unknown
 projects onto unavailable with the existing `unknown_availability` reason, or
 `stale_availability` when the evidence expired (`RouteReadiness::unknown`,
 `::stale`, `::is_unknown`). Observed reasons map to existing exclusion names:
-missing executable, signed out to `auth_required`, account mismatch,
+missing executable, signed out to `auth_required`, expired login to
+`login_expired`, account mismatch,
 exhausted and provider refusal to `provider_refused`; the rest project as
 unknown.
+
+Dispatch may supersede older authentication evidence in memory after a fresh
+account-scoped login probe. OpenCode has no isolated login-status probe: after
+its executable check, dispatch warns that login is unverified and lets the
+selected launch check it. This removes only older sign-out and expiry evidence
+for that launch; it does not erase the stored observation, an account mismatch
+or a provider refusal.
 
 Routing, route commands, dispatch, host diagnostics, peer responses and quota
 displays consume this record. Route previews do not perform host I/O unless

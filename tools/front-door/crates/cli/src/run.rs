@@ -721,11 +721,33 @@ impl Registry<'_> {
             OutcomeStatus::Success => (run::Outcome::Succeeded, None),
             _ if auth && outcome.status() != OutcomeStatus::Success => (
                 run::Outcome::AuthRequired,
-                Some(format!(
-                    "provider sign-in required; {}",
-                    provenant_records::AdapterSpec::get(adapter.id())
-                        .map_or("run provenant accounts", |spec| spec.login_hint)
-                )),
+                Some(
+                    self.roots
+                        .and_then(|roots| {
+                            let config = provenant_config::read_with_domains(
+                                roots,
+                                &crate::domains::SECTIONS,
+                            )
+                            .ok()?;
+                            let records = crate::quota::read_cache(roots).unwrap_or_default();
+                            Some(crate::quota::account_login_diagnostic(
+                                config.domains.accounts.entries.values(),
+                                &records,
+                                adapter.id(),
+                                route.account_key.as_deref(),
+                                &provenant_records::RouteExclusionReason::AuthRequired,
+                            ))
+                        })
+                        .unwrap_or_else(|| {
+                            crate::quota::account_login_diagnostic(
+                                std::iter::empty(),
+                                &[],
+                                adapter.id(),
+                                None,
+                                &provenant_records::RouteExclusionReason::AuthRequired,
+                            )
+                        }),
+                ),
             ),
             OutcomeStatus::Refused => (run::Outcome::Rejected, Some("provider refused".into())),
             OutcomeStatus::Failed => (run::Outcome::Failed, Some("provider failed".into())),

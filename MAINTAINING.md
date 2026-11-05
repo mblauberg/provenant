@@ -259,6 +259,12 @@ They always exit 0, so they only warn:
 
 ## Verify and release
 
+Test tiers are T0 (touched crates), T1 (selected integration binaries),
+T2 (full suite), and T3 (stress and native tests). Use T0 by default in a lane,
+add T1 targets for the change, and run T2 and T3 in CI or on a suitable host.
+The [test tiers runbook](docs/runbooks/test-tiers.md) describes the selector,
+runner configuration and current limits.
+
 Run the checkout gates, or require exact-head `ci-status`:
 
 For a pull request branch, run only focused Rust crate tests. Hosted CI runs the workspace gates on the exact PR head.

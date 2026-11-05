@@ -1106,6 +1106,9 @@ pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
         return block.repair().to_owned();
     }
     match reason {
+        RouteExclusionReason::LoginExpired => {
+            "login expired; check the selected account with `provenant quota`".to_owned()
+        }
         RouteExclusionReason::InvalidAccountEvidence => {
             "invalid persisted account evidence; repair or re-register the account".to_owned()
         }
@@ -2012,6 +2015,7 @@ fn classify_pool(
                             // the chosen route can be used at all.
                             RouteExclusionReason::StaleAvailability
                             | RouteExclusionReason::AuthRequired
+                            | RouteExclusionReason::LoginExpired
                             | RouteExclusionReason::Exhausted
                             | RouteExclusionReason::FreeTierRefused
                             | RouteExclusionReason::ProviderRefused

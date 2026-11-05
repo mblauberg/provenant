@@ -188,6 +188,24 @@ impl State {
         self.last_progress_ms
     }
 
+    /// Time until a lifecycle deadline that can change the next decision.
+    pub(crate) fn deadline_in_ms(&self, now_ms: u64, wall_ms: u64) -> Option<u64> {
+        let wall = matches!(
+            self.phase,
+            Phase::Prepared | Phase::Running | Phase::TerminalGrace
+        )
+        .then(|| {
+            self.budgets
+                .wall_deadline_ms
+                .saturating_sub(now_ms.max(wall_ms))
+        });
+        let flush = (self.phase == Phase::TerminalGrace)
+            .then_some(self.root_flush_deadline_ms)
+            .flatten()
+            .map(|deadline| deadline.saturating_sub(now_ms));
+        wall.into_iter().chain(flush).min()
+    }
+
     /// A timeout is reportable only after WallDeadline delivery succeeded.
     pub fn timed_out(&self) -> bool {
         self.stop_attempts.iter().any(|attempt| {
@@ -684,5 +702,19 @@ mod tests {
             assert!(state.stop_attempts().is_empty());
             assert!(effects.is_empty());
         }
+    }
+
+    #[test]
+    fn wake_deadline_tracks_wall_clock_and_terminal_flush() {
+        let state = State::prepared(Budgets::with_cleanup(1_000, 25, 50));
+        let (state, _) = step(state, Event::Started, Tick::at(0));
+        assert_eq!(state.deadline_in_ms(10, 995), Some(5));
+
+        let (state, _) = step(state, Event::Terminal, Tick::at(100));
+        assert_eq!(state.deadline_in_ms(110, 110), Some(15));
+        assert_eq!(state.deadline_in_ms(125, 125), Some(0));
+        let (state, _) = step(state, Event::Silence, Tick::at(125));
+        assert_eq!(state.phase(), Phase::Stopping);
+        assert_eq!(state.deadline_in_ms(125, 125), None);
     }
 }

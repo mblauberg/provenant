@@ -29,6 +29,7 @@ pub enum ReadinessReason {
     CommandFailure,
     MissingExecutable,
     SignedOut,
+    LoginExpired,
     AccountMismatch,
     Exhausted,
     ProviderRefusal,
@@ -62,6 +63,53 @@ pub const READINESS_DIRECTORY: &str = "readiness";
 pub const MAX_READINESS_RECORDS: usize = crate::MAX_WINDOWS;
 const SCHEMA_VERSION: u32 = 1;
 const QUOTA_PROBE: &str = "quota-probe";
+
+/// Non-secret expiry metadata observed for this account's login. It is not
+/// quota evidence and never creates or clears a provider refusal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginObservation {
+    pub scope: ReadinessScope,
+    pub observed_unix_seconds: i64,
+    pub valid_until_unix_seconds: i64,
+    pub expires_unix_seconds: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginExpiryState {
+    Unknown,
+    Fresh,
+    Expiring,
+    Expired,
+}
+
+impl LoginObservation {
+    /// Stale, future and absent expiry metadata remain unknown.
+    pub fn state(&self, now: i64, warning_seconds: u64) -> LoginExpiryState {
+        if self.observed_unix_seconds > now
+            || self.valid_until_unix_seconds <= self.observed_unix_seconds
+            || now >= self.valid_until_unix_seconds
+        {
+            return LoginExpiryState::Unknown;
+        }
+        let Some(expiry) = self.expires_unix_seconds else {
+            return LoginExpiryState::Unknown;
+        };
+        if jiff::Timestamp::from_second(expiry).is_err() {
+            return LoginExpiryState::Unknown;
+        }
+        if expiry <= now {
+            LoginExpiryState::Expired
+        } else if warning_seconds > 0
+            && expiry.saturating_sub(now) <= i64::try_from(warning_seconds).unwrap_or(i64::MAX)
+        {
+            LoginExpiryState::Expiring
+        } else {
+            LoginExpiryState::Fresh
+        }
+    }
+}
 
 /// What a reader learns for one route: a verdict that is never ready by default.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +155,7 @@ impl ReadinessRead {
                 reason: match reason {
                     Some(ReadinessReason::MissingExecutable) => Excluded::MissingExecutable,
                     Some(ReadinessReason::SignedOut) => Excluded::AuthRequired,
+                    Some(ReadinessReason::LoginExpired) => Excluded::LoginExpired,
                     Some(ReadinessReason::AccountMismatch) => Excluded::AccountMismatch,
                     Some(ReadinessReason::Exhausted | ReadinessReason::ProviderRefusal) => {
                         Excluded::ProviderRefused
@@ -127,6 +176,8 @@ impl ReadinessRead {
 pub struct ReadinessFile {
     pub schema_version: u32,
     pub records: Vec<RouteReadiness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<LoginObservation>,
 }
 
 impl Default for ReadinessFile {
@@ -134,6 +185,7 @@ impl Default for ReadinessFile {
         Self {
             schema_version: SCHEMA_VERSION,
             records: Vec::new(),
+            login: None,
         }
     }
 }
@@ -151,6 +203,13 @@ impl ReadinessFile {
         let mut seen = std::collections::BTreeSet::new();
         if self.schema_version != SCHEMA_VERSION
             || self.records.len() > MAX_READINESS_RECORDS
+            || self.login.as_ref().is_some_and(|login| {
+                login.scope.adapter != adapter
+                    || login.scope.account_key != account_key
+                    || login.scope.host.is_empty()
+                    || login.scope.host.len() > 128
+                    || login.scope.route != ACCOUNT_ROUTE
+            })
             || self.records.iter().any(|r| {
                 r.scope.adapter != adapter
                     || r.scope.account_key != account_key
@@ -207,7 +266,25 @@ impl ReadinessFile {
                 return account;
             }
         }
-        read(scope)
+        let scoped = read(scope);
+        if scoped.state == ReadinessState::Unavailable {
+            return scoped;
+        }
+        if let Some(login) = &self.login
+            && login.scope.host == scope.host
+            && login.scope.adapter == scope.adapter
+            && login.scope.account_key == scope.account_key
+            && login.state(now, 0) == LoginExpiryState::Expired
+        {
+            return ReadinessRead {
+                state: ReadinessState::Unavailable,
+                reason: Some(ReadinessReason::LoginExpired),
+                expires_unix_seconds: Some(login.valid_until_unix_seconds),
+                reset_unix_seconds: None,
+                evidence_ref: Some("login-expiry".into()),
+            };
+        }
+        scoped
     }
 
     /// Make this host's provider-refusal observations exactly the refusals
@@ -335,6 +412,134 @@ impl ReadinessFile {
 mod tests {
     use super::*;
     #[test]
+    fn login_expiry_uses_fixed_clock_threshold_and_freshness() {
+        let mut login = LoginObservation {
+            scope: ReadinessScope {
+                host: LOCAL_HOST.into(),
+                adapter: "claude".into(),
+                account_key: "key".into(),
+                route: ACCOUNT_ROUTE.into(),
+            },
+            observed_unix_seconds: 100,
+            valid_until_unix_seconds: 1000,
+            expires_unix_seconds: Some(500),
+        };
+        assert_eq!(login.state(200, 299), LoginExpiryState::Fresh);
+        assert_eq!(login.state(200, 300), LoginExpiryState::Expiring);
+        assert_eq!(login.state(200, 0), LoginExpiryState::Fresh);
+        assert_eq!(login.state(500, 300), LoginExpiryState::Expired);
+        assert_eq!(login.state(99, 300), LoginExpiryState::Unknown);
+        assert_eq!(login.state(1000, 300), LoginExpiryState::Unknown);
+        login.expires_unix_seconds = None;
+        assert_eq!(login.state(200, 300), LoginExpiryState::Unknown);
+        login.expires_unix_seconds = Some(800);
+        assert_eq!(login.state(200, 300), LoginExpiryState::Fresh);
+        login.expires_unix_seconds = Some(i64::MAX);
+        assert_eq!(login.state(200, 300), LoginExpiryState::Unknown);
+    }
+
+    #[test]
+    fn fresh_expiry_excludes_only_after_expiration_and_expires_with_evidence() {
+        let file = ReadinessFile {
+            login: Some(LoginObservation {
+                scope: ReadinessScope {
+                    host: LOCAL_HOST.into(),
+                    adapter: "claude".into(),
+                    account_key: "key".into(),
+                    route: ACCOUNT_ROUTE.into(),
+                },
+                observed_unix_seconds: 100,
+                valid_until_unix_seconds: 300,
+                expires_unix_seconds: Some(200),
+            }),
+            ..Default::default()
+        };
+        let route = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "claude".into(),
+            account_key: "key".into(),
+            route: "claude/model".into(),
+        };
+        assert_eq!(
+            file.get(&route, 199).reason,
+            Some(ReadinessReason::NotProbed)
+        );
+        let expired = file.get(&route, 200);
+        assert_eq!(expired.state, ReadinessState::Unavailable);
+        assert_eq!(expired.reason, Some(ReadinessReason::LoginExpired));
+        assert!(matches!(
+            expired.project(),
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::LoginExpired,
+                ..
+            }
+        ));
+        assert_eq!(
+            file.get(&route, 300).reason,
+            Some(ReadinessReason::NotProbed)
+        );
+        let other = ReadinessScope {
+            account_key: "other".into(),
+            ..route.clone()
+        };
+        assert_eq!(
+            file.get(&other, 200).reason,
+            Some(ReadinessReason::NotProbed)
+        );
+        let remote = ReadinessScope {
+            host: "other-host".into(),
+            ..route
+        };
+        assert_eq!(
+            file.get(&remote, 200).reason,
+            Some(ReadinessReason::NotProbed)
+        );
+    }
+
+    #[test]
+    fn login_failure_expires_at_the_probe_interval() {
+        let account_scope = crate::AccountScope {
+            adapter: "claude".into(),
+            account_key: "key".into(),
+            label: "work".into(),
+        };
+        let mut account = crate::AccountRecord::empty(account_scope);
+        account.backoff_until_unix_seconds = Some(500);
+        let mut file = ReadinessFile::default();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            100,
+            60,
+            Some(ReadinessReason::LoginExpired),
+        )
+        .unwrap();
+        let scope = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "claude".into(),
+            account_key: "key".into(),
+            route: "claude/model".into(),
+        };
+        assert_eq!(
+            file.get(&scope, 159).reason,
+            Some(ReadinessReason::LoginExpired)
+        );
+        let account_scope = ReadinessScope {
+            route: ACCOUNT_ROUTE.into(),
+            ..scope.clone()
+        };
+        assert_eq!(
+            file.get(&account_scope, 160).reason,
+            Some(ReadinessReason::Stale)
+        );
+        file.sync_probe_result(&account, LOCAL_HOST, 501, 60, None)
+            .unwrap();
+        assert_eq!(
+            file.get(&scope, 501).reason,
+            Some(ReadinessReason::NotProbed)
+        );
+    }
+    #[test]
     fn readiness_round_trip_and_boundaries() {
         let scope = ReadinessScope {
             host: "host".into(),
@@ -412,6 +617,7 @@ mod tests {
             (CommandFailure, E::UnknownAvailability),
             (MissingExecutable, E::MissingExecutable),
             (SignedOut, E::AuthRequired),
+            (LoginExpired, E::LoginExpired),
             (AccountMismatch, E::AccountMismatch),
             (Exhausted, E::ProviderRefused),
             (ProviderRefusal, E::ProviderRefused),

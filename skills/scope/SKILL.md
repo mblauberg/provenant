@@ -33,6 +33,8 @@ ADR; record any other settled decision in the durable doc that owns the area.
 
 Write each criterion as one observable statement, `When <event>, <behaviour>`,
 tagged with how it is verified: `[test]`, `[command]`, `[capture]` or `[review]`.
+Check premises against the tree, give each deletion or move one owner, and say
+how verification catches a wrong implementation; test behaviour, not wording.
 Add must-not-change behaviour and the verify command. The readiness test: could a
 fresh agent build and verify this without asking? If not, it is not ready.
 

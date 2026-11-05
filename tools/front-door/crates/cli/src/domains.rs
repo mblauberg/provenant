@@ -670,6 +670,30 @@ mod tests {
     }
 
     #[test]
+    fn login_warning_default_and_override_report_their_origins() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        let default = provenant_config::read_with_domains(&roots, &SECTIONS).unwrap();
+        assert_eq!(default.domains.quota.login_expiry_warning_seconds, 3600);
+        assert!(matches!(
+            default.origins["domains.quota.login_expiry_warning_seconds"],
+            provenant_config::Origin::Compiled { .. }
+        ));
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version = 1\n[domains.quota]\nlogin_expiry_warning_seconds = 90\n",
+        )
+        .unwrap();
+        let configured = provenant_config::read_with_domains(&roots, &SECTIONS).unwrap();
+        assert_eq!(configured.domains.quota.login_expiry_warning_seconds, 90);
+        assert!(matches!(
+            configured.origins["domains.quota.login_expiry_warning_seconds"],
+            provenant_config::Origin::User { .. }
+        ));
+    }
+
+    #[test]
     fn cargo_seed_section_is_a_known_key_and_turns_the_seed_off() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);

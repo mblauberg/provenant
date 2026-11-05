@@ -3,6 +3,18 @@ use super::*;
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const DEPENDENCY_STDERR_TAIL: usize = 4096;
 
+pub(super) fn violates_account_pin(
+    selected_key: Option<&str>,
+    selected_adapter: Option<&str>,
+    candidate_key: Option<&str>,
+    candidate_adapter: &str,
+) -> bool {
+    selected_key.is_some_and(|key| {
+        candidate_key != Some(key)
+            || selected_adapter.is_some_and(|adapter| adapter != candidate_adapter)
+    })
+}
+
 // Resolve only PATH, leaving the rest of the daemon environment intact. The
 // login shell runs from the account home, never the writer's checkout.
 fn host_dependency_path(
@@ -450,6 +462,12 @@ pub(super) fn prepare_with_wait(
     )
 }
 
+/// A mismatch is about which account is signed in, so only a check that names
+/// the account may clear it; a plain "logged in" answer must not.
+pub(super) fn login_check_can_clear(adapter: &str, mismatch: bool) -> bool {
+    !mismatch || AdapterSpec::get(adapter).is_some_and(|spec| spec.login_check_names_account)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_candidates(
     registry: &Registry<'_>,
@@ -660,6 +678,7 @@ pub(super) fn prepare_candidates(
     .with_derived_accounts();
     let entries: Vec<_> = settings.entries.into_values().collect();
     let timestamp = clock.unix_seconds();
+    let diagnostic_records = crate::quota::read_cache(roots).unwrap_or_default();
     let mut availability = Vec::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
     let mut auth_failures = std::collections::BTreeMap::new();
@@ -677,7 +696,77 @@ pub(super) fn prepare_candidates(
             .and_then(|executable| {
                 observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
             }) {
-            Ok(record) => availability.push(record),
+            Ok(mut record) => {
+                let strategy = AdapterSpec::get(&entry.adapter)
+                    .map_or(provenant_records::LoginReprobe::None, |spec| {
+                        spec.login_reprobe
+                    });
+                if strategy != provenant_records::LoginReprobe::None {
+                    let scope = provenant_quota::ReadinessScope {
+                        host: provenant_quota::LOCAL_HOST.into(),
+                        adapter: entry.adapter.clone(),
+                        account_key: entry.key.clone(),
+                        route: provenant_quota::ACCOUNT_ROUTE.into(),
+                    };
+                    let recorded =
+                        crate::quota::read_readiness(roots.state.as_path(), &scope, timestamp);
+                    let mismatch = recorded.reason
+                        == Some(provenant_quota::ReadinessReason::AccountMismatch)
+                        || diagnostic_records.iter().any(|r| {
+                            r.account.adapter == entry.adapter
+                                && r.account.account_key == entry.key
+                                && r.last_error
+                                    == Some(provenant_quota::ProbeFailure::AccountMismatch)
+                        });
+                    let auth_failure = mismatch
+                        || matches!(
+                            recorded.reason,
+                            Some(
+                                provenant_quota::ReadinessReason::SignedOut
+                                    | provenant_quota::ReadinessReason::LoginExpired
+                            )
+                        );
+                    if auth_failure && login_check_can_clear(&entry.adapter, mismatch) {
+                        let executable = Path::new(&record.executable);
+                        if strategy == provenant_records::LoginReprobe::ExecutableOnly {
+                            // The version probe established executable availability,
+                            // not login health. Let the selected launch check auth.
+                            record.fixture_ref =
+                                format!("installed/{}/login-unverified", entry.adapter);
+                        } else {
+                            let healthy = match strategy {
+                                provenant_records::LoginReprobe::Codex => {
+                                    codex_login_is_healthy(entry, executable, &probe)
+                                }
+                                provenant_records::LoginReprobe::Cursor => {
+                                    cursor_login_is_healthy(entry, executable, &probe)
+                                }
+                                provenant_records::LoginReprobe::AccountIdentity => {
+                                    provenant_providers::accounts::detect_for_registration(
+                                        &executor,
+                                        &entry.adapter,
+                                        executable,
+                                        &home,
+                                        &user,
+                                        &entry.directory,
+                                        executor.root(),
+                                    )
+                                    .is_ok_and(|(key, _)| {
+                                        key == entry.key || (!mismatch && entry.key == "local")
+                                    })
+                                }
+                                provenant_records::LoginReprobe::None
+                                | provenant_records::LoginReprobe::ExecutableOnly => false,
+                            };
+                            if healthy {
+                                record.fixture_ref =
+                                    format!("installed/{}/login-status", entry.adapter);
+                            }
+                        }
+                    }
+                }
+                availability.push(record)
+            }
             Err(AccountObservationError::AuthRequired(detail)) => {
                 auth_failures.insert((entry.adapter.clone(), entry.key.clone()), detail.clone());
                 observation_failures.insert((entry.adapter.clone(), entry.key.clone()), detail);
@@ -773,7 +862,7 @@ pub(super) fn prepare_candidates(
                     provenant_records::run::PreparationFailure::AdapterUnavailable,
                 ),
             })?;
-            if matching.any(|other| other.key != entry.key) {
+            if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
                 return Err(PrepareError::Other(format!(
                     "account alias {label} is ambiguous; use its exact registered key"
                 )));
@@ -782,6 +871,20 @@ pub(super) fn prepare_candidates(
         })
         .transpose()?
         .or(prior_account);
+    let selected_adapter = resume
+        .and_then(|prior| prior.applied_route.as_ref())
+        .and_then(|route| route.provider.as_deref())
+        .or_else(|| {
+            selected.and_then(|key| {
+                entries
+                    .iter()
+                    .find(|entry| {
+                        entry.key == key
+                            && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
+                    })
+                    .map(|entry| entry.adapter.as_str())
+            })
+        });
     let host = provenant_config::bind_host(roots)
         .map_err(|e| e.to_string())?
         .to_string();
@@ -856,9 +959,23 @@ pub(super) fn prepare_candidates(
             }
             .allows_switch();
             if !allowed {
+                if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
+                    && let Some(last) = reasons.last_mut()
+                {
+                    last.detail.push_str(if named_pool {
+                        "; fallback retry budget exhausted"
+                    } else {
+                        "; no eligible fallback remains"
+                    });
+                }
                 break;
             }
             let Ok(next) = resolve(&rejected) else {
+                if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
+                    && let Some(last) = reasons.last_mut()
+                {
+                    last.detail.push_str("; no eligible fallback remains");
+                }
                 break;
             };
             redraws += 1;
@@ -873,16 +990,31 @@ pub(super) fn prepare_candidates(
         if rejected.contains(&model) {
             continue;
         }
+        let pinned = violates_account_pin(
+            selected,
+            selected_adapter,
+            route.account_key.as_deref(),
+            &route.adapter,
+        );
         if candidate > 0
             && !(provenant_routing::FallbackPolicy {
                 outcome: previous_outcome,
                 handoff: provenant_routing::FallbackHandoff::Local,
                 custody_released: true,
                 budget_remaining: true,
-                pinned: selected.is_some_and(|key| route.account_key.as_deref() != Some(key)),
+                pinned,
             })
             .allows_switch()
         {
+            if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
+                && let Some(last) = reasons.last_mut()
+            {
+                last.detail.push_str(if pinned {
+                    "; fallback unavailable because the account is pinned"
+                } else {
+                    "; fallback unavailable under the route policy"
+                });
+            }
             break;
         }
         rejected.push(model);
@@ -1000,15 +1132,20 @@ pub(super) fn prepare_candidates(
                     continue;
                 }
             }
-            if matches!(
-                reason,
-                provenant_records::RouteExclusionReason::AuthRequired
-            ) {
-                previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
+            let outcome = provenant_routing::FallbackOutcome::from_exclusion(reason);
+            if outcome == provenant_routing::FallbackOutcome::AuthRequired {
+                previous_outcome = outcome;
+                let key = selected.or(route.account_key.as_deref());
                 reasons.push(skip(
                     &label,
                     SkipKind::AuthRequired,
-                    provenant_routing::exclusion_detail(reason),
+                    crate::quota::account_login_diagnostic(
+                        entries.iter(),
+                        &diagnostic_records,
+                        &route.adapter,
+                        key,
+                        reason,
+                    ),
                 ));
                 continue;
             }
@@ -1022,17 +1159,7 @@ pub(super) fn prepare_candidates(
                 reasons.push(skip(&label, SkipKind::AuthRequired, detail));
                 continue;
             }
-            previous_outcome = match reason {
-                provenant_records::RouteExclusionReason::Exhausted
-                | provenant_records::RouteExclusionReason::FreeTierRefused
-                | provenant_records::RouteExclusionReason::ProviderRefused => {
-                    provenant_routing::FallbackOutcome::UsageLimited
-                }
-                provenant_records::RouteExclusionReason::MissingExecutable => {
-                    provenant_routing::FallbackOutcome::AdapterUnavailable
-                }
-                _ => provenant_routing::FallbackOutcome::Other,
-            };
+            previous_outcome = outcome;
             // An adapter left out of `access` names its confinement error, not the router's denial.
             let detail = plan_errors
                 .get(route.adapter.as_str())
@@ -1471,6 +1598,18 @@ pub(super) fn prepare_candidates(
                 format!("setup failed: {error}"),
             ));
             continue;
+        }
+        if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
+            spec.login_observation == provenant_records::LoginObservation::ExecutableOnly
+        }) && availability.iter().any(|record| {
+            record.adapter == route.adapter
+                && record.account_key == route.account_key
+                && record.fixture_ref == format!("installed/{}/login-unverified", route.adapter)
+        }) {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: OpenCode login status is unverified; the selected launch will check authentication"
+            );
         }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");

@@ -1,7 +1,9 @@
 //! `provenant internal build-slot`: the lane's `cargo` shim runs this. Cargo
 //! commands that compile take one host build slot first, then this process
 //! runs cargo as its child and waits, so the slot is held until cargo exits
-//! and not a moment longer. The slot descriptor is close-on-exec: a daemon or
+//! and not a moment longer. Nextest runs that reuse both Cargo and binary
+//! metadata do not compile and take no slot. The slot descriptor is
+//! close-on-exec: a daemon or
 //! orphaned grandchild that outlives the build never keeps it.
 //!
 //! This is a build throttle for cooperative fair sharing of CPU and memory
@@ -106,6 +108,25 @@ pub(crate) fn gated(args: &[OsString]) -> bool {
         }
         if arg.starts_with('-') {
             continue;
+        }
+        if arg == "nextest" {
+            let remaining = args
+                .take_while(|arg| *arg != OsStr::new("--"))
+                .collect::<Vec<_>>();
+            let has_option = |name: &str| {
+                remaining.iter().any(|arg| {
+                    arg.to_str()
+                        .is_some_and(|arg| arg == name || arg.starts_with(&format!("{name}=")))
+                })
+            };
+            if remaining
+                .first()
+                .is_some_and(|arg| *arg == OsStr::new("run"))
+                && has_option("--cargo-metadata")
+                && has_option("--binaries-metadata")
+            {
+                return false;
+            }
         }
         return GATED.contains(&arg);
     }
@@ -418,6 +439,40 @@ mod tests {
         ] {
             assert!(gated(&args(list)), "{list:?}");
         }
+    }
+
+    #[test]
+    fn nextest_run_with_reused_build_metadata_does_not_hold_a_build_slot() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(!gated(&args(&[
+            "nextest",
+            "run",
+            "--cargo-metadata",
+            "cargo.json",
+            "--binaries-metadata",
+            "bins.json"
+        ])));
+        assert!(gated(&args(&[
+            "nextest",
+            "run",
+            "--cargo-metadata",
+            "cargo.json"
+        ])));
+        assert!(gated(&args(&[
+            "nextest",
+            "list",
+            "--cargo-metadata",
+            "cargo.json",
+            "--binaries-metadata",
+            "bins.json"
+        ])));
+        assert!(gated(&args(&[
+            "nextest",
+            "run",
+            "--",
+            "--cargo-metadata",
+            "--binaries-metadata"
+        ])));
     }
 
     #[test]

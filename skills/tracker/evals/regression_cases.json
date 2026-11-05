@@ -74,6 +74,21 @@
         "companion_skills": []
       },
       "note": "Pause filing at the advisory cap. Keep unleased plans in the epic; create or reuse one leaf per live task on lease and use native sub-issue links once it exists."
+    },
+    {
+      "id": "r2885",
+      "relation": "positive",
+      "prompt": "Review this proposed issue before filing. The complete relevant tree has records.rs declaring `struct RecordRow`, and reader.rs reads the version in both `decode_header` and `decode_record`. Draft: \"No record schema exists; add one. Acceptance: use the existing single `read_version` call everywhere. Verify: run tests.\"",
+      "tags": [
+        "filing",
+        "premise",
+        "acceptance"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      },
+      "note": "Case added, effect not demonstrated: both trial arms found the false premise and criterion; the routing harness does not measure improvement."
     }
   ]
 }
