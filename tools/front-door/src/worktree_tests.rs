@@ -56,8 +56,7 @@ impl provenant_confinement::worktrees::WorkerObserver for UnknownWorkers {
 /// The driver's seams: free workers, the recorded boot and a holder that can
 /// crash after durable exit.
 struct Fixture;
-/// Admission facts owned by the test driver; disk and process identity still
-/// use the real fixture volumes and processes that custody verifies.
+/// Admission capacity is synthetic; process identity remains real for custody.
 struct FixtureResources;
 impl provenant_run::Resources for FixtureResources {
     fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
@@ -70,26 +69,8 @@ impl provenant_run::Resources for FixtureResources {
             total_bytes: 100,
         })
     }
-    fn disk(&self, attempt: &provenant_os::fs::Directory) -> std::io::Result<u64> {
-        provenant_run::Resources::disk(&provenant_run::SystemResources, attempt)
-    }
-    fn lane_disk(
-        &self,
-        attempt: &provenant_os::fs::Directory,
-        context: &provenant_run::HolderContext,
-    ) -> std::io::Result<u64> {
-        provenant_run::Resources::lane_disk(&provenant_run::SystemResources, attempt, context)
-    }
-    fn reclaim_lane_disk(
-        &self,
-        attempt: &provenant_os::fs::Directory,
-        context: &provenant_run::HolderContext,
-    ) -> bool {
-        provenant_run::Resources::reclaim_lane_disk(
-            &provenant_run::SystemResources,
-            attempt,
-            context,
-        )
+    fn disk(&self, _: &provenant_os::fs::Directory) -> std::io::Result<u64> {
+        Ok(u64::MAX)
     }
 }
 impl crate::Process for Fixture {
