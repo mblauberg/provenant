@@ -115,6 +115,7 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
         .arg(&prompt)
         .args(["--explain", "--set"])
         .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .args(["--set", "parameters.writer='junior'"])
         .output()?;
     assert!(
         output.status.success(),
@@ -124,6 +125,12 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
     );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let graph = &result["data"]["graph"];
+    assert_eq!(result["data"]["tier_mix"]["junior"], 1);
+    assert_eq!(result["data"]["tier_mix"]["inverted"], false);
+    assert_eq!(
+        result["data"]["tier_mix"]["line"],
+        "tier mix: junior 1 / senior 0 / principal 0"
+    );
     assert_eq!(graph["nodes"][0]["source"]["commit"], worktree_head);
     assert_eq!(
         graph["provenance"]["resolved_subject"]["commit"],
@@ -1799,13 +1806,12 @@ fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn s
         "scout-swarm.explain.txt",
         &explain_text("scout-swarm", &["--plan", "off"])?,
     )?;
-    golden(
-        "generator-evaluator.explain.txt",
-        &explain_text(
-            "generator-evaluator",
-            &["--set", "parameters.worktree=\".\""],
-        )?,
+    let writer = explain_text(
+        "generator-evaluator",
+        &["--set", "parameters.worktree=\".\""],
     )?;
+    assert!(writer.contains("tier mix: junior "), "{writer}");
+    golden("generator-evaluator.explain.txt", &writer)?;
     Ok(())
 }
 
@@ -1830,6 +1836,9 @@ fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::
         ("deliver", &deliver[..]),
     ] {
         let explained = explain_text(name, extra)?;
+        if name == "big-batch" {
+            assert!(explained.contains("tier mix: junior "), "{explained}");
+        }
         if name == "single" {
             let inspection = explained
                 .lines()

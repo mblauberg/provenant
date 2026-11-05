@@ -1,4 +1,4 @@
-use super::preset::{Expansion, Layers, expand, find_prompt};
+use super::preset::{Expansion, Layers, expand, find_prompt, writer_tier_mix};
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 
@@ -5783,4 +5783,60 @@ fn five_and_seven_lane_big_batches_fit_the_checkpoint_envelope() {
         );
         document.admit(&Default::default()).unwrap();
     }
+}
+
+#[test]
+fn writer_tier_override_and_advisory_mix() {
+    let expanded = expand(
+        &Layers::empty(),
+        "generator-evaluator",
+        "brief",
+        &[
+            "parameters.writer='junior'".into(),
+            "parameters.worktree='/repo/lane'".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(expanded.document["nodes"][0]["route"]["alias"], "junior");
+    let mut layers = Layers::empty();
+    layers
+        .roles
+        .add(
+            ".provenant/roles.toml",
+            "[roles.\"write.implement\"]\ntier = 'principal'\n",
+        )
+        .unwrap();
+    let inherited = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        inherited.document["nodes"][0]["route"]["alias"],
+        "principal"
+    );
+    let explicit = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.writer='junior'".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(explicit.document["nodes"][0]["route"]["alias"], "junior");
+
+    assert_eq!(
+        writer_tier_mix(expanded.document["nodes"].as_array().unwrap()),
+        [1, 0, 0]
+    );
+    let nodes = json!([
+        {"access":"worktree_write","route":{"alias":"senior"}},
+        {"access":"worktree_write","route":{"model":"provider/model"}},
+        {"composite":{"nodes":[{"access":"worktree_write","route":{"alias":"principal"}}]}}
+    ]);
+    assert_eq!(writer_tier_mix(nodes.as_array().unwrap()), [0, 1, 1]);
 }

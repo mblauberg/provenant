@@ -1,6 +1,8 @@
 Graph <id>
 Admission: {"reason":"writer worktree","status":"refused"}
 Inspection: null
+tier mix: junior 0 / senior 3 / principal 1
+Warning: writer tier mix is inverted; consider whether lower tiers fit the work.
 Preset selection: big-batch (override)
 Review shape: deep (by_kind; size=unknown; kind=integration; risk=unknown), standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: off -> off (planning turned off)

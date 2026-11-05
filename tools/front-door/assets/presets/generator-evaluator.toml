@@ -1,5 +1,5 @@
 stages = [
-  { id = "implement", role = "write.implement" },
+  { id = "implement", role = "write.implement", tier = "${writer}" },
   { id = "lens", min_successful = "${min_lenses}", parallel = [
     { id = "lens", for_each = "${lenses}", role = "lens.${item.name}", require_findings = true, outputs = ["result", "commit"] },
   ], source = { type = "node", node = "implement" } },
@@ -32,6 +32,7 @@ review_shape = { type = "string", default = "", doc = "Explicit review shape ove
 kind = { type = "string", default = "", doc = "Change kind that scales the lens panel: refactor, docs. Empty uses the task kind." }
 size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty defers the choice: the host measures the pinned reviewed commit against base when the review starts, so the panel fits the work actually written; pass a size to fix it now." }
 min_lenses = { type = "integer", default = 0, min = 0, max = 32, doc = "Minimum settled lenses; 0 means all but one, at least one." }
+writer = { type = "string", default = "", doc = "Writer route alias; empty uses the role tier (senior by default)." }
 evaluator = { type = "string", default = "senior", doc = "Routing tier for the evaluator that reconciles the lens findings." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 lenses = [
