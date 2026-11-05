@@ -327,9 +327,14 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
     if job.state == RemoteState::Submitting {
         return Err(CloudJobError::SubmissionUnknown);
     }
-    let state = provider
+    let mut state = provider
         .observe(&job.remote_id)
         .map_err(CloudJobError::Provider)?;
+    // Seeing a running job does not prove whether an earlier cancellation
+    // request was delivered or will take effect later.
+    if job.state == RemoteState::CancellationUnconfirmed && state == RemoteState::Running {
+        state = RemoteState::CancellationUnconfirmed;
+    }
     if let RemoteState::Finished { result } = &state {
         result
             .clone()
@@ -526,6 +531,27 @@ mod lifecycle_tests {
             store.saved.unwrap().state,
             RemoteState::CancellationUnconfirmed
         );
+    }
+    #[test]
+    fn cloud_reconcile_keeps_unconfirmed_cancel_until_terminal_observation() {
+        let mut provider = FakeProvider {
+            observed: RemoteState::Running,
+            confirmed: false,
+            submitted: 0,
+        };
+        let mut store = FakeStore::default();
+        let mut job = submit(&mut provider, &mut store, job(), "run tests").unwrap();
+        cancel(&mut provider, &mut store, &mut job).unwrap();
+        let mut recovered = store.saved.clone().unwrap();
+        reconcile(&mut provider, &mut store, &mut recovered).unwrap();
+        assert_eq!(recovered.state, RemoteState::CancellationUnconfirmed);
+        assert_eq!(store.saved.as_ref(), Some(&recovered));
+        provider.observed = RemoteState::Finished {
+            result: result(&"a".repeat(40)),
+        };
+        reconcile(&mut provider, &mut store, &mut recovered).unwrap();
+        assert!(matches!(recovered.state, RemoteState::Finished { .. }));
+        assert_eq!(store.saved, Some(recovered));
     }
     #[test]
     fn cloud_cancel_does_not_contact_provider_without_durable_intent() {
