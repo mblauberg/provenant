@@ -1,4 +1,26 @@
 {
+  "workspace": "tools/front-door",
+  "quarantine_command": [
+    "scripts/flaky-quarantine"
+  ],
+  "tiers": {
+    "0": [
+      "cargo fmt {packages} -- --check",
+      "cargo check --locked {packages}",
+      "../../scripts/verify-nextest --profile lane --locked {packages} --lib --bins"
+    ],
+    "1": [
+      "../../scripts/verify-nextest --profile lane --locked {integration_args}"
+    ],
+    "2": [
+      "../../scripts/verify-nextest --profile ci --workspace --locked --features provenant-providers/recording {quarantine_args}",
+      "cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result"
+    ],
+    "3": [
+      "../../scripts/verify-nextest --profile ci --workspace --locked --features provenant-providers/recording {quarantine_args} --stress-count 20",
+      "../../scripts/run-mutants"
+    ]
+  },
   "integrations": [
     {
       "paths": [
@@ -21,6 +43,7 @@
   "runners": {
     "ci": [
       "scripts/verify-ci-runner",
+      "{remote}",
       "{commit}",
       "{tier}"
     ]

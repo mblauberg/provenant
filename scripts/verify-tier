@@ -11,15 +11,14 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULTS = {
     "base": "origin/main",
-    "workspace": "tools/front-door",
+    "workspace": ".",
     "local_max_tier": 1,
     "load_per_cpu": 1.0,
-    "suggested_host": "CI",
     "tiers": {
-        "0": ["cargo fmt {packages} -- --check", "cargo check --locked {packages}", "../../scripts/verify-nextest --profile lane --locked {packages} --lib --bins"],
-        "1": ["../../scripts/verify-nextest --profile lane --locked {integration_args}"],
-        "2": ["../../scripts/verify-nextest --profile ci --workspace --locked --features provenant-providers/recording", "cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result"],
-        "3": ["../../scripts/verify-nextest --profile ci --workspace --locked --features provenant-providers/recording --stress-count 20", "../../scripts/run-mutants"],
+        "0": ["cargo fmt {packages} -- --check", "cargo check --locked {packages}", "scripts/verify-nextest --profile lane --locked {packages} --lib --bins"],
+        "1": ["scripts/verify-nextest --profile lane --locked {integration_args}"],
+        "2": ["scripts/verify-nextest --profile ci --workspace --locked"],
+        "3": ["scripts/verify-nextest --profile ci --workspace --locked --stress-count 20"],
     },
     "integrations": [],
     "remote": "origin",
@@ -79,7 +78,7 @@ def main():
         refs = subprocess.check_output(["git", "ls-remote", "--heads", cfg["remote"]], cwd=ROOT, text=True)
         if not any(line.split()[0] == commit for line in refs.splitlines() if line.split()):
             parser.error("commit is not the tip of a pushed branch")
-        command = [part.format(commit=commit, tier=args.tier) for part in runner]
+        command = [part.replace("{commit}", commit).replace("{tier}", args.tier).replace("{remote}", cfg["remote"]) for part in runner]
         print(f"tier T{args.tier} on {args.host}, commit {commit}: {shlex.join(command)}", flush=True)
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
         if result.stderr:
@@ -100,7 +99,9 @@ def main():
         print(f"result: host={args.host} tier=T{args.tier} commit={commit} exit_status={status}", flush=True)
         return status
     if int(args.tier) > cfg["local_max_tier"] or (int(args.tier) >= 2 and os.getloadavg()[0] > cfg["load_per_cpu"] * (os.cpu_count() or 1)):
-        print(f"warning: T{args.tier} may load this host; consider {cfg['suggested_host']}", file=sys.stderr)
+        host = next(iter(cfg["runners"]), None)
+        suggestion = f"; consider --host {host}" if host else ""
+        print(f"warning: T{args.tier} may load this host{suggestion}", file=sys.stderr)
     touched, integrations = [], []
     if args.tier in ("0", "1"):
         metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, text=True))
@@ -114,18 +115,31 @@ def main():
         print(f"No matching tests selected. result: host=local tier=T{args.tier} commit={commit} exit_status=0")
         return 0
     packages_arg = " ".join(f"-p {shlex.quote(name)}" for name in touched)
-    integration_args = " ".join(f"-p {shlex.quote(p)} --test {shlex.quote(b)}" for p, b, _ in integrations)
     templates = cfg["tiers"][args.tier]
     if not templates:
         print(f"T{args.tier} has no configured commands", file=sys.stderr)
         return 2
+    env = os.environ.copy()
+    threads = cfg.get("test_threads")
+    if threads is not None:
+        if type(threads) is not int or threads < 1:
+            print("test_threads must be a positive integer", file=sys.stderr)
+            return 2
+        env["VERIFY_TIER_TEST_THREADS"] = str(threads)
+        env["RUST_TEST_THREADS"] = str(threads)
+    quarantine_args = ""
+    if any("{quarantine_args}" in template for template in templates):
+        quarantine = subprocess.check_output(cfg["quarantine_command"], cwd=ROOT, text=True).strip()
+        if quarantine:
+            quarantine_args = "-E " + shlex.quote(f"not ({quarantine})")
     for template in templates:
         targets = integrations if "{integration_args}" in template else [None]
         for target in targets:
-            target_args = (f"-p {shlex.quote(target[0])} --test {shlex.quote(target[1])}" if target else integration_args)
-            command = shlex.split(template.format(packages=packages_arg, integration_args=target_args))
+            target_args = (f"-p {shlex.quote(target[0])} --test {shlex.quote(target[1])}" if target else "")
+            command_text = template.replace("{packages}", packages_arg).replace("{integration_args}", target_args).replace("{quarantine_args}", quarantine_args)
+            command = shlex.split(command_text)
             print(f"+ {shlex.join(command)}", flush=True)
-            status = subprocess.run(command, cwd=workspace).returncode
+            status = subprocess.run(command, cwd=workspace, env=env).returncode
             if status:
                 print(f"result: host=local tier=T{args.tier} commit={commit} exit_status={status}", flush=True)
                 return status

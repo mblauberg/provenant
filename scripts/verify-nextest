@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build nextest binaries under a build slot, then run them without one."""
+import os
 import subprocess
 import sys
 import tempfile
@@ -25,15 +26,18 @@ def main(args):
         for position in positions:
             if position + 1 >= len(args):
                 sys.exit(f"{flag} requires a value")
-            metadata_options.extend(args[position:position + 2])
+            metadata_options.extend(["--filter-platform" if flag == "--target" else flag, args[position + 1]])
     metadata_options.extend(arg for arg in args if arg in ("--all-features", "--no-default-features", "--offline", "--frozen"))
     run_options = []
-    if "--stress-count" in args:
-        index = args.index("--stress-count")
-        if index + 1 >= len(args):
-            sys.exit("--stress-count requires a value")
-        run_options = args[index:index + 2]
-        del args[index:index + 2]
+    for flag in ("--stress-count", "-E", "--filter-expr"):
+        while flag in args:
+            index = args.index(flag)
+            if index + 1 >= len(args):
+                sys.exit(f"{flag} requires a value")
+            run_options.extend(args[index:index + 2])
+            del args[index:index + 2]
+    if threads := os.environ.get("VERIFY_TIER_TEST_THREADS"):
+        run_options.extend(["--test-threads", threads])
     with tempfile.TemporaryDirectory(prefix="provenant-nextest-") as scratch:
         metadata = Path(scratch) / "cargo.json"
         binaries = Path(scratch) / "binaries.json"

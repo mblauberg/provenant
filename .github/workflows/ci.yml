@@ -522,6 +522,7 @@ jobs:
         run: |
           scripts/test-select-macos-checks
           scripts/test-check-ci-status
+          scripts/test-verify-tier
       - name: Test native inventory evidence
         run: scripts/test-check-native-inventory
       - name: Test flaky-test quarantine

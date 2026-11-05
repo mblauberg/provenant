@@ -7,11 +7,11 @@ Run `scripts/verify-tier` for T0 and `scripts/verify-tier --tier 1` for T1.
 It prints the selected crates, integration targets and matching paths. Selection
 compares committed and working-tree changes against `origin/main`. Configure the
 base, workspace, commands, integration mappings, warning threshold and
-suggested host in `.provenant/verify.json`. T0 formats, checks and runs unit
+runner hosts in `.provenant/verify.json`. T0 formats, checks and runs unit
 tests for touched crates; T1 runs mapped integration binaries. Add mappings as
 integration ownership is identified.
 
-T2 runs the unpartitioned CI nextest suite and its example test. T3 repeats the
+T2 runs the unpartitioned CI nextest suite with the same quarantine exclusions and runs its example test unconditionally; CI runs the example test only when affected. T3 repeats the
 suite and runs the advisory mutation script; the CI native jobs additionally
 cover native-only environments. Heavy tiers warn locally and continue. Configure
 an appropriate host for them.
@@ -22,7 +22,7 @@ then waits for its conclusion and verifies its commit. The workflow must first
 exist on the remote's default branch; GitHub credentials must permit workflow
 dispatch and reading runs. The runner uses hosted CI and no model tokens.
 
-A configured runner is an argument array with `{commit}` and `{tier}` fields.
+A configured runner is an argument array with `{commit}`, `{tier}` and optional `{remote}` fields.
 It must execute that pushed commit and return a final JSON line with `commit`,
 `tier` (a string) and integer `exit_status`. It exits zero when it successfully
 returns the receipt, including when the tier itself failed. Any prior stdout
@@ -41,3 +41,8 @@ uses scratch metadata rather than a second target directory. Other Cargo test
 commands still hold their slot until they exit. Existing lanes use the shim
 version installed at their launch; the split takes effect in newly launched
 lanes after upgrading Provenant.
+
+Set `test_threads` to a positive integer in `.provenant/verify.json` to cap
+test threads for tier runs. The default is unset. A cap reduces concurrent test
+load across lanes but can make each run slower; it does not reserve a shared
+execution slot.

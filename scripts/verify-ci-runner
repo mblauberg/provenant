@@ -5,22 +5,29 @@ import subprocess
 import sys
 import time
 import uuid
+from urllib.parse import urlparse
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[2] not in ("2", "3"):
-        sys.exit("usage: verify-ci-runner COMMIT 2|3")
-    commit, tier = sys.argv[1:]
-    refs = subprocess.check_output(["git", "ls-remote", "--heads", "origin"], text=True)
+    if len(sys.argv) != 4 or sys.argv[3] not in ("2", "3"):
+        sys.exit("usage: verify-ci-runner REMOTE COMMIT 2|3")
+    remote, commit, tier = sys.argv[1:]
+    refs = subprocess.check_output(["git", "ls-remote", "--heads", remote], text=True)
     branches = [line.split()[1].removeprefix("refs/heads/") for line in refs.splitlines()
                 if line.split() and line.split()[0] == commit]
     if not branches:
         sys.exit("commit is not the tip of a pushed branch")
+    url = subprocess.check_output(["git", "remote", "get-url", remote], text=True).strip()
+    repo_url = subprocess.check_output(["gh", "repo", "view", url, "--json", "url", "--jq", ".url"], text=True).strip()
+    parsed = urlparse(repo_url)
+    if not parsed.hostname or len(parsed.path.strip("/").split("/")) != 2:
+        sys.exit("could not resolve remote to a GitHub repository")
+    repo = parsed.hostname + parsed.path.rstrip("/")
     request = uuid.uuid4().hex
-    subprocess.run(["gh", "workflow", "run", "verify-tiers.yml", "--ref", branches[0],
+    subprocess.run(["gh", "workflow", "run", "verify-tiers.yml", "--repo", repo, "--ref", branches[0],
                     "-f", f"commit={commit}", "-f", f"tier={tier}", "-f", f"request={request}"], check=True, stdout=sys.stderr)
     deadline = time.monotonic() + 3600
     while time.monotonic() < deadline:
-        runs = json.loads(subprocess.check_output(["gh", "run", "list", "--workflow", "verify-tiers.yml",
+        runs = json.loads(subprocess.check_output(["gh", "run", "list", "--repo", repo, "--workflow", "verify-tiers.yml",
                                                   "--limit", "100", "--json", "databaseId,displayTitle,headSha,status,conclusion"], text=True))
         match = [run for run in runs if run["displayTitle"] == f"verify-{request}"]
         if match:

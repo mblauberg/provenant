@@ -16,7 +16,7 @@ git checkout --quiet --detach "$commit"
 actual=$(git rev-parse HEAD)
 [ "$actual" = "$commit" ]
 status=0
-scripts/verify-tier --tier "$tier" || status=$?
+scripts/verify-tier --tier "$tier" </dev/null || status=$?
 python3 -c 'import json,sys; print(json.dumps({"commit":sys.argv[1],"tier":sys.argv[2],"exit_status":int(sys.argv[3])}))' "$actual" "$tier" "$status"
 '''
 

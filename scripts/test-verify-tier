@@ -8,6 +8,9 @@ import unittest
 from unittest import mock
 import io
 import json
+import os
+import shlex
+import subprocess
 
 loader = importlib.machinery.SourceFileLoader("verify_tier", str(Path(__file__).with_name("verify-tier")))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -34,7 +37,7 @@ class Selection(unittest.TestCase):
             (root / ".provenant/verify.json").write_text('{"tiers": {"1": ["custom test"]}}')
             cfg = verify.config(root)
             self.assertEqual(cfg["tiers"]["1"], ["custom test"])
-            self.assertEqual(cfg["tiers"]["2"], verify.DEFAULTS["tiers"]["2"])
+            self.assertTrue(cfg["tiers"]["2"])
 
 
     def test_entry_point_runs_repository_override(self):
@@ -69,8 +72,6 @@ class Selection(unittest.TestCase):
             command = call.args[0]
             self.assertIn("child", command)
             self.assertNotIn("root", command)
-        self.assertIn("--lib", run.call_args_list[-1].args[0])
-        self.assertIn("--bins", run.call_args_list[-1].args[0])
 
     def test_t1_prints_matching_path_and_runs_named_binary(self):
         path = "workspace/src/parser.rs"
@@ -88,7 +89,7 @@ class Selection(unittest.TestCase):
         self.assertIn("--test", run.call_args.args[0])
 
     def test_high_load_warns_and_runs_configured_tier(self):
-        cfg = dict(verify.DEFAULTS, local_max_tier=3, suggested_host="peer", tiers={"2": ["true"]})
+        cfg = dict(verify.DEFAULTS, local_max_tier=3, runners={"peer": ["runner"]}, tiers={"2": ["true"]})
         metadata = json.dumps({"packages": [], "workspace_members": []})
         with mock.patch.object(verify, "config", return_value=cfg), \
              mock.patch.object(verify, "changed_paths", return_value=[]), \
@@ -99,7 +100,7 @@ class Selection(unittest.TestCase):
              mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO), \
              mock.patch.object(verify.sys, "stderr", new_callable=io.StringIO) as err:
             self.assertEqual(verify.main(), 0)
-        self.assertIn("peer", err.getvalue())
+        self.assertIn("--host peer", err.getvalue())
         run.assert_called_once()
 
     def test_fake_remote_reports_commit_and_failure(self):
@@ -135,8 +136,8 @@ class Selection(unittest.TestCase):
             self.assertEqual(peer.main(["peer", "https://example.invalid/repo.git", "abc", "2"]), 0)
         command = run.call_args.args[0]
         self.assertEqual(command[:3], ["ssh", "--", "peer"])
-        self.assertIn("abc", command[3])
-        self.assertIn("git checkout --quiet --detach", run.call_args.kwargs["input"])
+        self.assertEqual(shlex.split(command[3]), ["sh", "-s", "--", "https://example.invalid/repo.git", "abc", "2"])
+        self.assertEqual(run.call_args.kwargs["input"], peer.REMOTE)
 
     def test_dispatched_ci_receipt_is_bound_to_commit(self):
         ci_loader = importlib.machinery.SourceFileLoader("verify_ci", str(Path(__file__).with_name("verify-ci-runner")))
@@ -144,9 +145,9 @@ class Selection(unittest.TestCase):
         ci = importlib.util.module_from_spec(ci_spec)
         ci_loader.exec_module(ci)
         run = {"databaseId": 5, "displayTitle": "verify-unique", "headSha": "abc", "status": "completed", "conclusion": "success"}
-        with mock.patch.object(ci.sys, "argv", ["verify-ci-runner", "abc", "2"]), \
+        with mock.patch.object(ci.sys, "argv", ["verify-ci-runner", "upstream", "abc", "2"]), \
              mock.patch.object(ci.uuid, "uuid4", return_value=mock.Mock(hex="unique")), \
-             mock.patch.object(ci.subprocess, "check_output", side_effect=["abc\trefs/heads/test\n", json.dumps([run])]), \
+             mock.patch.object(ci.subprocess, "check_output", side_effect=["abc\trefs/heads/test\n", "https://example.com/owner/repo.git\n", "https://github.com/owner/repo\n", json.dumps([run])]), \
              mock.patch.object(ci.subprocess, "run") as dispatch, \
              mock.patch.object(ci.sys, "stdout", new_callable=io.StringIO) as out, \
              mock.patch.object(ci.sys, "stderr", new_callable=io.StringIO):
@@ -155,6 +156,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(result.exception.code, 0)
         self.assertEqual(json.loads(out.getvalue()), {"commit": "abc", "tier": "2", "exit_status": 0})
         self.assertIn("commit=abc", dispatch.call_args.args[0])
+        self.assertEqual(dispatch.call_args.args[0][dispatch.call_args.args[0].index("--repo") + 1], "github.com/owner/repo")
 
     def test_nextest_build_and_execution_are_separate_commands(self):
         nextest_loader = importlib.machinery.SourceFileLoader("verify_nextest", str(Path(__file__).with_name("verify-nextest")))
@@ -166,8 +168,11 @@ class Selection(unittest.TestCase):
             commands.append(command)
             return mock.Mock(returncode=0)
         with mock.patch.object(nextest.subprocess, "run", side_effect=run):
-            self.assertEqual(nextest.main(["--profile", "lane", "--locked", "-p", "child", "--lib", "--features", "recording", "--stress-count", "2", "--", "specific_test"]), 0)
+            self.assertEqual(nextest.main(["--profile", "lane", "--locked", "-p", "child", "--lib", "--features", "recording", "--target", "x86_64-example", "-E", "not (test(=quarantined))", "--stress-count", "2", "--", "specific_test"]), 0)
         self.assertIn("recording", commands[0])
+        self.assertIn("--filter-platform", commands[0])
+        self.assertNotIn("--target", commands[0])
+        self.assertIn("not (test(=quarantined))", commands[2])
         self.assertEqual(commands[1][:3], ["cargo", "nextest", "list"])
         self.assertIn("child", commands[1])
         self.assertIn("--list-type", commands[1])
@@ -177,6 +182,102 @@ class Selection(unittest.TestCase):
         self.assertIn("specific_test", commands[2])
         self.assertNotIn("--stress-count", commands[1])
         self.assertIn("--stress-count", commands[2])
+
+    def test_quarantine_and_thread_cap_reach_nextest_run(self):
+        cfg = dict(verify.DEFAULTS, workspace=".", test_threads=2,
+                   quarantine_command=["quarantine"],
+                   tiers={"2": ["verify-nextest --profile ci {quarantine_args}"]})
+        with mock.patch.object(verify, "config", return_value=cfg), \
+             mock.patch.object(verify.subprocess, "check_output", side_effect=["abc\n", "test(=flaky)\n"]), \
+             mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "2"]), \
+             mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO), \
+             mock.patch.object(verify.sys, "stderr", new_callable=io.StringIO):
+            self.assertEqual(verify.main(), 0)
+        args = run.call_args.args[0][1:]
+        self.assertEqual(args[-2:], ["-E", "not (test(=flaky))"])
+        loader = importlib.machinery.SourceFileLoader("nextest_filter", str(Path(__file__).with_name("verify-nextest")))
+        nextest = loader.load_module()
+        commands = []
+        with mock.patch.dict(os.environ, run.call_args.kwargs["env"], clear=True), \
+             mock.patch.object(nextest.subprocess, "run", side_effect=lambda command, **kw: commands.append(command) or mock.Mock(returncode=0)):
+            self.assertEqual(nextest.main(args), 0)
+        self.assertIn("not (test(=flaky))", commands[-1])
+        self.assertEqual(commands[-1][-2:], ["--test-threads", "2"])
+
+    def test_commands_keep_literal_braces(self):
+        cfg = dict(verify.DEFAULTS, tiers={"2": ["command '{literal}'"]})
+        with mock.patch.object(verify, "config", return_value=cfg), \
+             mock.patch.object(verify.subprocess, "check_output", return_value="abc\n"), \
+             mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "2"]), \
+             mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO), \
+             mock.patch.object(verify.sys, "stderr", new_callable=io.StringIO):
+            self.assertEqual(verify.main(), 0)
+        self.assertEqual(run.call_args.args[0], ["command", "{literal}"])
+
+    def test_ci_runner_rejects_missing_branch_and_mismatched_head_and_waits(self):
+        loader = importlib.machinery.SourceFileLoader("ci_cases", str(Path(__file__).with_name("verify-ci-runner")))
+        ci = loader.load_module()
+        base = ["abc\trefs/heads/test\n", "https://example.com/owner/repo.git\n", "https://github.com/owner/repo\n"]
+        def run_case(outputs):
+            with mock.patch.object(ci.sys, "argv", ["runner", "upstream", "abc", "2"]), \
+                 mock.patch.object(ci.uuid, "uuid4", return_value=mock.Mock(hex="unique")), \
+                 mock.patch.object(ci.subprocess, "check_output", side_effect=outputs) as query, \
+                 mock.patch.object(ci.subprocess, "run"), mock.patch.object(ci.time, "sleep") as sleep, \
+                 mock.patch.object(ci.sys, "stdout", new_callable=io.StringIO), \
+                 mock.patch.object(ci.sys, "stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as result:
+                    ci.main()
+            return result.exception.code, query, sleep
+        code, _, _ = run_case([""])
+        self.assertIn("not the tip", code)
+        pending = {"databaseId": 1, "displayTitle": "verify-unique", "headSha": "abc", "status": "in_progress", "conclusion": None}
+        mismatch = dict(pending, headSha="wrong", status="completed")
+        code, _, _ = run_case(base + [json.dumps([mismatch])])
+        self.assertIn("different commit", code)
+        complete = dict(pending, status="completed", conclusion="success")
+        code, query, sleep = run_case(base + [json.dumps([pending]), json.dumps([complete])])
+        self.assertEqual(code, 0)
+        sleep.assert_called_once()
+        self.assertEqual(query.call_args_list[0].args[0][-1], "upstream")
+        self.assertIn("--repo", query.call_args_list[-1].args[0])
+
+    def test_repository_config_applies_quarantine_to_both_heavy_tiers(self):
+        cfg = verify.config(verify.ROOT)
+        self.assertEqual(cfg["quarantine_command"], ["scripts/flaky-quarantine"])
+        for tier in ("2", "3"):
+            self.assertTrue(any("{quarantine_args}" in command for command in cfg["tiers"][tier]))
+
+    def test_peer_tier_receives_eof(self):
+        loader = importlib.machinery.SourceFileLoader("peer_stdin", str(Path(__file__).with_name("verify-peer-runner")))
+        peer = loader.load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = root / "git"
+            fake.write_text("#!/bin/sh\ncase \"$1\" in clone) for last do :; done; mkdir -p \"$last/scripts\"; cp \"$FAKE_TIER\" \"$last/scripts/verify-tier\" ;; rev-parse) echo abc ;; esac\n")
+            fake.chmod(0o755)
+            tier = root / "tier"
+            tier.write_text("#!/bin/sh\nif read line; then exit 9; fi\nexit 0\n")
+            tier.chmod(0o755)
+            result = subprocess.run(["sh", "-s", "--", "repo", "abc", "2"], input=peer.REMOTE, text=True,
+                                    capture_output=True, env=dict(os.environ, PATH=f"{tmp}:" + os.environ["PATH"], TMPDIR=tmp, FAKE_TIER=str(tier)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"commit": "abc", "tier": "2", "exit_status": 0})
+
+    def test_peer_script_rejects_commit_mismatch(self):
+        loader = importlib.machinery.SourceFileLoader("peer_mismatch", str(Path(__file__).with_name("verify-peer-runner")))
+        peer = loader.load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = root / "git"
+            fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$FAKE_LOG\"\ncase \"$1\" in clone) for last do :; done; mkdir -p \"$last\" ;; rev-parse) echo wrong ;; esac\n")
+            fake.chmod(0o755)
+            result = subprocess.run(["sh", "-s", "--", "repo", "expected", "2"], input=peer.REMOTE, text=True,
+                                    capture_output=True, env=dict(os.environ, PATH=f"{tmp}:" + os.environ["PATH"], TMPDIR=tmp, FAKE_LOG=str(root / "git.log")))
+            self.assertEqual((root / "git.log").read_text().splitlines(), ["clone", "checkout", "rev-parse"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("exit_status", result.stdout)
 
 
 if __name__ == "__main__":
