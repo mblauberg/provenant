@@ -1412,7 +1412,9 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         // two reviewers of three attempts each can outlast the rig's
         // ten-second watchdog. Retry chains are covered by
         // `capacity_settlement_resumes_the_same_session` and the run store.
-        "\n[domains.routing]\nsettlement_retries = 0\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low', efforts = ['low'] }}]\n[domains.routing.review.shapes.fixture]\nframe = false\nverifiers = 0\nsynthesis = 'reduce'\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness-spec', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'"
+        // The path rule below is the behaviour under test, so the default floors
+        // that would raise this workflow path to a larger shape are relaxed.
+        "\n[domains.routing]\nsettlement_retries = 0\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low', efforts = ['low'] }}]\n[domains.routing.review.shapes.fixture]\nframe = false\nverifiers = 0\nsynthesis = 'reduce'\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness-spec', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'\n[domains.routing.review.floors.operations]\npaths = []\ntier = 'routine'\nlenses = []\n[domains.routing.review.floors.unknown]\npaths = []\ntier = 'routine'\nlenses = []"
     )?;
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
