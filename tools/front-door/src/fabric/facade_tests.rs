@@ -1041,7 +1041,7 @@ pub(crate) mod peer_tests {
             executables: Default::default(),
             executable_search_path: Vec::new(),
             git: provenant_os::git::git_executable().ok_or("git")?,
-            codex_home: None,
+            default_account_directories: Default::default(),
             cargo_build_jobs: None,
             fixture_state_write: false,
         });

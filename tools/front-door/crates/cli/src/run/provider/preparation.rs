@@ -643,14 +643,21 @@ pub(super) fn prepare_candidates(
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
-    if eligible("codex") && !entries.iter().any(|e| e.adapter == "codex") {
+    for spec in ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.default_account_directory.is_some() && eligible(spec.name))
+    {
+        if entries.iter().any(|entry| entry.adapter == spec.name) {
+            continue;
+        }
+        let (environment, fallback) = spec.default_account_directory.expect("filtered above");
         let directory = registry
             .host
-            .and_then(|host| host.codex_home.clone())
-            .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
-            .unwrap_or_else(|| home.join(".codex"));
+            .and_then(|host| host.default_account_directories.get(spec.name).cloned())
+            .or_else(|| std::env::var_os(environment).map(PathBuf::from))
+            .unwrap_or_else(|| home.join(fallback));
         let mut entry = provenant_providers::accounts::Registration {
-            adapter: "codex".into(),
+            adapter: spec.name.into(),
             label: "default".into(),
             key: String::new(),
             org_fingerprint: None,
@@ -669,12 +676,12 @@ pub(super) fn prepare_candidates(
         };
         let discovered = (|| -> Result<(), AccountObservationError> {
             let executable =
-                locate("codex").map_err(AccountObservationError::VersionUnavailable)?;
+                locate(spec.name).map_err(AccountObservationError::VersionUnavailable)?;
             entry.directory = canonical(&directory)
                 .map_err(|detail| default_directory_error(&directory, detail))?;
             entry.key = provenant_providers::accounts::detect(
                 &executor,
-                "codex",
+                spec.name,
                 &executable,
                 &home,
                 &user,
@@ -687,7 +694,8 @@ pub(super) fn prepare_candidates(
         match discovered {
             Ok(()) => entries.push(entry),
             Err(error) => {
-                default_failures.insert("codex".to_owned(), (error.skip_kind(), error.to_string()));
+                default_failures
+                    .insert(spec.name.to_owned(), (error.skip_kind(), error.to_string()));
             }
         }
     }

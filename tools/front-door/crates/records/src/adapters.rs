@@ -95,6 +95,8 @@ pub struct AdapterSpec {
     /// Home-relative installation roots that can supply linked skills.
     /// They describe discovery provenance, not an eligibility allowlist.
     pub skill_install_roots: &'static [&'static str],
+    /// Environment override and home-relative default for an implicitly discovered account.
+    pub default_account_directory: Option<(&'static str, &'static str)>,
     pub registered_account: bool,
     /// A registered account's directory is the client's configuration
     /// directory, which account settings sync keeps in step. False where it is
@@ -329,6 +331,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             suffix: "skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
+        default_account_directory: None,
         registered_account: true,
         account_config_dir: true,
         account_directory_prefix: Some(".claude-"),
@@ -400,6 +403,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             suffix: "skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
+        default_account_directory: Some(("CODEX_HOME", ".codex")),
         registered_account: true,
         account_config_dir: true,
         account_directory_prefix: None,
@@ -475,6 +479,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             suffix: "skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
+        default_account_directory: None,
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
@@ -549,6 +554,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             suffix: "skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
+        default_account_directory: None,
         registered_account: true,
         account_config_dir: false,
         account_directory_prefix: None,
@@ -627,6 +633,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             suffix: "opencode/skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
+        default_account_directory: None,
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
@@ -699,6 +706,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         binary: "",
         skills: None,
         skill_install_roots: &[],
+        default_account_directory: None,
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
@@ -768,6 +776,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         binary: "",
         skills: None,
         skill_install_roots: &[],
+        default_account_directory: None,
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,

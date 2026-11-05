@@ -2191,7 +2191,7 @@ pub(super) fn launch_on_host_with_wait(
                 .unwrap_or_default(),
             git: provenant_os::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
-            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            default_account_directories: run::HostLaunchContext::default_account_directories(),
             cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
             #[cfg(feature = "fixture")]
             fixture_state_write: false,

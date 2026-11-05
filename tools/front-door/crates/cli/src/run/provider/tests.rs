@@ -1143,7 +1143,7 @@ fn executable_discovery_after_wait_observes_the_completed_update()
         executables: Default::default(),
         executable_search_path: vec![temp.path().into()],
         git: "/usr/bin/git".into(),
-        codex_home: None,
+        default_account_directories: Default::default(),
         cargo_build_jobs: None,
         #[cfg(feature = "fixture")]
         fixture_state_write: false,
