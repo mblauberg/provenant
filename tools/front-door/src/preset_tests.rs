@@ -4244,7 +4244,12 @@ mod planner_front_end {
                 linked.to_str().unwrap(),
             ],
         );
-        let found = super::super::preset::linked_worktrees(&main);
+        let linked_worktrees = |path| {
+            super::super::preset::linked_worktrees_from(&super::super::preset::project_worktrees(
+                path,
+            ))
+        };
+        let found = linked_worktrees(&main);
         let expected = std::fs::canonicalize(&linked)
             .unwrap()
             .display()
@@ -4260,7 +4265,7 @@ mod planner_front_end {
         // Outside a repository the project is only its own directory: no lanes.
         let bare = temp.path().join("bare");
         std::fs::create_dir(&bare).unwrap();
-        assert!(super::super::preset::linked_worktrees(&bare).is_empty());
+        assert!(linked_worktrees(&bare).is_empty());
         // The discovered list is what the planner is offered by default.
         let mut project = layers(PlanMode::On, None);
         project.plan.as_mut().unwrap().worktrees = found.clone();

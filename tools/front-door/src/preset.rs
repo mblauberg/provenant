@@ -2768,12 +2768,7 @@ fn discover_read_roots(worktrees: &[PathBuf], allowed: &[String], extra: &[PathB
 }
 
 /// The linked worktrees, not the main checkout, which can host a writer lane.
-#[cfg(test)]
-pub(crate) fn linked_worktrees(directory: &Path) -> Vec<String> {
-    linked_worktrees_from(&project_worktrees(directory))
-}
-
-fn linked_worktrees_from(worktrees: &[PathBuf]) -> Vec<String> {
+pub(crate) fn linked_worktrees_from(worktrees: &[PathBuf]) -> Vec<String> {
     worktrees
         .iter()
         .skip(1)
