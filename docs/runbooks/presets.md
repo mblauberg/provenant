@@ -9,7 +9,7 @@ chooses assignments, scopes, worktrees and acceptance evidence. A junior scout
 swarm remains read-only; it can share read roots without Git writer contention.
 
 Eleven presets are bundled: `scope`, `single`, `chain`, `fan-out`,
-`fan-out-synthesise`, `scout-swarm`, `generator-evaluator`, `review-council`,
+`fan-out-synthesise`, `scout-swarm`, `generator-evaluator`, `review`,
 `big-batch`, `scope-then-run` and `deliver`. All lower through the same stage path.
 `preset list` shows a table of name, winning layer, level, cost and errors.
 `preset show NAME` groups the resolved configuration into sections with origins, and
@@ -34,6 +34,42 @@ layer.
 
 ## Composition rules
 
+A typed parameter can declare `bind = "risk_tier"` or `bind = "kind"` to receive
+the corresponding `--risk-tier` or `--task-kind` request. An unbound flag warns
+and is dropped. Parameter files and `--set` retain their usual precedence.
+
+A parallel group can declare `zero_minimum = "all_but_one"` so a zero
+`min_successful` requires all but one member, at least one.
+It can declare `reduce_verdict = true` to export the worst successful member
+verdict; missing or invalid verdicts count as inconclusive.
+`export_first` adds outputs from the first member only; those outputs are
+unavailable if that member fails.
+
+`shape_stages` names the frame, parallel panel, verifier and synthesis stages
+controlled by the selected review shape. When a subject is not yet pinned, one
+deferred node builds those stages after the subject is known.
+
+A `for_each` stage may declare `review_lenses = true` to apply the review
+shape and risk-tag selection to its list.
+
+A typed child parameter can declare `inherit = true` to receive a matching
+parent parameter unless the stage supplies its own value. `inherit_explicit = true`
+forwards only a parent override, leaving the child's own default otherwise.
+
+A string parameter can declare `tracker_advice = true` to request tracker advice
+for its supplied spec before a run.
+
+A stage may declare `read_only_floor = true` to keep its preset read-only,
+including through inheritance.
+
+A leaf stage or role may declare `conditional_parameters`: each entry names a
+source `parameter`, an `equals_any` list, a `value` and an `otherwise` value.
+Interpolation uses the matching value when the destination parameter is absent;
+an explicitly supplied parameter takes precedence.
+
+Preset expansion checks the configured host graph node limit before launch;
+the refusal names the limit and its configuration owner.
+
 Typed parameters without defaults are required. Missing-value errors name the
 parameter; `--set` and parameter files satisfy it and retain type validation.
 Injected `read_roots` is optional for a nested preset that does not declare it;
@@ -41,8 +77,9 @@ other unknown parameters remain errors. `${index}` in nested role overrides
 resolves for each child count copy. Node titles default to the concrete node ID;
 stage titles and user or preset role overrides can supply a title.
 
-Only `for_each = "${lenses}"` is governed by the review shape's slot count and
-conditional risk tags. Other lists, including `big-batch` lanes, expand in full.
+Only a stage declaring `review_lenses = true` is governed by the review shape's
+slot count and conditional risk tags. Other lists, including `big-batch` lanes,
+expand in full.
 Every omitted lens appears in graph provenance, `run --explain` and a warning.
 
 ## Select a preset by rules
@@ -64,13 +101,13 @@ keys. Rule values contain a preset and optional typed parameters:
 default = { preset = "single" }
 
 [select.by_risk]
-critical = { preset = "review-council", parameters = { risk_tags = ["security"] } }
+critical = { preset = "review", parameters = { risk_tags = ["security"] } }
 
 [select.by_kind]
 docs = { preset = "chain" }
 
 [select.by_paths]
-"src/security/**" = { preset = "review-council" }
+"src/security/**" = { preset = "review" }
 
 [select.by_size]
 large = { preset = "big-batch" }
@@ -136,7 +173,7 @@ experiment is valid but declines this work item, its reason is recorded under
 ```toml
 [domains.fabric.pipelines.experiment.review-shape]
 control = "single"
-arms = { council = "review-council", chain = "chain" }
+arms = { council = "review", chain = "chain" }
 assign = "hash"
 shadow = false
 tiers = ["routine", "substantial"]
@@ -185,11 +222,11 @@ all role briefs and defaults.
 | Preset | Main parameters | Default work |
 | --- | --- | --- |
 | `scout-swarm` | `width = 4`, `external = 1`, `read_roots = []` | Junior codebase scouts and external scouts that research outward, then senior synthesis |
-| `generator-evaluator` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `writer = ""` (role tier, senior by default), `evaluator = "senior"`, `delivery = "none"` | Senior writer, the lens list over the commit it wrote, then an evaluator that gives each finding a disposition |
-| `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `verifiers = 1`, `verifier_tier = "verifier"`, `risk_tier`, `review_shape`, `risk_tags` | One `lens.NAME` role per lens, a verifier, preferably from another model family, that tries to falsify the findings, then senior synthesis with a disposition per finding |
+| `generator-evaluator` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `writer = ""` (role tier), `evaluator = "senior"`, `delivery = "none"` | Senior writer, the lens list over the commit it wrote, then an evaluator that gives each finding a disposition |
+| `review` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `verifiers = 1`, `verifier_tier = "verifier"`, `risk_tier`, `review_shape`, `risk_tags` | One `lens.NAME` role per lens, a verifier, preferably from another model family, that tries to falsify the findings, then senior synthesis with a disposition per finding |
 | `scope-then-run` | `width = 3`, `worktree`, `write_scope = ["."]`, `base`, `spec`, `delivery = "none"` | Scouts, a senior scoping stage, a verdict gate (a blocked scope launches no writer), then `generator-evaluator` |
 | `big-batch` | `lanes`, `batch_worktree`, `base`, `spec`, `integration_branch = "batch/graph"`, `scout = 1`, `width = 4`, `read_roots = []` | Scout, one writer lane per `lanes` entry, council, principal refactor, two-round repair and review |
-| `deliver` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `delivery = "pr"`, `base`, `spec`, `checks = []`, `ci_timeout_seconds = 7200`, `max_iterations = 3`, `repair_tier = "senior"`, `decision_session`, `risk_tier`, `review_shape`, `risk_tags`, `land = 1`, `land_tier = "substantial"` | Senior writer opening a pull request, a CI gate on its head, up to `max_iterations` fresh repairs each followed by the gate, `review-council` on the newest head, then land; see [Deliver through CI to land](#deliver-through-ci-to-land) |
+| `deliver` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `delivery = "pr"`, `base`, `spec`, `checks = []`, `ci_timeout_seconds = 7200`, `max_iterations = 3`, `repair_tier = "senior"`, `decision_session`, `risk_tier`, `review_shape`, `risk_tags`, `land = 1`, `land_tier = "substantial"` | Senior writer opening a pull request, a CI gate on its head, up to `max_iterations` fresh repairs each followed by the gate, `review` on the newest head, then land; see [Deliver through CI to land](#deliver-through-ci-to-land) |
 
 Write list parameters in a TOML file and pass `--params-file lanes.toml`. The
 file holds top-level `name = value` pairs, one per preset parameter. `--set`
@@ -357,7 +394,7 @@ role grants no authority: access, write scope and routing come from the stage.
 dates. It needs a web-capable route; define a routing route named `web`.
 Without one the compiler falls back to `junior` and `run --explain` prints the
 substitution. `--set parameters.external=0` opts out of external scouts, which
-the origins record. The same applies to `verifier_tier` in `review-council`:
+the origins record. The same applies to `verifier_tier` in `review`:
 define a route named `verifier` in another model family. The role settings
 `family = "cross_preferred"` and `family = "cross_required"` set
 `distinct_from = "dependencies"`, excluding the families of all upstream
@@ -389,21 +426,23 @@ visible in `provenant preset explain <preset>` under `local_check_policy` and
 `prompts`. An empty parameter uses the layered roles-library policy: bundled,
 then user, then project. Like `risk_tier` and `subject`, the policy is an ambient
 parameter inherited by nested presets that declare it, including big-batch,
-generator-evaluator, deliver, scope-then-run and review-council.
+generator-evaluator, deliver, scope-then-run and review.
 
 ## Review and source subjects
 
-The policy default is `review-council --plan on`; the chair checks the plan
-against the [review ladder](../../HARNESS.md#review-ladder) and supplies any
-missing required reviewers and lenses. Runtime selection and partial-success
-thresholds below do not yet enforce those floors or every triggered lens.
+The policy default is `review --plan on`. The configured path floors enforce
+minimum review shapes, reviewer counts and required lenses for static, planned
+and deferred reviews. A caller's list or planner fragment is expanded to meet
+that count; omitted required lenses are added with a warning. See
+the [review ladder](../../HARNESS.md#review-ladder).
 
-`review-council` runs one `lens.NAME` role per entry of the `lenses` list: correctness
+`review` runs one `lens.NAME` role per entry of the `lenses` list: correctness
 against the spec, design fit and reuse, simplicity, conventions and
 readability, and tests. `security-privacy` and `concurrency-data-errors` join
 when `risk_tags` names `security` or `concurrency`, and `adversarial` joins
-when it names `terminal`; `risk_tier = "terminal"` counts as that tag. `generator-evaluator` takes the same list, with
-correctness against the spec and simplicity by default. Every lens prompt
+when it names `terminal`; `risk_tier = "terminal"` counts as that tag.
+`generator-evaluator` uses the same shape and lens defaults; an explicit
+`lenses` parameter replaces its list. Every lens prompt
 carries the same context. The reviewer has read access to the whole
 repository, treats the diff stat and slices as navigation aids rather than the
 scope, reads callers, existing utilities and architecture, and reviews against
@@ -418,13 +457,17 @@ bound `batch_worktree`, then the project roots above. They do not resolve
 specs from the worktrees the planner may assign to lanes. Missing or unreadable
 files produce a named warning in explain and at launch, with guidance to pass
 an issue-number spec instead. Issue numbers are passed through unchanged. The
-subject node states both. Prompts live in
-`skills/code-review/references/lenses/`. After the lenses a verifier tries to
-falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
-finding one disposition: accepted, rejected or deferred, with a reason. The
+frame states both when the shape includes it. Prompts live in
+`skills/code-review/references/lenses/`. For a commit subject without an
+applied plan, the quick shape skips framing and uses a deterministic reduction
+of its lens verdicts; standard and deep run a verifier and synthesis by default.
+Kind, path and risk-tag additions can add lenses to quick. Added refactor
+lenses follow the configured catalogue order. The verifier tries to
+falsify every finding, and synthesis gives each finding one disposition:
+accepted, rejected or deferred, with a reason. The
 `generator-evaluator` evaluator does the same over its lens findings. Its
-`min_lenses` parameter defaults to 0 (all selected lenses but one, at least
-one); set a positive number to require that many, including the full panel.
+`min_lenses` parameter defaults to 0 (the risk-tier review minimum, at least
+one); set a positive number to require that many.
 Preset explain shows the parameter and its origin. Unavailable lenses are
 named in the evaluator input. A malformed findings block makes that lens
 unavailable and counts against the threshold, just like a failed lens. The
@@ -432,13 +475,17 @@ evaluator receives bounded, severity-ranked findings and paths to the full
 lens results; it must consult those results for findings omitted from the
 bounded export.
 
-A review of a `head` or `node` subject with no `size` or `review_shape`
+A review of a `head` or `node` subject
 (`deliver`, `generator-evaluator`, `big-batch`) cannot be measured when the
 graph expands, because the commit does not exist yet. The graph (schema 2,
-with `review_base`) carries one deferred `review` node that holds a lowered
-prompt for every candidate lens. When the subject is pinned the host measures
-it, picks the shape and lenses, and adds the panel to the graph. Pass `size` or
-`review_shape` to keep a static panel. `--explain` shows the size as pending.
+with `review_base`) carries one deferred `review` node with the panel stage
+templates. When the subject is pinned the host measures it, picks the shape
+and lenses, and builds the whole panel against that commit. Explicit `size` and
+`review_shape` remain requests subject to the path floor. `--explain` shows
+unmeasured paths and floors as pending.
+`provenant review` uses content identity: repeating the same request attaches to
+its graph, while `--fresh` starts a new graph. `--range` selects paths and size
+from that Git range; the target remains the reviewed commit.
 
 A `fan-out` stage with `distinct_families = true` (the `distinct_families`
 parameter) labels its branches as one family group, so the scheduler prefers
@@ -448,15 +495,17 @@ still runs.
 `--fresh` makes a preset run a new graph even when its inputs are unchanged,
 for example to rerun after a cancel. A plain rerun of the same inputs resolves
 to the same graph, so it resumes or replays; `--fresh` adds a one-off nonce to
-the graph identity. It requires `--preset`.
+the graph identity. It requires `--preset`. After correcting a launch failure,
+cancel the blocked graph and use `provenant run --preset <name> --fresh` to start
+another.
 
-Every `review-council` lens emits a fenced `findings` block before its single
+Every `review` lens emits a fenced `findings` block before its single
 verdict line. The block uses `schema_version: 1`, a `findings` array, and at
 most 32 entries and one-line summaries; a lens with no
 findings emits an empty array. A required
 findings block missing from a lens result makes that lens unavailable.
 
-The `review-council` lens group accepts partial success. A settled task failure
+The `review` lens group accepts partial success. A settled task failure
 in a lens or verifier, or a verified local preparation refusal, may be retried
 on its next route as a fresh attempt on the same node.
 `domains.fabric.graph.limits.review_substitutions` bounds these
@@ -472,11 +521,18 @@ only successful lenses flow to verification and synthesis, after an
 `coverage_below_minimum: N of M lenses succeeded, minimum K; unavailable: ...`
 when fewer than `min_reviews` lenses succeed. `min_reviews`
 currently defaults by `risk_tier` (`substantial` 1,
-`crucial` and `terminal` 2) and is at least 1; it is capped at the lens count.
+`crucial` and `terminal` 2) and is at least 1. Model panels cap it at the
+lens count; reduced panels retain the declared minimum, so a coverage shortfall
+cannot produce approval.
 A lens that ran and found blocking issues still blocks through its verdict.
 Councils where every lens succeeds are unchanged.
 
-The routing review shapes describe the runtime selection, not the policy floor.
+Routing `review.floors` maps named path classes to a minimum risk tier and
+required lenses. Project configuration can add classes or override the bundled
+classes; configuration schema and explain show the source and applied floors.
+Unmatched paths use the `unknown` class (substantial by default). Paths in the
+routine documentation class retain their ordinary selection. Deferred subjects
+show floors as pending until the commit is pinned.
 A lens whose `tier` is empty takes its pool from the review selection for `risk_tier` or the
 `review_shape` override. See [review shapes](model-routing.md#review-shapes)
 for the shape rules and reviewer counts. Conditional lenses add to that count.
@@ -531,7 +587,7 @@ provenant run --preset deliver --prompt-file slice.md \
 ```
 
 The graph is `write`, then `ci` (a CI gate and its repair loop), `review`
-(`review-council`), `accept` (a verdict gate) and `land`:
+(`review`), `accept` (a verdict gate) and `land`:
 
 1. The `write.implement` writer commits in the registered worktree and the
    host pushes its branch and opens the pull request.
@@ -551,7 +607,7 @@ The graph is `write`, then `ci` (a CI gate and its repair loop), `review`
    extend or accept; without it the graph pauses, and
    `--extend loop.ci--repair.rounds=N` or
    `--extend loop.ci--repair.decision=stop|accept` resumes it.
-5. `review-council` reviews a `head` source on the writer, the newest head the
+5. `review` reviews a `head` source on the writer, the newest head the
    chain delivered, so a repaired head is the one reviewed. Its lenses that
    route away from the writer also route away from every repair author. A
    failed review stops the graph before land.
@@ -783,8 +839,8 @@ commit bindings. Planner output cannot refer to named presets.
 `provenant run --preset big-batch --plan on` replaces the static `lanes` stage
 with a principal planner that chooses from the preset's `[plan]` catalogue:
 `writer-lane` (write scope, acceptance subset, route, budget) and
-`wave-barrier`. Each planned lane runs the writer, the default lens legs and
-the evaluator, as the static lane does. The planner sits after `scout` so the
+`wave-barrier`. Each planned lane runs the writer, a nested review and the
+evaluator, as the static lane does. The planner sits after `scout` so the
 plan uses the research; position is per preset. The planner may assign only the
 registered writer worktrees: the project's linked worktrees by default, or
 `--set 'parameters.worktrees=["/path/a","/path/b"]'`. Overlapping write scopes
@@ -794,8 +850,8 @@ sets its lane timeout, capped by `limits.graph_timeout_seconds`.
 
 `--plan` defaults to `[domains.fabric.plan] mode` (`auto`). `auto` stays off when
 `lanes` (or the catalogue's other `explicit` parameter, such as `width` or
-`lenses`) has any origin other than the bundled default, including a project or
-user preset. A `by_size` catalogue plans only a large subject. Otherwise, for
+`lenses`) comes from a later preset layer or a dispatch override. An initial preset
+layer supplies defaults regardless of its name. A `by_size` catalogue plans only a large subject. Otherwise, for
 `big-batch` unset lanes force it on, and an unset `width` does the same for the
 research presets; the thresholds
 (`auto.acceptance_items`, `auto.batch_issues`, `auto.write_crates`) then only
@@ -835,12 +891,12 @@ Catalogues shipped today:
 | Preset | Patterns | The planner chooses |
 | --- | --- | --- |
 | `big-batch` | `writer-lane`, `wave-barrier` | Lanes, scopes, waves, routes, budgets. |
-| `review-council` | `lens-<name>` per panel-selected lens | Which of the panel's lenses run, and each tier. |
+| `review` | `lens-<name>` per panel-selected lens | Which of the panel's lenses run, and each tier. |
 | `scout-swarm` | `scout`, `external-scout` | Scout count, each question, each route. |
 | `fan-out`, `fan-out-synthesise` | `worker` | Worker count, each question, each route. |
 | `scope-then-run` | `scout`, `external-scout`, `no-scout` | Whether to scout, the width, each question. |
 
-`review-council --plan on` cannot add a lens: the panel (risk-gated lenses,
+`review --plan on` cannot add a lens: the panel (risk-gated lenses,
 slot limit, order and tiers) builds the catalogue first, so the planner only
 narrows it and raises or lowers tiers. A stage after a planned stage reads the
 instantiated scouts', workers' or lenses' outputs, added to its inputs beside
@@ -892,11 +948,9 @@ preset's `base`. When `base` is empty, the review uses the graph's pinned
 integration base if available, otherwise the source commit itself, preserving
 launches in repositories without `origin/HEAD`. Set `base` to the intended
 comparison commit for a nonempty range. An `equal_base_and_head` node warning
-means that comparison has no commit range to review.
+names both commits when that comparison has no commit range to review. The host
+sets the review verdict to inconclusive, even if the agent reported a pass. When
+no base was resolved, the host reports that separately; the source fallback does
+not identify an empty review range.
 
-Writer tiers are advisory. Set `parameters.writer` for `generator-evaluator` to
-choose a different writer alias. Planned `big-batch` lanes default to `junior`;
-use `senior` for contained design and reserve `principal` for at most one lane
-per wave when appropriate. `run --explain` reports the concrete writer tier
-mix and warns if higher tiers outnumber lower tiers. Exact model and route
-choices remain available; the mix never refuses a graph.
+Writer tiers are advisory. Set `parameters.writer` for `generator-evaluator` to choose a writer alias. Planned `big-batch` lanes default to `junior`; use `senior` for contained design and reserve `principal` for at most one lane per wave when appropriate. `run --explain` reports the concrete writer tier mix and warns if higher tiers outnumber lower tiers. Exact model and route choices remain available; the mix never refuses a graph.

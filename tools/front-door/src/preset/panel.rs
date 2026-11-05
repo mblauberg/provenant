@@ -2,7 +2,7 @@
 //! selects, and the lenses that fill it.
 use super::StageBuilder;
 use provenant_fabric_runtime::graph::{ReviewLens, ReviewSpec};
-use provenant_routing::{LensPlan, ReviewConfig, ReviewReviewer, tier_is_set};
+use provenant_routing::{LensPlan, ReviewConfig, ReviewReviewer, ReviewSynthesis, tier_is_set};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -17,6 +17,8 @@ pub struct ShapeQuery<'a> {
     pub size: Option<&'a str>,
     /// Diff reference the change is measured from.
     pub base: Option<&'a str>,
+    /// Optional explicit range used for selection.
+    pub range: Option<&'a str>,
     /// Revision to measure, resolved in `worktree`.
     pub head: Option<&'a str>,
     /// Worktree to measure in; the project directory when absent.
@@ -37,6 +39,14 @@ type GitRunner = dyn Fn(&std::path::Path, &[&str]) -> Result<String, String>;
 pub struct ShapeHint {
     pub name: String,
     pub source: String,
+    pub frame: bool,
+    pub verifiers: usize,
+    pub synthesis: ReviewSynthesis,
+    /// Largest number of non-lens stages a deferred shape may add.
+    pub max_panel_stages: usize,
+    pub max_verifiers: usize,
+    /// Shape stages captured with the deferred review for replay validation.
+    pub panel_shapes: std::collections::BTreeMap<String, Value>,
     /// Reviewer pools in shape order, one entry per reviewer.
     pub slots: Vec<String>,
     /// Lens names a shape reviewer group names explicitly, with its pool.
@@ -51,6 +61,10 @@ pub struct ShapeHint {
     pub warnings: Vec<String>,
     /// Lenses that any changed-path rule or test marker may add at launch.
     pub possible_additions: Vec<String>,
+    /// Lenses required by the path floors for this pinned subject.
+    pub required_floor_lenses: Vec<String>,
+    pub floor_classes: Vec<String>,
+    pub floor_min_reviewers: usize,
     /// Candidates used when a review supplies no explicit lens list.
     pub default_lenses: Vec<String>,
 }
@@ -94,6 +108,26 @@ pub fn review_selector(
     review_selector_with_git(review, directory, task_kind, Box::new(git))
 }
 
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "used by library tests; integration targets also include this module"
+)]
+pub(crate) fn fixture_protected_selector() -> ShapeSelector {
+    review_selector_with_git(
+        ReviewConfig::default(),
+        PathBuf::from("/repo"),
+        None,
+        Box::new(|_, args| {
+            Ok(match args[0] {
+                "symbolic-ref" | "rev-parse" => "main\n".into(),
+                "diff" if args.contains(&"--name-only") => "src/credentials.rs\0".into(),
+                _ => String::new(),
+            })
+        }),
+    )
+}
+
 fn review_selector_with_git(
     review: ReviewConfig,
     directory: PathBuf,
@@ -104,19 +138,34 @@ fn review_selector_with_git(
         let kind = query.kind.or(task_kind.as_deref());
         let mut warnings = Vec::new();
         let mut paths = Vec::new();
+        let mut paths_unreadable = false;
         let mut test_marker = false;
         let cwd = query
             .worktree
             .map_or_else(|| directory.clone(), |tree| directory.join(tree));
-        let base = query
-            .base
+        if query.range.is_some_and(|range| range.starts_with('-')) {
+            return Err("git range must not begin with -".into());
+        }
+        let range_parts = query.range.map(|range| {
+            range
+                .split_once("...")
+                .or_else(|| range.split_once(".."))
+                .unwrap_or((range, ""))
+        });
+        let range_base = range_parts.map(|(base, _)| if base.is_empty() { "HEAD" } else { base });
+        let range_head = range_parts.and_then(|(_, head)| (!head.is_empty()).then_some(head));
+        let base = range_base
+            .or(query.base)
             .map(str::to_owned)
             .or_else(|| default_base(&run_git, &cwd));
         // A deferred review is measured against its pinned commit by the host;
         // the expansion-time working tree says nothing about it.
         if let Some(base) = base.as_deref().filter(|_| !query.defer) {
-            let tip = query.head.unwrap_or("HEAD");
-            let range = format!("{base}...{tip}");
+            let tip = range_head.or(query.head).unwrap_or("HEAD");
+            let range = query
+                .range
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{base}...{tip}"));
             match run_git(
                 &cwd,
                 &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
@@ -128,7 +177,10 @@ fn review_selector_with_git(
                         .map(str::to_owned)
                         .collect();
                 }
-                Err(error) => warnings.push(format!("cannot read changed paths: {error}")),
+                Err(error) => {
+                    paths_unreadable = true;
+                    warnings.push(format!("cannot read changed paths: {error}; applying highest configured floor and all required floor lenses"));
+                }
             }
             match run_git(
                 &cwd,
@@ -138,7 +190,15 @@ fn review_selector_with_git(
                 Err(error) => warnings.push(format!("cannot scan test markers: {error}")),
             }
         }
-        let size = match (query.size, query.shape, query.base.filter(|_| !query.defer)) {
+        if base.is_none() && !query.defer {
+            paths_unreadable = true;
+            warnings.push("cannot resolve review base; applying highest configured floor and all required floor lenses".into());
+        }
+        let size = match (
+            query.size,
+            query.shape,
+            base.as_deref().filter(|_| !query.defer),
+        ) {
             (Some(size), _, _) => {
                 if !["small", "medium", "large"].contains(&size) {
                     return Err(format!("unknown review size '{size}'"));
@@ -146,19 +206,44 @@ fn review_selector_with_git(
                 Some(size)
             }
             (None, None, Some(base)) => {
-                let measured =
-                    review
-                        .size
-                        .measure(kind, base, query.head.unwrap_or("HEAD"), &mut |args| {
-                            run_git(&cwd, args)
-                        });
+                let measured = review.size.measure(
+                    kind,
+                    base,
+                    range_head.or(query.head).unwrap_or("HEAD"),
+                    &mut |args| run_git(&cwd, args),
+                );
                 warnings.extend(measured.warning);
                 measured.size
             }
             _ => None,
         };
-        let selected = review.select_shape(query.shape, query.risk, kind, &[], size)?;
-        let plan = review.lens_plan(kind, &paths, test_marker);
+        let fallback;
+        let review = if paths_unreadable {
+            let (config, unknown_paths) = review.unreadable_paths();
+            paths = unknown_paths;
+            fallback = config;
+            &fallback
+        } else {
+            &review
+        };
+        let selected = review.select_shape(query.shape, query.risk, kind, &paths, size)?;
+        let mut plan = review.lens_plan(kind, &paths, test_marker);
+        let floors = review.path_floors(&paths);
+        for lens in &floors.lenses {
+            if !plan.add.contains(lens) {
+                plan.add.push(lens.clone());
+            }
+            if !plan.change_add.contains(lens) {
+                plan.change_add.push(lens.clone());
+            }
+        }
+        if !floors.classes.is_empty() {
+            warnings.push(format!(
+                "review path floors applied: {}; required lenses: {}",
+                floors.classes.join(", "),
+                floors.lenses.join(", ")
+            ));
+        }
         let lens_reason = plan
             .matched_paths
             .iter()
@@ -167,18 +252,39 @@ fn review_selector_with_git(
             .collect::<Vec<_>>();
         let mut hint = ShapeHint {
             name: selected.name.to_owned(),
+            frame: selected.shape.frame,
+            verifiers: selected.shape.verifiers,
+            synthesis: selected.shape.synthesis,
+            max_panel_stages: review
+                .shapes
+                .values()
+                .map(|shape| {
+                    usize::from(shape.frame)
+                        + shape.verifiers
+                        + usize::from(shape.synthesis == ReviewSynthesis::Model)
+                })
+                .max()
+                .unwrap_or(0),
+            max_verifiers: review.shapes.values().map(|shape| shape.verifiers).max().unwrap_or(0),
+            panel_shapes: review.shapes.iter().map(|(name, shape)| (name.clone(), json!({
+                "frame": shape.frame, "verifiers": shape.verifiers, "synthesis": shape.synthesis,
+            }))).collect(),
             source: format!(
-                "{}{}; size={}; kind={}; risk={}",
+                "{}{}; floors={}; size={}; kind={}; risk={}",
                 selected.source,
                 if lens_reason.is_empty() {
                     String::new()
                 } else {
                     format!("; lenses={}", lens_reason.join(","))
                 },
+                if query.defer { "pending".to_owned() } else if paths_unreadable { format!("unreadable (highest configured floor: {})", floors.classes.join(",")) } else if floors.classes.is_empty() { "none".to_owned() } else { floors.classes.join(",") },
                 size_text(size, query.defer),
                 kind.unwrap_or("unknown"),
                 query.risk.unwrap_or("unknown")
             ),
+            floor_min_reviewers: if floors.tier.is_some() { selected.shape.reviewers.iter().map(|row| row.count).sum() } else { 0 },
+            required_floor_lenses: floors.lenses,
+            floor_classes: floors.classes,
             plan,
             size: size.map(str::to_owned),
             warnings,
@@ -199,6 +305,8 @@ fn review_selector_with_git(
                 .by_paths
                 .values()
                 .flat_map(|rule| rule.add.iter().cloned())
+                .chain(review.shapes.values().flat_map(|shape| shape.reviewers.iter().flat_map(|group| group.lenses.iter().cloned())))
+                .chain(review.floors.values().flat_map(|floor| floor.lenses.iter().cloned()))
                 .chain(std::iter::once("tests".to_owned()))
                 .collect(),
             ..Default::default()
@@ -302,6 +410,7 @@ impl StageBuilder<'_> {
             kind,
             size: text("size"),
             base: text("base"),
+            range: text("selection_range"),
             head,
             worktree: text("worktree"),
             defer,
@@ -340,10 +449,22 @@ impl StageBuilder<'_> {
         let hint = self.shape_hint(false)?;
         let shape = hint.as_ref();
         let plan = shape.map(|shape| &shape.plan);
-        let caller_supplied = self
-            .origins
-            .get("parameters.lenses")
-            .is_some_and(|origin| origin != "bundled");
+        let caller_supplied = !list.is_empty()
+            && self
+                .origins
+                .get("parameters.lenses")
+                .is_some_and(|origin| !self.layers.is_initial_origin(self.name, "lenses", origin));
+        if list.is_empty()
+            && let Some(shape) = shape
+        {
+            list.extend(shape.default_lenses.iter().map(|name| {
+                let when = provenant_routing::RISK_TAG_LENSES
+                    .iter()
+                    .find_map(|(tag, lens)| (*lens == name).then_some(*tag))
+                    .unwrap_or("");
+                json!({"name":name, "tier":"", "when":when})
+            }));
+        }
         if let Some(plan) = plan {
             // A caller's own list keeps its lenses and order; only what the
             // change itself triggers (test paths and markers) is added to it.
@@ -355,6 +476,20 @@ impl StageBuilder<'_> {
                     &plan.add
                 },
             );
+        }
+        if caller_supplied && let Some(shape) = shape.filter(|shape| shape.floor_min_reviewers > 0)
+        {
+            let base_lenses: Vec<_> = shape
+                .default_lenses
+                .iter()
+                .filter(|name| {
+                    !provenant_routing::RISK_TAG_LENSES
+                        .iter()
+                        .any(|(_, lens)| *lens == name.as_str())
+                })
+                .cloned()
+                .collect();
+            append_plan_additions(&mut list, &base_lenses);
         }
         let in_list =
             |names: &[String], item: &Value| names.iter().any(|name| item["name"] == *name);
@@ -373,6 +508,21 @@ impl StageBuilder<'_> {
                     .iter()
                     .position(|name| item["name"] == *name)
                     .unwrap_or(plan.order.len())
+            });
+        }
+        if let Some(shape) = shape.filter(|_| !caller_supplied) {
+            let names: Vec<_> = shape.named.iter().map(|(name, _)| name.clone()).collect();
+            append_plan_additions(&mut list, &names);
+            for item in &mut list {
+                if names.iter().any(|name| item["name"] == *name) {
+                    item["when"] = json!("");
+                }
+            }
+            list.sort_by_key(|item| {
+                names
+                    .iter()
+                    .position(|name| item["name"] == *name)
+                    .unwrap_or(names.len())
             });
         }
         let limit = shape.map_or(usize::MAX, |shape| shape.slots.len().max(1));
@@ -446,18 +596,7 @@ impl StageBuilder<'_> {
             .get("subject")
             .and_then(|subject| subject.get("type"))
             .and_then(Value::as_str);
-        matches!(subject_type, Some("head" | "node")) && self.size_unpinned()
-    }
-
-    /// A review whose size and shape the stage leaves to the host.
-    fn size_unpinned(&self) -> bool {
-        let text = |key: &str| {
-            self.parameters
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-        };
-        self.layers.review.is_some() && text("size").is_none() && text("review_shape").is_none()
+        self.layers.review.is_some() && matches!(subject_type, Some("head" | "node"))
     }
 
     fn review_is_deferred(
@@ -467,7 +606,7 @@ impl StageBuilder<'_> {
         nodes: &[Value],
     ) -> bool {
         let source = object.get("source");
-        if !matches!(entries, [entry] if super::list_is_lenses(entry.get("for_each")))
+        if !matches!(entries, [entry] if super::selects_review_lenses(entry))
             || source.and_then(|source| source["type"].as_str()) != Some("node")
         {
             return false;
@@ -481,7 +620,7 @@ impl StageBuilder<'_> {
                     node["id"] == id && node["access"].as_str() == Some("worktree_write")
                 })
             });
-        self.size_unpinned() && (writes || self.defers_review_size())
+        self.layers.review.is_some() && (writes || self.defers_review_size())
     }
 
     /// The deferred node that replaces a lens stage: a read-only plan node that
@@ -504,7 +643,7 @@ impl StageBuilder<'_> {
     ) -> Result<Option<Value>, String> {
         // Static and deferred review stages alike record the requested base.
         let is_review = self.layers.review.is_some()
-            && matches!(entries, [entry] if super::list_is_lenses(entry.get("for_each")));
+            && matches!(entries, [entry] if super::selects_review_lenses(entry));
         if let Some(base) = self.parameters.get("base").and_then(Value::as_str)
             && is_review
             && !base.is_empty()
@@ -517,7 +656,7 @@ impl StageBuilder<'_> {
         if !self.review_is_deferred(entries, object, nodes) {
             return Ok(None);
         }
-        let spec = self.review_spec()?;
+        let spec = self.review_spec(object)?;
         let names = self.review_candidates(&spec.lenses)?;
         let items: Vec<Value> = names
             .iter()
@@ -527,6 +666,8 @@ impl StageBuilder<'_> {
             .as_object()
             .cloned()
             .ok_or("stage entries must be tables")?;
+        // Templates cover every candidate; selection happens when the head is pinned.
+        lens_entry.remove("review_lenses");
         lens_entry.insert("for_each".into(), Value::Array(items));
         let mut leaves = Vec::new();
         self.entry(
@@ -600,7 +741,10 @@ impl StageBuilder<'_> {
     /// The `ReviewSpec` this stage hands to launch-time resolution. Only what the
     /// stage states goes in: a size is recorded when the stage overrides it,
     /// and otherwise the host measures it when the review launches.
-    pub fn review_spec(&self) -> Result<ReviewSpec, String> {
+    pub fn review_spec(
+        &self,
+        group: &serde_json::Map<String, Value>,
+    ) -> Result<ReviewSpec, String> {
         let text = |key: &str| {
             self.parameters
                 .get(key)
@@ -630,11 +774,11 @@ impl StageBuilder<'_> {
             })
             .unwrap_or_default();
         let mut lenses = Vec::new();
-        // The bundled list is the default; only a caller's own list is a request.
+        // Initial-layer lists are defaults; later overrides are requests.
         let caller_supplied = self
             .origins
             .get("parameters.lenses")
-            .is_none_or(|origin| origin != "bundled");
+            .is_some_and(|origin| !self.layers.is_initial_origin(self.name, "lenses", origin));
         for lens in self
             .parameters
             .get("lenses")
@@ -671,23 +815,38 @@ impl StageBuilder<'_> {
             risk_tags,
             worktree: text("worktree"),
             lenses,
-            min_successful: if let Some(value) = self.parameters.get("min_lenses") {
-                Some(
-                    usize::try_from(
-                        value
+            min_successful: group
+                .get("min_successful")
+                .map(|value| {
+                    let count = if group.get("zero_minimum").and_then(Value::as_str)
+                        == Some("all_but_one")
+                    {
+                        super::interpolate(value, &self.parameters, self.prompt, 1)?
                             .as_u64()
-                            .ok_or("min_lenses must be a non-negative integer")?,
-                    )
-                    .map_err(|_| "min_lenses is too large")?,
-                )
-            } else {
-                self.parameters
-                    .get("min_reviews")
-                    .map(|value| self.minimum_successful(value))
-                    .transpose()?
-                    .map(|count| usize::try_from(count).map_err(|_| "min_reviews is too large"))
-                    .transpose()?
-            },
+                            .ok_or("min_successful must be a non-negative integer")?
+                    } else {
+                        self.minimum_successful(value)?
+                    };
+                    usize::try_from(count).map_err(|_| "min_successful is too large".to_owned())
+                })
+                .transpose()?,
+            reduce_verdict: group
+                .get("reduce_verdict")
+                .map(|value| {
+                    super::interpolate(value, &self.parameters, self.prompt, 1)?
+                        .as_bool()
+                        .ok_or_else(|| "reduce_verdict must be a boolean".to_owned())
+                })
+                .transpose()?
+                .unwrap_or(false),
+            export_first: group
+                .get("export_first")
+                .map(|value| {
+                    let value = super::interpolate(value, &self.parameters, self.prompt, 1)?;
+                    serde_json::from_value(value).map_err(|error| format!("export_first: {error}"))
+                })
+                .transpose()?
+                .unwrap_or_default(),
             max_nodes: names.len().saturating_add(1).max(2),
         })
     }

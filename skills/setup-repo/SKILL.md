@@ -34,7 +34,7 @@ Record the chosen level in the runbook and wire it into config:
 
 - `.provenant/preset-rules.toml` selects the preset: `by_readiness` (underspecified
   work goes to `scope-then-run`), `by_risk`, `by_paths` (for example a security path to
-  `review-council`).
+  `review`).
 - `.provenant/roles.toml` holds project lenses and strictness, such as the verifier's
   `family = "cross_required"`.
 - The `deliver` preset parameters `land_tier` and `decision_session` set what lands

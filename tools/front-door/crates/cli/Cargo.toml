@@ -35,6 +35,7 @@ toml_edit = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+provenant-records = { workspace = true, features = ["registry-fixture"] }
 provenant-confinement = { workspace = true, features = ["snapshot"] }
 provenant-test-support = { path = "../test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }

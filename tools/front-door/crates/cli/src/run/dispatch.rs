@@ -474,9 +474,8 @@ pub(crate) fn pool_effort_refusal(
         .flatten()
 }
 
-/// Refuse a model the catalogue does not record, or an effort its recorded
-/// model does not take, before any run record exists. A typo gets the nearest
-/// recorded IDs. Routing applies the same rules, but only after launch prep.
+/// Check catalogue requirements and recorded effort controls before a run
+/// record exists. A typo gets the nearest recorded IDs.
 pub(super) fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> {
     let Ok(id) = ModelId::parse(model) else {
         return Ok(());
@@ -484,9 +483,11 @@ pub(super) fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> 
     let catalogue = provenant_routing::Catalogue::bundled()
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
     let Some(entry) = catalogue.model(&id) else {
-        // A registry-only adapter has no built-in catalogue to consult.
-        // Routing checks that its identity is actually registered.
-        if provenant_records::AdapterSpec::get(id.adapter()).is_none() {
+        // Adapters can accept model names without a bundled catalogue entry.
+        // Routing still checks that the adapter is registered.
+        if provenant_records::AdapterSpec::get(id.adapter())
+            .is_none_or(|spec| !spec.require_catalogue_for_launch)
+        {
             return Ok(());
         }
         let nearest = catalogue.nearest_models(&id);

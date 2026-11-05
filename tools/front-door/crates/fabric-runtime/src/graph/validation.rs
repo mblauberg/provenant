@@ -77,7 +77,7 @@ pub(super) fn document_requires_schema_v2(document: &GraphDocument) -> bool {
 
 pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
     if let Some(composite) = &node.composite {
-        return composite
+        let mut kinds = composite
             .exports
             .iter()
             .flat_map(|input| input.outputs.iter().copied())
@@ -87,6 +87,10 @@ pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
                 }
                 kinds
             });
+        if composite.reduce_verdict && !kinds.contains(&OutputKind::Verdict) {
+            kinds.push(OutputKind::Verdict);
+        }
+        return kinds;
     }
     let mut kinds = vec![
         OutputKind::Result,
@@ -249,15 +253,7 @@ pub(super) fn validate_replay_plan(
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
     validate_schema(document).map_err(String::from)?;
-    let expansion_limits = crate::config::GraphLimits {
-        nodes: limits.nodes.max(16_384),
-        expansion_depth: limits.expansion_depth.max(64),
-        edges: usize::MAX,
-        routes_per_node: u16::MAX as usize,
-        node_prompt_bytes: usize::MAX,
-        graph_prompt_bytes: usize::MAX,
-        ..limits.clone()
-    };
+    let expansion_limits = super::model::expansion_safety_limits(limits);
     let expanded = loops::expand(document, &[], &expansion_limits)?;
     let plan = validate_flat_plan(&expanded, &expansion_limits).map_err(String::from)?;
     Ok(plan)

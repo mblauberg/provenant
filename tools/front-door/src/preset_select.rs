@@ -178,7 +178,7 @@ mod tests {
             &file,
             r#"
 [select.by_risk]
-critical = { preset = "review-council" }
+critical = { preset = "review" }
 [select.by_kind]
 docs = { preset = "chain" }
 [select.by_paths]
@@ -224,13 +224,13 @@ large = { preset = "big-batch" }
     #[test]
     fn a_different_preset_drops_the_rule_parameters() {
         let rule = super::PresetChoice {
-            preset: "review-council".into(),
+            preset: "review".into(),
             parameters: std::collections::BTreeMap::from([(
                 "lenses".into(),
                 serde_json::json!(["security"]),
             )]),
         };
-        let kept = rule.clone().for_preset("review-council");
+        let kept = rule.clone().for_preset("review");
         assert_eq!(kept, rule);
         let swapped = rule.for_preset("chain");
         assert_eq!(swapped.preset, "chain");

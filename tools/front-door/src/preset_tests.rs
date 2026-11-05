@@ -1,4 +1,7 @@
-use super::preset::{Expansion, Layers, expand, find_prompt, writer_tier_mix};
+use super::preset::{
+    Expansion, Layers, expand, find_prompt, request_bindings, tracker_advice_parameter,
+    writer_tier_mix,
+};
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 
@@ -313,7 +316,7 @@ fn omitted_lenses_are_recorded_in_explain_provenance() {
     layers.review = Some(shapes());
     let expanded = expand(
         &layers,
-        "review-council",
+        "review",
         "brief",
         &["parameters.risk_tier='routine'".into()],
     )
@@ -374,6 +377,19 @@ fn scope_preset_refuses_tree_write_broadening() {
         expand(&layers, "inherited-scope", "brief", &[])
             .unwrap_err()
             .contains("scope preset refuses")
+    );
+    layers
+        .insert(
+            "test",
+            "custom-floor",
+            "stages=[{id='reader',access='read_only',read_only_floor=true}]",
+        )
+        .unwrap();
+    layers.insert("test", "custom-floor-extended", "extends='custom-floor'\nstages=[{id='writer',access='worktree_write',worktree='/repo/lane',write_scope=['src']}]").unwrap();
+    assert!(
+        expand(&layers, "custom-floor-extended", "brief", &[])
+            .unwrap_err()
+            .contains("write-broadening")
     );
     layers
         .insert("test", "scope-delivery", "extends='scope'\ndelivery='pr'")
@@ -535,6 +551,306 @@ kind = "synthesise"
 }
 
 #[test]
+fn declared_parallel_reduction_keeps_the_worst_verdict() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let mut layers = Layers::empty();
+    layers.insert("test", "reduced-panel", "stages=[{id='panel',reduce_verdict=true,parallel=[{id='first',prompt='review'},{id='second',prompt='review'}]}]\n").unwrap();
+    let document: GraphDocument = serde_json::from_value(
+        expand(&layers, "reduced-panel", "brief", &[])
+            .unwrap()
+            .document,
+    )
+    .unwrap();
+    for failing in ["panel--first", "panel--second"] {
+        let mut owner = PresetOwner {
+            failing: vec![failing.into()],
+            ..Default::default()
+        };
+        let config = provenant_fabric_runtime::config::GraphConfig::default();
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut PresetJournal::default(),
+            &config.limits,
+            &config.budget,
+        )
+        .unwrap();
+        let panel = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "panel")
+            .unwrap();
+        assert_eq!(
+            panel
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.verdict.as_deref())
+                .and_then(provenant_records::workflow::ReviewVerdict::from_token),
+            Some(provenant_records::workflow::ReviewVerdict::RequestChanges)
+        );
+        assert_eq!(owner.launched.len(), 2);
+    }
+}
+
+#[test]
+fn quick_review_without_planning_runs_one_reduced_lens() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let mut layers = Layers::empty();
+    layers.review = Some(shapes());
+    let expansion = expand(
+        &layers,
+        "review",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.risk_tier='routine'".into(),
+            "parameters.subject.commit='0123456789abcdef0123456789abcdef01234567'".into(),
+        ],
+    )
+    .unwrap();
+    let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner::default();
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert_eq!(owner.launched, ["lenses--lens-correctness-spec"]);
+    let panel = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "lenses")
+        .unwrap();
+    assert_eq!(
+        panel
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.verdict.as_deref())
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token),
+        Some(provenant_records::workflow::ReviewVerdict::Approve)
+    );
+    assert_eq!(
+        panel
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.commit.as_deref()),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
+}
+
+#[test]
+fn quick_review_of_protected_path_runs_the_raised_panel() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let mut layers = Layers::empty();
+    layers.review = Some(super::preset::fixture_protected_selector());
+    let expansion = expand(
+        &layers,
+        "review",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.review_shape='quick'".into(),
+            "parameters.subject.commit='0123456789abcdef0123456789abcdef01234567'".into(),
+        ],
+    )
+    .unwrap();
+    assert!(
+        expansion
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("security"))
+    );
+    let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner::default();
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
+    assert!(owner.launched.len() > 8, "{:?}", owner.launched);
+    assert!(
+        owner
+            .launched
+            .iter()
+            .any(|id| id.contains("security-privacy"))
+    );
+    assert!(owner.launched.iter().any(|id| id == "verify"));
+    assert!(owner.launched.iter().any(|id| id == "synthesis"));
+}
+
+#[test]
+fn quick_review_reduces_all_explicit_lenses() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let mut layers = Layers::empty();
+    layers.review = Some(Box::new(|query| {
+        let mut hint = shapes()(query)?;
+        hint.slots = vec!["junior".into(); 3];
+        Ok(hint)
+    }));
+    let expansion = expand(
+        &layers,
+        "review",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.risk_tier='routine'".into(),
+            "parameters.subject.commit='0123456789abcdef0123456789abcdef01234567'".into(),
+            "parameters.lenses=[{name='correctness-spec',tier='',when=''},{name='tests',tier='',when=''},{name='security-privacy',tier='',when=''}]".into(),
+        ],
+    ).unwrap();
+    let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner {
+        failing: vec!["lenses--lens-tests".into()],
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert_eq!(owner.launched.len(), 3);
+    assert!(
+        owner.launched.contains(&"lenses--lens-tests".into()),
+        "{:?}",
+        owner.launched
+    );
+    let outputs = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "lenses")
+        .unwrap()
+        .outputs
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        outputs
+            .verdict
+            .as_deref()
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token),
+        Some(provenant_records::workflow::ReviewVerdict::RequestChanges)
+    );
+    assert_eq!(
+        outputs.commit.as_deref(),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
+}
+
+#[test]
+fn unframed_model_synthesis_uses_the_commit_source() {
+    let mut layers = Layers::empty();
+    layers.review = Some(Box::new(|_| {
+        Ok(super::preset::ShapeHint {
+            name: "custom".into(),
+            source: "test".into(),
+            frame: false,
+            verifiers: 0,
+            synthesis: provenant_routing::ReviewSynthesis::Model,
+            slots: vec!["senior".into()],
+            ..Default::default()
+        })
+    }));
+    let expansion = expand(
+        &layers,
+        "review",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        node(&expansion.document, "synthesis")["source"],
+        json!({"type":"commit","commit":"HEAD"})
+    );
+}
+
+#[test]
+fn reduced_shape_can_export_verifier_findings() {
+    let mut layers = Layers::empty();
+    layers.review = Some(Box::new(|_| {
+        Ok(super::preset::ShapeHint {
+            name: "custom".into(),
+            frame: false,
+            verifiers: 1,
+            synthesis: provenant_routing::ReviewSynthesis::Reduce,
+            slots: vec!["senior".into()],
+            ..Default::default()
+        })
+    }));
+    layers.insert("test", "with-review", "stages=[{id='review',preset='review',parameters={worktree='/repo/lane',subject={type='commit',commit='0123456789abcdef0123456789abcdef01234567'}}}]\n").unwrap();
+    let expansion = expand(&layers, "with-review", "brief", &[]).unwrap();
+    let boundary = &expansion.document["nodes"][0]["composite"];
+    let exports = boundary["exports"].as_array().unwrap();
+    assert!(exports.iter().any(|export| {
+        export["node"] == "lenses"
+            && export["outputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("verdict"))
+    }));
+    assert!(exports.iter().any(|export| {
+        export["node"] == "verify"
+            && export["outputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("findings"))
+    }));
+}
+
+#[test]
+fn nested_quick_review_exports_its_verdict_and_commit() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let mut layers = Layers::empty();
+    layers.review = Some(shapes());
+    layers.insert("test", "nested-review", "stages=[{id='review',preset='review',parameters={worktree='/repo/lane',risk_tier='routine',subject={type='commit',commit='0123456789abcdef0123456789abcdef01234567'}}}]\n").unwrap();
+    let expansion = expand(&layers, "nested-review", "brief", &[]).unwrap();
+    let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner::default();
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert_eq!(owner.launched, ["review--lenses--lens-correctness-spec"]);
+    let review = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "review")
+        .unwrap();
+    let outputs = review.outputs.as_ref().unwrap();
+    assert_eq!(
+        outputs
+            .verdict
+            .as_deref()
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token),
+        Some(provenant_records::workflow::ReviewVerdict::Approve)
+    );
+    assert_eq!(
+        outputs.commit.as_deref(),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
+}
+
+#[test]
 fn raw_node_kinds_and_control_role_profiles_keep_their_configuration() {
     use provenant_fabric_runtime::graph::{GraphDocument, NodeKind};
     let cases = [
@@ -620,7 +936,7 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
     for name in [
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "big-batch",
         "scope-then-run",
         "deliver",
@@ -637,6 +953,27 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
             inspection.limit_reason
         );
         assert!(inspection.nodes <= 512);
+    }
+}
+
+#[test]
+fn review_verifier_and_synthesis_put_verdict_after_evidence() {
+    for (preset, id) in [
+        ("review", "verify"),
+        ("review", "synthesis"),
+        ("generator-evaluator", "evaluate"),
+    ] {
+        let expanded = expand(&Layers::empty(), preset, "brief", &[]).unwrap();
+        let nodes = expanded.document["nodes"].as_array().unwrap();
+        let prompt = nodes.iter().find(|node| node["id"] == id).unwrap()["prompt"]
+            .as_str()
+            .unwrap()
+            .to_lowercase();
+        assert!(prompt.contains("after all findings and prose"), "{id}");
+        assert!(
+            prompt.contains("final") && prompt.contains("verdict"),
+            "{id}"
+        );
     }
 }
 
@@ -691,7 +1028,7 @@ fn require_findings_nodes_instruct_a_findings_block() {
     for name in [
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "big-batch",
         "scope-then-run",
         "deliver",
@@ -741,7 +1078,7 @@ fn admission_preset_version_follows_document() {
     for name in [
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "big-batch",
         "scope-then-run",
         "deliver",
@@ -826,7 +1163,7 @@ fn implementer_and_scope_briefs_carry_the_authority_envelope() {
 
 fn bundled_fixture(name: &str) -> provenant_fabric_runtime::graph::GraphDocument {
     let overrides = match name {
-        "generator-evaluator" | "review-council" => vec!["parameters.worktree='/repo/lane'".into()],
+        "generator-evaluator" | "review" => vec!["parameters.worktree='/repo/lane'".into()],
         "scope-then-run" | "deliver" => vec!["parameters.worktree='/repo/lane'".into()],
         "big-batch" => vec![
             "parameters.lanes=[{name='one',worktree='/repo/one',scope=['.'],spec=''},{name='two',worktree='/repo/two',scope=['.'],spec=''}]".into(),
@@ -959,12 +1296,45 @@ struct PresetOwner {
     input_dir: Option<tempfile::TempDir>,
     captured_results: std::collections::BTreeMap<String, String>,
     launched: Vec<String>,
+    planner_fragment: Option<String>,
+    deferred_shape: Option<String>,
+    deferred_paths: Vec<String>,
+    allow_land: bool,
+    lands: usize,
+    ci_head: Option<String>,
     /// The brief each launched node received, inputs included.
     prompts: Vec<(String, String)>,
     contexts: Vec<provenant_records::run::WorkContext>,
     integration_pins: usize,
     /// Integration head once a writer has integrated; the pin until then.
     integration: Option<String>,
+}
+
+impl provenant_fabric_runtime::graph::CiStatus for PresetOwner {
+    fn host_stamp(&self) -> Option<provenant_fabric_runtime::graph::CiHostStamp> {
+        Some(provenant_fabric_runtime::graph::CiHostStamp {
+            extra: Default::default(),
+            boot_identity: "fixture".into(),
+            host_monotonic_micros: 1,
+        })
+    }
+    fn observe_ci(
+        &mut self,
+        _: &str,
+        _: &[String],
+        _: usize,
+        _: usize,
+    ) -> provenant_fabric_runtime::graph::CiObservation {
+        provenant_fabric_runtime::graph::CiObservation {
+            extra: Default::default(),
+            state: provenant_fabric_runtime::graph::CiState::Passed,
+            summary: "passed".into(),
+            head_sha: self.ci_head.clone(),
+            failed_checks: vec![],
+            check_names: vec!["ci".into()],
+            truncated: false,
+        }
+    }
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
@@ -988,6 +1358,62 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
                 head: "0123456789abcdef0123456789abcdef01234567".into(),
             },
         ))
+    }
+
+    fn ci_status(&mut self) -> Option<&mut dyn provenant_fabric_runtime::graph::CiStatus> {
+        if self.deferred_shape.is_some() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+    fn wall_now(&self) -> Option<provenant_core::WallTime> {
+        self.deferred_shape.as_ref()?;
+        provenant_core::WallTime::from_micros(1_000_000).ok()
+    }
+
+    fn land(
+        &mut self,
+        request: provenant_fabric_runtime::graph::LandRequest<'_>,
+    ) -> Result<provenant_fabric_runtime::graph::LandObservation, Self::Error> {
+        if self.allow_land {
+            if request.pull_request.is_none() {
+                return Ok(
+                    provenant_fabric_runtime::graph::LandObservation::Identified {
+                        pull_request: 1,
+                    },
+                );
+            }
+            self.lands += 1;
+            Ok(provenant_fabric_runtime::graph::LandObservation::Merged {
+                pull_request: Some(1),
+                note: None,
+            })
+        } else {
+            Ok(provenant_fabric_runtime::graph::LandObservation::Refused {
+                reason: "fixture".into(),
+            })
+        }
+    }
+
+    fn resolve_review(
+        &mut self,
+        node: &provenant_fabric_runtime::graph::GraphNode,
+        subject: &str,
+    ) -> Result<
+        provenant_fabric_runtime::graph::Expansion,
+        provenant_fabric_runtime::graph::ReviewResolveError,
+    > {
+        let shape = self
+            .deferred_shape
+            .as_deref()
+            .ok_or(provenant_fabric_runtime::graph::ReviewResolveError::Unsupported)?;
+        crate::fabric::fixture_review_expansion_with_paths(
+            node,
+            subject,
+            shape,
+            &self.deferred_paths,
+        )
     }
 
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
@@ -1043,7 +1469,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         self.contexts.push(node.context.clone());
         let mut result =
             provenant_records::result_capture::ResultCapture::new(node.required_verdict);
-        let text = if self.many_findings {
+        let text = if key.node_id.ends_with("--plan") && self.planner_fragment.is_some() {
+            self.planner_fragment.clone().unwrap_or_default()
+        } else if self.many_findings {
             let directory = self.input_dir.as_ref().unwrap().path();
             let request_path = directory.join(format!("request-{}.json", key.node_id));
             let output_path = directory.join(format!("output-{}.txt", key.node_id));
@@ -1070,7 +1498,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             );
             std::fs::read_to_string(output_path).unwrap()
         } else if self.failing.contains(&key.node_id) {
-            "Blocked on the user.\nVERDICT: FAIL\n".into()
+            "Blocked on the user.\n```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: FAIL\n".into()
         } else if self.council_findings && key.node_id == "verify" {
             "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"summary\":\"fixture finding\",\"status\":\"open\"}]}\n```\nVERDICT: PASS\n".into()
         } else if self.council_findings && key.node_id == "synthesis" {
@@ -1089,6 +1517,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         } else {
             node.source_commit.map(str::to_owned)
         };
+        if access == AccessMode::WorktreeWrite {
+            self.ci_head = commit.clone();
+        }
         if access == AccessMode::WorktreeWrite
             && matches!(
                 replay.delivery,
@@ -1226,9 +1657,9 @@ fn preset_wait_prepares_scratch_once_across_polls() {
 }
 
 #[test]
-fn review_council_continues_when_lens_findings_exceed_the_cap() {
+fn review_continues_when_lens_findings_exceed_the_cap() {
     use provenant_fabric_runtime::graph::{GraphStatus, NodeState, advance_with_budget};
-    let document = bundled_fixture("review-council");
+    let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner {
         many_findings: true,
@@ -1324,9 +1755,9 @@ fn review_council_continues_when_lens_findings_exceed_the_cap() {
 }
 
 #[test]
-fn review_council_accepts_compact_overflow_dispositions() {
+fn review_accepts_compact_overflow_dispositions() {
     use provenant_fabric_runtime::graph::{GraphStatus, advance_with_budget};
-    let document = bundled_fixture("review-council");
+    let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner {
         many_findings: true,
@@ -1351,9 +1782,9 @@ fn review_council_accepts_compact_overflow_dispositions() {
 }
 
 #[test]
-fn review_council_refuses_a_missing_overflow_disposition() {
+fn review_refuses_a_missing_overflow_disposition() {
     use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
-    let document = bundled_fixture("review-council");
+    let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner {
         many_findings: true,
@@ -1383,9 +1814,9 @@ fn review_council_refuses_a_missing_overflow_disposition() {
 }
 
 #[test]
-fn review_council_refuses_a_missing_overflow_verification() {
+fn review_refuses_a_missing_overflow_verification() {
     use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
-    let document = bundled_fixture("review-council");
+    let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner {
         many_findings: true,
@@ -1424,9 +1855,9 @@ fn review_council_refuses_a_missing_overflow_verification() {
 }
 
 #[test]
-fn review_council_refuses_conflicting_overflow_dispositions() {
+fn review_refuses_conflicting_overflow_dispositions() {
     use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
-    let document = bundled_fixture("review-council");
+    let document = bundled_fixture("review");
     let config = provenant_fabric_runtime::config::GraphConfig::default();
     let mut owner = PresetOwner {
         many_findings: true,
@@ -1461,7 +1892,7 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
     for name in [
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "big-batch",
         "scope-then-run",
     ] {
@@ -1469,13 +1900,13 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
         let config = provenant_fabric_runtime::config::GraphConfig::default();
         let limits = config.limits.clone();
         let mut owner = PresetOwner {
-            council_findings: name == "review-council",
+            council_findings: name == "review",
             ..Default::default()
         };
         let mut journal = PresetJournal::default();
         let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &config.budget)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
-        if name == "review-council" {
+        if name == "review" {
             let synthesis = run
                 .checkpoint
                 .nodes
@@ -1655,10 +2086,7 @@ fn read_only_worktree_bindings_lower_to_read_roots() {
     let lens = &nodes[1]["composite"]["nodes"][0];
     assert!(lens.get("worktree").is_none());
     assert_eq!(lens["read_roots"], json!(["/repo/writer"]));
-    assert_eq!(
-        nodes[1]["source"],
-        json!({"type":"node","node":"implement"})
-    );
+    assert_eq!(lens["source"], json!({"type":"node","node":"implement"}));
 }
 
 #[test]
@@ -1721,7 +2149,16 @@ fn expansion_golden(name: &str) {
 
 #[test]
 fn composite_bundled_expansions_preserve_stage_wiring() {
-    expansion_golden("generator-evaluator");
+    for name in [
+        "scout-swarm",
+        "generator-evaluator",
+        "review",
+        "big-batch",
+        "scope-then-run",
+        "deliver",
+    ] {
+        expansion_golden(name);
+    }
     let layers = Layers::empty();
     for (name, expected) in [
         (
@@ -1730,10 +2167,7 @@ fn composite_bundled_expansions_preserve_stage_wiring() {
         ),
         ("scout-swarm", &["scouts", "synthesis"][..]),
         ("scope-then-run", &["scout", "scope", "ready", "run"][..]),
-        (
-            "review-council",
-            &["subject", "lenses", "verify", "synthesis"][..],
-        ),
+        ("review", &["subject", "lenses", "verify", "synthesis"][..]),
         ("deliver", &["write", "ci", "review", "accept", "land"][..]),
     ] {
         let document = expand(&layers, name, "brief", &[]).unwrap().document;
@@ -1776,24 +2210,18 @@ fn composite_bundled_expansions_preserve_stage_wiring() {
                 assert!(depends("synthesis", "scouts"));
             }
             "scope-then-run" => assert!(depends("run", "ready")),
-            "review-council" => {
-                let expected = params["lenses"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|lens| lens["when"].as_str().is_none_or(str::is_empty))
-                    .count();
-                assert_eq!(
-                    nodes[1]["composite"]["nodes"].as_array().unwrap().len(),
-                    expected
+            "review" => {
+                assert!(
+                    !nodes[1]["composite"]["nodes"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
                 );
             }
             "deliver" => {
-                let council = expand(&layers, "review-council", "brief", &[])
-                    .unwrap()
-                    .document;
+                let council = expand(&layers, "review", "brief", &[]).unwrap().document;
                 assert_eq!(
-                    review_lens_count(&document),
+                    lens_count(&document, "review"),
                     council["nodes"][1]["composite"]["nodes"]
                         .as_array()
                         .unwrap()
@@ -2011,8 +2439,10 @@ fn preset_limits_and_composition_wiring() {
     assert!(
         expand(&large, "outer", "brief", &[])
             .unwrap_err()
-            .contains("512 nodes")
+            .contains("limits.nodes=512")
     );
+    large.graph_limits.nodes = 2048;
+    assert!(expand(&large, "outer", "brief", &[]).is_ok());
     let mut deep = Layers::empty();
     for i in 0..9 {
         let stages = if i < 8 {
@@ -2205,6 +2635,7 @@ fn shapes() -> super::preset::ShapeSelector {
     Box::new(|query| {
         let (name, source, count) = match (query.shape, query.risk, query.kind) {
             (_, _, Some("integration")) => ("deep", "by_kind", 8),
+            (Some("quick"), _, _) => ("quick", "override", 1),
             (Some("standard"), _, _) => ("standard", "override", 5),
             (_, Some("crucial"), _) => ("deep", "by_risk", 8),
             (_, Some("routine"), _) => ("quick", "by_risk", 1),
@@ -2213,7 +2644,36 @@ fn shapes() -> super::preset::ShapeSelector {
         Ok(super::preset::ShapeHint {
             name: name.into(),
             source: source.into(),
+            frame: name != "quick",
+            verifiers: usize::from(name != "quick"),
+            synthesis: if name == "quick" {
+                provenant_routing::ReviewSynthesis::Reduce
+            } else {
+                provenant_routing::ReviewSynthesis::Model
+            },
             slots: vec!["junior".into(); count],
+            default_lenses: provenant_routing::ReviewConfig::default().lenses.order,
+            possible_additions: provenant_routing::RISK_TAG_LENSES
+                .iter()
+                .map(|(_, lens)| (*lens).to_owned())
+                .collect(),
+            max_panel_stages: 3,
+            max_verifiers: 1,
+            panel_shapes: [
+                (
+                    "quick".to_owned(),
+                    json!({"frame":false,"verifiers":0,"synthesis":"reduce"}),
+                ),
+                (
+                    "standard".to_owned(),
+                    json!({"frame":true,"verifiers":1,"synthesis":"model"}),
+                ),
+                (
+                    "deep".to_owned(),
+                    json!({"frame":true,"verifiers":1,"synthesis":"model"}),
+                ),
+            ]
+            .into(),
             plan: provenant_routing::ReviewConfig::default().lens_plan(query.kind, &[], false),
             ..Default::default()
         })
@@ -2224,7 +2684,7 @@ fn council(overrides: &[&str], shaped: bool) -> Result<serde_json::Value, String
     let mut layers = Layers::empty();
     layers.review = shaped.then(shapes);
     let overrides: Vec<String> = overrides.iter().map(|s| (*s).to_owned()).collect();
-    expand(&layers, "review-council", "the change", &overrides).map(|e| e.document)
+    expand(&layers, "review", "the change", &overrides).map(|e| e.document)
 }
 
 #[test]
@@ -2281,6 +2741,164 @@ fn tests_lens_includes_mutation_testing_only_for_crucial_or_terminal_risk() {
             "correctness lens at risk tier {risk}"
         );
     }
+}
+
+#[test]
+fn conditional_stage_values_follow_the_declared_parameter() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "conditional-stage", r#"
+stages = [{ id = 'task', prompt = '${message}', conditional_parameters = { message = { parameter = 'level', equals_any = ['high'], value = 'selected', otherwise = 'fallback' } } }]
+[parameters]
+level = 'low'
+"#).unwrap();
+    for (value, expected) in [("low", "fallback"), ("high", "selected")] {
+        let expansion = expand(
+            &layers,
+            "conditional-stage",
+            "brief",
+            &[format!("parameters.level='{value}'")],
+        )
+        .unwrap();
+        assert_eq!(node(&expansion.document, "task")["prompt"], expected);
+    }
+    layers.insert("test", "conditional-override", r#"
+stages = [{ id = 'task', prompt = '${message}', conditional_parameters = { message = { parameter = 'level', equals_any = ['high'], value = 'selected', otherwise = 'fallback' } } }]
+[parameters]
+level = 'high'
+message = 'explicit'
+"#).unwrap();
+    let expansion = expand(&layers, "conditional-override", "brief", &[]).unwrap();
+    assert_eq!(node(&expansion.document, "task")["prompt"], "explicit");
+}
+
+#[test]
+fn composite_exports_are_checked_when_a_preset_is_compiled() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "invalid-export", "stages = [{ id = 'group', stages = [{ id = 'member', prompt = 'work' }], exports = [{ node = 'missing', outputs = ['result'] }] }]\n").unwrap();
+    let error = expand(&layers, "invalid-export", "brief", &[]).unwrap_err();
+    assert!(error.contains("export"), "{error}");
+    layers.insert("test", "valid-export", "stages = [{ id = 'group', stages = [{ id = 'member', prompt = 'work' }], exports = [{ node = 'member', outputs = ['result'] }] }]\n").unwrap();
+    let mut document = expand(&layers, "valid-export", "brief", &[])
+        .unwrap()
+        .document;
+    document["nodes"][0]["composite"]["exports"][0]["node"] = json!("missing");
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document).unwrap();
+    assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+}
+
+#[test]
+fn preset_node_limit_uses_the_host_admission_bound() {
+    let mut layers = Layers::empty();
+    layers.graph_limits.nodes = 1;
+    let error = expand(&layers, "chain", "brief", &[]).unwrap_err();
+    let document = expand(&Layers::empty(), "chain", "brief", &[])
+        .unwrap()
+        .document;
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document).unwrap();
+    assert_eq!(error, document.admit(&layers.graph_limits).unwrap_err());
+    assert!(error.contains("limits.nodes=1"), "{error}");
+    assert!(error.contains("domains.fabric.graph.limits"), "{error}");
+
+    let loop_preset = "stages=[{id='repair',loop={max_rounds=2,until='check',stages=[{id='check',kind='gate',condition={type='budget'}}]}}]\n";
+    layers.insert("test", "counted-loop", loop_preset).unwrap();
+    layers.graph_limits.nodes = 2;
+    let error = expand(&layers, "counted-loop", "brief", &[]).unwrap_err();
+    let mut unlimited = Layers::empty();
+    unlimited
+        .insert("test", "counted-loop", loop_preset)
+        .unwrap();
+    let document: provenant_fabric_runtime::graph::GraphDocument = serde_json::from_value(
+        expand(&unlimited, "counted-loop", "brief", &[])
+            .unwrap()
+            .document,
+    )
+    .unwrap();
+    assert_eq!(error, document.admit(&layers.graph_limits).unwrap_err());
+}
+
+#[test]
+fn configured_node_limit_also_applies_to_flat_presets() {
+    let stages = (0..513)
+        .map(|index| format!("{{id='node-{index}',prompt='work'}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut layers = Layers::empty();
+    layers
+        .insert("test", "flat-large", &format!("stages=[{stages}]\n"))
+        .unwrap();
+    let error = expand(&layers, "flat-large", "brief", &[]).unwrap_err();
+    assert!(error.contains("limits.nodes=512"), "{error}");
+    layers.graph_limits.nodes = 1024;
+    assert!(expand(&layers, "flat-large", "brief", &[]).is_ok());
+}
+
+#[test]
+fn expanded_composite_id_refusal_matches_admission() {
+    let outer = "a".repeat(32);
+    let inner = "b".repeat(32);
+    let mut layers = Layers::empty();
+    let preset = format!(
+        "stages=[{{ id='{outer}', stages=[{{ id='{inner}', prompt='work' }}], exports=[{{ node='{inner}', outputs=['result'] }}] }}]\n"
+    );
+    layers.insert("test", "long-id", &preset).unwrap();
+    let error = expand(&layers, "long-id", "brief", &[]).unwrap_err();
+    let valid = preset.replace(&outer, "group");
+    layers.insert("test", "short-id", &valid).unwrap();
+    let mut document = expand(&layers, "short-id", "brief", &[]).unwrap().document;
+    document["nodes"][0]["id"] = json!(outer);
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document).unwrap();
+    assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+}
+
+#[test]
+fn expanded_loop_id_refusal_matches_admission() {
+    let outer = "a".repeat(32);
+    let inner = "b".repeat(32);
+    let mut layers = Layers::empty();
+    let preset = format!(
+        "stages=[{{id='{outer}',loop={{max_rounds=1,until='{inner}',stages=[{{id='{inner}',kind='gate',condition={{type='budget'}}}}]}}}}]\n"
+    );
+    layers.insert("test", "long-loop", &preset).unwrap();
+    let error = expand(&layers, "long-loop", "brief", &[]).unwrap_err();
+    let valid = preset.replace(&outer, "loop");
+    layers.insert("test", "short-loop", &valid).unwrap();
+    let mut document = expand(&layers, "short-loop", "brief", &[])
+        .unwrap()
+        .document;
+    document["nodes"][0]["id"] = json!(outer);
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document).unwrap();
+    assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+}
+
+#[test]
+fn nested_composites_within_the_host_depth_bound_compile() {
+    let mut stage = "{ id='leaf', prompt='work' }".to_owned();
+    for index in 0..9 {
+        stage = format!("{{ id='g{index}', stages=[{stage}] }}");
+    }
+    let mut layers = Layers::empty();
+    layers
+        .insert("test", "nested-composites", &format!("stages=[{stage}]\n"))
+        .unwrap();
+    let expansion = expand(&layers, "nested-composites", "brief", &[]).unwrap();
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expansion.document).unwrap();
+    assert!(document.admit(&layers.graph_limits).is_ok());
+}
+
+#[test]
+fn preset_construction_stops_at_the_shared_expansion_safety_bound() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "wide-composites", "stages=[{id='a',count=32,stages=[{id='b',count=32,stages=[{id='c',count=32,prompt='work'}]}]}]\n").unwrap();
+    let error = expand(&layers, "wide-composites", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("limits.nodes") && error.contains("composite expansion"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -2399,7 +3017,7 @@ fn preset_local_check_policy_parameter_propagates_through_compositions() {
             "scope-then-run",
             vec!["write.implement", "lens.correctness-spec"],
         ),
-        ("review-council", vec!["review.verify", "lens.tests"]),
+        ("review", vec!["review.verify", "lens.tests"]),
     ] {
         let expanded = expand(
             &layers,
@@ -2503,7 +3121,7 @@ default = "Preset default policy."
 }
 
 fn lens_ids(document: &serde_json::Value) -> Vec<String> {
-    document["nodes"][1]["composite"]["nodes"]
+    node(document, "lenses")["composite"]["nodes"]
         .as_array()
         .unwrap()
         .iter()
@@ -2512,7 +3130,7 @@ fn lens_ids(document: &serde_json::Value) -> Vec<String> {
 }
 
 #[test]
-fn review_council_fans_out_one_lens_role_over_the_lens_list() {
+fn review_fans_out_one_lens_role_over_the_lens_list() {
     let document = council(&["parameters.worktree='/repo/lane'"], false).unwrap();
     assert_eq!(
         lens_ids(&document),
@@ -2540,6 +3158,20 @@ fn review_council_fans_out_one_lens_role_over_the_lens_list() {
 }
 
 #[test]
+fn review_prompts_put_the_verdict_after_the_evidence() {
+    let document = council(&["parameters.worktree='/repo/lane'"], false).unwrap();
+    for role in ["review.verify", "review.synthesis"] {
+        let prompt = find_prompt(&document["nodes"], role).unwrap();
+        assert!(
+            prompt.contains("non-empty") && prompt.contains("final"),
+            "{role}"
+        );
+        assert!(prompt.contains("handoff"), "{role}");
+        assert!(prompt.contains("INCONCLUSIVE"), "{role}");
+    }
+}
+
+#[test]
 fn lens_contract_rejects_two_verdict_lines() {
     let document = council(&["parameters.worktree='/repo/lane'"], false).unwrap();
     let lenses = document["nodes"][1]["composite"]["nodes"]
@@ -2549,33 +3181,11 @@ fn lens_contract_rejects_two_verdict_lines() {
         let prompt = lens["prompt"].as_str().unwrap();
         assert!(prompt.contains("```findings"), "{}: {prompt}", lens["id"]);
         assert!(
-            prompt.contains("schema_version 1"),
+            prompt.contains("final non-empty line"),
             "{}: {prompt}",
             lens["id"]
         );
-        assert!(
-            prompt.contains("{\"schema_version\":1,\"findings\":[]}"),
-            "{}: {prompt}",
-            lens["id"]
-        );
-        assert!(
-            prompt.contains(
-                "\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12"
-            ),
-            "{}: {prompt}",
-            lens["id"]
-        );
-        assert!(prompt.contains("at most 32"), "{}: {prompt}", lens["id"]);
-        assert!(
-            prompt.contains("before the verdict line"),
-            "{}: {prompt}",
-            lens["id"]
-        );
-        assert!(
-            prompt.contains("exactly one verdict line"),
-            "{}: {prompt}",
-            lens["id"]
-        );
+        assert!(prompt.contains("INCONCLUSIVE"), "{}: {prompt}", lens["id"]);
     }
     let mut capture = provenant_records::result_capture::ResultCapture::new(None);
     capture.push(b"VERDICT: changes abc123\nVERDICT: FAIL\n");
@@ -2681,6 +3291,7 @@ fn a_path_added_lens_survives_its_risk_tag_condition_without_duplicating() {
             Ok(super::preset::ShapeHint {
                 name: "quick".into(),
                 source: "test".into(),
+                synthesis: provenant_routing::ReviewSynthesis::Reduce,
                 slots: vec!["junior".into()],
                 plan: provenant_routing::LensPlan {
                     add: vec!["tests".into()],
@@ -2695,7 +3306,7 @@ fn a_path_added_lens_survives_its_risk_tag_condition_without_duplicating() {
             lenses.to_owned(),
             format!("parameters.risk_tags={tags}"),
         ];
-        let document = expand(&layers, "review-council", "the change", &overrides)
+        let document = expand(&layers, "review", "the change", &overrides)
             .unwrap()
             .document;
         assert_eq!(
@@ -2708,7 +3319,7 @@ fn a_path_added_lens_survives_its_risk_tag_condition_without_duplicating() {
 
 #[test]
 fn the_council_lens_triggers_match_the_shared_risk_tag_table() {
-    let text = include_str!("../assets/presets/review-council.toml");
+    let text = include_str!("../assets/presets/review.toml");
     for (tag, lens) in provenant_routing::RISK_TAG_LENSES {
         assert!(
             text.contains(&format!(
@@ -2787,6 +3398,7 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
         .as_array()
         .unwrap();
     assert_eq!(route(&nodes[0])["alias"], "principal");
+    assert!(nodes[0].get("family_group").is_none());
     for (tier, expected) in [
         (
             "'codex/gpt-6@high'",
@@ -2804,6 +3416,38 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
             expected
         );
     }
+}
+
+#[test]
+fn review_shape_family_groups_reach_lens_nodes() {
+    let mut layers = Layers::empty();
+    let selector = shapes();
+    layers.review = Some(Box::new(move |query| {
+        let mut hint = selector(query)?;
+        hint.groups = vec![
+            serde_json::from_value(
+                json!({"pool":"junior", "count":5, "lenses":[], "distinct_families":true}),
+            )
+            .unwrap(),
+        ];
+        Ok(hint)
+    }));
+    let document = expand(
+        &layers,
+        "review",
+        "the change",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.review_shape='standard'".into(),
+        ],
+    )
+    .unwrap()
+    .document;
+    let nodes = document["nodes"][1]["composite"]["nodes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(nodes.len(), 5);
+    assert!(nodes.iter().all(|node| node["family_group"] == "group-0"));
 }
 
 fn lens_count(document: &serde_json::Value, council: &str) -> usize {
@@ -2843,7 +3487,7 @@ fn each_review_stage_selects_its_shape_from_its_own_parameters() {
         .insert(
             "repo",
             "wrap",
-            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nrisk_tier = 'routine'\n",
+            "stages = [{ id = 'council', preset = 'review', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nrisk_tier = 'routine'\n",
         )
         .unwrap();
     let low = expand(&layers, "wrap", "brief", &[]).unwrap();
@@ -2956,7 +3600,7 @@ fn council_with_roles(roles: &str) -> Result<Expansion, String> {
     layers.roles.add("repo roles.toml", roles)?;
     expand(
         &layers,
-        "review-council",
+        "review",
         "the change",
         &[
             "parameters.worktree='/repo/lane'".into(),
@@ -3145,10 +3789,10 @@ fn opting_out_of_external_scouts_is_an_explicit_recorded_parameter() {
 }
 
 #[test]
-fn review_council_verifies_between_the_lenses_and_the_synthesis() {
+fn review_verifies_between_the_lenses_and_the_synthesis() {
     let expanded = expand(
         &Layers::empty(),
-        "review-council",
+        "review",
         "the change",
         &["parameters.worktree='/repo/lane'".into()],
     )
@@ -3200,7 +3844,7 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
     );
     let skipped = expand(
         &Layers::empty(),
-        "review-council",
+        "review",
         "the change",
         &[
             "parameters.worktree='/repo/lane'".into(),
@@ -3226,7 +3870,7 @@ fn the_verifier_route_falls_back_to_senior_when_undefined() {
     layers.known_routes = Some(["senior".to_owned()].into());
     let expanded = expand(
         &layers,
-        "review-council",
+        "review",
         "the change",
         &["parameters.worktree='/repo/lane'".into()],
     )
@@ -3389,7 +4033,7 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
     )
     .unwrap();
     assert_eq!(
-        node(&expanded.document, "lens")["composite"]["min_successful"],
+        node(&expanded.document, "lenses")["composite"]["min_successful"],
         1
     );
     let override_expanded = expand(
@@ -3403,7 +4047,7 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
     )
     .unwrap();
     assert_eq!(
-        node(&override_expanded.document, "lens")["composite"]["min_successful"],
+        node(&override_expanded.document, "lenses")["composite"]["min_successful"],
         2
     );
     let evaluate = node(&expanded.document, "evaluate");
@@ -3435,7 +4079,7 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
     for lens in lenses {
         assert_eq!(lens.extra.get("review_base"), Some(&json!("main")));
         assert!(
-            matches!(&lens.source, Some(provenant_fabric_runtime::graph::SourceBinding::Node { node }) if node == "implement")
+            matches!(&lens.source, Some(provenant_fabric_runtime::graph::SourceBinding::Node { node }) if node == "lens--subject")
         );
     }
     assert!(
@@ -3513,7 +4157,7 @@ const CATALOGUE: [&str; 9] = [
     "chain",
     "fan-out",
     "fan-out-synthesise",
-    "review-council",
+    "review",
     "generator-evaluator",
     "scout-swarm",
     "big-batch",
@@ -3634,11 +4278,24 @@ fn stage_ids_address_set_paths_on_leaves_and_presets() {
 #[test]
 fn ambient_subject_and_risk_tier_flow_to_children_that_declare_them() {
     let mut layers = Layers::empty();
+    layers.insert("test", "inheriting-child", "stages=[{id='task',prompt='${topic}'}]\n[parameters]\ntopic={type='string',default='child',inherit=true}").unwrap();
+    layers
+        .insert(
+            "test",
+            "inheriting-parent",
+            "stages=[{id='child',preset='inheriting-child'}]\n[parameters]\ntopic='parent'",
+        )
+        .unwrap();
+    let custom = expand(&layers, "inheriting-parent", "brief", &[]).unwrap();
+    assert_eq!(
+        custom.document["nodes"][0]["composite"]["nodes"][0]["prompt"],
+        "parent"
+    );
     layers
         .insert(
             "repo",
             "wrap",
-            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nsubject = { type = 'integration' }\nrisk_tier = 'crucial'\n",
+            "stages = [{ id = 'council', preset = 'review', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nsubject = { type = 'integration' }\nrisk_tier = 'crucial'\n",
         )
         .unwrap();
     let result = expand(&layers, "wrap", "brief", &[]).unwrap();
@@ -3649,7 +4306,7 @@ fn ambient_subject_and_risk_tier_flow_to_children_that_declare_them() {
         .insert(
             "repo",
             "wrap",
-            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane', subject = { type = 'commit', commit = 'HEAD' } } }]\n",
+            "stages = [{ id = 'council', preset = 'review', parameters = { worktree = '/repo/lane', subject = { type = 'commit', commit = 'HEAD' } } }]\n",
         )
         .unwrap();
     let result = expand(&layers, "wrap", "brief", &[]).unwrap();
@@ -3870,7 +4527,7 @@ fn bundled_presets_fit_the_default_host_depth_limit() {
     // The documents' own `limits` are ignored by the host, so check against
     // the default host limits only.
     let limits = provenant_fabric_runtime::config::GraphConfig::default().limits;
-    for name in ["big-batch", "scope-then-run", "review-council"] {
+    for name in ["big-batch", "scope-then-run", "review"] {
         let document = bundled_fixture(name);
         let inspection = document.inspect(&limits).unwrap();
         assert_eq!(inspection.limit_reason, None, "{name}");
@@ -3881,7 +4538,7 @@ fn bundled_presets_fit_the_default_host_depth_limit() {
 fn cross_family_prefers_by_default_and_a_project_may_require_it() {
     let expanded = expand(
         &Layers::empty(),
-        "review-council",
+        "review",
         "the change",
         &["parameters.worktree='/repo/lane'".into()],
     )
@@ -4023,7 +4680,7 @@ stages = [
 fn synthesis_declares_and_requests_a_disposition_for_every_finding() {
     let expanded = expand(
         &Layers::empty(),
-        "review-council",
+        "review",
         "the change",
         &["parameters.worktree='/repo/lane'".into()],
     )
@@ -4514,7 +5171,7 @@ mod planner_front_end {
     }
 
     fn static_lenses(params: Vec<(String, Value)>) -> Vec<String> {
-        let plain = plain("review-council", params);
+        let plain = plain("review", params);
         plain.document["nodes"][1]["composite"]["nodes"]
             .as_array()
             .unwrap()
@@ -4531,13 +5188,49 @@ mod planner_front_end {
     }
 
     #[test]
-    fn review_council_plans_only_lenses_the_panel_allows() {
+    fn review_planner_receives_required_floor_lenses() {
+        let mut on = layers(PlanMode::On, None);
+        let base = shapes();
+        on.review = Some(Box::new(move |query| {
+            let mut hint = base(query)?;
+            hint.required_floor_lenses = vec!["security-privacy".into()];
+            hint.floor_classes = vec!["security".into()];
+            hint.floor_min_reviewers = 3;
+            hint.plan.add.push("security-privacy".into());
+            hint.plan.change_add.push("security-privacy".into());
+            Ok(hint)
+        }));
+        let planned = run(
+            &on,
+            "review",
+            "brief",
+            vec![("worktree".into(), json!("/repo/lane"))],
+        );
+        let plan = &planned.document["nodes"][1]["plan"];
+        assert!(
+            plan["required_floor_patterns"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("lens-security-privacy"))
+        );
+        assert_eq!(plan["floor_min_reviewers"], 3);
+        assert!(
+            plan["floor_classes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("security"))
+        );
+        assert!(lens_names(&planned).contains(&"security-privacy".to_owned()));
+    }
+
+    #[test]
+    fn review_plans_only_lenses_the_panel_allows() {
         let on = layers(PlanMode::On, None);
         let base = vec![("worktree".to_owned(), json!("/repo/lane"))];
         for tags in [json!([]), json!(["security"])] {
             let mut params = base.clone();
             params.push(("risk_tags".into(), tags.clone()));
-            let planned = run(&on, "review-council", "brief", params.clone());
+            let planned = run(&on, "review", "brief", params.clone());
             // The catalogue is exactly the lens set the static stage would run.
             assert_eq!(lens_names(&planned), static_lenses(params), "{tags}");
             assert_eq!(ids(&planned), ["subject", "plan", "verify", "synthesis"]);
@@ -4546,12 +5239,12 @@ mod planner_front_end {
         let mut quiet = base.clone();
         quiet.push(("risk_tags".into(), json!([])));
         assert!(
-            !lens_names(&run(&on, "review-council", "brief", quiet))
+            !lens_names(&run(&on, "review", "brief", quiet))
                 .contains(&"security-privacy".to_owned())
         );
         let mut tagged = base.clone();
         tagged.push(("risk_tags".into(), json!(["security"])));
-        let planned = run(&on, "review-council", "brief", tagged);
+        let planned = run(&on, "review", "brief", tagged);
         assert!(lens_names(&planned).contains(&"security-privacy".to_owned()));
         // Each lens leg pins the commit itself and offers its panel tier.
         let leg = pattern(&planned, "lens-correctness-spec");
@@ -4568,7 +5261,15 @@ mod planner_front_end {
     }
 
     #[test]
-    fn review_council_with_a_non_commit_subject_keeps_its_static_lenses() {
+    fn review_with_a_non_commit_subject_keeps_its_static_lenses() {
+        let mut configured = layers(PlanMode::On, None);
+        let original = include_str!("../assets/presets/review.toml");
+        let with_subject = original.replacen(
+            "stages = [",
+            "stages = [{ id = 'write', access = 'worktree_write', worktree = '/repo/lane', prompt = 'produce the subject' },",
+            1,
+        );
+        configured.insert("test", "review", &with_subject).unwrap();
         let params = vec![
             ("worktree".to_owned(), json!("/repo/lane")),
             (
@@ -4576,12 +5277,7 @@ mod planner_front_end {
                 json!({"type": "node", "node": "write"}),
             ),
         ];
-        let expansion = run(
-            &layers(PlanMode::On, None),
-            "review-council",
-            "brief",
-            params,
-        );
+        let expansion = run(&configured, "review", "brief", params);
         let decision = expansion.plan.as_ref().unwrap();
         assert!(!decision.applied);
         assert!(
@@ -4593,7 +5289,7 @@ mod planner_front_end {
     }
 
     #[test]
-    fn review_council_auto_plans_only_a_large_subject() {
+    fn review_auto_plans_only_a_large_subject() {
         let sized = |size: Option<&'static str>| -> Layers {
             let mut layers = layers(PlanMode::Auto, None);
             layers.review = Some(Box::new(move |query| {
@@ -4604,12 +5300,12 @@ mod planner_front_end {
             layers
         };
         let params = || vec![("worktree".to_owned(), json!("/repo/lane"))];
-        let large = run(&sized(Some("large")), "review-council", "brief", params());
+        let large = run(&sized(Some("large")), "review", "brief", params());
         let decision = large.plan.as_ref().unwrap();
         assert!(decision.applied, "{}", decision.reason);
         assert_eq!(decision.reason, "review subject is large");
         assert!(ids(&large).contains(&"plan".to_owned()));
-        let small = run(&sized(Some("small")), "review-council", "brief", params());
+        let small = run(&sized(Some("small")), "review", "brief", params());
         let decision = small.plan.as_ref().unwrap();
         assert!(!decision.applied);
         assert_eq!(decision.reason, "review subject is not large (size=small)");
@@ -4620,11 +5316,11 @@ mod planner_front_end {
             .collect::<Vec<_>>()
             .join("\n");
         let brief = format!("Review #1 #2 #3 #4 #5 #6\n## Acceptance\n{long}");
-        let small_long = run(&sized(Some("small")), "review-council", &brief, params());
+        let small_long = run(&sized(Some("small")), "review", &brief, params());
         let decision = small_long.plan.as_ref().unwrap();
         assert!(!decision.applied, "{}", decision.reason);
         assert_eq!(decision.reason, "review subject is not large (size=small)");
-        let unknown = run(&sized(None), "review-council", "brief", params());
+        let unknown = run(&sized(None), "review", "brief", params());
         assert!(
             unknown
                 .plan
@@ -5007,8 +5703,119 @@ mod planner_front_end {
         assert!(!ids(&degraded).contains(&"plan".to_owned()));
     }
 
-    /// A planned writer lane is the static `generator-evaluator` lane, written
-    /// independently: expand that preset on its own and compare node by node.
+    #[test]
+    fn quick_planned_review_falls_back_to_a_reduced_lens() {
+        use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+        let expansion = run(
+            &layers(PlanMode::On, None),
+            "review",
+            "brief",
+            vec![
+                ("worktree".into(), json!("/repo/lane")),
+                ("review_shape".into(), json!("quick")),
+                (
+                    "subject".into(),
+                    json!({"type":"commit","commit":"0123456789abcdef0123456789abcdef01234567"}),
+                ),
+            ],
+        );
+        let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+        let config = provenant_fabric_runtime::config::GraphConfig::default();
+        let fragment = "```fragment\n{\"schema_version\":1,\"nodes\":[],\"patterns\":[{\"id\":\"one\",\"pattern\":\"lens-correctness-spec\",\"parameters\":{}}]}\n```".to_owned();
+        for (fragment, failing) in [
+            (None, false),
+            (Some(fragment.clone()), false),
+            (Some(fragment), true),
+        ] {
+            let mut owner = super::PresetOwner {
+                planner_fragment: fragment,
+                failing: if failing {
+                    vec!["lenses--plan--one--lens".into()]
+                } else {
+                    Vec::new()
+                },
+                ..Default::default()
+            };
+            let run = advance_with_budget(
+                &document,
+                &mut owner,
+                &mut super::PresetJournal::default(),
+                &config.limits,
+                &config.budget,
+            )
+            .unwrap();
+            assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
+            assert_eq!(owner.launched.len(), 2, "{:?}", owner.launched);
+            assert!(
+                owner
+                    .launched
+                    .iter()
+                    .all(|id| !id.ends_with("synthesis") && !id.ends_with("subject"))
+            );
+            let panel = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "lenses")
+                .unwrap();
+            let verdict = panel
+                .outputs
+                .as_ref()
+                .and_then(|output| output.verdict.as_deref())
+                .and_then(provenant_records::workflow::ReviewVerdict::from_token);
+            assert_eq!(
+                verdict,
+                Some(if failing {
+                    provenant_records::workflow::ReviewVerdict::RequestChanges
+                } else {
+                    provenant_records::workflow::ReviewVerdict::Approve
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn reduced_planner_fallback_keeps_the_full_panel_minimum() {
+        use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+        let mut configured = layers(PlanMode::On, None);
+        let selector = shapes();
+        configured.review = Some(Box::new(move |query| {
+            let mut shape = selector(query)?;
+            shape.frame = false;
+            shape.verifiers = 0;
+            shape.synthesis = provenant_routing::ReviewSynthesis::Reduce;
+            shape.slots = vec!["senior".into(); 3];
+            Ok(shape)
+        }));
+        let expansion = run(
+            &configured,
+            "review",
+            "brief",
+            vec![
+                ("worktree".into(), json!("/repo/lane")),
+                ("review_shape".into(), json!("quick")),
+                ("min_reviews".into(), json!(3)),
+                (
+                    "subject".into(),
+                    json!({"type":"commit","commit":"0123456789abcdef0123456789abcdef01234567"}),
+                ),
+            ],
+        );
+        let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+        let config = provenant_fabric_runtime::config::GraphConfig::default();
+        let mut owner = super::PresetOwner::default();
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut super::PresetJournal::default(),
+            &config.limits,
+            &config.budget,
+        )
+        .unwrap();
+        assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
+        assert_eq!(owner.launched.len(), 4, "{:?}", owner.launched);
+    }
+
     #[test]
     fn a_planned_lane_keeps_the_static_lanes_review_steps() {
         let planned = run(
@@ -5018,86 +5825,22 @@ mod planner_front_end {
             worktrees(),
         );
         let catalogue = &planned.document["nodes"][1]["plan"]["patterns"][0];
-        assert_eq!(catalogue["name"], "writer-lane");
-        // The default lens roster and the evaluator, with no review shape
-        // selecting a roster; shape-selected rosters are a follow-up.
-        let unplanned = Layers::empty();
-        let lane = expand_with(
-            &unplanned,
-            "generator-evaluator",
-            "brief",
-            &[
-                ("worktree".into(), json!("${worktree}")),
-                ("scope".into(), json!(["${scope}"])),
-                ("delivery".into(), json!("integrate:batch/graph")),
-            ],
-            &[],
-        )
-        .unwrap();
-        let mut expected = Vec::new();
-        for node in lane.document["nodes"].as_array().unwrap() {
-            match node.get("composite") {
-                Some(inner) => {
-                    for leg in inner["nodes"].as_array().unwrap() {
-                        let mut leg = leg.clone();
-                        leg["source"] = node["source"].clone();
-                        expected.push(leg);
-                    }
-                }
-                None => expected.push(node.clone()),
-            }
-        }
-        let project = |node: &Value| {
-            json!({
-                "id": node["id"],
-                "role": node["role"],
-                "role_digest": node["role_digest"],
-                "access": node["access"],
-                "kind": node.get("kind"),
-                "route": node["route"]["alias"],
-                "distinct_from": node.get("distinct_from"),
-                "dispositions": node.get("dispositions"),
-                "source": node.get("source").map(|source| source["type"].clone()),
-                "read_roots": node.get("read_roots"),
-                "prompt": node["prompt"],
-            })
-        };
-        let by_id = |nodes: &[Value]| {
-            let mut rows: Vec<Value> = nodes.iter().map(project).collect();
-            rows.sort_by_key(|row| row["id"].as_str().unwrap().to_owned());
-            rows
-        };
-        let mut actual: Vec<Value> = catalogue["nodes"].as_array().unwrap().clone();
-        // The writer's route is the pattern's `route` parameter and its brief is
-        // the lane's own; the review steps match the static ones exactly.
-        for node in &mut actual {
-            if node["id"] == "implement" {
-                node["route"] = json!({"alias": "senior"});
-            }
-        }
-        let (actual, expected) = (by_id(&actual), by_id(&expected));
-        assert_eq!(actual.len(), 4);
-        for (planned, static_lane) in actual.iter().zip(&expected) {
-            if planned["id"] == "implement" {
-                for key in ["role", "role_digest", "access", "source"] {
-                    assert_eq!(planned[key], static_lane[key], "implement {key}");
-                }
-            } else {
-                assert_eq!(planned, static_lane);
-            }
-        }
-        let ids: Vec<_> = actual
-            .iter()
-            .map(|row| row["id"].as_str().unwrap())
-            .collect();
+        let nodes = catalogue["nodes"].as_array().unwrap();
+        let review = nodes.iter().find(|node| node["id"] == "review").unwrap();
+        assert!(review["composite"]["nodes"].is_array());
+        let deferred = &review["composite"]["nodes"][0];
+        assert_eq!(deferred["panel_templates"]["frame"]["role"], "plan.review");
         assert_eq!(
-            ids,
-            [
-                "evaluate",
-                "implement",
-                "lens-correctness-spec",
-                "lens-simplicity"
-            ]
+            deferred["panel_templates"]["synthesis"]["role"],
+            "review.synthesis"
+        );
+        let evaluator = nodes.iter().find(|node| node["id"] == "evaluate").unwrap();
+        assert!(
+            evaluator["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|input| input["node"] == "review")
         );
     }
 
@@ -5181,7 +5924,7 @@ mod planner_front_end {
         layers.project_dir = Some(temp.path().to_path_buf());
         let expansion = run(
             &layers,
-            "review-council",
+            "review",
             "brief",
             vec![("spec".into(), json!("spec.md"))],
         );
@@ -5202,7 +5945,7 @@ mod planner_front_end {
                 Some("plan"),
             ),
             (
-                "review-council",
+                "review",
                 council,
                 &["subject", "plan", "verify", "synthesis"][..],
                 Some("verify"),
@@ -5242,7 +5985,7 @@ mod planner_front_end {
                     "{name}"
                 );
             }
-            if name == "review-council" {
+            if name == "review" {
                 assert_eq!(lens_names(&expansion), static_lenses(params));
             }
         }
@@ -5250,7 +5993,7 @@ mod planner_front_end {
 
     #[test]
     fn planned_prompts_use_the_effective_local_check_policy() {
-        for preset in ["big-batch", "review-council", "scope-then-run"] {
+        for preset in ["big-batch", "review", "scope-then-run"] {
             for (project_policy, parameter, expected) in [
                 (
                     None,
@@ -5280,7 +6023,7 @@ mod planner_front_end {
                 }
                 params.push(("local_check_policy".into(), json!(parameter)));
                 let expansion = run(&layers, preset, "brief", params);
-                let role = if preset == "review-council" {
+                let role = if preset == "review" {
                     "lens.correctness-spec"
                 } else {
                     "write.implement"
@@ -5453,6 +6196,53 @@ mod planner_front_end {
             2
         );
     }
+    #[test]
+    fn planned_research_and_review_match_their_golden_graphs() {
+        let council = vec![("worktree".to_owned(), json!("/repo/lane"))];
+        let roots = vec![("read_roots".to_owned(), json!(["/repo/extra"]))];
+        let scoped = vec![("worktree".to_owned(), json!("/repo/lane"))];
+        for (name, params) in [
+            ("scout-swarm", roots),
+            ("review", council),
+            ("fan-out", Vec::new()),
+            ("fan-out-synthesise", Vec::new()),
+            ("scope-then-run", scoped),
+        ] {
+            // Patterns that pick a route need a closed list, as real planning has.
+            let mut planned = layers(PlanMode::On, None);
+            planned.known_routes =
+                Some(["junior", "senior", "principal"].map(str::to_owned).into());
+            let expansion = run(&planned, name, "brief", params);
+            let mut actual = serde_json::to_string_pretty(&expansion.document).unwrap();
+            actual.push('\n');
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("assets/presets/fixtures/{name}.plan.json"));
+            if std::env::var_os("UPDATE_GOLDEN").is_some() {
+                std::fs::write(&path, &actual).unwrap();
+            }
+            let expected = std::fs::read_to_string(&path).unwrap_or_default();
+            assert_eq!(actual, expected, "{name}: rerun with UPDATE_GOLDEN=1");
+        }
+    }
+
+    #[test]
+    fn planned_big_batch_matches_its_golden_graph() {
+        let expansion = run(
+            &layers(PlanMode::On, None),
+            "big-batch",
+            "brief",
+            worktrees(),
+        );
+        let mut actual = serde_json::to_string_pretty(&expansion.document).unwrap();
+        actual.push('\n');
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/presets/fixtures/big-batch.plan.json");
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::write(&path, &actual).unwrap();
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(actual, expected, "rerun with UPDATE_GOLDEN=1 to refresh");
+    }
 }
 
 fn real_selector(directory: &str) -> Layers {
@@ -5465,45 +6255,27 @@ fn real_selector(directory: &str) -> Layers {
     layers
 }
 
-fn review_lens_count(document: &serde_json::Value) -> usize {
-    let review = document["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["id"] == "review")
-        .unwrap();
-    review["composite"]["nodes"][1]["composite"]["nodes"]
-        .as_array()
-        .unwrap()
-        .len()
-}
-
 #[test]
-fn deliver_forwards_size_and_kind_into_the_review_panel() {
+fn deliver_carries_size_kind_and_shape_to_the_deferred_panel() {
     let layers = real_selector("/nonexistent");
-    let panel = |extra: &[&str]| {
-        let mut overrides = vec!["parameters.worktree='/repo/w'".to_owned()];
-        overrides.extend(extra.iter().map(|s| (*s).to_owned()));
-        expand(&layers, "deliver", "brief", &overrides).unwrap()
-    };
-    assert_eq!(
-        review_lens_count(&panel(&["parameters.size='small'"]).document),
-        1
-    );
-    assert_eq!(
-        review_lens_count(&panel(&["parameters.size='medium'"]).document),
-        5
-    );
-    assert_eq!(
-        review_lens_count(
-            &panel(&["parameters.size='medium'", "parameters.kind='refactor'"]).document
-        ),
-        6
-    );
-    assert_eq!(
-        review_lens_count(&panel(&["parameters.size='large'"]).document),
-        8
-    );
+    let document = expand(
+        &layers,
+        "deliver",
+        "brief",
+        &[
+            "parameters.worktree='/repo/w'".into(),
+            "parameters.size='medium'".into(),
+            "parameters.kind='refactor'".into(),
+            "parameters.review_shape='quick'".into(),
+        ],
+    )
+    .unwrap()
+    .document;
+    let panel = &document["nodes"][2]["composite"]["nodes"][0];
+    assert_eq!(panel["kind"], "plan");
+    assert_eq!(panel["review"]["size"], "medium");
+    assert_eq!(panel["review"]["kind"], "refactor");
+    assert_eq!(panel["review"]["shape"], "quick");
 }
 
 /// A review of a head or node subject with no size or shape cannot be measured
@@ -5528,16 +6300,23 @@ fn a_head_subject_review_defers_its_size_to_the_pinned_commit() {
     // No expansion-time git read: nothing to degrade, nothing to warn about.
     assert!(expanded.warnings.is_empty(), "{:?}", expanded.warnings);
     let review = &document["nodes"][2]["composite"]["nodes"];
-    let lenses = &review[1];
+    assert_eq!(review.as_array().unwrap().len(), 1);
+    let lenses = &review[0];
     assert_eq!(lenses["id"], "lenses");
     assert_eq!(lenses["kind"], "plan");
     assert_eq!(lenses["review"]["worktree"], "/repo/w");
-    assert_eq!(lenses["review"]["max_nodes"], 12);
-    assert_eq!(lenses["depends_on"], json!(["subject"]));
+    assert!(lenses["review"]["max_nodes"].as_u64().unwrap() > 12);
+    assert_eq!(lenses["source"]["type"], "head");
+    assert!(lenses["panel_templates"]["frame"].is_object());
+    assert!(lenses["panel_templates"]["verifier"].is_object());
+    assert!(lenses["panel_templates"]["synthesis"].is_object());
     assert_eq!(lenses["read_roots"], json!(["/repo/w"]));
     assert!(lenses.get("composite").is_none());
     let templates = lenses["lens_templates"].as_object().unwrap();
     assert!(templates.contains_key("correctness-spec") && templates.contains_key("adversarial"));
+    for lens in lenses["review"]["lenses"].as_array().unwrap() {
+        assert!(templates.contains_key(lens["name"].as_str().unwrap()));
+    }
     let template = &templates["tests"];
     assert_eq!(template["access"], "read_only");
     assert_eq!(template["role"], "lens.tests");
@@ -5547,16 +6326,20 @@ fn a_head_subject_review_defers_its_size_to_the_pinned_commit() {
     // The writer keeps one route; read-only members repeat their alias.
     assert!(document["nodes"][0].get("routes").is_none());
     assert_eq!(document["nodes"][0]["route"]["alias"], "senior");
-    assert_eq!(review[0]["routes"].as_array().unwrap().len(), 2);
-    let verify = &review[2];
-    assert_eq!(verify["id"], "verify");
+    assert_eq!(
+        lenses["panel_templates"]["frame"]["routes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document.clone()).unwrap();
     assert_eq!(document.review_base.as_deref(), Some("main"));
 }
 
 #[test]
-fn explicit_size_shape_and_commit_subjects_keep_the_static_v1_panel() {
+fn explicit_size_and_shape_still_defer_unpinned_subjects() {
     let layers = real_selector("/nonexistent");
     let deliver = |extra: &str| {
         expand(
@@ -5570,21 +6353,26 @@ fn explicit_size_shape_and_commit_subjects_keep_the_static_v1_panel() {
     };
     for extra in ["parameters.size='small'", "parameters.review_shape='quick'"] {
         let document = deliver(extra);
-        assert_eq!(document["schema_version"], 1, "{extra}");
-        assert!(document.get("review_base").is_none(), "{extra}");
-        assert!(document["nodes"][2]["composite"]["nodes"][1]["composite"].is_object());
+        assert_eq!(document["schema_version"], 2, "{extra}");
+        assert_eq!(
+            document["nodes"][2]["composite"]["nodes"][0]["kind"],
+            "plan"
+        );
     }
     // The default council reviews a commit, which is already pinned.
     let document = expand(
         &layers,
-        "review-council",
+        "review",
         "brief",
         &["parameters.worktree='/repo/w'".into()],
     )
     .unwrap()
     .document;
-    assert_eq!(document["schema_version"], 1);
     assert!(document["nodes"][1]["composite"].is_object());
+    assert_ne!(
+        document["nodes"][1]["composite"]["nodes"][0]["kind"],
+        "plan"
+    );
     // A preset that never reviews stays on v1 with no review fields.
     for name in ["single", "chain", "fan-out", "scout-swarm"] {
         let document = expand(&Layers::empty(), name, "brief", &[])
@@ -5604,8 +6392,8 @@ fn reviews_that_disagree_on_the_base_are_refused() {
             r#"
 stages = [
   { id = "a", role = "writer" },
-  { id = "first", preset = "review-council", depends_on = ["a"], parameters = { subject = { type = "head", node = "a" }, worktree = "/repo/w", base = "main" } },
-  { id = "second", preset = "review-council", depends_on = ["a"], parameters = { subject = { type = "head", node = "a" }, worktree = "/repo/w", base = "release" } },
+  { id = "first", preset = "review", depends_on = ["a"], parameters = { subject = { type = "head", node = "a" }, worktree = "/repo/w", base = "main" } },
+  { id = "second", preset = "review", depends_on = ["a"], parameters = { subject = { type = "head", node = "a" }, worktree = "/repo/w", base = "release" } },
 ]
 [parameters]
 worktree = { type = "string", default = "/repo/w" }
@@ -5776,10 +6564,10 @@ fn big_batch_without_scout_preserves_remaining_stage_wiring() {
 }
 
 #[test]
-fn compact_preset_show_lists_review_council_parameter_docs() {
+fn compact_preset_show_lists_review_parameter_docs() {
     let layers = Layers::empty();
-    let (values, origins) = layers.resolve("review-council").unwrap();
-    let data = json!({"name": "review-council", "values": values, "origins": origins});
+    let (values, origins) = layers.resolve("review").unwrap();
+    let data = json!({"name": "review", "values": values, "origins": origins});
     let shown = super::preset::human_for_test(&data, false);
     for (name, value) in data["values"]["parameters"].as_object().unwrap() {
         assert!(shown.contains(name), "missing {name}");
@@ -5801,10 +6589,10 @@ fn compact_preset_explain_lists_parameter_names() {
 #[test]
 fn preset_show_and_explain_describe_parameters_and_origins() {
     let layers = Layers::empty();
-    let (values, mut origins) = layers.resolve("review-council").unwrap();
-    origins.extend(expand(&layers, "review-council", "", &[]).unwrap().origins);
-    let explain = layers.explain("review-council").unwrap();
-    assert_eq!(explain["name"], "review-council");
+    let (values, mut origins) = layers.resolve("review").unwrap();
+    origins.extend(expand(&layers, "review", "", &[]).unwrap().origins);
+    let explain = layers.explain("review").unwrap();
+    assert_eq!(explain["name"], "review");
     let parameters = values["parameters"].as_object().unwrap();
     let explained = explain["parameters"].as_array().unwrap();
     assert_eq!(parameters.len(), explained.len());
@@ -5873,7 +6661,7 @@ fn a_static_commit_council_records_the_requested_base() {
     let layers = real_selector("/nonexistent");
     let document = expand(
         &layers,
-        "review-council",
+        "review",
         "brief",
         &[
             "parameters.worktree='/repo/w'".into(),
@@ -5891,7 +6679,7 @@ fn a_static_commit_council_records_the_requested_base() {
 /// Every document a preset emits must pass the admission checks the runtime
 /// applies on submit, not just deserialize: a document that carried a review
 /// base under schema 1 expanded and explained cleanly yet was refused as
-/// "invalid input" by every `run --preset review-council` with a base.
+/// "invalid input" by every `run --preset review` with a base.
 #[test]
 fn every_bundled_preset_document_passes_graph_admission() {
     let layers = real_selector("/nonexistent");
@@ -5910,14 +6698,14 @@ fn every_bundled_preset_document_passes_graph_admission() {
         "fan-out",
         "scout-swarm",
         "generator-evaluator",
-        "review-council",
+        "review",
         "scope-then-run",
         "deliver",
         "big-batch",
     ] {
         for extra in shapes {
             let mut overrides: Vec<String> = match name {
-                "generator-evaluator" | "review-council" | "scope-then-run" | "deliver" => {
+                "generator-evaluator" | "review" | "scope-then-run" | "deliver" => {
                     vec!["parameters.worktree='/repo/lane'".into()]
                 }
                 "big-batch" => vec![
@@ -5967,10 +6755,36 @@ fn a_generator_review_defers_its_size_until_the_writer_has_run() {
         .iter()
         .find(|node| node["id"] == "lens")
         .unwrap();
-    assert_eq!(lens["kind"], "plan");
-    assert_eq!(lens["source"]["type"], "node");
-    assert_eq!(lens["source"]["node"], "implement");
-    assert!(lens["lens_templates"].is_object());
+    let deferred = &lens["composite"]["nodes"][0];
+    assert_eq!(deferred["kind"], "plan");
+    assert_eq!(deferred["source"]["type"], "node");
+    assert_eq!(deferred["source"]["node"], "implement");
+    assert!(
+        deferred["review"]["lenses"].as_array().unwrap().is_empty(),
+        "{deferred}"
+    );
+    assert!(deferred["lens_templates"].is_object());
+    let custom = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.lenses=[{name='tests',tier='',when=''}]".into(),
+        ],
+    )
+    .unwrap()
+    .document;
+    let lens = custom["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "lens")
+        .unwrap();
+    assert_eq!(
+        lens["composite"]["nodes"][0]["review"]["lenses"][0]["name"],
+        "tests"
+    );
     let sized = expand(
         &layers,
         "generator-evaluator",
@@ -5982,7 +6796,136 @@ fn a_generator_review_defers_its_size_until_the_writer_has_run() {
     )
     .unwrap()
     .document;
-    assert_eq!(sized["schema_version"], 1);
+    assert_eq!(sized["schema_version"], 2);
+    let group = sized["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "lens")
+        .unwrap();
+    let nodes = group["composite"]["nodes"].as_array().unwrap();
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node["kind"] == "plan" && node["review"]["size"] == "small")
+    );
+}
+
+#[test]
+fn deliver_deferred_review_runs_the_resolved_shape_on_the_writer_commit() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let layers = real_selector("/nonexistent");
+    for shape in ["quick", "standard", "protected"] {
+        let mut expansion = expand(
+            &layers,
+            "deliver",
+            "brief",
+            &[
+                "parameters.worktree='/repo/lane'".into(),
+                format!("parameters.land={}", usize::from(shape == "quick")),
+                "parameters.land_tier='routine'".into(),
+                "parameters.checks=['ci']".into(),
+            ],
+        )
+        .unwrap();
+        pin_fixture_sources(&mut expansion.document);
+        let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+        let config = provenant_fabric_runtime::config::GraphConfig::default();
+        let mut owner = PresetOwner {
+            deferred_shape: Some(if shape == "protected" { "quick" } else { shape }.into()),
+            deferred_paths: if shape == "protected" {
+                vec!["src/credentials.rs".into()]
+            } else {
+                vec![]
+            },
+            allow_land: shape == "quick",
+            ..Default::default()
+        };
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut PresetJournal::default(),
+            &config.limits,
+            &config.budget,
+        )
+        .unwrap();
+        assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
+        let attempts: Vec<_> = owner
+            .launched
+            .iter()
+            .filter(|id| id.contains("--r--"))
+            .collect();
+        if shape == "quick" {
+            assert_eq!(attempts.len(), 1, "{attempts:?}");
+            assert_eq!(owner.lands, 1);
+        } else {
+            if shape == "standard" {
+                assert_eq!(attempts.len(), 8, "{attempts:?}");
+            } else {
+                assert!(attempts.len() > 8, "{attempts:?}");
+            }
+            assert!(attempts[0].ends_with("--f"));
+            assert!(attempts[attempts.len() - 2].ends_with("--v-1"));
+            assert!(attempts[attempts.len() - 1].ends_with("--s"));
+        }
+        let writer = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "write")
+            .unwrap()
+            .outputs
+            .as_ref()
+            .unwrap()
+            .commit
+            .as_ref()
+            .unwrap();
+        for progress in run
+            .checkpoint
+            .nodes
+            .iter()
+            .filter(|node| node.id.contains("--r--") && !node.attempts.is_empty())
+        {
+            assert_eq!(progress.source_commit.as_ref(), Some(writer));
+        }
+    }
+}
+
+#[test]
+fn crucial_generator_reaches_evaluator_after_review() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let layers = real_selector("/nonexistent");
+    let mut expansion = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.risk_tier='crucial'".into(),
+            "parameters.size='small'".into(),
+        ],
+    )
+    .unwrap();
+    pin_fixture_sources(&mut expansion.document);
+    let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner {
+        deferred_shape: Some("deep".into()),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert!(
+        owner.launched.iter().any(|id| id == "evaluate"),
+        "{:#?}",
+        run.checkpoint.nodes
+    );
 }
 
 #[test]
@@ -6000,7 +6943,7 @@ fn preset_file_spec_reaches_review_nodes_and_warns_when_missing() {
     .unwrap();
     let mut layers = Layers::empty();
     layers.project_dir = Some(project.clone());
-    for preset in ["generator-evaluator", "review-council"] {
+    for preset in ["generator-evaluator", "review"] {
         let expanded = super::preset::expand_with(
             &layers,
             preset,
@@ -6309,6 +7252,114 @@ fn five_and_seven_lane_big_batches_fit_the_checkpoint_envelope() {
 }
 
 #[test]
+fn request_bindings_follow_declarations_and_warn_when_missing() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "custom-bindings", "stages = []\n[parameters]\npriority = { type = 'string', default = '', bind = 'risk_tier' }\ncategory = { type = 'string', default = '', bind = 'kind' }\n").unwrap();
+    let (values, warnings) =
+        request_bindings(&layers, "custom-bindings", Some("crucial"), Some("docs")).unwrap();
+    assert!(warnings.is_empty());
+    assert!(values.contains(&("priority".into(), json!("crucial"))));
+    assert!(values.contains(&("category".into(), json!("docs"))));
+    let (values, warnings) =
+        request_bindings(&layers, "single", Some("routine"), Some("docs")).unwrap();
+    assert!(values.is_empty());
+    assert!(warnings.iter().any(|w| w.contains("--risk-tier")));
+    assert!(warnings.iter().any(|w| w.contains("--task-kind")));
+}
+
+#[test]
+fn copied_generator_evaluator_receives_the_same_request_and_nodes() {
+    let mut layers = Layers::empty();
+    layers.review = Some(shapes());
+    layers
+        .insert(
+            "test",
+            "custom-generator",
+            include_str!("../assets/presets/generator-evaluator.toml"),
+        )
+        .unwrap();
+    let mut documents = Vec::new();
+    for name in ["generator-evaluator", "custom-generator"] {
+        let (bindings, warnings) =
+            request_bindings(&layers, name, Some("crucial"), Some("docs")).unwrap();
+        assert!(warnings.is_empty());
+        assert!(bindings.contains(&("risk_tier".into(), json!("crucial"))));
+        assert!(bindings.contains(&("kind".into(), json!("docs"))));
+        let expansion = super::preset::expand_with(
+            &layers,
+            name,
+            "brief",
+            &bindings,
+            &["parameters.worktree='/repo/lane'".into()],
+        )
+        .unwrap();
+        documents.push(expansion.document["nodes"].clone());
+    }
+    assert_eq!(documents[0], documents[1]);
+}
+
+#[test]
+fn removed_review_preset_name_uses_the_unknown_preset_error() {
+    let old_name = ["review", "council"].join("-");
+    let error = Layers::empty().resolve(&old_name).unwrap_err();
+    assert!(
+        error.contains(&format!("unknown preset: {old_name}")),
+        "{error}"
+    );
+}
+
+#[test]
+fn evaluator_role_has_a_default_without_a_preset_specific_parameter() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "custom-evaluator",
+            "stages = [{ id = 'evaluate', role = 'review.evaluator' }]\n[parameters]\nworktree = '/repo/lane'\nspec = ''\n",
+        )
+        .unwrap();
+    let expansion = expand(&layers, "custom-evaluator", "brief", &[]).unwrap();
+    assert_eq!(
+        route(node(&expansion.document, "evaluate"))["alias"],
+        "senior"
+    );
+}
+
+#[test]
+fn tracker_advice_is_declared_by_parameter() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "custom-advice",
+            "stages=[]\n[parameters]\nticket={type='string',default='',tracker_advice=true}",
+        )
+        .unwrap();
+    let (custom, _) = layers.resolve("custom-advice").unwrap();
+    assert_eq!(tracker_advice_parameter(&custom), Some("ticket"));
+    let (single, _) = layers.resolve("single").unwrap();
+    assert_eq!(tracker_advice_parameter(&single), None);
+}
+
+#[test]
+fn review_lens_selection_is_declared_on_the_stage() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "declared-selection", "stages=[{id='selected',for_each='${choices}',review_lenses=true,prompt='selected'},{id='ordinary',for_each='${choices}',prompt='ordinary'}]\n[parameters]\nchoices=[{name='always'},{name='conditional',when='security'}]\n").unwrap();
+    let expanded = expand(&layers, "declared-selection", "brief", &[]).unwrap();
+    let nodes = expanded.document["nodes"].as_array().unwrap();
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node["id"] != "selected-conditional")
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node["id"] == "ordinary-conditional")
+    );
+}
+
+#[test]
 fn writer_tier_override_and_advisory_mix() {
     let expanded = expand(
         &Layers::empty(),
@@ -6362,4 +7413,136 @@ fn writer_tier_override_and_advisory_mix() {
         {"composite":{"nodes":[{"access":"worktree_write","route":{"alias":"principal"}}]}}
     ]);
     assert_eq!(writer_tier_mix(nodes.as_array().unwrap()), [0, 1, 1]);
+}
+
+#[test]
+fn big_batch_without_scout_matches_golden() {
+    let expanded = super::preset::expand_with(
+        &Layers::empty(),
+        "big-batch",
+        "brief",
+        &[("scout".into(), json!(0))],
+        &[],
+    )
+    .unwrap();
+    let nodes = expanded.document["nodes"].as_array().unwrap();
+    assert!(!nodes.iter().any(|node| node["id"] == "scout"));
+    let mut actual = serde_json::to_string_pretty(&expanded.document).unwrap();
+    actual.push('\n');
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/presets/fixtures/big-batch.no-scout.json");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
+    assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
+}
+
+#[test]
+fn preset_show_and_explain_json_match_snapshots() {
+    use provenant_records::{CommandResult, Outcome};
+    let layers = Layers::empty();
+    let (values, mut origins) = layers.resolve("review").unwrap();
+    origins.extend(expand(&layers, "review", "", &[]).unwrap().origins);
+    let show = CommandResult::new(
+        "preset",
+        Outcome::Ok,
+        json!({"name": "review", "values": values, "origins": origins}),
+    );
+    let explain = CommandResult::new("preset", Outcome::Ok, layers.explain("review").unwrap());
+    // `UPDATE_GOLDEN=1` rewrites the fixtures.
+    let golden = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    for (actual, name) in [
+        (
+            serde_json::to_value(show).unwrap(),
+            "preset-review-show.json",
+        ),
+        (
+            serde_json::to_value(explain).unwrap(),
+            "preset-review-explain.json",
+        ),
+    ] {
+        let path = golden.join(name);
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            let mut text = serde_json::to_string_pretty(&actual).unwrap();
+            text.push('\n');
+            std::fs::write(&path, text).unwrap();
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            actual,
+            serde_json::from_str::<Value>(&expected).unwrap_or_default(),
+            "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
+        );
+    }
+}
+
+#[test]
+fn file_spec_expansion_golden() {
+    let mut layers = Layers::empty();
+    layers.project_dir = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let mut expanded = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.spec='assets/presets/fixtures/review-spec.md'".into()],
+    )
+    .unwrap();
+    expanded.document["graph_id"] = json!("<graph-id>");
+    let mut actual = serde_json::to_string_pretty(&expanded.document)
+        .unwrap()
+        .replace(env!("CARGO_MANIFEST_DIR"), "<project>");
+    actual.push('\n');
+    let path = layers
+        .project_dir
+        .unwrap()
+        .join("assets/presets/fixtures/generator-evaluator-file-spec.expansion.json");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
+    assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
+}
+
+#[test]
+fn review_preserves_legacy_council_structure() {
+    // Projection of the pre-rename review-council expansion at 1e2381cb1^.
+    // Prompts, digests and graph IDs are intentionally outside the structure.
+    fn project(value: &Value) -> Value {
+        match value {
+            Value::Object(fields) => Value::Object(
+                fields
+                    .iter()
+                    .filter(|(key, _)| !["prompt", "role_digest", "digest"].contains(&key.as_str()))
+                    .map(|(key, value)| (key.clone(), project(value)))
+                    .collect(),
+            ),
+            Value::Array(items) => Value::Array(items.iter().map(project).collect()),
+            _ => value.clone(),
+        }
+    }
+    let expected: Value = serde_json::from_str(include_str!(
+        "../assets/presets/fixtures/legacy-council-structure.json"
+    ))
+    .unwrap();
+    let current = expand(&Layers::empty(), "review", "brief", &[]).unwrap();
+    assert_eq!(project(&current.document["nodes"]), expected);
+    // The old default fixture has eight lenses. Standard takes its first five;
+    // both shapes retain the old subject, panel, verifier and synthesis wiring.
+    for (risk, count) in [("substantial", 5), ("crucial", 8)] {
+        let graph = council(&[&format!("parameters.risk_tier='{risk}'")], true).unwrap();
+        let old = expected.as_array().unwrap();
+        let actual = graph["nodes"].as_array().unwrap();
+        for (before, after) in old.iter().zip(actual) {
+            for key in ["id", "role", "access", "depends_on", "source"] {
+                assert_eq!(before.get(key), after.get(key), "{risk}: {key}");
+            }
+        }
+        let legacy_lenses = old[1]["composite"]["nodes"].as_array().unwrap();
+        let lenses = actual[1]["composite"]["nodes"].as_array().unwrap();
+        assert_eq!(lenses.len(), count);
+        for (before, after) in legacy_lenses.iter().take(count).zip(lenses) {
+            for key in ["id", "role", "access", "depends_on", "require_findings"] {
+                assert_eq!(before.get(key), after.get(key), "{risk}: {key}");
+            }
+        }
+    }
 }

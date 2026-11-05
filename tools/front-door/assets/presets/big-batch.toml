@@ -4,11 +4,11 @@ stages = [
   { id = "lanes", parallel = [
     { id = "lane", for_each = "${lanes}", preset = "generator-evaluator", parameters = { worktree = "${item.worktree}", scope = "${item.scope}", spec = "${item.spec}", spec_max_bytes = "${spec_max_bytes}", base = "${base}", delivery = "integrate:${integration_branch}" } },
   ] },
-  { id = "council", preset = "review-council", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", spec_max_bytes = "${spec_max_bytes}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
+  { id = "council", preset = "review", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", spec_max_bytes = "${spec_max_bytes}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
   { id = "refactor", role = "refactor-principal" },
   { id = "repair", loop = { max_rounds = 2, until = "accept", stages = [
     { id = "fix", role = "repairer" },
-    { id = "review", preset = "review-council", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", spec_max_bytes = "${spec_max_bytes}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
+    { id = "review", preset = "review", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", spec_max_bytes = "${spec_max_bytes}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
     { id = "accept", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
   ] } },
 ]
@@ -30,19 +30,15 @@ guidance = """Split the work into waves of writer lanes. Give each lane its own 
 
 [[plan.patterns]]
 name = "writer-lane"
-# The same per-lane review as the static generator-evaluator lane: the lens
-# legs judge the commit the writer made, and the evaluator reconciles their
-# findings. A pattern cannot nest composites, so the lens legs sit beside the
-# writer and each depends on it.
+# The lane uses the same review flow as the static generator-evaluator lane.
 exports = [
   { node = "implement", outputs = ["branch", "commit"] },
   { node = "evaluate", outputs = ["result", "findings", "verdict"] },
 ]
 nodes = [
   { id = "implement", role = "write.implement", title = "Lane ${lane}", brief = "Lane ${lane}. Time budget: ${budget_seconds} seconds; commit your work and stop with a handoff before it passes.", deadline_seconds = "${budget_seconds}", worktree = "${worktree}", delivery = "integrate:${integration_branch}", tier = "${route}", write_scope = "${scope}", acceptance_checks = "${acceptance}" },
-  { id = "lens-correctness-spec", role = "lens.correctness-spec", item = { name = "correctness-spec", tier = "senior" }, depends_on = ["implement"], source = { type = "node", node = "implement" }, inputs = [{ node = "implement", outputs = ["result"] }], acceptance_checks = ["Check the committed change against the spec", "End with one exact VERDICT line"] },
-  { id = "lens-simplicity", role = "lens.simplicity", item = { name = "simplicity", tier = "senior" }, depends_on = ["implement"], source = { type = "node", node = "implement" }, inputs = [{ node = "implement", outputs = ["result"] }], acceptance_checks = ["Name what can be deleted or simplified", "End with one exact VERDICT line"] },
-  { id = "evaluate", role = "review.evaluator", tier = "senior", depends_on = ["lens-correctness-spec", "lens-simplicity", "implement"], source = { type = "node", node = "implement" }, inputs = [{ node = "lens-correctness-spec", outputs = ["result"] }, { node = "lens-simplicity", outputs = ["result"] }], acceptance_checks = ["Give every finding one disposition", "End with one exact VERDICT line"] },
+  { id = "review", preset = "review", depends_on = ["implement"], parameters = { subject = { type = "node", node = "implement" }, worktree = "${worktree}", base = "${base}", spec = "${spec}", spec_max_bytes = "${spec_max_bytes}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
+  { id = "evaluate", role = "review.evaluator", tier = "senior", depends_on = ["review", "implement"], source = { type = "node", node = "implement" }, inputs = [{ node = "review", outputs = ["result", "findings"] }], acceptance_checks = ["Give every finding one disposition", "End with one exact VERDICT line"] },
 ]
 
 [plan.patterns.parameters]
@@ -73,12 +69,12 @@ batch_worktree = { type = "string", default = "", doc = "Registered worktree on 
 base = { type = "string", default = "", doc = "Diff reference the batch is measured from." }
 spec = { type = "string", default = "", doc = "Issue number or file the batch answers." }
 spec_max_bytes = { type = "integer", default = 16384, min = 1, max = 65536, doc = "Maximum bytes of a file spec included in each review brief." }
-risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
+risk_tier = { type = "string", inherit = true, bind = "risk_tier", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
-kind = { type = "string", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
+kind = { type = "string", bind = "kind", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
 size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty defers the choice: the host measures the pinned reviewed commit against base when the review starts, so the panel fits the work actually written; pass a size to fix it now." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
-local_check_policy = { type = "string", default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
+local_check_policy = { type = "string", inherit = true, default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
 worktrees = { type = "list", default = [], doc = "Registered writer worktrees a planner may assign to its lanes; empty leaves the choice open." }
 # One entry per lane: name, worktree, scope and spec. Supply with --params-file.
 lanes = [

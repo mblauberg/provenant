@@ -961,6 +961,15 @@ fn defaults(_: Profile) -> &'static str {
 /// Enforced model policy restrictions, including a retired schedule key in a
 /// restricting rule, are a boundary; other routing input recovers.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("review.floors.{floor}.paths", "list"),
+    FieldMetadata::enumeration(
+        "review.floors.{floor}.tier",
+        &["routine", "substantial", "crucial", "terminal"],
+    ),
+    FieldMetadata::new("review.floors.{floor}.lenses", "list"),
+    FieldMetadata::new("review.shapes.{shape}.frame", "bool"),
+    FieldMetadata::int("review.shapes.{shape}.verifiers", 0, 32),
+    FieldMetadata::enumeration("review.shapes.{shape}.synthesis", &["model", "reduce"]),
     FieldMetadata::int("settlement_retries", 0, MAX_SETTLEMENT_RETRIES as i64),
     FieldMetadata::int("capacity_retry_seconds", 0, MAX_RETRY_WAIT_SECONDS as i64),
     FieldMetadata::int(

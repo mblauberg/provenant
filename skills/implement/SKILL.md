@@ -34,7 +34,7 @@ provenant run --preset deliver --prompt-file ISSUE.md \
 
 Check the explanation, then submit the same command without `--explain` (add
 `--wait 2h` when no one is watching). Nodes run in order: `write`, `ci` (a
-repair loop bounded by `max_iterations`), `review` (`review-council`), `accept`
+repair loop bounded by `max_iterations`), `review` (`review`), `accept`
 and `land`. `risk_tier` picks the review shape and `land_tier` (default `substantial`) the
 landing gate, so set both to the approved tier. Routine and substantial work
 lands automatically; crucial and terminal work asks the `decision_session`,
@@ -57,7 +57,7 @@ worktree. Name the method skill: `test-design` for observable behaviour,
 `refactor` for restructuring, `diagnose` for an unknown cause.
 
 The preset does not yet implement the planner-led policy or review repair loop.
-Run `review-council --plan on` and supplement its panel to meet HARNESS floors.
+Run `review --plan on` and supplement its panel to meet HARNESS floors.
 `deliver` has no gate for that supplemental review, so pass `land=0` when the
 panel needs supplementing and land by hand once it passes. A failed council
 stops `deliver`. A separate writer repairs accepted findings,

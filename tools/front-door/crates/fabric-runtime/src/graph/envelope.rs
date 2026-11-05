@@ -21,11 +21,33 @@ const UNKNOWN_USAGE_TEXT_BYTES: usize = 64;
 pub(super) const REFUSAL_CODE_BYTES: usize = 64;
 /// Space for a deferred review node's expanded progress and serialized record.
 /// A prospective expansion is also checked against this reservation.
-const REVIEW_NODE_RESERVE: usize = 64 * 1024;
+const REVIEW_NODE_RESERVE: usize = 40 * 1024;
 const REVIEW_RECORD_RESERVE: usize = 256 * 1024;
 
 fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
     let templates = node.extra.get("lens_templates").map_or(0, canonical_len);
+    let panel_templates = node
+        .extra
+        .get("panel_templates")
+        .and_then(serde_json::Value::as_object);
+    let panel_bytes = panel_templates.map_or(0, |templates| {
+        let one = |key: &str| {
+            templates
+                .get(key)
+                .filter(|value| !value.is_null())
+                .map_or(0, canonical_len)
+        };
+        let verifiers = node
+            .extra
+            .get("panel_max_verifiers")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(review.max_nodes)
+            .min(review.max_nodes);
+        one("frame")
+            .saturating_add(one("synthesis"))
+            .saturating_add(one("verifier").saturating_mul(verifiers))
+    });
     let inherited = canonical_len(&(&node.depends_on, &node.inputs, &node.read_roots));
     // A custom lens can have a disposition projection or CI evidence larger
     // than an ordinary review leaf. Reserve those declared additions too.
@@ -90,6 +112,13 @@ fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
         .saturating_mul(REVIEW_NODE_RESERVE)
         .saturating_add(REVIEW_RECORD_RESERVE)
         .saturating_add(templates.saturating_mul(2))
+        // Verifier templates can be instantiated more than once.
+        .saturating_add(panel_bytes.saturating_mul(2))
+        .saturating_add(if panel_templates.is_some() {
+            DISPOSITION_FINDINGS_BYTES + COMPOSITE_EXCERPT_BYTES
+        } else {
+            0
+        })
         .saturating_add(template_extra)
         .saturating_add(route_extra)
         // Explicit lens tiers can carry route lists copied into both the
