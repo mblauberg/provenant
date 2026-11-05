@@ -1507,7 +1507,7 @@ pub(super) fn dispatch_inner(
                                     &info.path,
                                 ) {
                                     Ok(_) => {}
-                                    Err(worktrees::WorkerState::Busy) => {
+                                    Err(worktrees::Occupancy::Held) => {
                                         let tree = provenant_confinement::verify_worktree(
                                             context.repo,
                                             &info.path,
@@ -1520,13 +1520,7 @@ pub(super) fn dispatch_inner(
                                             holder,
                                         });
                                     }
-                                    Err(worktrees::WorkerState::Live) => {
-                                        return Err(worktrees::live_refusal(
-                                            context.workers,
-                                            &info.path,
-                                        ));
-                                    }
-                                    Err(_) => return Err(worktrees::WorktreeError::UnknownWriter),
+                                    Err(other) => return Err(worktrees::custody_refusal(other)),
                                 }
                             }
                             Ok(json!({

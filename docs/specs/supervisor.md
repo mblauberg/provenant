@@ -85,7 +85,8 @@ Failed-creation cleanup rechecks the operation owner under those locks before
 removing the tree. An unreadable owner record is custody uncertainty with the
 worktree scope and read failure, not an unowned checkout. Inventory retains the
 validated owner record or its read error, while the existing worktree-list
-owner labels remain stable.
+owner labels remain stable. A retained import fence still refuses custody, but
+is reported as scoped custody uncertainty rather than as a live held lease.
 
 A lane owner whose recorded attempt is confirmed terminal may be reassigned
 when the writer lock is free even if the census sees a process in the tree.

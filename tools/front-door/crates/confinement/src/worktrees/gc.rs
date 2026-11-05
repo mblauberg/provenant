@@ -1179,10 +1179,7 @@ fn preview_foreign(
     // A missing slot means no writer has ever held this tree.
     let writer = {
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
-        cache_writer_probe(context.project_state, &lane.path).map_err(|state| match state {
-            WorkerState::Busy => WorktreeError::LockBusy,
-            _ => WorktreeError::UnknownWriter,
-        })?
+        cache_writer_probe(context.project_state, &lane.path).map_err(custody_refusal)?
     };
     let recheck = || -> Result<WorktreeCondition, WorktreeError> {
         verified.repo().revalidate()?;

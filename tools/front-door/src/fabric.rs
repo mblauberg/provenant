@@ -37,7 +37,7 @@ fn peer_adoption_custody(
     cancel: &CancelToken,
 ) -> Result<Option<&'static str>, provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees::{
-        self, Occupancy, OccupancyUnknownSource, WorkerState, WorktreeError,
+        self, Occupancy, OccupancyUnknownSource, WorktreeError,
     };
     let warning = match &observation.occupancy {
         Occupancy::Held => None,
@@ -69,13 +69,10 @@ fn peer_adoption_custody(
     let _writer =
         worktrees::cache_writer_guard(context.project_state, tree.path()).map_err(|state| {
             match state {
-                WorkerState::Busy => WorktreeError::WriterBusy {
+                Occupancy::Held => WorktreeError::WriterBusy {
                     holder: holder().ok().flatten(),
                 },
-                _ => WorktreeError::UnknownOccupancy {
-                    path: tree.path().to_path_buf(),
-                    detail: "writer custody could not be verified".into(),
-                },
+                other => worktrees::custody_refusal(other),
             }
         })?;
     worktrees::check_writer_terminal(tree.repo())?;
@@ -4131,7 +4128,10 @@ fn settle_owned_worktree(
                                 let guard =
                                     worktrees::cache_writer_guard(context.project_state, path)?;
                                 if !terminal(path) || !no_live(path) {
-                                    return Err(worktrees::WorkerState::Unknown);
+                                    return Err(worktrees::Occupancy::custody_unknown(
+                                        path.to_path_buf(),
+                                        "lane settlement could not be verified",
+                                    ));
                                 }
                                 Ok(Some(guard))
                             },

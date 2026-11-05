@@ -179,7 +179,7 @@ fn list_impl(
                 } else {
                     WorktreeCondition::Unknown
                 },
-                WorkerState::Unknown,
+                Occupancy::custody_unknown(path.clone(), "primary custody was not observed"),
                 true,
             )
         } else {
@@ -202,7 +202,10 @@ fn list_impl(
                         }
                     };
                     let disk = if entry.locked || entry.prunable {
-                        WorkerState::Unknown
+                        Occupancy::custody_unknown(
+                            path.clone(),
+                            "Git registration is locked or prunable",
+                        )
                     } else {
                         disk_writer_state(context.project_state, &path)
                     };
@@ -213,17 +216,26 @@ fn list_impl(
                         } else {
                             WorktreeCondition::Unknown
                         },
-                        disk,
-                        entry.locked || entry.prunable || disk == WorkerState::Unknown,
+                        disk.clone(),
+                        entry.locked
+                            || entry.prunable
+                            || matches!(&disk, Occupancy::Unknown { .. }),
                     )
                 }
                 Err(error) => {
                     registration_evidence = Some(format!("worktree verification failed: {error}"));
-                    (WorktreeCondition::Unknown, WorkerState::Unknown, true)
+                    (
+                        WorktreeCondition::Unknown,
+                        Occupancy::custody_unknown(
+                            path.clone(),
+                            "worktree registration could not be verified",
+                        ),
+                        true,
+                    )
                 }
             }
         };
-        let occupancy = if disk == WorkerState::Busy {
+        let occupancy = if matches!(&disk, Occupancy::Held) {
             Occupancy::Held
         } else if registration_unknown || owner_evidence.is_some() {
             let evidence = if entry.locked {
@@ -231,9 +243,15 @@ fn list_impl(
             } else if entry.prunable {
                 "Git marks the worktree prunable".to_owned()
             } else {
-                owner_evidence.or(registration_evidence).unwrap_or_else(|| {
-                    "worktree registration or writer custody could not be verified".to_owned()
-                })
+                owner_evidence
+                    .or(registration_evidence)
+                    .or_else(|| match &disk {
+                        Occupancy::Unknown { evidence, .. } => Some(evidence.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        "worktree registration or writer custody could not be verified".to_owned()
+                    })
             };
             Occupancy::Unknown {
                 scope: path.clone(),
@@ -420,11 +438,7 @@ pub fn create(
             return Err(WorktreeError::UnknownWriter);
         }
     }
-    let _writer =
-        cache_writer_guard(context.project_state, &target).map_err(|state| match state {
-            WorkerState::Busy => WorktreeError::LockBusy,
-            _ => WorktreeError::UnknownWriter,
-        })?;
+    let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
     let named_root = context
         .repo
         .root_dir()
@@ -486,7 +500,7 @@ pub fn create(
         dirty: WorktreeCondition::Clean,
         owner: Ok(None),
         primary: false,
-        occupancy: combine_occupancy(&target, WorkerState::Free, writer),
+        occupancy: combine_occupancy(&target, Occupancy::Available, writer),
     })
 }
 

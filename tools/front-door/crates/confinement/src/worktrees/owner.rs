@@ -89,11 +89,10 @@ pub fn update_owner_when_unchanged(
     }
     let _writer =
         cache_writer_guard(context.project_state, tree.path()).map_err(|state| match state {
-            WorkerState::Busy => WorktreeError::WriterBusy {
+            Occupancy::Held => WorktreeError::WriterBusy {
                 holder: current.as_ref().and_then(|owner| owner.attempt_id),
             },
-            WorkerState::Live => WorktreeError::LiveWriter,
-            _ => WorktreeError::UnknownWriter,
+            other => custody_refusal(other),
         })?;
     save_owner(&tree, updated)
 }
@@ -152,11 +151,7 @@ pub fn save_lane_owner_when_free(
         return Err(WorktreeError::IdentityChanged);
     }
     let _writer =
-        cache_writer_guard(context.project_state, tree.path()).map_err(|state| match state {
-            WorkerState::Busy => WorktreeError::LockBusy,
-            WorkerState::Live => WorktreeError::LiveWriter,
-            _ => WorktreeError::UnknownWriter,
-        })?;
+        cache_writer_guard(context.project_state, tree.path()).map_err(custody_refusal)?;
     let current_prior = load_owner(&tree)?;
     if current_prior.as_ref() != expected_prior {
         return Err(WorktreeError::IdentityChanged);

@@ -871,7 +871,7 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
         let held = cache_writer_guard(context.project_state, &path).map_err(|_| "guard failed")?;
         assert!(matches!(
             cache_writer_probe(context.project_state, &path),
-            Err(WorkerState::Busy)
+            Err(Occupancy::Held)
         ));
         drop(held);
     }
@@ -917,24 +917,23 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
             .any(|record| record.scope == scope)
     );
 
-    assert!(matches!(
-        cache_writer_probe(context.project_state, &path),
-        Err(WorkerState::Busy)
-    ));
-    assert!(matches!(
-        cache_writer_guard(context.project_state, &path),
-        Err(WorkerState::Busy)
-    ));
+    for refusal in [
+        cache_writer_probe(context.project_state, &path).map(|_| ()),
+        cache_writer_guard(context.project_state, &path).map(|_| ()),
+    ] {
+        assert!(matches!(refusal,
+            Err(Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody })
+                if scope == path && evidence.contains("retained import fence")
+        ));
+    }
     let lane = list(&context, &cancel())?
         .into_iter()
         .find(|lane| lane.path == path)
         .ok_or("lane")?;
-    assert_eq!(lane.occupancy, Occupancy::Held);
-    let observation = list(&context, &cancel())?
-        .into_iter()
-        .find(|entry| entry.path == path)
-        .ok_or("retained worktree")?;
-    assert_eq!(observation.occupancy, Occupancy::Held);
+    assert!(matches!(&lane.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
+            if scope == &path && evidence.contains("retained import fence")
+    ));
     fs::write(path.join("uncommitted"), "preserve unfinished work")?;
     let tree = verify_worktree(&fixture.repo, &path)?;
     let new_owner = WorktreeOwner {
@@ -957,7 +956,8 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
             false,
             &cancel()
         ),
-        Err(WorktreeError::LockBusy)
+        Err(WorktreeError::UnknownOccupancy { path: scope, detail })
+            if scope == path && detail.contains("retained import fence")
     ));
     assert!(load_owner(&tree)?.is_none());
     assert_eq!(fs::read(attempt.join("reservation.json"))?, reservation);
@@ -967,14 +967,13 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         .iter()
         .find(|entry| entry.path == path)
         .ok_or("entry")?;
-    assert!(matches!(
-        lock_worktree(&context, entry, &cancel(), false),
-        Err(WorktreeError::LockBusy)
-    ));
-    assert!(matches!(
-        lock_worktree(&context, entry, &cancel(), true),
-        Err(WorktreeError::LockBusy)
-    ));
+    for preview in [false, true] {
+        assert!(matches!(
+            lock_worktree(&context, entry, &cancel(), preview),
+            Err(WorktreeError::UnknownOccupancy { path: scope, detail })
+                if scope == path && detail.contains("retained import fence")
+        ));
+    }
     fs::create_dir(path.join("target"))?;
     fs::write(path.join("target/artifact"), "retained")?;
     let lanes = list(&context, &cancel())?;
@@ -1478,15 +1477,15 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
 fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<(), Box<dyn Error>> {
     let scope = Path::new("/fixture/worktree");
     assert!(matches!(
-        combine_occupancy(scope, WorkerState::Unknown, WorkerState::Live),
+        combine_occupancy(scope, Occupancy::custody_unknown(scope.to_path_buf(), "fixture"), WorkerState::Live),
         Occupancy::Unknown { scope: actual, source: OccupancyUnknownSource::Custody, .. } if actual == scope
     ));
     assert_eq!(
-        combine_occupancy(scope, WorkerState::Busy, WorkerState::Live),
+        combine_occupancy(scope, Occupancy::Held, WorkerState::Live),
         Occupancy::Held
     );
     assert!(matches!(
-        combine_occupancy(scope, WorkerState::Free, WorkerState::Busy),
+        combine_occupancy(scope, Occupancy::Available, WorkerState::Busy),
         Occupancy::Unknown { scope: actual, source: OccupancyUnknownSource::Census, .. } if actual == scope
     ));
     struct Incomplete;

@@ -308,10 +308,7 @@ fn with_wip_custody(
             let verified = provenant_confinement::verify_worktree(context.repo, &tree.path)
                 .map_err(worktrees::WorktreeError::from)?;
             let _writer = worktrees::cache_writer_guard(context.project_state, verified.path())
-                .map_err(|state| match state {
-                    worktrees::WorkerState::Busy => worktrees::WorktreeError::LockBusy,
-                    _ => worktrees::WorktreeError::UnknownWriter,
-                })?;
+                .map_err(worktrees::custody_refusal)?;
             worktrees::check_writer_terminal(verified.repo())?;
             let branch = tree
                 .branch

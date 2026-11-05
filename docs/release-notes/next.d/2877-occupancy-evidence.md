@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- Worktree admission, listing and cleanup use the same scoped occupancy evidence, and local refusals report the affected path (#2877).
+- Worktree admission, listing and cleanup share scoped occupancy evidence; retained import fences report uncertainty rather than a live writer (#2877).

@@ -1002,7 +1002,6 @@ fn collection_lock_for(
 
 fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
     use provenant_confinement::cache::{CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard};
-    use provenant_confinement::worktrees::WorkerState;
 
     let workspace = if command.scheduled {
         roots::Workspace::Home
@@ -1236,7 +1235,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 };
             }
         }
-        Err(WorkerState::Unknown)
+        Err(worktrees::Occupancy::custody_unknown(
+            path.to_path_buf(),
+            "writer registration was not observed",
+        ))
     });
     let provider_state = if command.pressure {
         crate::provider_retention::collect_pressure(

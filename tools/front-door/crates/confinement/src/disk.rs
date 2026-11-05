@@ -230,9 +230,15 @@ pub fn worktrees(
     let observed = workers.observe_roots(&roots);
     let mut inventory = Vec::new();
     for listed in listed.into_iter().filter(|entry| !entry.bare) {
-        let registered = registration.map_or(WorkerState::Unknown, |directory| {
-            disk_writer_state(directory, &listed.path)
-        });
+        let registered = registration.map_or_else(
+            || {
+                crate::worktrees::Occupancy::custody_unknown(
+                    listed.path.clone(),
+                    "writer registration is unavailable",
+                )
+            },
+            |directory| disk_writer_state(directory, &listed.path),
+        );
         let occupancy = combine_occupancy(
             &listed.path,
             registered,
