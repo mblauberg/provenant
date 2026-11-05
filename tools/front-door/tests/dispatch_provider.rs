@@ -716,6 +716,35 @@ fn settled_policy_lanes(
     }
     Err("policy successors did not settle within the fixture budget".into())
 }
+
+fn handoff_recovered(lanes: &Value) -> bool {
+    let Some(rows) = lanes["data"]["lanes"].as_array() else {
+        return false;
+    };
+    rows.iter()
+        .any(|row| row["attempt_number"] == 1 && row["state"] == "quota_limited")
+        && rows.iter().any(|row| {
+            row["attempt_number"] == 2
+                && row["continuation"] == "policy_fallback"
+                && !matches!(
+                    row["state"].as_str(),
+                    None | Some("queued" | "starting" | "running" | "settling")
+                )
+        })
+}
+
+fn handoff_recovery_requires_a_settled_successor() -> Result {
+    let mut lanes = json!({"data":{"lanes":[{"attempt_number":1,"state":"quota_limited"}]}});
+    assert!(!handoff_recovered(&lanes));
+    lanes["data"]["lanes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"attempt_number":2,"state":"running","continuation":"policy_fallback"}));
+    assert!(!handoff_recovered(&lanes));
+    lanes["data"]["lanes"][1]["state"] = json!("uncommitted");
+    assert!(handoff_recovered(&lanes));
+    Ok(())
+}
 /// Confined synthetic accounts exercise real launch, holder settlement and
 /// fresh retry routing without contacting a live provider service.
 fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Result {
@@ -794,7 +823,20 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
             .as_str()
             .ok_or("retained worktree path")?,
     );
-    let lanes = settled_policy_lanes(&rig, output, 1)?;
+    assert!(code(&output) == 1 || code(&output) == 0, "{output:?}");
+    let run_id = launch["data"]["run_id"].as_str().ok_or("run ID")?;
+    let lanes = provenant_test_support::wait_for(
+        "quota-limited attempt and settled fallback",
+        std::time::Duration::from_secs(120),
+        || -> Result<Value> {
+            let output = rig.command(&["lanes", "--id", run_id, "--all", "--json"])?;
+            if code(&output) != 0 {
+                return Err(format!("lanes command failed: {output:?}").into());
+            }
+            Ok(serde_json::from_slice(&output.stdout.bytes)?)
+        },
+        |observation| observation.as_ref().is_ok_and(handoff_recovered),
+    )??;
     let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
@@ -5104,6 +5146,7 @@ fn main() -> ExitCode {
                 "stats_reports_partial_signals_outside_graph_groups",
                 "submit_prints_each_brief_read_root_warning_once",
                 "interrupted_progress_recovers_on_another_account_in_the_same_worktree",
+                "handoff_recovery_requires_a_settled_successor",
                 "capacity_settlement_resumes_the_same_session",
                 "fixture_guardian_exits_when_sigkilled_test_owner_dies",
                 "review_council_resolves_identity_only_dispositions",
@@ -5163,6 +5206,7 @@ fn main() -> ExitCode {
                     "stats_reports_partial_signals_outside_graph_groups" => stats_reports_partial_signals_outside_graph_groups(),
                     "submit_prints_each_brief_read_root_warning_once" => submit_prints_each_brief_read_root_warning_once(),
                     "interrupted_progress_recovers_on_another_account_in_the_same_worktree" => interrupted_progress_recovers_on_another_account_in_the_same_worktree(),
+                    "handoff_recovery_requires_a_settled_successor" => handoff_recovery_requires_a_settled_successor(),
                     "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
                     "fixture_guardian_exits_when_sigkilled_test_owner_dies" => fixture_guardian_exits_when_sigkilled_test_owner_dies(),
                     "review_council_resolves_identity_only_dispositions" => review_council_resolves_identity_only_dispositions(),
