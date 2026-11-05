@@ -6,6 +6,7 @@ pub mod accounts;
 pub mod agy;
 pub mod claude;
 pub mod cloud;
+pub mod cloud_cli;
 pub mod codex;
 pub mod codex_rollout;
 pub mod command;
