@@ -659,14 +659,13 @@ pub(super) fn render_lanes_with_lineage(
             // A lane that has not started says what it is waiting for.
             let wait = waits.iter().find(|w| w.attempt_id == lane.attempt_id);
             let silence_reason = lane
-                .provider_silent_for_ms.0
+                .provider_silent_for_ms
+                .0
                 .map(provenant_records::run::provider_silence_reason);
             let reason = reason
                 .or_else(|| wait.map(|w| w.waiting_for.clone()))
                 .or_else(|| silence_reason.clone());
-            let waiting_for = wait
-                .map(|w| w.waiting_for.clone())
-                .or(silence_reason);
+            let waiting_for = wait.map(|w| w.waiting_for.clone()).or(silence_reason);
             let reason_text = reason
                 .as_deref()
                 .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
@@ -686,7 +685,9 @@ pub(super) fn render_lanes_with_lineage(
                 Some(id) => format!("{state_text} → retrying ({id})"),
                 None => state_text,
             };
-            let state_text = lane.retry_of.map_or(state_text.clone(), |id| format!("{state_text} (retry of {id})"));
+            let state_text = lane.retry_of.map_or(state_text.clone(), |id| {
+                format!("{state_text} (retry of {id})")
+            });
             // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
                 "{}/{}/{}{title_text} {state_text} {route_text}{account_field}{reason_text}\n",
@@ -741,9 +742,7 @@ pub(super) fn render_lanes_with_lineage(
                     ..
                 }
             ) {
-                let capacity = reason
-                    .as_deref()
-                    .is_some_and(capacity_reason);
+                let capacity = reason.as_deref().is_some_and(capacity_reason);
                 if capacity
                     && lane
                         .session
@@ -831,61 +830,76 @@ pub(super) fn render_lanes_with_lineage(
                     let attempt = artifact(root, lane, "");
                     let path = run::locate_transcript(&attempt, session, &lane.write_grants)
                         .map(|path| attempt.join(path));
-                    json!({ "adapter": adapter, "session": session, "path": path })
+                    provenant_records::wire::LaneTranscript {
+                        adapter: adapter.to_owned(),
+                        session: session.to_owned(),
+                        path: path.map(|path| path.display().to_string()),
+                    }
                 });
             // The settled record's own reason, without a waiting lane's note.
-            let settlement = matches!(lane.state, run::AttemptState::Terminal { .. })
-                .then(|| json!({ "reason": state_and_reason(&lane.state).1 }));
-            let mut row = json!({
-                "run_id": lane.run_id,
-                "task_id": lane.task_id,
-                "attempt_id": lane.attempt_id,
-                "attempt_number": lane.attempt_number,
-                "retry_of": lane.retry_of,
-                "superseded_by": successors.get(&lane.attempt_id).copied().or(lane.superseded_by),
-                "cause": lane.settlement_reason,
-                "state": state,
-                "exit_code": exit_code,
-                "reason": reason,
-                "settlement": settlement,
-                "lane_class": wait.map(|w| w.lane_class),
-                "waiting_for": waiting_for,
-                "requested_route": lane.requested_route,
-                "resolved_route": lane.resolved_route,
-                "applied_route": lane.applied_route,
-                "skipped_routes": lane.skipped_routes,
-                "account": account,
-                "observed_route": lane.observed_route,
-                "queued_at": lane.queued_at,
-                "started_at": lane.started_at,
-                "priority": lane.priority,
-                "finished_at": finished_at,
-                "last_output_at": lane.last_output_at,
-                "runtime_deadline": lane.runtime_deadline,
-                "overdue": now_wall.is_some_and(|now| run::overdue_at(lane, now)),
-                "stale": run::holder_absent(root, lane),
-                "partial_signals": lane.partial_signals,
-                "delivery_id": lane.delivery_id,
-                "write_grants": lane.write_grants,
-                "read_only_writable": lane.read_only_writable,
-                "git_grants_digest": lane.git_grants_digest,
-                "head": lane.head,
-                "protected_paths": lane.protected_paths,
-                "delivery": lane.delivery,
-                "continuation": lane.continuation,
-                "cache_read_share": provenant_routing::cache_read_share(lane.usage.uncached_input, lane.usage.cache_read, lane.usage.cache_write),
-                "result_path": result,
-                "transcript": transcript,
+            let settlement = matches!(lane.state, run::AttemptState::Terminal { .. }).then(|| {
+                provenant_records::wire::LaneSettlement {
+                    reason: state_and_reason(&lane.state).1,
+                }
             });
-            if let Some(title) = &lane.title {
-                row["title"] = json!(title);
-            }
-            if lane.requested_priority.map(i32::from) != lane.priority
-                && let Some(priority) = lane.requested_priority
-            {
-                row["requested_priority"] = json!(priority);
-            }
-            row
+            let row = provenant_records::wire::LaneRow {
+                run_id: lane.run_id.to_string(),
+                task_id: lane.task_id.to_string(),
+                attempt_id: lane.attempt_id.to_string(),
+                attempt_number: lane.attempt_number,
+                retry_of: lane.retry_of.map(|id| id.to_string()),
+                superseded_by: successors
+                    .get(&lane.attempt_id)
+                    .copied()
+                    .or(lane.superseded_by)
+                    .map(|id| id.to_string()),
+                cause: lane.settlement_reason,
+                state,
+                exit_code,
+                reason,
+                settlement,
+                lane_class: wait.map(|w| w.lane_class.as_str().to_owned()),
+                waiting_for,
+                requested_route: json!(lane.requested_route),
+                resolved_route: Some(json!(lane.resolved_route)),
+                applied_route: json!(lane.applied_route),
+                skipped_routes: json!(lane.skipped_routes),
+                account: json!(account),
+                observed_route: json!(lane.observed_route),
+                queued_at: json!(lane.queued_at),
+                started_at: json!(lane.started_at),
+                priority: lane.priority.map(i64::from),
+                finished_at: json!(finished_at),
+                last_output_at: json!(lane.last_output_at),
+                runtime_deadline: json!(lane.runtime_deadline),
+                overdue: now_wall.is_some_and(|now| run::overdue_at(lane, now)),
+                stale: run::holder_absent(root, lane),
+                partial_signals: json!(lane.partial_signals),
+                delivery_id: lane.delivery_id.map(|id| id.to_string()),
+                write_grants: json!(lane.write_grants),
+                read_only_writable: json!(lane.read_only_writable),
+                git_grants_digest: lane.git_grants_digest.map(|digest| digest.to_string()),
+                head: lane.head.map(|head| head.to_string()),
+                protected_paths: json!(lane.protected_paths),
+                delivery: json!(lane.delivery),
+                continuation: json!(lane.continuation),
+                cache_read_share: provenant_routing::cache_read_share(
+                    lane.usage.uncached_input,
+                    lane.usage.cache_read,
+                    lane.usage.cache_write,
+                ),
+                result_path: json!(result),
+                transcript,
+                title: lane.title.clone(),
+                requested_priority: lane
+                    .requested_priority
+                    .filter(|priority| Some(i32::from(*priority)) != lane.priority)
+                    .map(i64::from),
+                provider_seconds: None,
+                handoff: None,
+                provider_error: None,
+            };
+            json!(row)
         })
         .collect();
     if rows.is_empty() {
