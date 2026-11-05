@@ -4122,7 +4122,7 @@ fn render_lanes_omits_account_when_unresolved() -> Result<(), Box<dyn std::error
     Ok(())
 }
 #[test]
-#[allow(clippy::disallowed_methods)] // Exercise the real wait and an independent settlement.
+#[allow(clippy::disallowed_methods)] // The wait command has a real-time deadline.
 fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error>> {
     if reexec_test_in_lane("run::tests::wait_handles_a_stale_default_cursor")? {
         return Ok(());
@@ -4214,33 +4214,36 @@ fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error
         .expect_err("explicit selection over the cap must fail");
     assert!(error.message.contains("1000"));
     assert!(error.message.contains("narrow"));
+    struct FetchHookGuard;
+    impl Drop for FetchHookGuard {
+        fn drop(&mut self) {
+            wait::AFTER_FIRST_FETCH.with(|hook| *hook.borrow_mut() = None);
+        }
+    }
+    let _hook_guard = FetchHookGuard;
     let context = session.context.clone();
-    let worker = std::thread::spawn(move || -> Result<(), String> {
-        let clock = SystemClock::new();
-        let release = clock
-            .mono_now()
-            .checked_add(DurationMicros::from_micros(5_000_000))
-            .map_err(|e| e.to_string())?;
-        clock.wait_until(release).map_err(|e| e.to_string())?;
-        let cancel = CancelToken::new();
-        let call = run::Request {
-            clock: &clock,
-            cancel: &cancel,
-        };
-        let store = run::RunStore::open(&context, &call).map_err(|e| e.to_string())?;
-        store
-            .withdraw(
-                id,
-                run::AttemptState::Queued {
-                    extra: Default::default(),
-                },
-                run::Outcome::Cancelled,
-                "fixture",
-                clock.wall_now().map_err(|e| e.to_string())?,
-                &call,
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(())
+    wait::AFTER_FIRST_FETCH.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let store = run::RunStore::open(&context, &call).unwrap();
+            store
+                .withdraw(
+                    id,
+                    run::AttemptState::Queued {
+                        extra: Default::default(),
+                    },
+                    run::Outcome::Cancelled,
+                    "fixture",
+                    clock.wall_now().unwrap(),
+                    &call,
+                )
+                .unwrap();
+        }));
     });
     let picks = Picks {
         targets: &[],
@@ -4257,7 +4260,6 @@ fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error
         &edge,
     )
     .map_err(|e| e.message)?;
-    worker.join().map_err(|_| "worker panicked")??;
     assert!(!timed_out);
     assert_eq!(data["settled_backlog"]["count"], 1001);
     assert!(

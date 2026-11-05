@@ -46,6 +46,11 @@ fn read_file(directory: &Directory, name: &OsStr, limit: u64) -> Result<Vec<u8>,
     Ok(bytes)
 }
 
+#[cfg(test)]
+thread_local! {
+    static SCANNED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 // Walk backwards by blocks until the newest valid reading is found.
 fn last_reading(
     directory: &Directory,
@@ -80,6 +85,8 @@ fn last_reading(
             first = false;
         }
         for byte in block.into_iter().rev() {
+            #[cfg(test)]
+            SCANNED_BYTES.with(|count| count.set(count.get() + 1));
             if byte != b'\n' {
                 pending.push(byte);
                 continue;
@@ -419,17 +426,14 @@ mod tests {
         let cap = provenant_quota::DEFAULT_HISTORY_MAX_BYTES;
         record(&quota, &snapshot(100, None, 500, 900), cap)?;
         let path = temp.path().join("quota/history/k1.claude.jsonl");
-        let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
-        // Spans many 4 KiB blocks with no newline. Re-searching the growing
-        // buffer per block took tens of seconds here; one pass takes well under
-        // a second.
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
+        // Spans many blocks with no newline.
         file.write_all(&vec![b'x'; 4 << 20])?;
         drop(file);
-        let clock = SystemClock::new();
-        let started = clock.mono_now().as_micros();
+        let length = std::fs::metadata(path)?.len() as usize;
+        SCANNED_BYTES.with(|count| count.set(0));
         assert!(!record(&quota, &snapshot(200, None, 500, 900), cap)?);
-        let elapsed = clock.mono_now().as_micros().saturating_sub(started);
-        assert!(elapsed < 5_000_000, "{elapsed} us");
+        assert_eq!(SCANNED_BYTES.with(std::cell::Cell::get), length);
         Ok(())
     }
 
