@@ -1642,14 +1642,14 @@ fn opencode_stderr_live_quota() -> Result {
             "5s",
             "--json",
         ])?;
-        assert_eq!(code(&out), 0, "{out:?}");
+        assert_eq!(code(&out), 0, "{prompt_text}: {out:?}");
         let dispatched: Value = serde_json::from_slice(&out.stdout.bytes)?;
         let run = dispatched["data"]["run_id"].as_str().ok_or("run")?;
         let out = rig.command(&["lanes", "--id", run, "--json"])?;
-        assert_eq!(code(&out), 0, "{out:?}");
+        assert_eq!(code(&out), 0, "{prompt_text}: {out:?}");
         let lanes: Value = serde_json::from_slice(&out.stdout.bytes)?;
         let lane = &lanes["data"]["lanes"][0];
-        assert_eq!(lane["state"], expected, "{lane}");
+        assert_eq!(lane["state"], expected, "{prompt_text}: {lane}");
         let attempt = rig
             .state
             .join("runs")
@@ -1657,8 +1657,16 @@ fn opencode_stderr_live_quota() -> Result {
             .join("attempts")
             .join(lane["attempt_id"].as_str().ok_or("attempt")?);
         let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
-        assert_eq!(exit["stop_reason"].as_str(), stop_reason, "{exit}");
-        assert_eq!(exit["terminal_observed"], stop_reason.is_some(), "{exit}");
+        assert_eq!(
+            exit["stop_reason"].as_str(),
+            stop_reason,
+            "{prompt_text}: {exit}"
+        );
+        assert_eq!(
+            exit["terminal_observed"],
+            stop_reason.is_some(),
+            "{prompt_text}: {exit}"
+        );
         cleanup.disarm();
     }
     Ok(())
