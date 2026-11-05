@@ -86,8 +86,8 @@ impl Providers for PinnedWriter {
         _: &str,
         paths: &LaunchPaths,
         _: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
-        prepare(task, paths).map_err(|error| error.to_string())
+    ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
+        prepare(task, paths).map_err(|error| error.to_string().into())
     }
     fn decode(
         &self,
