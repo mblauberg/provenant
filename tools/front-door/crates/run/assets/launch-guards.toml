@@ -272,6 +272,16 @@ boundary = "unclassified"
 reason = "Validates route, continuation, executable and account inputs before adapter preparation."
 
 [[guard]]
+site = "providers/src/launch.rs#tool_search_path"
+boundary = "warning"
+reason = "An optional Cargo directory that cannot be represented in PATH is omitted with a warning."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
+boundary = "warning"
+reason = "An optional Cargo directory that cannot be represented in PATH is omitted with a warning; native PATH bytes otherwise remain intact."
+
+[[guard]]
 site = "providers/src/launch.rs#package_grant"
 boundary = "warning"
 reason = "A shared package prefix is omitted and the executable receives an exact grant; the omission is reported."
