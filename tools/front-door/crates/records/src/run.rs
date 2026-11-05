@@ -24,6 +24,11 @@ pub fn default_lane_priority(writer: bool, build_heavy: bool) -> u8 {
 pub const RECORD_LIMIT: u64 = 1024 * 1024;
 /// Encoded write grants an attempt may record, leaving terminal headroom.
 pub const MAX_WRITE_GRANT_BYTES: u64 = 256 * 1024;
+/// Maximum configurable encoded grants; terminal records retain at least the
+/// same amount of headroom for their other fields.
+pub const MAX_WRITE_GRANT_BYTES_CEILING: u64 = 8 * RECORD_LIMIT;
+/// Host-owned terminal decisions can contain the full applied grant ledger.
+pub const TERMINAL_RECORD_LIMIT: u64 = 16 * RECORD_LIMIT;
 pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;

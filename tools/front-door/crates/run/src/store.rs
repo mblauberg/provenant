@@ -204,7 +204,13 @@ impl RunStore {
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
         let dir = self.attempt_dir(old.run_id, id, false)?;
-        if read_sealed(&dir, AttemptFile::TerminalPending.name(), RECORD_LIMIT)?.is_some() {
+        if read_sealed(
+            &dir,
+            AttemptFile::TerminalPending.name(),
+            TERMINAL_RECORD_LIMIT,
+        )?
+        .is_some()
+        {
             return Err(RunError::TerminalRecoveryRequired);
         }
         let raw = read_sealed(&dir, AttemptFile::Result.name(), RESULT_LIMIT)?
@@ -231,8 +237,12 @@ impl RunStore {
         let old = self.record(id, call)?;
         let dir = self.attempt_dir(old.run_id, id, false)?;
         let pending: AttemptRecord = crate::db::decode_attempt(
-            &read_sealed(&dir, AttemptFile::TerminalPending.name(), RECORD_LIMIT)?
-                .ok_or(RunError::TerminalRecoveryRequired)?,
+            &read_sealed(
+                &dir,
+                AttemptFile::TerminalPending.name(),
+                TERMINAL_RECORD_LIMIT,
+            )?
+            .ok_or(RunError::TerminalRecoveryRequired)?,
         )?;
         super::reader::validate_attempt(&pending)?;
         if pending.attempt_id != id
@@ -277,8 +287,12 @@ impl RunStore {
         let current = self.record(id, call)?;
         let dir = self.attempt_dir(current.run_id, id, false)?;
         let pending: AttemptRecord = crate::db::decode_attempt(
-            &read_sealed(&dir, AttemptFile::TerminalPending.name(), RECORD_LIMIT)?
-                .ok_or(RunError::TerminalRecoveryRequired)?,
+            &read_sealed(
+                &dir,
+                AttemptFile::TerminalPending.name(),
+                TERMINAL_RECORD_LIMIT,
+            )?
+            .ok_or(RunError::TerminalRecoveryRequired)?,
         )?;
         super::reader::validate_attempt(&pending)?;
         if pending.attempt_id != id
@@ -893,7 +907,7 @@ impl RunStore {
         let (outcome, finished_at, reason, preparation_failure) = match read_sealed(
             &attempt_dir,
             AttemptFile::TerminalPending.name(),
-            RECORD_LIMIT,
+            TERMINAL_RECORD_LIMIT,
         )? {
             Some(raw) => {
                 let saved: AttemptRecord = crate::db::decode_attempt(&raw)?;
@@ -1219,14 +1233,14 @@ impl RunStore {
         match read_sealed(
             &attempt_dir,
             AttemptFile::TerminalPending.name(),
-            RECORD_LIMIT,
+            TERMINAL_RECORD_LIMIT,
         )? {
             Some(saved) if saved != intent => {
                 let name = format!(
                     "terminal-pending.conflict-{}.json",
                     provenant_core::hex(CanonicalV1::file_digest(&intent).bytes())
                 );
-                seal(&attempt_dir, &name, &intent, RECORD_LIMIT)?;
+                seal(&attempt_dir, &name, &intent, TERMINAL_RECORD_LIMIT)?;
                 return Err(RunError::TerminalRecoveryRequired);
             }
             Some(_) => {}
@@ -1262,7 +1276,7 @@ impl RunStore {
                     &attempt_dir,
                     AttemptFile::TerminalPending.name(),
                     &intent,
-                    RECORD_LIMIT,
+                    TERMINAL_RECORD_LIMIT,
                 )?;
             }
         }
@@ -1342,7 +1356,7 @@ impl RunStore {
         super::reader::validate_attempt(&next)?;
         let attempt = self.attempt_dir(old.run_id, old.attempt_id, false)?;
         let name = AttemptFile::TerminalPending.name();
-        let next = match read_sealed(&attempt, name, RECORD_LIMIT)? {
+        let next = match read_sealed(&attempt, name, TERMINAL_RECORD_LIMIT)? {
             Some(raw) => {
                 let saved: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 super::reader::validate_attempt(&saved)?;
@@ -1385,7 +1399,7 @@ impl RunStore {
                 saved
             }
             None => {
-                seal(&attempt, name, &bytes(&next)?, RECORD_LIMIT)?;
+                seal(&attempt, name, &bytes(&next)?, TERMINAL_RECORD_LIMIT)?;
                 next
             }
         };

@@ -448,6 +448,30 @@ mod tests {
     }
 
     #[test]
+    fn terminal_record_bound_reads_old_and_larger_decisions() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let dir = Directory::open_anchor(temp.path())?;
+        seal(&dir, "old.json", b"old", TERMINAL_RECORD_LIMIT)?;
+        assert_eq!(
+            read_sealed(&dir, "old.json", TERMINAL_RECORD_LIMIT)?.as_deref(),
+            Some(b"old".as_slice())
+        );
+        let larger = vec![b'x'; RECORD_LIMIT as usize + 1];
+        seal(
+            &dir,
+            "terminal-pending.json",
+            &larger,
+            TERMINAL_RECORD_LIMIT,
+        )?;
+        assert_eq!(
+            read_sealed(&dir, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?.as_deref(),
+            Some(larger.as_slice())
+        );
+        assert!(read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn read_sealed_follows_a_checkpoint_replaced_after_open() -> TestResult {
         let temp = tempfile::tempdir()?;
         let dir = Directory::open_anchor(temp.path())?;

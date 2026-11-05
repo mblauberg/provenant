@@ -1045,7 +1045,7 @@ impl RunStore {
             tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
             Ok(())
         })?;
-        if let Some(raw) = read_sealed(attempt, "terminal-pending.json", RECORD_LIMIT)? {
+        if let Some(raw) = read_sealed(attempt, "terminal-pending.json", TERMINAL_RECORD_LIMIT)? {
             let pending = crate::db::decode_attempt(&raw)?;
             let record = if pending.exit_evidence.is_some() {
                 self.recover_terminal(id, exit, call)
