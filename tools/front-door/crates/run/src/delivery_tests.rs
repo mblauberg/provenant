@@ -3696,18 +3696,34 @@ fn oversize_host(
 fn many_linked_worktrees_do_not_block_protection_checks()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
-    // Each entry is about 155 bytes, so 201 linked worktrees exceed 16 KiB.
+    // The fixture already has one real linked worktree. Add Git's administrative
+    // entries directly to exercise a long listing without 201 extra Git spawns.
+    let admin = fixture.writer.project.join(".git/worktrees");
+    let head = std::fs::read(admin.join("lane/HEAD"))?;
     for index in 0..201 {
         let path = fixture.root.join(format!("tree-{index}"));
-        fixture.git(&[
-            "worktree",
-            "add",
-            "--no-checkout",
-            "--detach",
-            path.to_str().ok_or("tree")?,
-        ])?;
+        let entry = admin.join(format!("fixture-{index}"));
+        std::fs::create_dir(&entry)?;
+        std::fs::write(entry.join("HEAD"), &head)?;
+        std::fs::write(entry.join("commondir"), b"../..\n")?;
+        std::fs::write(
+            entry.join("gitdir"),
+            format!("{}\n", path.join(".git").display()),
+        )?;
     }
     let project = &fixture.writer.project;
+    let git = provenant_os::git::git_executable().ok_or("git executable")?;
+    let argv = [
+        git.into_os_string(),
+        "worktree".into(),
+        "list".into(),
+        "--porcelain".into(),
+    ];
+    let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
+    options.env = Some(&fixture.environment);
+    let listing = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(listing.termination, Termination::Exit(0));
+    assert!(listing.stdout.bytes.len() > 16 * 1024);
     HostDeliveryContext::validate_integration_target(project, "feature/unprotected")?;
     HostDeliveryContext::check_delivery_branch(project, "feature/unprotected")?;
     Ok(())
