@@ -173,18 +173,19 @@ pub(super) fn own_worktree(
                     }
                     warn_advisory_occupancy(&info.path, &observation.occupancy)?;
                     let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-                    let owner = worktrees::load_owner(&tree)?;
+                    let owner = worktrees::load_owner(&tree);
+                    if matches!(observation.occupancy, Occupancy::Held) {
+                        return Err(worktrees::WorktreeError::WriterBusy {
+                            holder: owner.ok().flatten().and_then(|owner| owner.attempt_id),
+                        });
+                    }
+                    let owner = owner?;
                     if owner
                         .as_ref()
                         .is_some_and(|owner| owner.origin != WorktreeOrigin::Lane)
                     {
                         owner_refused = true;
                         return Err(worktrees::WorktreeError::UnknownWriter);
-                    }
-                    if matches!(observation.occupancy, Occupancy::Held) {
-                        return Err(worktrees::WorktreeError::WriterBusy {
-                            holder: owner.and_then(|owner| owner.attempt_id),
-                        });
                     }
                     (info, None)
                 }

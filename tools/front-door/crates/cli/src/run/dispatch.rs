@@ -1512,7 +1512,9 @@ pub(super) fn dispatch_inner(
                                             context.repo,
                                             &info.path,
                                         )?;
-                                        let holder = worktrees::load_owner(&tree)?
+                                        let holder = worktrees::load_owner(&tree)
+                                            .ok()
+                                            .flatten()
                                             .and_then(|owner| owner.attempt_id);
                                         return Err(worktrees::WorktreeError::WriterBusy {
                                             holder,

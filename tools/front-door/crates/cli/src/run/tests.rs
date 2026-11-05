@@ -3351,6 +3351,17 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
             worktrees::WorktreeError::UnknownOccupancy { path: scope, detail }
         ))) if scope == path && detail.contains("owner record could not be read")
     ));
+    let held = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        worktrees::cache_writer_guard(context.project_state, &path)
+            .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+    })?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::WriterBusy { holder: None }
+        )))
+    ));
+    drop(held);
     std::fs::write(&owner_path, saved_owner)?;
     let run_policy = CensusPolicyWorkers::for_run(&observer, &roots)?;
     let replay = super::own_worktree(
