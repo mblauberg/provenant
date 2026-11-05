@@ -273,7 +273,7 @@ fn explicit_selection_range_uses_its_own_tip_for_paths_and_size() {
         ..Default::default()
     })
     .unwrap();
-    assert!(hint.plan.change_add.iter().any(|name| name == "tests"));
+    assert!(hint.plan.change_add.iter().any(|lens| lens == "tests"));
     let calls = seen.borrow();
     assert!(
         calls
