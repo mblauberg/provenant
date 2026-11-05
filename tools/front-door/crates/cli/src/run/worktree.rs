@@ -47,6 +47,16 @@ impl From<OwnWorktreeError> for Fail {
     }
 }
 
+fn warn_worktree_census(path: &Path, detail: &str) {
+    use std::io::Write;
+    let warning = format!("{}: {detail}", path.display());
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: {}",
+        plain_text(&warning, 4096)
+    );
+}
+
 /// Create or claim the owned tree and publish its lane ownership. A new
 /// tree's owner records the commit creation pinned, so nothing is resolved
 /// again after the side effect and a replay finds the same base.
@@ -131,23 +141,15 @@ pub(super) fn own_worktree(
                         owner_refused = true;
                         return Err(worktrees::WorktreeError::UnknownWriter);
                     }
-                    if observation.observed == worktrees::WorkerState::Unknown
-                        && !observation.registration_unknown
-                        && owner.is_none()
-                        && worktrees::cache_writer_probe(context.project_state, &info.path).is_ok()
-                    {
-                        let evidence = context
+                    let census_detail = || {
+                        context
                             .workers
-                            .observe_evidence(std::slice::from_ref(&info.path), false);
-                        return Err(worktrees::WorktreeError::CensusUnknown {
-                            path: info.path.clone(),
-                            detail: evidence
-                                .details
-                                .get(&info.path)
-                                .cloned()
-                                .unwrap_or_else(|| context.workers.incomplete_census_detail()),
-                        });
-                    }
+                            .observe_evidence(std::slice::from_ref(&info.path), false)
+                            .details
+                            .get(&info.path)
+                            .cloned()
+                            .unwrap_or_else(|| context.workers.incomplete_census_detail())
+                    };
                     match info.writer {
                         WriterState::Free => {}
                         WriterState::Busy => {
@@ -167,16 +169,12 @@ pub(super) fn own_worktree(
                             {
                                 return Err(worktrees::live_refusal(context.workers, &info.path));
                             }
-                            use std::io::Write;
-                            let detail = format!(
-                                "{}: {}; the previous lane attempt has finished",
-                                info.path.display(),
-                                worktrees::live_refusal(context.workers, &info.path)
-                            );
-                            let _ = writeln!(
-                                std::io::stderr().lock(),
-                                "warning: {}",
-                                plain_text(&detail, 4096)
+                            warn_worktree_census(
+                                &info.path,
+                                &format!(
+                                    "{}; the previous lane attempt has finished",
+                                    worktrees::live_refusal(context.workers, &info.path)
+                                ),
                             );
                         }
                         WriterState::Unknown => {
@@ -188,9 +186,20 @@ pub(super) fn own_worktree(
                                 || worktrees::cache_writer_probe(context.project_state, &info.path)
                                     .is_err()
                             {
+                                if observation.observed == worktrees::WorkerState::Unknown
+                                    && !observation.registration_unknown
+                                {
+                                    return Err(worktrees::WorktreeError::CensusUnknown {
+                                        path: info.path.clone(),
+                                        detail: census_detail(),
+                                    });
+                                }
                                 return Err(worktrees::WorktreeError::UnknownWriterAt {
                                     path: info.path.clone(),
                                 });
+                            }
+                            if observation.observed == worktrees::WorkerState::Unknown {
+                                warn_worktree_census(&info.path, &census_detail());
                             }
                         }
                     }

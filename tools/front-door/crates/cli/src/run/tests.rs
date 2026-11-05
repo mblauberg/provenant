@@ -2924,6 +2924,34 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         Ok((info.path, info.head))
     })?;
 
+    let held = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        worktrees::cache_writer_guard(context.project_state, &path)
+            .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+    })?;
+    let busy = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("second-writer")?,
+        &edge,
+        &Free,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+        None,
+    );
+    assert!(matches!(
+        busy,
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::WriterBusy { holder: Some(holder) }
+        ))) if holder == prior_attempt
+    ));
+    drop(held);
+
     // Exercise the actual owned-run admission boundary for an existing,
     // unowned tree whose registration and on-disk custody are known but whose
     // process census is incomplete.
@@ -3016,6 +3044,45 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         other => panic!("expected LiveProcess, got {other:?}"),
     }
     assert_eq!(observer.1.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let unknown = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(3)?,
+        },
+        None,
+        &OperationId::parse("nonterminal-with-incomplete-census")?,
+        &edge,
+        &session,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+        None,
+    );
+    assert!(matches!(
+        unknown,
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::CensusUnknown { path: ref scope, ref detail }
+        ))) if scope == &path && detail == "injected census incomplete"
+    ));
+    let (admitted, _) = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(3)?,
+        },
+        None,
+        &OperationId::parse("terminal-with-incomplete-census")?,
+        &edge,
+        &session,
+        |id| id == prior_attempt,
+        &mut None,
+        &clock,
+        &cancel,
+        None,
+    )?;
+    assert_eq!(admitted.path, path);
     Ok(())
 }
 
