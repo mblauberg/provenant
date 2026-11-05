@@ -268,18 +268,18 @@ reason = "Validates profile paths, process policy, fixture observations, endpoin
 
 [[guard]]
 site = "providers/src/launch.rs#admit"
+boundary = "authority"
+reason = "The adapter, registered account and continuation must match the selected route, and a read-only working directory must lie within a granted root."
+
+[[guard]]
+site = "providers/src/launch.rs#admit"
 boundary = "unclassified"
-reason = "Validates route, continuation, executable and account inputs before adapter preparation."
+reason = "Non-absolute executable, home or working-directory inputs are refused and require a safe fallback or boundary classification."
 
 [[guard]]
 site = "providers/src/launch.rs#tool_search_path"
 boundary = "warning"
 reason = "An optional Cargo directory that cannot be represented in PATH is omitted with a warning."
-
-[[guard]]
-site = "providers/src/opencode.rs#prepare"
-boundary = "warning"
-reason = "An optional Cargo directory that cannot be represented in PATH is omitted with a warning; native PATH bytes otherwise remain intact."
 
 [[guard]]
 site = "providers/src/launch.rs#package_grant"

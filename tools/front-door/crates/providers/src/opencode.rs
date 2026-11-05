@@ -222,24 +222,10 @@ fn prepare(
     // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
     let bin = plan.scratch.path.join("bin");
     let shell = access == Access::WorktreeWrite;
-    let cargo_bin = input.home.join(".cargo/bin");
-    let mut path_entries = vec![bin.as_path()];
-    if shell {
-        if std::env::join_paths([&cargo_bin]).is_ok() {
-            path_entries.push(cargo_bin.as_path());
-        } else {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: OpenCode cannot include the Cargo bin directory in PATH; continuing without it"
-            );
-        }
-    }
-    path_entries.extend([
-        std::path::Path::new("/usr/bin"),
-        std::path::Path::new("/bin"),
-    ]);
-    let path = std::env::join_paths(path_entries).map_err(|_| ProviderError::InvalidPath)?;
+    let defaults = crate::launch::tool_search_path(input.home, shell);
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&defaults)))
+            .map_err(|_| ProviderError::InvalidPath)?;
     let mut env = base_env(input, &plan.scratch.path, path);
     let xdg = |key, fallback| {
         (input.host_var)(key)

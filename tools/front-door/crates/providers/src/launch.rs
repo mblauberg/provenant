@@ -453,13 +453,6 @@ pub(crate) fn admit(
     Ok((access, session))
 }
 
-/// Minimal environment: the user's identity, a fixed search path and TMPDIR
-/// under the attempt's private tmp directory. zsh ignores TMPDIR for the
-/// temporary files behind here-documents and here-strings and defaults
-/// TMPPREFIX to `/tmp/zsh`, which a lane cannot write, so TMPPREFIX points
-/// into the same directory. Repository-specific Git object configuration
-/// belongs to the private directory.
-/// Callers append provider keys.
 /// Preserve native tool paths and omit an optional entry that PATH cannot encode.
 pub(crate) fn tool_search_path(home: &Path, include_cargo: bool) -> OsString {
     let cargo = home.join(".cargo/bin");
@@ -480,6 +473,13 @@ pub(crate) fn tool_search_path(home: &Path, include_cargo: bool) -> OsString {
     path
 }
 
+/// Minimal environment: the user's identity, a fixed search path and TMPDIR
+/// under the attempt's private tmp directory. zsh ignores TMPDIR for the
+/// temporary files behind here-documents and here-strings and defaults
+/// TMPPREFIX to `/tmp/zsh`, which a lane cannot write, so TMPPREFIX points
+/// into the same directory. Repository-specific Git object configuration
+/// belongs to the private directory.
+/// Callers append provider keys.
 pub(crate) fn base_env(
     input: &PrepareInput<'_>,
     scratch: &Path,
