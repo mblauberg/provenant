@@ -982,8 +982,6 @@ pub struct Replay<'a> {
 pub struct NodeInput<'a> {
     /// Remaining portion of the graph's single infrastructure allowance.
     pub settlement_retries: Option<u8>,
-    /// A family-constrained node never redraws its alias after settlement.
-    pub family_separation: bool,
     /// Models selected for earlier attempts of this node.
     pub prior_attempts: &'a [String],
     /// Sibling families to avoid where possible, never a routing requirement.

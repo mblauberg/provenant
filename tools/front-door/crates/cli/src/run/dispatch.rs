@@ -1361,6 +1361,7 @@ pub(super) fn dispatch_inner(
                     access.network = network;
                 }
                 Submitted {
+                    settlement_retry_limit: None,
                     context,
                     build_heavy,
                     title,

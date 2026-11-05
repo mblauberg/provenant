@@ -1792,9 +1792,6 @@ mod retry_allowance_tests {
         assert_eq!(super::graph_retry_allowance(&empty, &empty, &roots), (2, "shipped_default".into()));
         std::fs::write(roots.state.as_path().join("config.toml"), "schema_version=1\n[domains.routing]\nsettlement_retries=4\n")?;
         assert_eq!(super::graph_retry_allowance(&empty, &empty, &roots), (4, "host_config".into()));
-        let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
-        let profile = config.dispatch_profile(&["domains.routing.settlement_retries=1".into()])?;
-        assert_eq!(profile.knobs["domains.routing.settlement_retries"], 1);
         let preset = serde_json::from_value(serde_json::json!({"retry":{"retries":3}}))?;
         assert_eq!(super::graph_retry_allowance(&empty, &preset, &roots), (3, "preset".into()));
         let node = serde_json::from_value(serde_json::json!({"retry":{"retries":0}}))?;

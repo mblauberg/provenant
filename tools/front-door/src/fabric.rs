@@ -2101,6 +2101,7 @@ impl BinaryRunOwner<'_> {
             budget,
             cancel,
             provenant_records::run::LaneAccess::default(),
+            None,
         )
         .map_err(|error| scope_io(error, "submit"))
     }
@@ -2111,8 +2112,9 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
         access: provenant_records::run::LaneAccess,
+        settlement_retry_limit: Option<u8>,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        self.submit_inner(input, budget, cancel, access)
+        self.submit_inner(input, budget, cancel, access, settlement_retry_limit)
             .map_err(|error| scope_io(error, "submit"))
     }
     fn submit_inner(
@@ -2121,6 +2123,7 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
         access: provenant_records::run::LaneAccess,
+        settlement_retry_limit: Option<u8>,
     ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
         let SubmitInput::Submit {
@@ -2205,6 +2208,7 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(fail_error)?;
             submitted.push(Submitted {
+                settlement_retry_limit,
                 context: task.context,
                 build_heavy: task.build_heavy,
                 base: task.base,
@@ -5025,6 +5029,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let mut prepared_without_request = false;
             let mut accepted_knobs = None;
             let mut accepted_route = None;
+            let mut accepted_retry_limit = None;
             let context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
                     Ok(request) => {
@@ -5032,6 +5037,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         if accepted {
                             accepted_knobs = Some(task.profile.overrides.clone());
                             accepted_route = Some(task.route.clone());
+                            accepted_retry_limit = Some(task.profile.settlement_retry_limit);
                         }
                         task.context.clone()
                     }
@@ -5313,9 +5319,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             serde_json::Value::from(exclude)
                         ));
                     }
-                    if let Some(retries) = node.settlement_retries {
-                        knobs.push(format!("domains.routing.settlement_retries={retries}"));
-                    }
                     knobs
                 },
                 host: None,
@@ -5358,20 +5361,27 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 }
                 legacy
             });
-            let receipt =
-                match owner.submit_with_access(input, self.budget, self.cancel, grants.clone()) {
-                    Err(FacadeError::OperationConflict) if legacy_input.is_some() => {
-                        // Store admission still requires the reserved digest to match
-                        // exactly. Only legacy metadata is retried, once.
-                        owner.submit_with_access(
-                            legacy_input.ok_or(FacadeError::StateCorrupt)?,
-                            self.budget,
-                            self.cancel,
-                            grants,
-                        )?
-                    }
-                    result => result?,
-                };
+            let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
+            let receipt = match owner.submit_with_access(
+                input,
+                self.budget,
+                self.cancel,
+                grants.clone(),
+                retry_limit,
+            ) {
+                Err(FacadeError::OperationConflict) if legacy_input.is_some() => {
+                    // Store admission still requires the reserved digest to match
+                    // exactly. Only legacy metadata is retried, once.
+                    owner.submit_with_access(
+                        legacy_input.ok_or(FacadeError::StateCorrupt)?,
+                        self.budget,
+                        self.cancel,
+                        grants,
+                        retry_limit,
+                    )?
+                }
+                result => result?,
+            };
             owner.actor = None;
             let target = receipt
                 .targets

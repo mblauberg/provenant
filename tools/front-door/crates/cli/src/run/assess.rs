@@ -8,6 +8,7 @@ fn failed_result_check(policy: &provenant_routing::ModelPolicy, decoded: &run::D
             decoded.outcome,
             run::Outcome::Succeeded | run::Outcome::Failed | run::Outcome::Uncommitted
         )
+        && (decoded.outcome != run::Outcome::Succeeded || decoded.complete)
         && !policy.result_valid(&decoded.result)
 }
 
@@ -20,7 +21,9 @@ pub(super) fn assess_model_result(
     policy_attempt: u64,
 ) -> Result<run::ResultAssessment, String> {
     if failed_result_check(policy, decoded) {
-        let retry = if !run::Service::has_writes(task.writer.is_some(), &task.access.write_roots)
+        let retry = if decoded.outcome == run::Outcome::Succeeded
+            && decoded.complete
+            && !run::Service::has_writes(task.writer.is_some(), &task.access.write_roots)
             && record.continuation.as_deref() != Some("policy_fallback")
         {
             // Caller alternatives take precedence over the bundled fallback.
@@ -169,21 +172,12 @@ pub(super) fn assess_settlement_retry(
     now_unix_seconds: i64,
     quota_handoff_recovery: bool,
 ) -> run::ResultAssessment {
-    // The registry also fills a default knob with this name. Only an explicit
-    // dispatch override (the graph's sealed remaining allowance) wins over
-    // the host routing section; an unrelated filled default cannot shadow it.
+    // The graph seals its remaining allowance in the task profile. Ordinary
+    // runs use the host routing policy directly.
     let allowance = task
         .profile
-        .overrides
-        .iter()
-        .any(|entry| entry.starts_with("domains.routing.settlement_retries="))
-        .then(|| {
-            task.profile
-                .knobs
-                .get("domains.routing.settlement_retries")
-                .and_then(serde_json::Value::as_u64)
-        })
-        .flatten()
+        .settlement_retry_limit
+        .map(u64::from)
         .unwrap_or(u64::from(config.settlement_retries))
         .min(u64::from(provenant_routing::MAX_SETTLEMENT_RETRIES));
     let max_attempts = allowance + 1;
@@ -429,6 +423,7 @@ mod tests {
         assert_eq!(decision.cause, Some(run::PolicyCause::Quota));
         decoded.outcome = run::Outcome::ModelUnavailable;
         decoded.reason = Some("provider capacity: busy".into());
+        decoded.session = Some("fixture".into());
         let decision = assess_settlement_retry(
             &provenant_routing::RoutingConfig::default(),
             task,

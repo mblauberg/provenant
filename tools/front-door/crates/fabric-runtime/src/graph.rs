@@ -2149,7 +2149,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     &key,
                     NodeInput {
                         settlement_retries,
-                        family_separation: node.distinct_from.is_some(),
                         prior_attempts: &prior_attempts,
                         family_peers: &family_peers,
                         context: node_context(&plan, node),

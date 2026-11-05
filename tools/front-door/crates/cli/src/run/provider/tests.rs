@@ -1276,10 +1276,13 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     )
     .err()
     .ok_or("stale writer source was accepted")?;
-    assert_eq!(
-        error.to_string(),
-        "invalid run record: writer differs from pinned source commit"
+    assert!(
+        error
+            .to_string()
+            .contains("differs from pinned source commit"),
+        "{error}"
     );
+    assert!(error.to_string().contains(&"a".repeat(40)), "{error}");
     let call = run::Request {
         clock: &clock,
         cancel: &cancel,
@@ -2472,6 +2475,11 @@ fn prepare_policy_writer_successor(
         executable,
         launch: Default::default(),
     };
+    let custody = directory.try_lock(
+        std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    drop(custody);
     let started = store.start(input.run_id, &capture, &|_, _| unreachable!(), &call)?;
     assert!(
         matches!(started.as_slice(), [run::Started::Refused { reason, .. }] if reason == "captured prepared successor"),

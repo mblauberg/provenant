@@ -989,10 +989,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     let mut profiled = task.clone();
     profiled.profile = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
         .dispatch_profile(&[])?;
-    assert_eq!(
-        profiled.profile.knobs["domains.routing.settlement_retries"],
-        2
-    );
+    assert_eq!(profiled.profile.settlement_retry_limit, None);
     assert!(
         run::Providers::assess_result(&rooted, &profiled, &record, &capacity, None, None, 1)?
             .retry
@@ -1001,6 +998,21 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
 
     assert!(assess_recovered(&Registry::default())?.retry.is_some());
     const NOW: i64 = 1_800_000_000;
+    let mut graph_task = task.clone();
+    graph_task.profile.settlement_retry_limit = Some(0);
+    assert!(
+        assess_settlement_retry(&config, &graph_task, &record, &capacity, 1, NOW, false)
+            .retry
+            .is_none()
+    );
+    graph_task.profile.settlement_retry_limit = Some(1);
+    assert_eq!(
+        assess_settlement_retry(&config, &graph_task, &record, &capacity, 1, NOW, false)
+            .retry
+            .ok_or("graph retry")?
+            .max_attempts,
+        2
+    );
     let assess_at = |record: &run::AttemptRecord,
                      task: &run::TaskRequest,
                      decoded: &run::Decoded,
@@ -3156,6 +3168,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         chair: chair.clone(),
         operation_id: OperationId::parse("context-ref-replay").unwrap(),
         tasks: vec![Submitted {
+            settlement_retry_limit: None,
             context: None,
             build_heavy: false,
             title: None,
@@ -6555,6 +6568,9 @@ fn run_explain_reports_admission_timeout_with_visible_origin()
 
 #[test]
 fn admission_window_deadline_is_preserved_on_restart() -> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane("run::tests::admission_window_deadline_is_preserved_on_restart")? {
+        return Ok(());
+    }
     let fixture = linked_fixture()?;
     with_edge(
         &fixture.root,

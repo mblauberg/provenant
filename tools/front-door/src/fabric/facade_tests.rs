@@ -647,7 +647,7 @@ pub(crate) mod peer_tests {
             ("default-no-origin-head", None, &head),
         ] {
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"review-pins", "node_id":name, "route_index":0}))?;
-            let observation = graph_owner.observe_or_start(&key, graph::NodeInput { family_separation: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
+            let observation = graph_owner.observe_or_start(&key, graph::NodeInput { settlement_retries: Some(1), prior_attempts: &[], family_peers: &[],
                 context: Default::default(), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
                 source_commit: Some(&head), review_base, title: name, prompt: "review",
                 required_verdict: None, deadline_seconds: None, inputs_dir: None,
@@ -656,6 +656,7 @@ pub(crate) mod peer_tests {
             })?;
             let operation = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.ok_or("missing operation")?;
             let request = store.request(operation.run_id, &call)?;
+            assert_eq!(request.tasks[0].profile.settlement_retry_limit, Some(1));
             assert_eq!(request.tasks[0].base.as_deref(), Some(expected_base.as_str()));
             assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
             let reference = match observation {
@@ -753,7 +754,6 @@ pub(crate) mod peer_tests {
                 &key,
                 graph::NodeInput {
                     settlement_retries: None,
-                    family_separation: false,
                     prior_attempts: &[],
                     family_peers: &[],
                     context: provenant_records::run::WorkContext {
@@ -1783,7 +1783,7 @@ pub(crate) mod peer_tests {
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
                 "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
             }))?;
-            bound.observe_or_start(&key, graph::NodeInput { family_separation: false, settlement_retries: None, review_base: None,
+            bound.observe_or_start(&key, graph::NodeInput { settlement_retries: None, review_base: None,
                 prior_attempts: prior, family_peers: peers, context: Default::default(), read_roots: &[],
                 distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
                 title: "lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -2326,7 +2326,7 @@ pub(crate) mod peer_tests {
             network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
         };
         let actor = bound.actor();
-        bound.observe_or_start(&key, graph::NodeInput { family_separation: false, settlement_retries: None, review_base: None,
+        bound.observe_or_start(&key, graph::NodeInput { settlement_retries: None, review_base: None,
             prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "later lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -2349,7 +2349,7 @@ pub(crate) mod peer_tests {
             "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0
         }))?;
         let actor = bound.actor();
-        bound.observe_or_start(&second, graph::NodeInput { family_separation: false, settlement_retries: None, review_base: None,
+        bound.observe_or_start(&second, graph::NodeInput { settlement_retries: None, review_base: None,
             prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "second lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -2434,7 +2434,7 @@ pub(crate) mod peer_tests {
         let exact_key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
             "graph_id":"pinned-base", "node_id":exact.nodes[1].id, "route_index":0
         }))?;
-        bound.observe_or_start(&exact_key, graph::NodeInput { family_separation: false, settlement_retries: None, review_base: None,
+        bound.observe_or_start(&exact_key, graph::NodeInput { settlement_retries: None, review_base: None,
             prior_attempts: &[], family_peers: &["openai".to_owned()], context: Default::default(), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "exact lens", prompt: "review", required_verdict: None, deadline_seconds: None,

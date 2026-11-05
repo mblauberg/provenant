@@ -294,6 +294,7 @@ pub(super) fn lane_access_checked(
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
+    pub settlement_retry_limit: Option<u8>,
     pub context: Option<provenant_records::run::WorkContext>,
     pub build_heavy: bool,
     pub title: Option<String>,
@@ -559,10 +560,14 @@ pub(super) fn submit_with_host_and_wait(
         .tasks
         .into_iter()
         .map(|task| {
+            let mut task_profile = profile.clone();
+            task_profile.settlement_retry_limit = task
+                .settlement_retry_limit
+                .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));
             Ok(run::DispatchTask {
                 context: task.context,
                 build_heavy: task.build_heavy,
-                profile: profile.clone(),
+                profile: task_profile,
                 title: task.title,
                 task_id: task.task_id,
                 prompt: task.prompt,

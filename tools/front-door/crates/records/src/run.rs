@@ -102,6 +102,9 @@ pub struct HarnessProfile {
     pub name: String,
     pub knobs: std::collections::BTreeMap<String, serde_json::Value>,
     pub overrides: Vec<String>,
+    /// Remaining settlement retries sealed for a graph task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_retry_limit: Option<u8>,
     // Preserve the removed field only to verify sealed request and attempt digests.
     #[doc(hidden)]
     #[serde(
