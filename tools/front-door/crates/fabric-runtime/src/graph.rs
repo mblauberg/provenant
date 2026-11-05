@@ -894,6 +894,22 @@ fn apply_launch_block(
     progress.launch_retry = None;
 }
 
+/// Apply expiration of a recorded launch window without I/O.
+fn apply_launch_deadline_block(progress: &mut NodeProgress, reason: &str) {
+    progress.advance_error_code = Some("launch_retry_exhausted".into());
+    progress.advance_error = Some(format!(
+        "node {}: the launch failed: {}; {}",
+        progress.id,
+        reason,
+        launch_diagnostic(&crate::coordination::facade::FacadeError::Busy)
+            .next
+            .as_deref()
+            .unwrap_or("retry the graph advance")
+    ));
+    progress.state = NodeState::Blocked;
+    progress.launch_retry = None;
+}
+
 /// Revert cancellation-only state changes without altering attempt records.
 fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (String, &'static str)> {
     let saved_wake = checkpoint.wake_at;
@@ -1811,19 +1827,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     };
                     if !accepted {
                         let reason = retry.reason.clone().unwrap_or_default();
-                        let progress = &mut checkpoint.nodes[node_index];
-                        progress.advance_error_code = Some("launch_retry_exhausted".into());
-                        progress.advance_error = Some(format!(
-                            "node {}: the launch failed: {}; {}",
-                            progress.id,
-                            reason,
-                            launch_diagnostic(&crate::coordination::facade::FacadeError::Busy)
-                                .next
-                                .as_deref()
-                                .unwrap_or("retry the graph advance")
-                        ));
-                        progress.state = NodeState::Blocked;
-                        progress.launch_retry = None;
+                        apply_launch_deadline_block(&mut checkpoint.nodes[node_index], &reason);
                         asks::refresh_wake(&mut checkpoint);
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;

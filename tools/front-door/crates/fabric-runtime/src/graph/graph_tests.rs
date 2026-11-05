@@ -8537,6 +8537,23 @@ fn launch_wake_is_capped_by_the_original_deadline() {
 }
 
 #[test]
+fn launch_deadline_transition_needs_only_node_and_reason() {
+    let mut progress: NodeProgress = serde_json::from_value(serde_json::json!({
+        "id":"one", "state":"running", "worktree":null, "attempts":[],
+        "launch_retry":{"failures":1,"reason":"busy"}
+    }))
+    .unwrap();
+    apply_launch_deadline_block(&mut progress, "busy");
+    assert_eq!(progress.state, NodeState::Blocked);
+    assert_eq!(
+        progress.advance_error_code.as_deref(),
+        Some("launch_retry_exhausted")
+    );
+    assert!(progress.advance_error.as_deref().unwrap().contains("busy"));
+    assert!(progress.launch_retry.is_none());
+}
+
+#[test]
 fn launch_block_transition_needs_only_node_and_error() {
     let mut progress: NodeProgress = serde_json::from_value(serde_json::json!({
         "id":"one", "state":"running", "worktree":null, "attempts":[]
