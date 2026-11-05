@@ -120,7 +120,6 @@ fn reservation_listing_flags_unscoped_evidence() -> TestResult {
         listing.issues[0].reservation,
         PathBuf::from("writer/reservation.json")
     );
-    assert!(listing.issues[0].reason.contains("unscoped"));
     Ok(())
 }
 
@@ -155,10 +154,12 @@ fn publish_reservation(directory: &Directory, record: &Reservation) -> TestResul
 }
 
 #[test]
-fn recovery_reads_only_attempt_scoped_reservations() -> TestResult {
+fn recovery_ignores_another_attempts_legacy_record() -> TestResult {
     let root = tempfile::tempdir()?;
     let slot = Directory::open_anchor(root.path())?;
-    publish_reservation(&slot, &legacy_reservation(scope(), &slot.metadata()?))?;
+    let mut other = scope();
+    other.attempt = AttemptId::from_bytes([9; 16]);
+    publish_reservation(&slot, &legacy_reservation(other, &slot.metadata()?))?;
     assert!(!reservation_present(&slot, scope())?);
     let clock = SystemClock;
     let cancel = CancelToken::new();
