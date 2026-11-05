@@ -3194,3 +3194,75 @@ fn historical_run_stores_upgrade_with_attempts_and_backups() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn version_eight_upgrade_preserves_terminal_attempt_references() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    let store = RunStore::open(&context, &call)?;
+    store.create(&input, &call)?;
+    store.withdraw(
+        id,
+        AttemptState::Queued {
+            extra: Default::default(),
+        },
+        Outcome::Rejected,
+        "fixture rejection",
+        WallTime::from_micros(200)?,
+        &call,
+    )?;
+    let before = store.record(id, &call)?;
+    let event_count: i64 = store.db.query_row(
+        "SELECT count(*) FROM events WHERE attempt=?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert!(event_count > 0);
+    store.db.pragma_update(None, "user_version", 8)?;
+    drop(store);
+    let upgraded = RunStore::open(&context, &call)?;
+    assert_eq!(upgraded.record(id, &call)?, before);
+    assert_eq!(
+        upgraded.db.query_row(
+            "SELECT count(*) FROM events WHERE attempt=?1",
+            [id.to_string()],
+            |row| row.get::<_, i64>(0)
+        )?,
+        event_count
+    );
+    assert_eq!(
+        upgraded
+            .db
+            .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?,
+        1
+    );
+    assert_eq!(
+        upgraded
+            .db
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })?,
+        0
+    );
+    assert!(
+        upgraded
+            .db
+            .execute(
+                "UPDATE attempts SET record=record WHERE id=?1",
+                [id.to_string()]
+            )
+            .is_err()
+    );
+    assert!(
+        upgraded
+            .db
+            .execute("DELETE FROM attempts WHERE id=?1", [id.to_string()])
+            .is_err()
+    );
+    Ok(())
+}
