@@ -211,6 +211,8 @@ pub trait CloudJobStore {
 #[derive(Debug)]
 pub enum CloudJobError<P, S> {
     Provider(P),
+    /// A failed submission can still have reached the provider. Do not retry.
+    SubmitUnknown(P),
     /// Submission succeeded. Preserve this identity and do not blindly retry.
     SaveAfterSubmit {
         job: RemoteJob,
@@ -237,7 +239,7 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
     store.begin(&job).map_err(CloudJobError::Store)?;
     job.remote_id = provider
         .submit(CloudSubmission { job: &job, task })
-        .map_err(CloudJobError::Provider)?;
+        .map_err(CloudJobError::SubmitUnknown)?;
     if job.remote_id.trim().is_empty() {
         return Err(CloudJobError::SubmissionUnknown);
     }
@@ -431,6 +433,42 @@ mod lifecycle_tests {
         cancel(&mut provider, &mut store, &mut job).unwrap();
         assert_eq!(job.state, RemoteState::Cancelled);
     }
+    #[test]
+    fn cloud_submit_failure_retains_unknown_intent() {
+        struct LostResponse;
+        impl CloudProvider for LostResponse {
+            type Error = ();
+            fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
+                Err(())
+            }
+            fn observe(&mut self, _: &str) -> Result<RemoteState, ()> {
+                panic!("no remote id")
+            }
+            fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+                panic!("no remote id")
+            }
+        }
+        let mut store = FakeStore::default();
+        assert!(matches!(
+            submit(&mut LostResponse, &mut store, job(), "run tests"),
+            Err(CloudJobError::SubmitUnknown(()))
+        ));
+        let mut recovered = store.saved.clone().unwrap();
+        assert_eq!(recovered.state, RemoteState::Submitting);
+        assert!(matches!(
+            reconcile(&mut LostResponse, &mut store, &mut recovered),
+            Err(CloudJobError::SubmissionUnknown)
+        ));
+        assert!(matches!(
+            cancel(&mut LostResponse, &mut store, &mut recovered),
+            Err(CloudJobError::SubmissionUnknown)
+        ));
+        assert!(matches!(
+            submit(&mut LostResponse, &mut store, job(), "run tests"),
+            Err(CloudJobError::Store(()))
+        ));
+    }
+
     #[test]
     fn cloud_submit_refuses_unpinned_commit_before_custody() {
         let mut provider = FakeProvider {
