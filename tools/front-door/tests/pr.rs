@@ -1042,8 +1042,8 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             }
             if Path::new("merge-delay").exists() {
                 // GitHub merged, but the response consumes the remaining budget.
-                #[allow(clippy::disallowed_methods)]
-                std::thread::sleep(std::time::Duration::from_secs(6));
+                #[allow(clippy::disallowed_methods)] // Bound fixture lifetime if cleanup fails.
+            std::thread::park_timeout(std::time::Duration::from_secs(120));
             }
             if Path::new("merge-timeout").exists() {
                 // The merge took effect, but the reply was lost.

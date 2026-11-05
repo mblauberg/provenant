@@ -3224,15 +3224,20 @@ impl PrepareFixture {
             // child can briefly share the dropped lock's open file description
             // until it execs. Retry for about five seconds.
             let mut resumed = None;
-            for _ in 0..500 {
-                resumed = crate::settlement::Guard::claim(&attempt, scope, &clock)?;
-                if resumed.is_some() {
-                    break;
-                }
-                #[allow(clippy::disallowed_methods)]
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            settlement = resumed.ok_or("resumed owner")?;
+            provenant_test_support::wait_for(
+                "resumed settlement owner",
+                Duration::from_secs(5),
+                || {
+                    let result = crate::settlement::Guard::claim(&attempt, scope, &clock);
+                    let ready = !matches!(result, Ok(None));
+                    resumed = Some(result);
+                    ready
+                },
+                |ready| *ready,
+            )?;
+            settlement = resumed
+                .ok_or("no claim attempted")??
+                .ok_or("resumed owner")?;
         }
         let review = launch.terminal(
             &state,
@@ -4477,7 +4482,9 @@ fn terminal_attributes_only_the_pinned_head_after_branch_advances()
 fn automatic_integration_does_not_hold_application_locks_during_git()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use provenant_os::fs::LockMode;
-    use std::{ffi::OsStr, time::Instant};
+    use std::ffi::OsStr;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let mut fixture = PrepareFixture::new()?;
     fixture.git(&["push", "origin", "HEAD:refs/heads/integration"])?;
     fixture.request = HostDeliveryContext::destination(
@@ -4488,12 +4495,13 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
     let native = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let wrapper = fixture.root.join("blocked-fetch-git");
     let entered = fixture.root.join("fetch-entered");
+    let fifo = fixture.root.join("fetch.fifo");
     let resume = fixture.root.join("fetch-resume");
     let armed = fixture.root.join("armed");
     let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
     fixture.executable(&wrapper, &format!(
-        "#!/bin/sh\nfor arg do\nif [ \"$arg\" = fetch ] && [ -e {} ] && [ ! -e {} ]; then\n: > {}\ntries=0\nwhile [ ! -e {} ]; do\n[ \"$tries\" -lt 200 ] || exit 91\n/bin/sleep 0.05\ntries=$((tries+1))\ndone\nfi\ndone\nexec {} \"$@\"\n",
-        quote(&armed), quote(&resume), quote(&entered), quote(&resume), quote(&native)
+        "#!/bin/sh\nfor arg do\nif [ \"$arg\" = fetch ] && [ -e {} ] && [ ! -e {} ]; then\nmkfifo {} || exit 91\n: > {}\nIFS= read -r release < {} || exit 92\nfi\ndone\nexec {} \"$@\"\n",
+        quote(&armed), quote(&resume), quote(&fifo), quote(&entered), quote(&fifo), quote(&native)
     ))?;
     fixture
         .environment
@@ -4501,6 +4509,8 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
     let host = fixture.prepare()?;
     fixture.commit(&fixture.writer.worktree, "lane for optimistic integration")?;
     let head = host.head(&fixture.writer)?;
+    let cancel = provenant_core::CancelToken::new();
+    let host = host.cancellable(&cancel);
     let directory = Directory::open_anchor(&fixture.writer.project.join(".git"))?;
     let integrate = format!(
         "provenant-integrate-{}.lock",
@@ -4518,12 +4528,24 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
     std::thread::scope(
         |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
             let worker = scope.spawn(|| host.integrate(&fixture.writer, &fixture.request, head));
-            let started = Instant::now();
-            while !entered.exists() && started.elapsed() < Duration::from_secs(5) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let seen = entered.exists();
-            let available = seen
+            let pipe = provenant_test_support::wait_for(
+                "integration fetch to wait for release",
+                Duration::from_secs(5),
+                || {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&fifo)
+                },
+                |result| match result {
+                    Ok(_) => true,
+                    Err(error) => {
+                        error.kind() != std::io::ErrorKind::NotFound
+                            && error.raw_os_error() != Some(libc::ENXIO)
+                    }
+                },
+            );
+            let available = matches!(&pipe, Ok(Ok(_)))
                 && ["provenant-lane-setup.lock", &integrate]
                     .iter()
                     .all(|name| {
@@ -4531,9 +4553,20 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
                             .try_lock_existing(OsStr::new(name), LockMode::Exclusive)
                             .is_ok()
                     });
-            std::fs::write(&resume, b"resume")?;
-            worker.join().map_err(|_| "integration panicked")??;
-            assert!(seen, "integration never fetched");
+            let resume_file = std::fs::write(&resume, b"resume");
+            let resumed = match pipe {
+                Ok(Ok(mut pipe)) if resume_file.is_ok() => pipe.write_all(b"resume\n"),
+                Ok(Err(error)) => Err(error),
+                Err(error) => Err(std::io::Error::other(error)),
+                _ => Err(std::io::Error::other("could not write resume marker")),
+            };
+            if resumed.is_err() {
+                cancel.cancel();
+            }
+            let result = worker.join().map_err(|_| "integration panicked")?;
+            resume_file?;
+            resumed?;
+            result?;
             assert!(
                 available,
                 "automatic integration held an application lock during Git"
@@ -4548,14 +4581,14 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
 #[allow(clippy::disallowed_methods)]
 fn delivery_cancellation_stops_its_running_git_child()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    use std::time::Instant;
     let mut fixture = PrepareFixture::new()?;
     let native = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let wrapper = fixture.root.join("blocked-delivery-git");
     let entered = fixture.root.join("delivery-entered");
     let armed = fixture.root.join("armed");
+    let fifo = fixture.root.join("delivery.fifo");
     let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
-    fixture.executable(&wrapper, &format!("#!/bin/sh\nfor arg do\nif [ \"$arg\" = cat-file ] && [ -e {} ]; then\n: > {}\n/bin/sleep 30\nfi\ndone\nexec {} \"$@\"\n", quote(&armed), quote(&entered), quote(&native)))?;
+    fixture.executable(&wrapper, &format!("#!/bin/sh\nfor arg do\nif [ \"$arg\" = cat-file ] && [ -e {} ]; then\nmkfifo {} || exit 91\n: > {}\nexec /bin/cat {}\nfi\ndone\nexec {} \"$@\"\n", quote(&armed), quote(&fifo), quote(&entered), quote(&fifo), quote(&native)))?;
     fixture
         .environment
         .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
@@ -4566,11 +4599,13 @@ fn delivery_cancellation_stops_its_running_git_child()
     std::thread::scope(
         |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
             let worker = scope.spawn(|| host.head(&fixture.writer));
-            let started = Instant::now();
-            while !entered.exists() && started.elapsed() < Duration::from_secs(5) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let seen = entered.exists();
+            let seen = provenant_test_support::wait_for(
+                "delivery Git child",
+                Duration::from_secs(5),
+                || entered.exists(),
+                |seen| *seen,
+            )
+            .is_ok();
             cancel.cancel();
             assert!(matches!(
                 worker.join().map_err(|_| "delivery panicked")?,

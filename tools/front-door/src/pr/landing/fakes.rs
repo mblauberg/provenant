@@ -19,7 +19,6 @@ pub struct FakeForge {
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
     pub check_runs: BTreeMap<String, Vec<GateEvidence>>,
-    pub check_delay: std::time::Duration,
     pub check_timeouts: Vec<std::time::Duration>,
     pub labels: BTreeMap<u64, Vec<String>>,
     pub direct_push: bool,
@@ -80,9 +79,6 @@ impl Forge for FakeForge {
     }
     #[allow(clippy::disallowed_methods, reason = "simulate a slow forge in tests")]
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
-        if !self.check_delay.is_zero() {
-            std::thread::sleep(self.check_delay);
-        }
         Ok(self.check_runs.get(commit).cloned().unwrap_or_default())
     }
     fn checks_with_timeout(

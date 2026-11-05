@@ -1331,20 +1331,18 @@ mod tests {
             0,
         )?;
         let mut ready = [0];
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match group
-                .stdout
-                .as_mut()
-                .ok_or("missing stdout")?
-                .read(&mut ready)
-            {
-                Ok(1) => break,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                other => return Err(format!("descendant readiness: {other:?}").into()),
-            }
-            assert!(Instant::now() < deadline, "descendant never became ready");
-            std::thread::sleep(Duration::from_millis(5));
+        let stdout = group.stdout.as_mut().ok_or("missing stdout")?;
+        let read = provenant_test_support::wait_for(
+            "descendant readiness",
+            Duration::from_secs(5),
+            || match stdout.read(&mut ready) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => None,
+                other => Some(other),
+            },
+            Option::is_some,
+        )?;
+        if !matches!(read, Some(Ok(1))) {
+            return Err(format!("descendant readiness: {read:?}").into());
         }
         assert_eq!(ready, [b'R']);
         // Close the guardian's copy and kill the provider, leaving only its
@@ -1367,16 +1365,16 @@ mod tests {
         drop(group.stdin.take());
         let mut tail = Vec::new();
         let mut stdout = group.stdout.take().ok_or("missing stdout")?;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match stdout.read_to_end(&mut tail) {
-                Ok(_) => break,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(error.into()),
-            }
-            assert!(Instant::now() < deadline, "descendant did not exit");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let read = provenant_test_support::wait_for(
+            "descendant exit",
+            Duration::from_secs(5),
+            || match stdout.read_to_end(&mut tail) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => None,
+                other => Some(other),
+            },
+            Option::is_some,
+        )?;
+        read.ok_or("missing descendant exit")??;
         admit(WaitBudget::cli(clock.mono_now(), 5)?)?.withdraw_unlaunched()?;
         Ok(())
     }
@@ -1401,14 +1399,12 @@ mod tests {
                 .stdin(Stdio::piped())
                 .spawn()?,
         );
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while !ready.exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "orphan never became ready"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        provenant_test_support::wait_for(
+            "orphan readiness",
+            Duration::from_secs(3),
+            || ready.exists(),
+            |ready| *ready,
+        )?;
         let ProcessObservation::Present(fact) =
             super::super::census::SystemProcessObserver.observe(i64::from(child.0.id()))
         else {
@@ -1416,18 +1412,14 @@ mod tests {
         };
         assert!(signal_build(&fact.identity, libc::SIGSTOP)?);
         assert!(signal_identity(&fact.identity, false));
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if let Some(status) = child.0.try_wait()? {
-                assert_eq!(status.signal(), Some(libc::SIGTERM));
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "TERM remained pending on a stopped orphan"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let status = provenant_test_support::wait_for(
+            "stopped orphan termination",
+            Duration::from_secs(3),
+            || child.0.try_wait(),
+            |result| !matches!(result, Ok(None)),
+        )??
+        .ok_or("missing orphan status")?;
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
         Ok(())
     }
 

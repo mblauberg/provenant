@@ -15,7 +15,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use support::{Result, TestRig, code, eventually};
+use support::{Result, TestRig, code};
 
 // Only the harness=false target dispatches with these seams. The installed
 // binary has no fixture flag, feature or environment override.
@@ -56,7 +56,46 @@ impl provenant_confinement::worktrees::WorkerObserver for UnknownWorkers {
 /// The driver's seams: free workers, the recorded boot and a holder that can
 /// crash after durable exit.
 struct Fixture;
+/// Admission facts owned by the test driver; disk and process identity still
+/// use the real fixture volumes and processes that custody verifies.
+struct FixtureResources;
+impl provenant_run::Resources for FixtureResources {
+    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+        use provenant_supervisor::census::ProcessObserver;
+        provenant_supervisor::fixture::RecordedBootObserver.observe(pid)
+    }
+    fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
+        Ok(provenant_os::sys::resources::MemorySample {
+            available_bytes: 100,
+            total_bytes: 100,
+        })
+    }
+    fn disk(&self, attempt: &provenant_os::fs::Directory) -> std::io::Result<u64> {
+        provenant_run::Resources::disk(&provenant_run::SystemResources, attempt)
+    }
+    fn lane_disk(
+        &self,
+        attempt: &provenant_os::fs::Directory,
+        context: &provenant_run::HolderContext,
+    ) -> std::io::Result<u64> {
+        provenant_run::Resources::lane_disk(&provenant_run::SystemResources, attempt, context)
+    }
+    fn reclaim_lane_disk(
+        &self,
+        attempt: &provenant_os::fs::Directory,
+        context: &provenant_run::HolderContext,
+    ) -> bool {
+        provenant_run::Resources::reclaim_lane_disk(
+            &provenant_run::SystemResources,
+            attempt,
+            context,
+        )
+    }
+}
 impl crate::Process for Fixture {
+    fn admission_resources(&self) -> &dyn provenant_run::Resources {
+        &FixtureResources
+    }
     fn workers(&self) -> &'static dyn provenant_confinement::worktrees::WorkerObserver {
         if std::env::var_os("FIXTURE_UNKNOWN_WORKERS").is_some() {
             &UnknownWorkers
@@ -1444,23 +1483,32 @@ fn await_terminal(
 ) -> Result<provenant_run::AttemptRecord> {
     let mut result = None;
     // A third import is eligible after the five- and thirty-second backoffs.
-    if !eventually(Duration::from_secs(60), || {
-        let poll = provenant_run::Request {
-            clock: call.clock,
-            cancel: call.cancel,
-        };
-        match store.record(attempt, &poll) {
-            Ok(record) if matches!(record.state, provenant_run::AttemptState::Terminal { .. }) => {
-                result = Some(Ok(record));
-                true
+    if provenant_test_support::wait_for(
+        "writer terminal state",
+        Duration::from_secs(60),
+        || {
+            let poll = provenant_run::Request {
+                clock: call.clock,
+                cancel: call.cancel,
+            };
+            match store.record(attempt, &poll) {
+                Ok(record)
+                    if matches!(record.state, provenant_run::AttemptState::Terminal { .. }) =>
+                {
+                    result = Some(Ok(record));
+                    true
+                }
+                Ok(_) => false,
+                Err(error) => {
+                    result = Some(Err(error));
+                    true
+                }
             }
-            Ok(_) => false,
-            Err(error) => {
-                result = Some(Err(error));
-                true
-            }
-        }
-    }) {
+        },
+        |done| *done,
+    )
+    .is_err()
+    {
         let poll = provenant_run::Request {
             clock: call.clock,
             cancel: call.cancel,
@@ -1475,7 +1523,7 @@ fn await_terminal(
         )
         .into());
     }
-    Ok(result.expect("eventually returned on terminal state or error")?)
+    Ok(result.expect("wait returned on terminal state or error")?)
 }
 
 fn assert_terminal_outcome(
@@ -1491,13 +1539,19 @@ fn assert_terminal_outcome(
 
 pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result {
     let mut failure = None;
-    let released = eventually(Duration::from_secs(5), || match store.writer_fences() {
-        Ok(fences) => fences.is_empty(),
-        Err(error) => {
-            failure = Some(error);
-            true
-        }
-    });
+    let released = provenant_test_support::wait_for(
+        "writer reservation release",
+        Duration::from_secs(5),
+        || match store.writer_fences() {
+            Ok(fences) => fences.is_empty(),
+            Err(error) => {
+                failure = Some(error);
+                true
+            }
+        },
+        |done| *done,
+    )
+    .is_ok();
     if let Some(error) = failure {
         return Err(error.into());
     }
@@ -1583,9 +1637,12 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
             let ready = worktree.join(".writer-fixture-ready");
             let release = worktree.join(".writer-fixture-release");
             fs::write(&ready, b"ready")?;
-            if !eventually(Duration::from_secs(10), || release.exists()) {
-                return Err("writer fixture hold timed out".into());
-            }
+            provenant_test_support::wait_for(
+                "writer fixture release",
+                Duration::from_secs(10),
+                || release.exists(),
+                |released| *released,
+            )?;
         }
         _ => return Err("unknown writer provider fixture mode".into()),
     }
@@ -2878,6 +2935,16 @@ fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result {
 // Split by lane mode so each test fits the per-test time budget (#2627);
 // every case costs about 5 s of confined preparation and execution.
 fn lane_prepare_isolates_nested_state() -> Result {
+    use provenant_run::Resources;
+    use provenant_supervisor::census::{ProcessObservation, ProcessObserver};
+
+    let pid = i64::from(std::process::id());
+    let ProcessObservation::Present(fact) =
+        provenant_supervisor::fixture::RecordedBootObserver.observe(pid)
+    else {
+        return Err("fixture process identity unavailable".into());
+    };
+    assert_eq!(FixtureResources.guardian_identity(), Some(fact.identity));
     lane_prepare_cases(&[("codex", false, false, 91), ("claude", false, false, 93)])
 }
 

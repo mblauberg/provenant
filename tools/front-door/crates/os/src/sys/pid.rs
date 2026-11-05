@@ -1767,32 +1767,29 @@ mod tests {
         // A fresh exec opens and closes descriptors while its runtime starts;
         // observe the settled process (asleep in sleep(1)).
         #[cfg(target_os = "linux")]
-        for _ in 0..500 {
-            let asleep = std::fs::read_to_string(format!("/proc/{}/stat", child.0.id()))
-                .ok()
-                .and_then(|stat| {
-                    stat.rsplit_once(')')
-                        .map(|(_, tail)| tail.trim_start().starts_with('S'))
-                })
-                == Some(true);
-            if asleep {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        provenant_test_support::wait_for(
+            "settled process",
+            std::time::Duration::from_secs(5),
+            || {
+                std::fs::read_to_string(format!("/proc/{}/stat", child.0.id()))
+                    .ok()
+                    .and_then(|stat| {
+                        stat.rsplit_once(')')
+                            .map(|(_, tail)| tail.trim_start().starts_with('S'))
+                    })
+                    == Some(true)
+            },
+            |asleep| *asleep,
+        )
+        .unwrap();
         #[cfg(target_os = "macos")]
-        let observation = {
-            let mut observation = None;
-            for _ in 0..500 {
-                let current = occupancy(child.0.id() as i32);
-                if current.complete {
-                    observation = Some(current);
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            observation.unwrap_or_else(|| occupancy(child.0.id() as i32))
-        };
+        let observation = provenant_test_support::wait_for(
+            "complete process occupancy",
+            std::time::Duration::from_secs(5),
+            || occupancy(child.0.id() as i32),
+            |observation| observation.complete,
+        )
+        .unwrap();
         #[cfg(target_os = "linux")]
         let observation = occupancy(child.0.id() as i32);
         let paths: Vec<_> = observation

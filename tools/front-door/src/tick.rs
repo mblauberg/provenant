@@ -837,23 +837,25 @@ mod tests {
         drop(held);
         // A sibling test thread can fork while the lock is released and briefly
         // hold a copy of its descriptor, so retry the acquire for up to 2 s.
-        let mut tries = 0;
-        loop {
-            seed_pass(
-                &directory,
-                &seed_clock(),
-                false,
-                || panic!("a disabled seed must not enumerate projects"),
-                |_| -> Result<Refresh, Box<dyn std::error::Error>> { panic!("must not refresh") },
-            )
-            .unwrap();
-            tries += 1;
-            if seed_state(&directory) == "disabled" || tries >= 100 {
-                break;
-            }
-            #[allow(clippy::disallowed_methods)] // Test-only: bounded 2 s retry.
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        provenant_test_support::wait_for(
+            "disabled seed state",
+            std::time::Duration::from_secs(2),
+            || {
+                seed_pass(
+                    &directory,
+                    &seed_clock(),
+                    false,
+                    || panic!("a disabled seed must not enumerate projects"),
+                    |_| -> Result<Refresh, Box<dyn std::error::Error>> {
+                        panic!("must not refresh")
+                    },
+                )
+                .unwrap();
+                seed_state(&directory)
+            },
+            |state| *state == "disabled",
+        )
+        .unwrap();
         assert_eq!(seed_state(&directory), "disabled");
         seed_pass(
             &directory,

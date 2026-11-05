@@ -985,17 +985,20 @@ fn unrelated_corrupt_shared_history_does_not_get_scanned() -> TestResult {
 #[test]
 fn cancellation_kills_a_blocking_import_within_two_seconds() -> TestResult {
     use provenant_core::Clock;
-    use std::time::Instant;
     let fixture = Fixture::new("sha1")?;
     let clock = provenant_os::clock::SystemClock::new();
     let wrapper = fixture.root.join("blocking-git");
     let entered = fixture.root.join("entered");
+    let fifo = fixture.root.join("import.fifo");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nfor arg do\ncase \"$arg\" in push) : > '{}'; /bin/sleep 30;; esac\ndone\nexec '{}' \"$@\"\n",
-            entered.display(),
-            fixture.git.display()
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in push) mkfifo {} || exit 91; : > {}; exec /bin/cat {};; esac\ndone\nexec {} \"$@\"\n",
+            quote(&fifo),
+            quote(&entered),
+            quote(&fifo),
+            quote(&fixture.git)
         ),
     )?;
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
@@ -1021,11 +1024,13 @@ fn cancellation_kills_a_blocking_import_within_two_seconds() -> TestResult {
                 },
             )
         });
-        let start = Instant::now();
-        while !entered.exists() && start.elapsed() < Duration::from_secs(3) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let seen = entered.exists();
+        let seen = provenant_test_support::wait_for(
+            "import to start",
+            Duration::from_secs(3),
+            || entered.exists(),
+            |seen| *seen,
+        )
+        .is_ok();
         let cancelled_at = clock.mono_now();
         let receipt = provenant_supervisor::custody::request_stop(
             attempt.try_clone()?,

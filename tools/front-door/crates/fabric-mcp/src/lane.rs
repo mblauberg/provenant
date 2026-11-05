@@ -448,9 +448,13 @@ mod tests {
             provenant_records::Limits::CONFIG,
             move |_, cancel, _| {
                 started.send(()).unwrap();
-                while !cancel.is_cancelled() {
-                    thread::sleep(Duration::from_millis(10));
-                }
+                provenant_test_support::wait_for(
+                    "relay cancellation",
+                    IO_TIMEOUT,
+                    || cancel.is_cancelled(),
+                    |cancelled| *cancelled,
+                )
+                .unwrap();
                 Err(FacadeError::Cancelled.into())
             },
         )?;

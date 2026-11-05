@@ -663,24 +663,33 @@ fn event_replay_deduplication_and_durable_cursor() {
             .is_empty()
     );
 }
-// The holder keeps its write lock across a real-time sleep so the sender waits.
-#[allow(clippy::disallowed_methods)]
 #[test]
 fn a_busy_store_waits_for_the_writer_instead_of_failing() {
     let f = Fixture::new();
     let store = f.open();
-    let held = Barrier::new(2);
+    let (held_tx, held_rx) = std::sync::mpsc::sync_channel(0);
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::scope(|s| {
-        let releaser = s.spawn(|| {
-            let holder = f.open();
+        let fixture = &f;
+        let holder = s.spawn(move || {
+            let holder = fixture.open();
             holder.db.execute_batch("BEGIN IMMEDIATE").unwrap();
-            held.wait();
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            held_tx.send(()).unwrap();
+            let blocked = matches!(
+                done_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            );
             holder.db.execute_batch("ROLLBACK").unwrap();
+            blocked
         });
-        held.wait();
-        store.send(&message(&f, 5), &f.request()).unwrap();
-        releaser.join().unwrap();
+        held_rx.recv().unwrap();
+        let result = store.send(&message(&f, 5), &f.request());
+        let _ = done_tx.send(());
+        assert!(
+            holder.join().unwrap(),
+            "sender returned while the write lock was held"
+        );
+        result.unwrap();
     });
     assert_eq!(
         store

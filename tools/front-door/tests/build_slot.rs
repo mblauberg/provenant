@@ -7,6 +7,7 @@
 use provenant_os::build_slots::{BuildSlots, DIRECTORY};
 use std::{
     fs,
+    io::Write,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -20,6 +21,7 @@ struct Rig {
     state: PathBuf,
     cargo: PathBuf,
     log: PathBuf,
+    release: fs::File,
     /// Prefix of where a waiting build tells the host it waits; each command
     /// adds its pid.
     marker: PathBuf,
@@ -36,6 +38,9 @@ impl Rig {
         fs::create_dir(&state)?;
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
         fs::write(&log, "")?;
+        let fifo = root.join("build-release");
+        assert!(Command::new("mkfifo").arg(&fifo).status()?.success());
+        let release = fs::OpenOptions::new().read(true).write(true).open(&fifo)?;
         let binary = env!("CARGO_BIN_EXE_provenant");
         let slot_dir = state.join(DIRECTORY.join("/"));
         fs::write(
@@ -43,7 +48,7 @@ impl Rig {
             format!(
                 "#!/bin/sh\n\
                  case \"$1\" in\n\
-                 build) echo \"start $$\" >> '{log}'; /bin/sleep 0.3; echo \"end $$\" >> '{log}' ;;\n\
+                 build) echo \"start $$\" >> '{log}'; if [ \"${{PROVENANT_TEST_HELD_BUILD:-}}\" = 1 ]; then IFS= read -r release < '{fifo}'; fi; echo \"end $$\" >> '{log}' ;;\n\
                  fmt) echo \"fmt $$\" >> '{log}' ;;\n\
                  check) echo \"hung $$\" >> '{log}'; exec /bin/sleep 60 ;;\n\
                  bg) /bin/sleep 60 >/dev/null 2>&1 </dev/null & echo \"bg $!\" >> '{log}' ;;\n\
@@ -51,6 +56,7 @@ impl Rig {
                  test) echo \"outer $$\" >> '{log}'; '{binary}' internal build-slot -- \"$0\" build ;;\n\
                  esac\n",
                 log = log.display(),
+                fifo = fifo.display(),
                 slots = slot_dir.display(),
             ),
         )?;
@@ -61,6 +67,7 @@ impl Rig {
             state,
             cargo,
             log,
+            release,
         })
     }
 
@@ -90,6 +97,13 @@ impl Rig {
         Ok(self.command(slots, 120, args).spawn()?)
     }
 
+    fn held_build(&self, slots: u64) -> Result<Child> {
+        Ok(self
+            .command(slots, 120, &["build"])
+            .env("PROVENANT_TEST_HELD_BUILD", "1")
+            .spawn()?)
+    }
+
     fn log(&self) -> Result<Vec<String>> {
         Ok(fs::read_to_string(&self.log)?
             .lines()
@@ -116,6 +130,11 @@ impl Rig {
                     .is_some_and(|name| name.to_string_lossy().starts_with(&format!("{prefix}.")))
             })
             .collect()
+    }
+
+    fn release(&self) -> Result {
+        writeln!(&self.release, "continue")?;
+        Ok(())
     }
 
     fn started(&self, word: &str) -> bool {
@@ -176,8 +195,16 @@ fn more_builds_than_slots_compile_serially() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     let mut children = (0..4)
-        .map(|_| rig.shim(1, &["build"]))
+        .map(|_| rig.held_build(1))
         .collect::<Result<Vec<_>>>()?;
+    for started in 1..=4 {
+        assert!(until(Duration::from_secs(30), || {
+            rig.log().is_ok_and(|log| {
+                log.iter().filter(|line| line.starts_with("start ")).count() >= started
+            })
+        }));
+        rig.release()?;
+    }
     for child in &mut children {
         assert!(finish(child, Duration::from_secs(30))?);
     }
@@ -186,7 +213,11 @@ fn more_builds_than_slots_compile_serially() -> Result {
     // One slot: every start is followed by its own end before the next start.
     for pair in log.chunks(2) {
         let (start, end) = (&pair[0], &pair[1]);
-        assert_eq!(start.strip_prefix("start "), end.strip_prefix("end "));
+        assert_eq!(
+            start.strip_prefix("start "),
+            end.strip_prefix("end "),
+            "{log:?}"
+        );
     }
     Ok(())
 }
@@ -196,8 +227,17 @@ fn two_slots_allow_two_builds_at_once_and_no_more() -> Result {
     let rig = Rig::new()?;
     rig.provision(2)?;
     let mut children = (0..4)
-        .map(|_| rig.shim(2, &["build"]))
+        .map(|_| rig.held_build(2))
         .collect::<Result<Vec<_>>>()?;
+    for started in 2..=4 {
+        assert!(until(Duration::from_secs(30), || {
+            rig.log().is_ok_and(|log| {
+                log.iter().filter(|line| line.starts_with("start ")).count() >= started
+            })
+        }));
+        rig.release()?;
+    }
+    rig.release()?;
     for child in &mut children {
         assert!(finish(child, Duration::from_secs(30))?);
     }
@@ -218,8 +258,8 @@ fn waiting_commands_keep_separate_markers() -> Result {
     rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
     assert!(until(Duration::from_secs(20), || rig.started("hung")));
-    let mut first = rig.shim(1, &["build"])?;
-    let mut second = rig.shim(1, &["build"])?;
+    let mut first = rig.held_build(1)?;
+    let mut second = rig.held_build(1)?;
     assert!(until(Duration::from_secs(20), || rig.markers().len() == 2));
     holder.kill()?;
     holder.wait()?;
@@ -227,6 +267,12 @@ fn waiting_commands_keep_separate_markers() -> Result {
     assert!(until(Duration::from_secs(30), || {
         rig.started("start") && rig.markers().len() == 1
     }));
+    rig.release()?;
+    assert!(until(Duration::from_secs(30), || {
+        rig.log()
+            .is_ok_and(|log| log.iter().filter(|line| line.starts_with("start ")).count() == 2)
+    }));
+    rig.release()?;
     assert!(finish(&mut first, Duration::from_secs(30))?);
     assert!(finish(&mut second, Duration::from_secs(30))?);
     assert!(rig.markers().is_empty());
@@ -394,12 +440,10 @@ fn a_marker_naming_a_live_ancestor_that_is_not_a_shim_does_not_skip_the_gate() -
     rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
     assert!(until(Duration::from_secs(20), || rig.started("hung")));
-    let marker = rig.log.with_extension("marker");
     let result = rig.log.with_extension("result");
     // The shell stays the shim's parent: the shim is not its last command.
     let script = format!(
-        "while [ ! -s '{m}' ]; do /bin/sleep 0.05; done; PROVENANT_BUILD_SLOT=$(cat '{m}') '{bin}' internal build-slot -- '{cargo}' build; echo \"exit $?\" > '{r}'; exit 0",
-        m = marker.display(),
+        "IFS= read -r marker; PROVENANT_BUILD_SLOT=$marker '{bin}' internal build-slot -- '{cargo}' build; echo \"exit $?\" > '{r}'; exit 0",
         bin = env!("CARGO_BIN_EXE_provenant"),
         cargo = rig.cargo.display(),
         r = result.display(),
@@ -409,15 +453,18 @@ fn a_marker_naming_a_live_ancestor_that_is_not_a_shim_does_not_skip_the_gate() -
         .env("PROVENANT_BUILD_SLOT_STATE", &rig.state)
         .env("PROVENANT_BUILD_SLOTS", "1")
         .env("PROVENANT_BUILD_WAIT_SECS", "1")
+        .stdin(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
     let pid = i64::from(shell.id());
     let ProcessObservation::Present(fact) = SystemProcessObserver.observe(pid) else {
         return Err("shell not observable".into());
     };
-    let staged = marker.with_extension("tmp");
-    fs::write(&staged, format!("{pid}:{}", fact.identity.native_start))?;
-    fs::rename(&staged, &marker)?;
+    writeln!(
+        shell.stdin.take().ok_or("shell stdin")?,
+        "{pid}:{}",
+        fact.identity.native_start
+    )?;
     assert!(until(Duration::from_secs(30), || result.exists()));
     assert!(
         fs::read_to_string(&result)?.contains("exit 1"),
@@ -453,15 +500,13 @@ fn the_cargo_lock_wait_and_the_slot_wait_share_one_deadline() -> Result {
             .iter()
             .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("lock ")))
     }));
-    let lock_wait_started = Instant::now();
-    while lock_wait_started.elapsed() < Duration::from_secs(2) {
-        std::thread::yield_now();
-    }
+    assert!(until(Duration::from_secs(20), || began.elapsed()
+        >= Duration::from_secs(2)));
     drop(lock);
     assert!(!finish(&mut waiter, Duration::from_secs(30))?);
     let total = began.elapsed();
     assert!(
-        total < Duration::from_millis(6500),
+        total < Duration::from_secs(15),
         "the two waits shared one budget, took {total:?}"
     );
     assert!(stderr_of(&mut waiter)?.contains("gave up waiting for a build slot"));

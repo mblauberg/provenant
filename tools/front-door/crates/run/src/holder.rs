@@ -150,9 +150,10 @@ impl HolderContext {
     }
     /// Open the store, retrying transient failures for about 30 s so a busy
     /// host does not turn into a refused or stranded attempt.
-    // Transient database retries use real pauses between attempts.
-    #[allow(clippy::disallowed_methods)]
     pub fn open(raw: &[u8]) -> Result<(Self, RunStore)> {
+        Self::open_with_clock(raw, &SystemClock)
+    }
+    fn open_with_clock(raw: &[u8], clock: &dyn Clock) -> Result<(Self, RunStore)> {
         use provenant_core::retry::{Backoff, RetryCause, is_transient};
         const BACKOFF: Backoff = Backoff::new(
             std::time::Duration::from_millis(100),
@@ -160,7 +161,7 @@ impl HolderContext {
             std::time::Duration::from_secs(5),
         );
         for attempt in 0..10 {
-            match Self::open_once(raw) {
+            match Self::open_once(raw, clock) {
                 Err(error) => {
                     let cause = match error {
                         RunError::Contention => RetryCause::Contention,
@@ -172,14 +173,22 @@ impl HolderContext {
                     if !is_transient(cause) {
                         return Err(error);
                     }
-                    std::thread::park_timeout(BACKOFF.delay(attempt));
+                    let micros = u64::try_from(BACKOFF.delay(attempt).as_micros())
+                        .map_err(|_| RunError::Admission(AdmissionError::Clock))?;
+                    let deadline = clock
+                        .mono_now()
+                        .checked_add(provenant_core::DurationMicros::from_micros(micros))
+                        .map_err(|_| RunError::Admission(AdmissionError::Clock))?;
+                    clock
+                        .wait_until(deadline)
+                        .map_err(|_| RunError::Admission(AdmissionError::Clock))?;
                 }
                 other => return other,
             }
         }
-        Self::open_once(raw)
+        Self::open_once(raw, clock)
     }
-    fn open_once(raw: &[u8]) -> Result<(Self, RunStore)> {
+    fn open_once(raw: &[u8], clock: &dyn Clock) -> Result<(Self, RunStore)> {
         let context: Self = crate::db::decode(raw)?;
         let mut inputs =
             RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
@@ -208,7 +217,7 @@ impl HolderContext {
             .map_or(context.roots.state_root.as_path(), |host| {
                 host.configuration_root.as_path()
             });
-        let store = RunStore::open(&execution, &call(&SystemClock, &CancelToken::new())?)?
+        let store = RunStore::open(&execution, &call(clock, &CancelToken::new())?)?
             .with_writer_registry(registry);
         Ok((context, store))
     }
@@ -220,6 +229,7 @@ fn call<'a>(clock: &'a dyn Clock, cancel: &'a CancelToken) -> Result<Request<'a>
 pub struct RunHolder<'a> {
     pub providers: &'a dyn Providers,
     pub resources: &'a dyn Resources,
+    pub clock: &'a dyn Clock,
 }
 /// Bind the host's sealed output roots to admission's resource observations.
 struct LaneResources<'a> {
@@ -227,6 +237,9 @@ struct LaneResources<'a> {
     context: &'a HolderContext,
 }
 impl Resources for LaneResources<'_> {
+    fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+        self.resources.observe_process(pid)
+    }
     fn process_budget(&self) -> std::io::Result<provenant_os::sys::resources::ProcessBudget> {
         self.resources.process_budget()
     }
@@ -307,7 +320,8 @@ pub(crate) fn object_import_refused(
 
 impl provenant_supervisor::Holder for RunHolder<'_> {
     fn admit(&self, context: &[u8], attempt: &Directory) -> custody::Result<()> {
-        let (context, store) = HolderContext::open(context).map_err(custody_error)?;
+        let (context, store) =
+            HolderContext::open_with_clock(context, self.clock).map_err(custody_error)?;
         store
             .admit(
                 context.attempt_id,
@@ -316,18 +330,18 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                     resources: self.resources,
                     context: &context,
                 },
-                &SystemClock,
+                self.clock,
                 &CancelToken::new(),
             )
             .map(drop)
             .map_err(custody_error)
     }
     fn provider_exited(&self, raw: &[u8], _reason: Option<StopReason>) -> custody::Result<()> {
-        let (context, store) = HolderContext::open(raw).map_err(custody_error)?;
-        let clock = SystemClock::new();
+        let (context, store) =
+            HolderContext::open_with_clock(raw, self.clock).map_err(custody_error)?;
         let cancel = CancelToken::new();
         store
-            .write(&call(&clock, &cancel).map_err(custody_error)?, |db| {
+            .write(&call(self.clock, &cancel).map_err(custody_error)?, |db| {
                 db.execute(
                     "DELETE FROM admission WHERE attempt=?1",
                     [context.attempt_id.to_string()],
@@ -343,7 +357,8 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
         exit: &ExitObservation,
         recovery: &custody::Recovery,
     ) -> custody::Result<()> {
-        let (context, store) = HolderContext::open(context).map_err(custody_error)?;
+        let (context, store) =
+            HolderContext::open_with_clock(context, self.clock).map_err(custody_error)?;
         let cancel = CancelToken::new();
         let finished = store
             .finish_in_custody(
@@ -357,7 +372,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                     holder_context: &context,
                 },
                 self.providers,
-                &call(&SystemClock, &cancel).map_err(custody_error)?,
+                &call(self.clock, &cancel).map_err(custody_error)?,
             )
             .map_err(custody_error)?;
         if !finished.release_permitted {
@@ -1994,6 +2009,63 @@ mod host_clock_tests {
 mod disk_admission_tests {
     use super::*;
     #[test]
+    fn guardian_admission_uses_injected_host_facts_and_clock()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use provenant_supervisor::Holder;
+
+        for available in [1, 100] {
+            let temp = tempfile::tempdir()?;
+            let base = std::fs::canonicalize(temp.path())?;
+            let clock = crate::tests::clock();
+            let cancel = CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let execution = crate::tests::context(temp.path())?;
+            let mut store = RunStore::open(&execution, &call)?;
+            store.set_admission_policy(crate::AdmissionPolicy {
+                memory_floor_basis_points: 100,
+                ..Default::default()
+            });
+            let run = crate::tests::input();
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let context = HolderContext {
+                schema_version: 1,
+                roots: RootSeed {
+                    home: base.join("home"),
+                    checkout: base.join("checkout"),
+                    state_root: execution.state_root.as_path().to_path_buf(),
+                },
+                project_id: execution.project_id,
+                actor_id: execution.actor_id,
+                run_id: run.run_id,
+                attempt_id: id,
+                host_delivery: None,
+                launch: None,
+                sealed: None,
+            };
+            let holder = RunHolder {
+                providers: &crate::dispatch_tests::Fake::default(),
+                resources: &crate::tests::HostFacts::new(available),
+                clock: &clock,
+            };
+            holder.admit(&context.encode()?, &attempt)?;
+            let admitted = store.record(id, &call)?;
+            assert!(matches!(admitted.state, AttemptState::Running { .. }));
+            assert_eq!(admitted.started_at, Some(clock.wall_now()?));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn admission_samples_the_sealed_working_directory_and_cache()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -2027,8 +2099,20 @@ mod disk_admission_tests {
         };
         struct Limited;
         impl Resources for Limited {
+            fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+                crate::tests::HostFacts::new(100).guardian_identity()
+            }
+            fn observe_process(
+                &self,
+                pid: i64,
+            ) -> provenant_supervisor::census::ProcessObservation {
+                crate::tests::HostFacts::new(100).observe_process(pid)
+            }
             fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
-                SystemResources.memory()
+                Ok(provenant_os::sys::resources::MemorySample {
+                    available_bytes: 100,
+                    total_bytes: 100,
+                })
             }
             fn disk(&self, _: &Directory) -> std::io::Result<u64> {
                 Ok(u64::MAX)

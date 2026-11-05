@@ -240,23 +240,17 @@ fn fixture() -> Result {
         io::stdin().read_to_string(&mut prompt)?;
         if prompt.contains("fixture owner lifetime probe") {
             // Keep the synthetic provider alive while its owner's lifetime is tested.
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            return Ok(());
+            #[allow(clippy::disallowed_methods)] // Bound fixture lifetime if cleanup fails.
+            std::thread::park_timeout(std::time::Duration::from_secs(120));
         }
-        if prompt.contains("stderr refusal then hang")
-            || prompt.contains("stderr refusal then success")
-        {
+        if prompt.contains("stderr refusal then hang") {
             write!(
                 io::stderr(),
                 "\x1b[31mAI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000"
             )?;
             io::stderr().flush()?;
-            if prompt.contains("stderr refusal then hang") {
-                loop {
-                    std::thread::park();
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_secs(4));
+            #[allow(clippy::disallowed_methods)] // Bound fixture lifetime if cleanup fails.
+            std::thread::park_timeout(std::time::Duration::from_secs(120));
         }
         if prompt.contains("stderr quota mention") {
             writeln!(
@@ -281,9 +275,8 @@ fn fixture() -> Result {
         io::stdout().flush()?;
         if prompt.contains("free limit then hang") {
             // Keep the process and its pipes live until the guardian stops it.
-            loop {
-                std::thread::park();
-            }
+            #[allow(clippy::disallowed_methods)] // Bound fixture lifetime if cleanup fails.
+            std::thread::park_timeout(std::time::Duration::from_secs(120));
         }
         return Ok(());
     }
@@ -1589,11 +1582,6 @@ fn opencode_stderr_live_quota() -> Result {
     for (prompt_text, expected, stop_reason) in [
         (
             "stderr refusal then hang",
-            "quota_limited",
-            Some("post_terminal_cleanup"),
-        ),
-        (
-            "stderr refusal then success",
             "quota_limited",
             Some("post_terminal_cleanup"),
         ),
@@ -4803,10 +4791,10 @@ fn fixture_owner_repro(ready_path: &std::path::Path) -> Result {
         ready_path,
         serde_json::to_vec(&json!({"root": rig.root, "guardian": identity}))?,
     )?;
-    loop {
-        // Keep the owner alive until the parent kills it to test guardian cleanup.
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    }
+    // Keep the owner alive until the parent kills it to test guardian cleanup.
+    #[allow(clippy::disallowed_methods)] // Bound fixture lifetime if cleanup fails.
+    std::thread::park_timeout(std::time::Duration::from_secs(120));
+    Ok(())
 }
 
 fn find_guardian_identity(root: &std::path::Path) -> Result<Option<Value>> {

@@ -1055,14 +1055,31 @@ mod answer_delivery_tests {
     #[test]
     fn local_gate_cleans_up_background_processes() -> Result<(), Error> {
         let dir = tempfile::tempdir()?;
+        use provenant_supervisor::census::{ProcessObservation, SystemProcessObserver};
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(dir.path().join("release"))
+                .status()?
+                .success()
+        );
         let settings = provenant_cli::domains::LocalGateSettings {
             mode: provenant_cli::domains::LocalGateMode::Enforce,
-            commands: vec!["(sleep 1; touch escaped) &".into()],
+            commands: vec!["cat release & echo $! > child.pid".into()],
             timeout_seconds: 2,
         };
         run_local_gate(&settings, dir.path())?;
-        std::thread::sleep(Duration::from_millis(1200));
-        assert!(!dir.path().join("escaped").exists());
+        let pid: i64 = std::fs::read_to_string(dir.path().join("child.pid"))?
+            .trim()
+            .parse()?;
+        provenant_test_support::wait_for(
+            "local gate child termination",
+            Duration::from_secs(5),
+            || SystemProcessObserver.observe(pid),
+            |observation| {
+                matches!(observation, ProcessObservation::Absent)
+                    || matches!(observation, ProcessObservation::Present(fact) if fact.zombie)
+            },
+        )?;
         Ok(())
     }
 

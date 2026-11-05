@@ -70,6 +70,14 @@ use std::{
 /// Process-wide seams the entry point selects once. The defaults observe the
 /// real system; the worktree driver substitutes its fixtures.
 pub trait Process {
+    /// Host admission observations used by the composed guardian.
+    fn admission_resources(&self) -> &dyn provenant_run::Resources {
+        &provenant_run::SystemResources
+    }
+    /// The guardian's clock, sampled at the process edge.
+    fn clock(&self) -> &dyn provenant_core::Clock {
+        &provenant_os::clock::SystemClock
+    }
     /// Observes whether a worktree's writer is alive.
     fn workers(&self) -> &'static dyn provenant_confinement::worktrees::WorkerObserver {
         &provenant_confinement::worktrees::SystemWorkerObserver
@@ -577,7 +585,8 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
     let registry = provenant_cli::run::Registry::default();
     let holder = provenant_run::RunHolder {
         providers: &registry,
-        resources: &provenant_run::SystemResources,
+        resources: process.admission_resources(),
+        clock: process.clock(),
     };
     process.holder(&holder, &mut |holder| {
         let holder = provenant_cli::run::HostHolder::new(holder);

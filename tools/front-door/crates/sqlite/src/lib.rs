@@ -406,8 +406,7 @@ mod tests {
         assert_eq!(busy_timeout(), outer);
     }
 
-    // The writer holds its lock across a real-time sleep to make the reader wait.
-    #[allow(clippy::disallowed_methods)]
+    // Hold the writer until the contender has begun and is still waiting.
     #[test]
     fn a_contended_store_waits_for_the_writer_instead_of_failing()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -424,15 +423,33 @@ mod tests {
         writer.execute_batch(
             "CREATE TABLE t (v INTEGER); BEGIN IMMEDIATE; INSERT INTO t VALUES (1);",
         )?;
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let contender_path = path.clone();
+        let worker = std::thread::spawn(
+            move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                let contender = open_connection(&contender_path, false)?;
+                started_tx.send(())?;
+                let result =
+                    contender.execute_batch("BEGIN IMMEDIATE; INSERT INTO t VALUES (2); COMMIT;");
+                done_tx.send(result)?;
+                Ok(())
+            },
+        );
+        started_rx.recv()?;
+        let blocked = matches!(
+            done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        writer.execute_batch("COMMIT")?;
+        let result = done_rx.recv_timeout(Duration::from_secs(5));
+        worker
+            .join()
+            .map_err(|_| "contender thread")?
+            .map_err(|error| error.to_string())?;
+        assert!(blocked, "contender returned while the write lock was held");
+        result??;
         let contender = open_connection(&path, false)?;
-        let started = std::time::Instant::now();
-        let released = std::thread::spawn(move || -> rusqlite::Result<()> {
-            std::thread::sleep(Duration::from_millis(300));
-            writer.execute_batch("COMMIT")
-        });
-        contender.execute_batch("BEGIN IMMEDIATE; INSERT INTO t VALUES (2); COMMIT;")?;
-        assert!(started.elapsed() >= Duration::from_millis(250));
-        released.join().map_err(|_| "writer thread")??;
         let rows: i64 = contender.query_row("SELECT count(*) FROM t", [], |row| row.get(0))?;
         assert_eq!(rows, 2);
         std::fs::remove_dir_all(&temp)?;

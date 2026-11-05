@@ -1865,7 +1865,6 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)] // Bounded real lock contention.
 pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck()
 -> Result<(), Box<dyn Error>> {
     for scenario in [
@@ -1918,10 +1917,7 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck()
                     .project_state
                     .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
                     .unwrap();
-                holder.replace(Some(std::thread::spawn(move || {
-                    std::thread::park_timeout(std::time::Duration::from_millis(50));
-                    drop(repository);
-                })));
+                holder.replace(Some(repository));
                 return false;
             }
             if matches!(
@@ -1984,7 +1980,7 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck()
             assert!(!path.exists());
         }
         if let Some(holder) = holder.into_inner() {
-            holder.join().unwrap();
+            drop(holder);
         } else {
             assert!(final_writer_held.get());
         }
