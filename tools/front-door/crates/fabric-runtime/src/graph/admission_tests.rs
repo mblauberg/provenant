@@ -12,7 +12,8 @@ fn document(version: u32, nodes: Value) -> GraphDocument {
 
 #[test]
 fn admission_refuses_unenforced_required_output_fields() {
-    for key in ["required"] {
+    {
+        let key = "required";
         let mut selector = json!({"node":"source", "outputs":["findings"]});
         selector[key] = json!(["findings"]);
         let graph = document(
