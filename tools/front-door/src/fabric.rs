@@ -3373,7 +3373,7 @@ fn graph_attempt_usage(
     }
 }
 
-fn decode_graph_document(
+pub(crate) fn decode_graph_document(
     bytes: &[u8],
 ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
     #[derive(serde::Deserialize)]

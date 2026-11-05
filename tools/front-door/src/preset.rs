@@ -4452,6 +4452,16 @@ pub(super) fn writer_tier_mix(nodes: &[provenant_fabric_runtime::graph::GraphNod
 
 // Explain is read-only and must not publish an overflow artifact. The graph
 // was already bounded by the owner's 8 MiB document limit in expand().
+pub(crate) fn decode_bound_graph(
+    document: &Value,
+) -> Result<provenant_fabric_runtime::graph::GraphDocument, String> {
+    serde_json::to_vec(document)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            crate::fabric::decode_graph_document(&bytes).map_err(|error| error.to_string())
+        })
+}
+
 fn explain(
     expansion: Expansion,
     document: Result<provenant_fabric_runtime::graph::GraphDocument, String>,
@@ -5234,8 +5244,7 @@ pub(crate) fn run_with_review(
     }
     // Both dispatch paths consume the same typed interpretation of the final
     // bound graph. Keep the wire document for its explicit field presence.
-    let document =
-        serde_json::from_value(expansion.document.clone()).map_err(|error| error.to_string());
+    let document = decode_bound_graph(&expansion.document);
     if request.explain {
         explain(expansion, document, brief_warnings, globals)
     } else {

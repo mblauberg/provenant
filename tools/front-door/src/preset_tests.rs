@@ -1,6 +1,6 @@
 use super::preset::{
-    Expansion, Layers, expand, find_prompt, request_bindings, tracker_advice_parameter,
-    writer_tier_mix,
+    Expansion, Layers, decode_bound_graph, expand, find_prompt, request_bindings,
+    tracker_advice_parameter, writer_tier_mix,
 };
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
@@ -548,6 +548,18 @@ kind = "synthesise"
     );
     let _: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(expanded.document).unwrap();
+}
+
+#[test]
+fn bound_graph_decode_enforces_reader_depth_limit() {
+    let mut expansion = expand(&Layers::empty(), "single", "brief", &[]).unwrap();
+    assert!(decode_bound_graph(&expansion.document).is_ok());
+    let mut nested = json!(null);
+    for _ in 0..65 {
+        nested = json!([nested]);
+    }
+    expansion.document["extra_fixture"] = nested;
+    assert!(decode_bound_graph(&expansion.document).is_err());
 }
 
 #[test]
