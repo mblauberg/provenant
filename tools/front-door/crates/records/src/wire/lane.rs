@@ -89,14 +89,25 @@ impl LaneRow {
         use crate::run::AttemptState;
         match state {
             AttemptState::Terminal {
-                outcome, reason, ..
+                outcome,
+                reason,
+                extra,
+                ..
             } => (
                 serde_json::to_value(outcome)
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default(),
-                (reason.is_some() || *outcome != crate::run::Outcome::Succeeded)
-                    .then(|| outcome.diagnostic_reason().to_owned()),
+                extra
+                    .get("terminal_cause")
+                    .and_then(|value| {
+                        serde_json::from_value::<crate::run::TerminalCause>(value.clone()).ok()
+                    })
+                    .map(|cause| cause.reason().to_owned())
+                    .or_else(|| {
+                        (reason.is_some() || *outcome != crate::run::Outcome::Succeeded)
+                            .then(|| outcome.diagnostic_reason().to_owned())
+                    }),
             ),
             other => (
                 serde_json::to_value(other)
@@ -168,6 +179,39 @@ impl LaneRow {
     pub fn project(lane: &crate::run::AttemptRecord, facts: LaneProjectionFacts) -> Self {
         use crate::run::AttemptState;
         let (state, mut terminal_reason) = Self::state_and_reason(&lane.state);
+        // Settlement reasons are closed, locally recorded facts, unlike the
+        // terminal state's free text, which can contain provider output.
+        if let Some(reason) = lane.settlement_reason
+            && matches!(
+                lane.state,
+                AttemptState::Terminal {
+                    outcome: crate::run::Outcome::Succeeded
+                        | crate::run::Outcome::ReviewRequired
+                        | crate::run::Outcome::Uncommitted,
+                    ..
+                }
+            )
+        {
+            use crate::run::SettlementReason;
+            let detail = match reason {
+                SettlementReason::HandoffMissing => {
+                    Some("the lane finished without a handoff; inspect its result")
+                }
+                SettlementReason::DeclaredStop => {
+                    Some("the lane stopped with work remaining; inspect its result")
+                }
+                SettlementReason::ProviderStop => {
+                    Some("the provider stopped early; inspect its result and resume if needed")
+                }
+                SettlementReason::UncommittedWork => {
+                    Some("the writer has uncommitted changes; preserve or commit the edits")
+                }
+                _ => None,
+            };
+            if let Some(detail) = detail {
+                terminal_reason = Some(detail.to_owned());
+            }
+        }
         if matches!(
             lane.state,
             AttemptState::Terminal {
@@ -383,4 +427,38 @@ pub fn lane_list_schema() -> Value {
 /// when it encodes an attempt, so the two cannot disagree.
 pub fn provider_seconds(provider_ms: Option<u64>) -> Option<f64> {
     provider_ms.map(|millis| millis as f64 / 1000.0)
+}
+
+#[cfg(test)]
+mod terminal_cause_tests {
+    use super::*;
+    use crate::run::{AttemptState, Outcome, TerminalCause};
+
+    #[test]
+    fn terminal_reasons_use_typed_causes_without_provider_text() {
+        for cause in [
+            TerminalCause::SpawnFailure,
+            TerminalCause::ProcessCrash,
+            TerminalCause::SettlementFailure,
+            TerminalCause::ProviderEarlyStop,
+            TerminalCause::FreePoolQuota,
+        ] {
+            let mut extra = crate::ExtraFields::default();
+            extra.insert(
+                "terminal_cause".into(),
+                serde_json::to_value(cause).unwrap(),
+            );
+            let state = AttemptState::Terminal {
+                extra,
+                outcome: Outcome::Failed,
+                exit_code: Some(1),
+                finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
+                reason: Some("secret provider text".into()),
+            };
+            let (_, reason) = LaneRow::state_and_reason(&state);
+            assert_eq!(reason.as_deref(), Some(cause.reason()));
+            assert!(!reason.unwrap().contains("secret"));
+        }
+        assert!(TerminalCause::FreePoolQuota.reason().contains("paid route"));
+    }
 }

@@ -3198,6 +3198,7 @@ fn prepare_policy_writer_successor(
         old.attempt_id,
         old.revision,
         &run::TerminalPublication {
+            terminal_cause: None,
             outcome: run::Outcome::QuotaLimited,
             finished_at: clock.wall_now()?,
             started_at: None,

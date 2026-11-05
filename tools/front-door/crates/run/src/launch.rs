@@ -155,6 +155,7 @@ fn applied_write_grants(
 }
 /// Provider-decoded facts from a completed capture.
 pub struct Decoded {
+    pub terminal_cause: Option<TerminalCause>,
     pub outcome: Outcome,
     pub result: String,
     pub complete: bool,

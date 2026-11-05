@@ -545,6 +545,7 @@ impl Registry<'_> {
             .and_then(provenant_records::AdapterSpec::get)
             .is_some_and(|spec| spec.result_event_usage);
         let failed = |reason: &str| run::Decoded {
+            terminal_cause: None,
             outcome: run::Outcome::Failed,
             result: String::new(),
             complete: false,
@@ -646,6 +647,7 @@ impl Registry<'_> {
             outcome.model()
         };
         let mut decoded = run::Decoded {
+            terminal_cause: None,
             outcome: run::Outcome::Failed,
             result: String::new(),
             complete: true,
@@ -808,6 +810,7 @@ impl Registry<'_> {
             decoded.reason = rollout_error;
         }
         if decoded.outcome == run::Outcome::Succeeded && early_stop {
+            decoded.terminal_cause = Some(run::TerminalCause::ProviderEarlyStop);
             decoded.reason = Some(
                 provenant_records::diagnostic::ProviderFailureFact::EarlyStop
                     .reason()
@@ -841,6 +844,9 @@ impl Registry<'_> {
             .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
         {
             decoded.outcome = run::Outcome::QuotaLimited;
+            if pool.as_deref() == Some("opencode-free") {
+                decoded.terminal_cause = Some(run::TerminalCause::FreePoolQuota);
+            }
             let fact = provenant_records::diagnostic::ProviderFailureFact::Quota {
                 free_pool: pool.as_deref() == Some("opencode-free"),
             };

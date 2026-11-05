@@ -1679,18 +1679,18 @@ pub(super) fn prepare_candidates(
             if outcome == provenant_routing::FallbackOutcome::AuthRequired {
                 previous_outcome = outcome;
                 let key = selected.or(route.account_key.as_deref());
-                let mut skipped = skip(
-                    &label,
-                    SkipKind::AuthRequired,
-                    crate::quota::account_login_diagnostic(
-                        entries.iter(),
-                        &diagnostic_records,
-                        &route.adapter,
-                        key,
-                        reason,
-                    ),
+                let detail = crate::quota::account_login_diagnostic(
+                    entries.iter(),
+                    &diagnostic_records,
+                    &route.adapter,
+                    key,
+                    reason,
                 );
+                let mut skipped = skip(&label, SkipKind::AuthRequired, &detail);
                 skipped.set_cause(reason.clone());
+                // This detail is assembled from registered account facts, not
+                // provider output. Remote projections still use typed facts.
+                skipped.detail = detail;
                 reasons.push(skipped);
                 continue;
             }
@@ -1701,8 +1701,9 @@ pub(super) fn prepare_candidates(
                 unavailable_auth_detail(&route, selected, &entries, &auth_failures)
             {
                 previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
-                let mut skipped = skip(&label, SkipKind::AuthRequired, detail);
+                let mut skipped = skip(&label, SkipKind::AuthRequired, &detail);
                 skipped.set_cause(provenant_records::RouteExclusionReason::AuthRequired);
+                skipped.detail = detail;
                 reasons.push(skipped);
                 continue;
             }

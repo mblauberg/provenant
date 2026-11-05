@@ -1088,6 +1088,7 @@ impl RunStore {
         let mut decoded = match (&record.applied_route, exit.never_spawned) {
             // Cancelled before spawn; keep the guardian's own reason too.
             (_, true) if cancelled => Decoded {
+                terminal_cause: None,
                 outcome: Outcome::Cancelled,
                 result: String::new(),
                 complete: true,
@@ -1103,6 +1104,7 @@ impl RunStore {
                 )),
             },
             (_, true) => Decoded {
+                terminal_cause: Some(TerminalCause::SpawnFailure),
                 outcome: Outcome::Rejected,
                 result: String::new(),
                 complete: true,
@@ -1136,6 +1138,9 @@ impl RunStore {
             }
             (None, false) => return Err(RunError::Validation("running attempt lacks a route")),
         };
+        if !cancelled && matches!(exit.termination, Some(Termination::Signal(_))) {
+            decoded.terminal_cause = Some(TerminalCause::ProcessCrash);
+        }
         // Provider-owned session transcripts record tool output, so a printed
         // credential can survive there after capture and result filtering.
         // Scrub before publication so a retry never starts from new plaintext.
@@ -1389,6 +1394,7 @@ impl RunStore {
                     );
                     seal_import_refusal(attempt, exit.scope, &writer.worktree, &reason)?;
                     decoded.outcome = Outcome::Failed;
+                    decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
                     decoded.reason = Some(reason);
                 }
                 _ if refused => {}
@@ -1849,8 +1855,15 @@ impl RunStore {
         } else if cancelled {
             decoded.outcome = Outcome::Cancelled;
         }
+        if matches!(
+            decoded.outcome,
+            Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
+        ) {
+            decoded.terminal_cause = None;
+        }
         let decoded_reason = decoded.reason.take().map(bounded_reason);
         let publication = TerminalPublication {
+            terminal_cause: decoded.terminal_cause,
             outcome: decoded.outcome,
             finished_at,
             started_at: record.started_at,

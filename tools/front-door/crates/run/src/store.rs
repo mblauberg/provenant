@@ -56,6 +56,7 @@ pub struct PreparedRun {
 /// composition edge, after secret scanning. This storage API never launches.
 #[derive(Clone)]
 pub struct TerminalPublication<'a> {
+    pub terminal_cause: Option<TerminalCause>,
     pub outcome: Outcome,
     pub finished_at: WallTime,
     pub started_at: Option<WallTime>,
@@ -854,6 +855,7 @@ impl RunStore {
         };
         old.preparation_failure = preparation_failure;
         let publication = TerminalPublication {
+            terminal_cause: None,
             outcome,
             finished_at,
             started_at: None,
@@ -1019,8 +1021,15 @@ impl RunStore {
             complete: publication.complete,
             redacted: publication.redacted,
         });
+        let mut terminal_extra = provenant_records::ExtraFields::default();
+        if let Some(cause) = publication.terminal_cause {
+            terminal_extra.insert(
+                "terminal_cause".into(),
+                serde_json::to_value(cause).expect("serialise terminal cause"),
+            );
+        }
         next.state = AttemptState::Terminal {
-            extra: Default::default(),
+            extra: terminal_extra,
             outcome: publication.outcome,
             exit_code: outcome_exit,
             finished_at: publication.finished_at,

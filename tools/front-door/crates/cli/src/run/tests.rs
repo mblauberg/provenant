@@ -1133,6 +1133,7 @@ fn model_policy_results_check_sections_and_bound_continuations()
     let task = &input.request.tasks[0];
     let policies = provenant_routing::ModelPolicies::default();
     let mut decoded = run::Decoded {
+        terminal_cause: None,
         outcome: run::Outcome::Succeeded,
         result: "   \n".into(),
         complete: true,
@@ -1353,6 +1354,7 @@ fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
         .ok_or("host resume accepted")?;
     assert_eq!(error.kind, ErrorKind::ContinuationUnsupported);
     let mut decoded = run::Decoded {
+        terminal_cause: None,
         outcome: run::Outcome::ModelUnavailable,
         result: String::new(),
         complete: false,
@@ -1480,6 +1482,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     };
     let config = provenant_routing::RoutingConfig::default();
     let decoded = |outcome, session: Option<&str>, reason: &str| run::Decoded {
+        terminal_cause: None,
         outcome,
         result: String::new(),
         complete: false,
@@ -8125,6 +8128,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     id,
                     session.store.record(id, &call)?.revision,
                     &run::TerminalPublication {
+                        terminal_cause: None,
                         outcome: run::Outcome::Unsettled,
                         finished_at: clock.wall_now()?,
                         started_at: None,

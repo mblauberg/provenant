@@ -3089,6 +3089,7 @@ impl Providers for Fake {
         assert_eq!(applied, &route());
         self.decoded.set(self.decoded.get() + 1);
         Ok(Decoded {
+            terminal_cause: None,
             outcome: self.outcome.unwrap_or(Outcome::Succeeded),
             result: self
                 .answer
@@ -5425,6 +5426,7 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
     observed.termination = Some(Termination::Exit(1));
     seal_exit(&store, &observed)?;
     let publication = TerminalPublication {
+        terminal_cause: None,
         outcome: Outcome::Failed,
         finished_at: WallTime::from_micros(160)?,
         started_at: Some(WallTime::from_micros(120)?),

@@ -718,6 +718,35 @@ impl From<Outcome> for crate::AttemptOutcome {
         }
     }
 }
+/// Safe cause of a terminal decision, independent of provider text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalCause {
+    SpawnFailure,
+    ProcessCrash,
+    SettlementFailure,
+    ProviderEarlyStop,
+    FreePoolQuota,
+}
+
+impl TerminalCause {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::SpawnFailure => "the provider could not start; inspect local launch evidence",
+            Self::ProcessCrash => {
+                "the provider process crashed; inspect local evidence before retrying"
+            }
+            Self::SettlementFailure => "lane settlement failed; inspect local recovery evidence",
+            Self::ProviderEarlyStop => {
+                "provider stopped early; inspect the result and resume if needed"
+            }
+            Self::FreePoolQuota => {
+                crate::diagnostic::ProviderFailureFact::Quota { free_pool: true }.reason()
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum AttemptState {

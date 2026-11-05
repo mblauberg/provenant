@@ -362,6 +362,7 @@ pub(super) fn route() -> RouteRecord {
 }
 pub(super) fn publication() -> TerminalPublication<'static> {
     TerminalPublication {
+        terminal_cause: None,
         outcome: Outcome::Succeeded,
         finished_at: WallTime::from_micros(200).unwrap(),
         started_at: Some(WallTime::from_micros(110).unwrap()),
@@ -3005,6 +3006,7 @@ fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult
         );
         blocker.execute_batch("ROLLBACK")?;
         let conflicting = TerminalPublication {
+            terminal_cause: None,
             result: "conflicting result",
             ..publication()
         };
@@ -3066,6 +3068,7 @@ fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
         let original = std::fs::read(path.join("terminal-pending.json"))?;
         blocker.execute_batch("ROLLBACK")?;
         let conflicting = TerminalPublication {
+            terminal_cause: None,
             result: "conflicting result",
             ..publication()
         };

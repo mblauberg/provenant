@@ -130,6 +130,7 @@ impl Providers for PinnedWriter {
             return Err("provider failed".into());
         }
         Ok(Decoded {
+            terminal_cause: None,
             outcome: Outcome::Succeeded,
             // A finished lane reports a handoff; without one it settles review_required.
             result: format!("{}\n{HANDOFF}", String::from_utf8_lossy(stdout).trim_end()),
