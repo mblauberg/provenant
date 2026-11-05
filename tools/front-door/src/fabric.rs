@@ -4549,6 +4549,28 @@ impl BoundGraphOwner<'_> {
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn launch_retry_policy(
+        &self,
+    ) -> Result<provenant_fabric_runtime::graph::LaunchRetryPolicy, Self::Error> {
+        let config = provenant_config::read_with_domains(
+            &self.factory.context.roots,
+            &provenant_cli::domains::SECTIONS,
+        )
+        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        let value = |name: &str| {
+            config
+                .knobs
+                .get(name)
+                .and_then(|knob| knob.value.as_u64())
+                .ok_or(FacadeError::StateCorrupt)
+        };
+        Ok(provenant_fabric_runtime::graph::LaunchRetryPolicy {
+            limit: u32::try_from(value("lanes.launch_retry_limit")?)
+                .map_err(|_| FacadeError::StateCorrupt)?,
+            first_seconds: value("lanes.launch_retry_first_seconds")?,
+            max_seconds: value("lanes.launch_retry_max_seconds")?,
+        })
+    }
     fn admission_timeout_seconds(&self) -> Option<u64> {
         let configured = provenant_confinement::run_config::RunConfig::read(
             self.factory.context.roots.state.as_path(),

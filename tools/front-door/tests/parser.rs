@@ -1436,6 +1436,31 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_refuses_authority_
 }
 
 #[test]
+fn config_schema_reports_launch_retry_knobs() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let output = rig.command(&["config", "schema", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let fields = schema["data"]["fields"].as_array().ok_or("schema fields")?;
+    for (name, default, min, max) in [
+        ("lanes.launch_retry_limit", 3, 0, 20),
+        ("lanes.launch_retry_first_seconds", 5, 1, 3600),
+        ("lanes.launch_retry_max_seconds", 600, 1, 86400),
+    ] {
+        let field = fields
+            .iter()
+            .find(|field| field["path"] == name)
+            .ok_or(name)?;
+        assert_eq!(field["default"], default);
+        assert_eq!(field["value"], default);
+        assert_eq!(field["min"], min);
+        assert_eq!(field["max"], max);
+        assert_eq!(field["source"], "default");
+    }
+    Ok(())
+}
+
+#[test]
 fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
     let rig = TestRig::new()?.without_state()?;
     let show = rig.command(&["config", "show", "--json"])?;

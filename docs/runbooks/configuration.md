@@ -161,6 +161,13 @@ declaration does not make an unlisted process admissible.
 Batch concurrency resolves from the profile by batch class. A batch with any
 `worktree-write` lane uses `lanes.max_concurrency` (registry default 8); a
 batch with none uses `lanes.max_concurrency_read_only` (registry default 16).
+Graph launch retries use `lanes.launch_retry_limit` (default 3, range 0–20),
+`lanes.launch_retry_first_seconds` (default 5, range 1–3600), and
+`lanes.launch_retry_max_seconds` (default 600, range 1–86400). The delay doubles
+per failure; the effective cap is at least the first delay. The admission
+deadline can end retries sooner. A zero limit blocks on the first transient
+failure. `provenant config show` reports each effective value and its source.
+
 A `lanes.max_concurrency` you set yourself (in `[knobs]` or with `--knob`) also
 caps the read-only default unless you set `lanes.max_concurrency_read_only`
 too; a preset does not. An explicit `--concurrency N` (1 to 16) or Fabric

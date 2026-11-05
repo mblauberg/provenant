@@ -8031,6 +8031,7 @@ struct ErrorLauncher {
     now: Option<provenant_core::WallTime>,
     now_after_error: Option<provenant_core::WallTime>,
     admission_seconds: Option<u64>,
+    retry_policy: Option<LaunchRetryPolicy>,
     accepted: bool,
 }
 
@@ -8042,6 +8043,12 @@ impl AttemptOwner for ErrorLauncher {
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         self.now
+    }
+    fn launch_retry_policy(&self) -> Result<LaunchRetryPolicy, Self::Error> {
+        Ok(self.retry_policy.unwrap_or(LaunchRetryPolicy {
+            limit: 20,
+            ..Default::default()
+        }))
     }
     fn admission_timeout_seconds(&self) -> Option<u64> {
         Some(self.admission_seconds.unwrap_or(3600))
@@ -8086,6 +8093,36 @@ fn retry_of(checkpoint: &GraphCheckpoint) -> &LaunchRetry {
         .launch_retry
         .as_ref()
         .expect("a pending launch retry")
+}
+
+#[test]
+fn launch_retry_limit_blocks_after_configured_failures() {
+    for limit in [0, 1] {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: busy_times(2),
+            retry_policy: Some(LaunchRetryPolicy {
+                limit,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let first = advance(&document, &mut owner, &mut journal).unwrap();
+        if limit == 1 {
+            assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
+            owner.now = Some(at(5));
+            advance(&document, &mut owner, &mut journal).unwrap();
+        }
+        let node = &journal.0.as_ref().unwrap().nodes[0];
+        assert_eq!(node.state, NodeState::Blocked);
+        assert_eq!(
+            node.advance_error_code.as_deref(),
+            Some("launch_retry_exhausted")
+        );
+        assert_eq!(owner.calls.len(), limit as usize + 1);
+    }
 }
 
 #[test]

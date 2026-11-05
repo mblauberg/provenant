@@ -404,6 +404,24 @@
       "effect": "Ordered registered Claude account labels allowed as switch targets; empty allows none.",
       "trade_off": "An explicit list controls which signed-in accounts may receive the chair."
     },
+    "lanes.launch_retry_limit": {
+      "type": "int", "min": 0, "max": 20, "default": 3, "status": "wired",
+      "reader": "tools/front-door/src/fabric.rs, tools/front-door/crates/fabric-runtime/src/graph.rs",
+      "effect": "Maximum retries after transient graph launch failures.",
+      "trade_off": "Lower stops sooner; higher allows more time for transient admission failures to clear."
+    },
+    "lanes.launch_retry_first_seconds": {
+      "type": "int", "min": 1, "max": 3600, "default": 5, "status": "wired",
+      "reader": "tools/front-door/src/fabric.rs, tools/front-door/crates/fabric-runtime/src/graph.rs",
+      "effect": "Initial graph launch retry delay, doubled after each failure.",
+      "trade_off": "Lower retries sooner and increases load on a busy host."
+    },
+    "lanes.launch_retry_max_seconds": {
+      "type": "int", "min": 1, "max": 86400, "default": 600, "status": "wired",
+      "reader": "tools/front-door/src/fabric.rs, tools/front-door/crates/fabric-runtime/src/graph.rs",
+      "effect": "Maximum launch retry delay, raised to the initial delay if smaller.",
+      "trade_off": "Lower checks recovery sooner and increases load on a busy host."
+    },
     "lanes.silence_seconds": {
       "type": "int", "min": 1, "max": 3600, "default": 1800, "status": "wired",
       "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/custody.rs, tools/front-door/crates/supervisor/src/guardian.rs",

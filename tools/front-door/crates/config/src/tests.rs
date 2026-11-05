@@ -1526,6 +1526,38 @@ fn writer_publishing_knob_defaults_off_and_can_be_enabled_per_dispatch() {
 }
 
 #[test]
+fn launch_retry_knobs_have_defaults_and_enforce_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    for (name, default, min, max) in [
+        ("lanes.launch_retry_limit", 3, 0, 20),
+        ("lanes.launch_retry_first_seconds", 5, 1, 3600),
+        ("lanes.launch_retry_max_seconds", 600, 1, 86400),
+    ] {
+        let shown = read(&roots).unwrap();
+        assert_eq!(shown.knobs[name].value.as_i64(), Some(default));
+        assert_eq!(shown.knobs[name].source, KnobSource::Default);
+        let set = |value: i64| {
+            knob_edit(
+                &roots,
+                KnobEdit::Set {
+                    name,
+                    value: &value.to_string(),
+                },
+            )
+        };
+        assert!(set(min - 1).is_err());
+        assert!(set(max + 1).is_err());
+        set(min).unwrap();
+        assert_eq!(
+            read(&roots).unwrap().knobs[name].source,
+            KnobSource::Override
+        );
+        knob_edit(&roots, KnobEdit::Unset(name)).unwrap();
+    }
+}
+
+#[test]
 fn read_only_batch_concurrency_has_its_own_knob() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());

@@ -190,10 +190,22 @@ const HOST_ID_BYTES: usize = 256;
 const MAX_UNKNOWN_USAGE: usize = 64;
 const MAX_USAGE_EVENTS: usize = 128;
 
-/// Seconds before the first launch retry; each further failure doubles it.
-const LAUNCH_RETRY_FIRST_SECONDS: u64 = 5;
-/// The longest launch retry wait.
-const LAUNCH_RETRY_MAX_SECONDS: u64 = 600;
+/// Bounded retries for transient launch failures.
+#[derive(Debug, Clone, Copy)]
+pub struct LaunchRetryPolicy {
+    pub limit: u32,
+    pub first_seconds: u64,
+    pub max_seconds: u64,
+}
+impl Default for LaunchRetryPolicy {
+    fn default() -> Self {
+        Self {
+            limit: 3,
+            first_seconds: 5,
+            max_seconds: 600,
+        }
+    }
+}
 
 /// Entries a prompt lists before referring to the complete input index.
 pub const UPSTREAM_INPUT_LIST_LIMIT: usize = 64;
@@ -245,6 +257,11 @@ pub trait AttemptOwner {
     /// Maximum time to admit a launch, measured from its first submission.
     fn admission_timeout_seconds(&self) -> Option<u64> {
         None
+    }
+
+    /// Effective launch retry policy for this graph advance.
+    fn launch_retry_policy(&self) -> Result<LaunchRetryPolicy, Self::Error> {
+        Ok(LaunchRetryPolicy::default())
     }
 
     /// Re-read host-owned proof of a pre-custody preparation refusal and
@@ -750,6 +767,7 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     error: &R::Error,
     clock: Option<provenant_core::WallTime>,
     admission_seconds: u64,
+    policy: LaunchRetryPolicy,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
     let retrying = launch_retry_kind(error);
@@ -799,11 +817,11 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                 deadline
             }
         };
-        if now < deadline {
+        if now < deadline && u32::from(retry.failures) <= policy.limit {
             let delay = provenant_core::retry::Backoff::new(
-                std::time::Duration::from_secs(LAUNCH_RETRY_FIRST_SECONDS),
+                std::time::Duration::from_secs(policy.first_seconds),
                 2,
-                std::time::Duration::from_secs(LAUNCH_RETRY_MAX_SECONDS),
+                std::time::Duration::from_secs(policy.max_seconds.max(policy.first_seconds)),
             )
             .delay(u64::from(retry.failures) - 1);
             retry.wake_at = Some(
@@ -2468,6 +2486,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             &error,
                             owner.wall_now(),
                             owner.admission_timeout_seconds().unwrap_or(3600),
+                            owner.launch_retry_policy().map_err(GraphError::Run)?,
                             journal,
                         )?;
                         break;
