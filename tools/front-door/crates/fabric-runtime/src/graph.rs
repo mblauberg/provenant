@@ -1689,7 +1689,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .extra
                     .get("retry")
                     .and_then(|value| value["retries"].as_u64());
-                let mut spent = progress.attempts.len().saturating_sub(1) as u64;
+                // Preparation refusals have not launched a provider and do not
+                // consume the settlement retry allowance.
+                let mut spent = 0u64;
                 for reference in progress
                     .attempts
                     .iter()
@@ -1699,31 +1701,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         owner.retry_successors(reference).map_err(GraphError::Run)?,
                     );
                 }
-                if route_index > 0
-                    && progress
-                        .attempts
-                        .last()
-                        .is_some_and(|attempt| attempt.state == AttemptState::Terminal)
-                    && allowance.is_some_and(|limit| spent >= limit)
-                {
-                    let progress = &mut checkpoint.nodes[node_index];
-                    progress.state = NodeState::Failed;
-                    progress.advance_error_code = Some("settlement_retries_exhausted".into());
-                    progress.advance_error =
-                        Some("Cumulative infrastructure-successor allowance exhausted".into());
-                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    break;
-                }
-                // A new configured route consumes one successor; observation
-                // of an existing key consumes none.
-                let next_cost = u64::from(
-                    progress
-                        .attempts
-                        .last()
-                        .is_some_and(|attempt| attempt.state == AttemptState::Terminal),
-                );
-                let settlement_retries = allowance
-                    .map(|limit| limit.saturating_sub(spent).saturating_sub(next_cost) as u8);
+                let settlement_retries = allowance.map(|limit| limit.saturating_sub(spent) as u8);
                 let route = node
                     .routes
                     .get(route_index)

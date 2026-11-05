@@ -6769,15 +6769,21 @@ fn cumulative_allowance_counts_run_successors_and_survives_observation_replay() 
 }
 
 #[test]
-fn configured_route_and_run_retries_share_the_remaining_allowance() {
+fn preparation_fallback_does_not_consume_settlement_allowance() {
+    use provenant_records::run::PreparationFailure;
     let mut lane = node("lane", route("first"));
     lane.route = None;
     lane.routes = Some(vec![route("first"), route("second"), route("third")]);
     let mut owner = FakeOwner {
-        retry_limit: Some(2),
+        retry_limit: Some(0),
+        fallback_evidence: [
+            ("first".into(), PreparationFailure::UsageLimited),
+            ("second".into(), PreparationFailure::UsageLimited),
+        ]
+        .into(),
         observations: [
-            terminal(AttemptOutcome::UsageLimited),
-            terminal(AttemptOutcome::UsageLimited),
+            preparation_refusal("first", AttemptOutcome::UsageLimited),
+            preparation_refusal("second", AttemptOutcome::UsageLimited),
             terminal(AttemptOutcome::Succeeded),
         ]
         .into(),
@@ -6790,7 +6796,7 @@ fn configured_route_and_run_retries_share_the_remaining_allowance() {
     )
     .unwrap();
     assert!(run.checkpoint.successful());
-    assert_eq!(owner.retry_budgets, vec![Some(2), Some(1), Some(0)]);
+    assert_eq!(owner.retry_budgets, vec![Some(0), Some(0), Some(0)]);
 }
 
 #[test]
