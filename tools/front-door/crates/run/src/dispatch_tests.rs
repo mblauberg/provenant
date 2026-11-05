@@ -3484,7 +3484,8 @@ fn a_lane_without_a_handoff_reports_a_stdout_path_denial_in_its_reason() -> Test
     let reason = terminal_reason(&store, id, &call)?;
     assert!(reason.contains("/fixture/missing-grant"), "{reason}");
     assert!(reason.contains("access grant"), "{reason}");
-    assert_eq!(terminal(&store, id, &call)?, Outcome::ReviewRequired);
+    // A read-only answer is its own proof, so the denial is a diagnostic only.
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
     Ok(())
 }
 
@@ -3878,32 +3879,26 @@ fn a_declared_stop_settles_review_required() -> TestResult {
 }
 
 #[test]
-fn a_complete_finish_and_prose_about_remaining_work_are_not_flagged() -> TestResult {
+fn a_read_only_answer_without_handoff_settles_succeeded() -> TestResult {
+    // `input()` is a read-only task, so its complete answer is its proof.
     for answer in [
+        "answer".to_owned(),
         "All of the brief is done.".to_owned(),
         "Work remains in the renderer, which I did not finish.".to_owned(),
         // A block quoted mid-answer is not the lane's closing statement.
         format!("The contract says:\n{STOPPED_EARLY}\nI followed it and finished."),
     ] {
         let record = settle_with(&answer, Some(Outcome::Succeeded), Vec::new())?;
-        assert_eq!(
-            record.partial_signals,
-            [PartialSignal::HandoffMissing],
-            "{answer}"
-        );
+        assert!(record.partial_signals.is_empty(), "{answer}");
         let AttemptState::Terminal {
-            outcome: Outcome::ReviewRequired,
-            reason: Some(reason),
+            outcome: Outcome::Succeeded,
+            reason: None,
             ..
         } = &record.state
         else {
-            return Err(format!("no handoff must need review: {:?}", record.state).into());
+            return Err(format!("read-only answer must succeed: {:?}", record.state).into());
         };
-        assert!(
-            reason.starts_with(crate::holder::NO_HANDOFF_REASON),
-            "{reason}"
-        );
-        assert_eq!(
+        assert_ne!(
             record.settlement_reason,
             Some(provenant_records::run::SettlementReason::HandoffMissing)
         );
@@ -3918,10 +3913,7 @@ fn provider_stops_are_kept_and_failures_carry_no_flag() -> TestResult {
         Some(Outcome::Succeeded),
         vec![PartialSignal::ProviderStop],
     )?;
-    assert_eq!(
-        record.partial_signals,
-        [PartialSignal::HandoffMissing, PartialSignal::ProviderStop]
-    );
+    assert_eq!(record.partial_signals, [PartialSignal::ProviderStop]);
     let record = settle_with(
         &format!("{STOPPED_EARLY}\n"),
         Some(Outcome::Failed),

@@ -704,9 +704,12 @@ uncommitted edits ends `uncommitted`; neither delivers. Paths in the project's
 `[domains.run] review_exempt` list (release-note fragments, specs, lock files
 and `.tracker-input` by default) never count toward either, and Git metadata,
 hooks and provider control roots can never be listed. Run reads no provider
-transcript except Codex's post-exit identity projection.
+transcript except Codex's post-exit identity projection. A read-only lane (no
+`writer`) whose complete, validated, non-empty answer is present settles
+`succeeded` without a handoff; only a writer must also report one.
 - Why: a crash, truncation or impostor must never read as success.
 - Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
+  `crates/run/src/dispatch_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`;
   `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
   `crates/confinement/src/quarantine.rs::exempt_instruction_tree_paths_settle_without_review`;
   `::hard_controls_stay_under_review_even_when_listed`;
@@ -724,8 +727,9 @@ schema v2 block with status `stopped_early` or `blocked`, and nothing after it),
 `provider_stop` (the provider reported a stop reason other
 than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
 `terminal_reason` other than `completed`), `uncommitted_work`, and
-`handoff_missing` (a model lane, meaning any route other than a model-less
-adapter such as `command`, settled without a valid final handoff). A failed
+`handoff_missing` (a writer on a model route, meaning any route other than a
+model-less adapter such as `command`, settled without a valid final handoff;
+a read-only lane never carries it). A failed
 lane never carries `handoff_missing`; a redaction failure flips the outcomes
 that would into `failed`. Prose is never read, and a quoted, repeated or
 trailing-text block is no flag. A declared stop (`stopped_early` or `blocked`)
