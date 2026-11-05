@@ -41,7 +41,7 @@ const KICKSTART_DEADLINE: Duration = Duration::from_secs(3);
 const BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_millis(300);
 const BOOTSTRAP_ATTEMPTS: usize = 5;
 /// Maximum accepted requests running concurrently. Excess connections are
-/// closed immediately; the client reports its stable empty-reply error.
+/// closed immediately; the client receives no reply.
 const MAX_CONNECTIONS: usize = 64;
 
 #[derive(Clone, Default)]
@@ -1575,10 +1575,19 @@ mod tests {
             |count| *count == MAX_CONNECTIONS,
         )
         .unwrap();
-        assert!(matches!(
-            forward(&state, b"request"),
-            Err(AgentError::NoReply(_))
-        ));
+        match forward(&state, b"request") {
+            Err(AgentError::NoReply(_)) => {}
+            Err(AgentError::Io(error)) => assert!(
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::NotConnected
+                ),
+                "unexpected socket error: {error:?}"
+            ),
+            result => panic!("excess connection was not closed: {result:?}"),
+        }
         drop(held);
         provenant_test_support::wait_for(
             "peer slots released",
