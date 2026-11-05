@@ -4602,6 +4602,17 @@ impl BoundGraphOwner<'_> {
     }
 }
 
+// Only a unanimous typed cause describes the failed lane as a whole.
+fn unanimous_preparation_cause(
+    skipped: &[provenant_records::run::SkippedRoute],
+) -> Option<provenant_records::RouteExclusionReason> {
+    let mut causes = skipped.iter().map(|route| route.cause.as_ref());
+    let first = causes.next()??;
+    causes
+        .all(|cause| cause == Some(first))
+        .then(|| first.clone())
+}
+
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn admission_timeout_seconds(&self) -> Option<u64> {
         let configured = provenant_confinement::run_config::RunConfig::read(
@@ -4685,6 +4696,40 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             return Ok(None);
         }
         Ok(record.preparation_failure)
+    }
+
+    fn preparation_refusal_cause(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        reference: &str,
+    ) -> Result<Option<provenant_records::RouteExclusionReason>, Self::Error> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(None);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(self.cancel)?;
+        let call = owner.call(self.cancel);
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
+            .map_err(run_error)?;
+        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+            })
+        {
+            return Ok(None);
+        }
+        Ok(unanimous_preparation_cause(&record.skipped_routes))
     }
 
     fn resolve_review(

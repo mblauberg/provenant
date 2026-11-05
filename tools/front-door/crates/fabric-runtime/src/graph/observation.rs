@@ -120,6 +120,7 @@ pub(super) fn fallback_denial(
     access: AccessMode,
     unreadable: bool,
     outcome: AttemptOutcome,
+    cause: Option<&provenant_records::RouteExclusionReason>,
 ) -> (&'static str, String) {
     let (code, denial) = if launched && access == AccessMode::WorktreeWrite {
         (
@@ -143,7 +144,14 @@ pub(super) fn fallback_denial(
         AttemptOutcome::AdapterUnavailable => "The lane's adapter is unavailable.",
         _ => "The lane failed.",
     };
-    (code, format!("{reason} {denial}"))
+    let detail = cause.map(provenant_routing::exclusion_detail);
+    (
+        code,
+        match detail {
+            Some(detail) => format!("{reason} {detail}. {denial}"),
+            None => format!("{reason} {denial}"),
+        },
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

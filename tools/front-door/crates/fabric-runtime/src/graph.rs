@@ -257,6 +257,15 @@ pub trait AttemptOwner {
         Ok(None)
     }
 
+    /// Read a typed preparation cause for reporting, without granting fallback.
+    fn preparation_refusal_cause(
+        &mut self,
+        _key: &AttemptKey,
+        _reference: &str,
+    ) -> Result<Option<provenant_records::RouteExclusionReason>, Self::Error> {
+        Ok(None)
+    }
+
     /// Resolve a deferred review; hosts without support fail closed.
     fn resolve_review(
         &mut self,
@@ -1858,8 +1867,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             _ => (None, false),
                         };
                         if !live_fallback_allowed(outcome, last.launched, node.access, evidence) {
-                            let (code, message) =
-                                fallback_denial(last.launched, node.access, unreadable, outcome);
+                            let cause = last.attempt_ref.as_deref().and_then(|reference| {
+                                owner
+                                    .preparation_refusal_cause(&last.key, reference)
+                                    .ok()
+                                    .flatten()
+                            });
+                            let (code, message) = fallback_denial(
+                                last.launched,
+                                node.access,
+                                unreadable,
+                                outcome,
+                                cause.as_ref(),
+                            );
                             let progress = &mut checkpoint.nodes[node_index];
                             progress.state = NodeState::Failed;
                             progress.advance_error_code = Some(code.into());
@@ -2494,6 +2514,28 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     },
                     _ => (None, false),
                 };
+                let fallback_cause = match &observation {
+                    AttemptObservation::Terminal {
+                        attempt_ref: Some(reference),
+                        launched: false,
+                        outcome,
+                        ..
+                    } if route_index + 1 < node.routes.len()
+                        && fallback_candidate(*outcome, node.access, false)
+                        && !live_fallback_allowed(
+                            *outcome,
+                            false,
+                            node.access,
+                            fallback_evidence,
+                        ) =>
+                    {
+                        owner
+                            .preparation_refusal_cause(&key, reference)
+                            .ok()
+                            .flatten()
+                    }
+                    _ => None,
+                };
                 let mut usage_error = None;
                 let mut cost_error = None;
                 let usage = if let AttemptObservation::Terminal {
@@ -2854,6 +2896,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                                 node.access,
                                                 evidence_unreadable,
                                                 outcome,
+                                                fallback_cause.as_ref(),
                                             );
                                             progress.advance_error_code = Some(code.into());
                                             progress.advance_error = Some(message);

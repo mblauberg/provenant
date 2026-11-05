@@ -1111,6 +1111,9 @@ pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
         RouteExclusionReason::LoginExpired => {
             "login expired; check the selected account with `provenant quota`".to_owned()
         }
+        RouteExclusionReason::AuthRequired => {
+            "the selected account requires login; sign in and run `provenant quota tick`".to_owned()
+        }
         RouteExclusionReason::InvalidAccountEvidence => {
             "invalid persisted account evidence; repair or re-register the account".to_owned()
         }

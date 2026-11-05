@@ -403,6 +403,7 @@ pub(super) fn skip(route: &str, kind: SkipKind, detail: impl Into<String>) -> Sk
         extra: Default::default(),
         route: route.to_owned(),
         kind,
+        cause: None,
         detail: detail.into(),
     }
 }

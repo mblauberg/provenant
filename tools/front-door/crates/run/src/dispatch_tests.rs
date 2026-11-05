@@ -4070,6 +4070,7 @@ fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
         extra: Default::default(),
         route: "claude".into(),
         kind: SkipKind::AuthRequired,
+        cause: None,
         detail: "account work: sign in again".into(),
     }];
     store.record_skipped_routes(id, &skipped, &call)?;
@@ -8792,6 +8793,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
                         } else {
                             SkipKind::AuthRequired
                         },
+                        cause: None,
                         detail: "sign-in required".into(),
                     })
                     .to_vec(),

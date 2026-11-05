@@ -1634,7 +1634,13 @@ pub(super) fn prepare_candidates(
                     } else {
                         provenant_routing::FallbackOutcome::AdapterUnavailable
                     };
-                    reasons.push(skip(&label, *kind, detail));
+                    let mut skipped = skip(&label, *kind, detail);
+                    skipped.cause = Some(if *kind == SkipKind::AuthRequired {
+                        provenant_records::RouteExclusionReason::AuthRequired
+                    } else {
+                        reason.clone()
+                    });
+                    reasons.push(skipped);
                     continue;
                 }
                 let relevant: Vec<_> = entries
@@ -1653,11 +1659,13 @@ pub(super) fn prepare_candidates(
                     && !relevant.is_empty()
                 {
                     previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
-                    reasons.push(skip(
+                    let mut skipped = skip(
                         &label,
                         SkipKind::Account,
                         relevant.into_iter().cloned().collect::<Vec<_>>().join("; "),
-                    ));
+                    );
+                    skipped.cause = Some(reason.clone());
+                    reasons.push(skipped);
                     continue;
                 }
             }
@@ -1665,7 +1673,7 @@ pub(super) fn prepare_candidates(
             if outcome == provenant_routing::FallbackOutcome::AuthRequired {
                 previous_outcome = outcome;
                 let key = selected.or(route.account_key.as_deref());
-                reasons.push(skip(
+                let mut skipped = skip(
                     &label,
                     SkipKind::AuthRequired,
                     crate::quota::account_login_diagnostic(
@@ -1675,7 +1683,9 @@ pub(super) fn prepare_candidates(
                         key,
                         reason,
                     ),
-                ));
+                );
+                skipped.cause = Some(reason.clone());
+                reasons.push(skipped);
                 continue;
             }
             if matches!(
@@ -1685,7 +1695,9 @@ pub(super) fn prepare_candidates(
                 unavailable_auth_detail(&route, selected, &entries, &auth_failures)
             {
                 previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
-                reasons.push(skip(&label, SkipKind::AuthRequired, detail));
+                let mut skipped = skip(&label, SkipKind::AuthRequired, detail);
+                skipped.cause = Some(provenant_records::RouteExclusionReason::AuthRequired);
+                reasons.push(skipped);
                 continue;
             }
             previous_outcome = outcome;
@@ -1705,7 +1717,9 @@ pub(super) fn prepare_candidates(
                         format!("confinement plan: {error}")
                     },
                 );
-            reasons.push(skip(&label, SkipKind::Unavailable, detail));
+            let mut skipped = skip(&label, SkipKind::Unavailable, detail);
+            skipped.cause = Some(reason.clone());
+            reasons.push(skipped);
             continue;
         }
         if let Err(error) = crate::route::check_dispatch_candidate(roots, &route, provider_registry)

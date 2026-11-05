@@ -4274,3 +4274,30 @@ pub(crate) mod peer_tests {
         Ok(())
     }
 }
+
+#[test]
+fn fallback_cause_uses_only_unanimous_typed_facts() {
+    use provenant_records::{
+        RouteExclusionReason as Cause,
+        run::{SkipKind, SkippedRoute},
+    };
+    let route = |cause| SkippedRoute {
+        extra: Default::default(),
+        route: "/private/token".into(),
+        kind: SkipKind::Unavailable,
+        cause,
+        detail: "prompt token \u{1b} /private/secret".into(),
+    };
+    let first = route(Some(Cause::StaleAvailability));
+    let first: SkippedRoute = serde_json::from_slice(&serde_json::to_vec(&first).unwrap()).unwrap();
+    assert_eq!(
+        unanimous_preparation_cause(std::slice::from_ref(&first)),
+        Some(Cause::StaleAvailability)
+    );
+    assert_eq!(unanimous_preparation_cause(&[first.clone(), route(None)]), None);
+    assert_eq!(
+        unanimous_preparation_cause(&[first, route(Some(Cause::AuthRequired))]),
+        None
+    );
+    assert_eq!(unanimous_preparation_cause(&[]), None);
+}

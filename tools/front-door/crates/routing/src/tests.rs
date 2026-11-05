@@ -4516,6 +4516,7 @@ fn account_evidence_reasons_carry_their_repair_text() {
             "provenant quota tick",
         ),
         (RouteExclusionReason::StaleAvailability, "stale"),
+        (RouteExclusionReason::AuthRequired, "sign in"),
     ] {
         assert!(exclusion_detail(&reason).contains(text), "{reason:?}");
     }

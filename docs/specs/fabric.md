@@ -320,7 +320,9 @@ validates input for its transport without flattening the validation cause to
 text; the projection includes approved fields and reasons. A bounded input
 refusal includes the approved field and byte limit, without its contents. An unanchored
 host path or an arbitrary source error is omitted; uncertain handoffs name the
-operation to inspect instead of directing a new launch. Protocol mismatch
+operation to inspect instead of directing a new launch. A denied fallback may
+include a unanimous typed readiness cause from the identity-checked local attempt;
+free-form skipped-route details do not enter graph diagnostics. Protocol mismatch
 transport identifies a peer by its host ID rather than its SSH destination.
 - Why: people and agents act on the code.
 - Test: `crates/cli/src/fabric.rs::upgrade_and_peer_version_refusals_match_on_both_edges`;

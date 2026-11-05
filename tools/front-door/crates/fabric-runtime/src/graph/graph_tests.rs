@@ -82,6 +82,7 @@ struct FakeOwner {
         std::collections::BTreeMap<String, provenant_records::run::PreparationFailure>,
     omit_fallback_evidence: bool,
     fail_fallback_evidence: bool,
+    fallback_cause: Option<provenant_records::RouteExclusionReason>,
 }
 
 /// An inbox reply from `chair`, choosing `option` or sending `text`.
@@ -117,6 +118,14 @@ impl AttemptOwner for FakeOwner {
             return Err(NoObservation);
         }
         Ok(self.fallback_evidence.get(reference).copied())
+    }
+
+    fn preparation_refusal_cause(
+        &mut self,
+        _: &AttemptKey,
+        _: &str,
+    ) -> Result<Option<provenant_records::RouteExclusionReason>, Self::Error> {
+        Ok(self.fallback_cause.clone())
     }
 
     fn resolve_review(
@@ -6410,6 +6419,7 @@ fn live_fallback_without_release_proof_stops() {
             AttemptOutcome::AuthRequired,
         )]),
         omit_fallback_evidence: true,
+        fallback_cause: Some(provenant_records::RouteExclusionReason::StaleAvailability),
         ..Default::default()
     };
     let result = advance(
@@ -6423,6 +6433,8 @@ fn live_fallback_without_release_proof_stops() {
     let reason = result.checkpoint.nodes[0].advance_error.as_deref().unwrap();
     assert!(reason.contains("authentication"));
     assert!(reason.contains("custody"));
+    assert!(reason.contains("stale"));
+    assert!(reason.contains("provenant quota tick"));
 }
 
 #[test]

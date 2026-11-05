@@ -739,6 +739,9 @@ pub struct SkippedRoute {
     /// `adapter/model`, or the adapter alone for an account-level skip.
     pub route: String,
     pub kind: SkipKind,
+    /// Typed readiness cause, when the router supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<crate::RouteExclusionReason>,
     pub detail: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
