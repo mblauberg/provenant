@@ -442,6 +442,9 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
 
 #[test]
 fn command_dispatch_launches_when_the_store_fails_fast() -> Result {
+    if !available()? {
+        return Ok(());
+    }
     let rig = rig(json!({"pass":{"argv":["/bin/sh","-c","printf 'hello\\n'"]}}))?;
     let _cleanup = rig.process_cleanup();
     let original = fs::read_to_string(rig.state.join("config.toml"))?;
@@ -455,9 +458,6 @@ fn command_dispatch_launches_when_the_store_fails_fast() -> Result {
         loaded["data"]["domains"]["fabric"]["limits"]["store_busy_timeout_ms"], 0,
         "{loaded}"
     );
-    if !available()? {
-        return Ok(());
-    }
     let submitted = dispatch(&rig, "pass", 10)?;
     // With no busy timeout, the polling reads below fail whenever the lane's
     // supervisor holds the store. Only the dispatch needs the fail-fast store.

@@ -854,6 +854,7 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
         },
         |observation| observation.as_ref().is_ok_and(handoff_recovered),
     )??;
+    assert!(lanes["data"]["ignored_settled"].is_null(), "{lanes}");
     let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
