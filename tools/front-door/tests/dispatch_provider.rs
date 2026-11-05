@@ -87,6 +87,8 @@ fn dispatch_proceeds_when_provider_update_is_busy() -> Result {
     let prompt = rig.root.join("prompt.txt");
     use std::os::unix::fs::MetadataExt;
     let metadata = fs::metadata(rig.state.join("provider-updates/agy.lock"))?;
+    #[allow(clippy::disallowed_methods)] // The launch must honour the caller's short wait.
+    let started = std::time::Instant::now();
     fs::write(
         &prompt,
         format!("report lease status {} {}", metadata.dev(), metadata.ino()),
@@ -109,6 +111,12 @@ fn dispatch_proceeds_when_provider_update_is_busy() -> Result {
     // Preparation can outlast the one-second wait on a loaded host.
     let lanes = rig.command(&["lanes", "--id", run, "--wait", "60s", "--json"])?;
     assert_eq!(code(&lanes), 0, "{lanes:?}");
+    // The default lease wait is 30 seconds; a one-second caller must not spend it.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(25),
+        "{:?}",
+        started.elapsed()
+    );
     let output = rig.command(&["output", run, "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     assert!(

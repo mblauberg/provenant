@@ -2307,13 +2307,14 @@ pub fn launch(
 
 /// The detached launcher's entry point. It reopens the admitted run and uses
 /// the ordinary host launch path, including writer custody and guardian handoff.
-pub fn launch_worker(id: RunId, edge: &Edge<'_>) -> Reply {
+pub fn launch_worker(id: RunId, provider_lease_wait: Option<u64>, edge: &Edge<'_>) -> Reply {
     let outcome = (|| {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = request(&clock, &cancel)?;
         let session = open(edge, &call)?;
-        let started = launch_prepared(&session, id, edge, &call, None)?;
+        let started =
+            launch_prepared_with_wait(&session, id, edge, &call, None, provider_lease_wait)?;
         Ok((json!({"started": started}), String::new()))
     })();
     reply("internal launch", outcome)
@@ -2337,6 +2338,9 @@ pub(super) fn launch_with_deadline(
         "internal".into(),
         "launch".into(),
         record.run_id.to_string().into(),
+        // The caller's wait also bounds a wait for an updating provider.
+        "--provider-lease-wait".into(),
+        wait.as_secs().max(1).to_string().into(),
     ];
     // Process startup and each admitted task need a usable receipt window
     // even when the requested observation wait is very short.
