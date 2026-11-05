@@ -1,11 +1,7 @@
 name: Dependabot auto-merge
 
-# Patch-only, unattended auto-merge for Dependabot PRs (issue #155). Minor and
-# major updates are left untouched for maintainer review. This workflow never
-# checks out the PR head: dependabot/fetch-metadata reads PR metadata over the
-# API, and `gh pr merge --auto` only asks GitHub to merge once the repo
-# ruleset's single required check (`ci-status`) reports green, so there is no
-# pull_request_target/pwn-request surface here at all.
+# Metadata and changed paths are read through the API; the PR head is never
+# checked out. GitHub's required ci-status check still gates the merge.
 #
 on:
   pull_request:
@@ -17,7 +13,7 @@ concurrency:
 
 jobs:
   automerge:
-    name: Auto-merge patch-level Dependabot PRs
+    name: Auto-merge eligible Dependabot PRs
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Belt and braces: only Dependabot's own PRs against this repository (not
@@ -36,19 +32,32 @@ jobs:
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
-      - name: Enable auto-merge for patch-level updates
-        if: >-
-          steps.metadata.outputs.update-type == 'version-update:semver-patch'
+      - name: Check eligibility
+        id: eligibility
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --merge "$PR_URL"
-
-      - name: Log skip for excluded or non-patch updates
-        if: >-
-          steps.metadata.outputs.update-type != 'version-update:semver-patch'
-        env:
-          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
-          DEPENDENCY_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
         run: |
-          echo "Skipping auto-merge: update-type=$UPDATE_TYPE dependencies=$DEPENDENCY_NAMES require maintainer review."
+          eligible=false
+          if jq -e 'length > 0 and all(.[]; (.prevVersion | length > 0) and (.newVersion | length > 0) and (.updateType == "version-update:semver-patch" or .updateType == "version-update:semver-minor"))' <<< "$DEPENDENCIES" >/dev/null; then
+            files=$(gh api --paginate --slurp "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100")
+            if jq -e --argjson count "$CHANGED_FILES" '
+              [ .[][] | .filename ] as $paths |
+              ($paths | length) == $count and $count > 0 and
+              all($paths[]; test("(^|/)(Cargo\\.toml|Cargo\\.lock|package\\.json|package-lock\\.json|npm-shrinkwrap\\.json|yarn\\.lock|pnpm-lock\\.yaml)$"))
+            ' <<< "$files" >/dev/null; then
+              eligible=true
+            fi
+          fi
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge
+        if: steps.eligibility.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge --auto --merge --match-head-commit "$HEAD_SHA" "$PR_URL"
