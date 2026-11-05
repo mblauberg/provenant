@@ -677,6 +677,63 @@ fn wait_for_guardian(guardian: &mut crate::fixture::ChildGuard) -> std::process:
 }
 
 #[cfg(all(feature = "fixture", target_os = "macos"))]
+struct RemoveWriterEvidence;
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+impl ExitPublisher for RemoveWriterEvidence {
+    fn commit_reservation(&self, directory: &Directory, _: &[u8]) -> Result<Publication> {
+        let path = directory.current_path()?;
+        std::fs::remove_dir_all(&path).map_err(|source| provenant_os::fs::FsError::Io {
+            operation: "remove fixture writer evidence",
+            path: path.clone(),
+            source,
+        })?;
+        Err(CustodyError::Io(io::Error::from(io::ErrorKind::NotFound)))
+    }
+
+    fn publish(&self, _: &Directory, _: &[u8]) -> Result<Publication> {
+        Err(CustodyError::InvalidRecord)
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+fn guardian_retires_after_unlinked_writer_evidence_and_quiescence() {
+    const CHILD_ARGS: &str = "PROVENANT_TEST_GUARDIAN_UNLINKED_WRITER_FDS";
+    if let Some(args) = child_descriptors(CHILD_ARGS) {
+        let observer = crate::fixture::RecordedBootObserver;
+        let error = supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&RemoveWriterEvidence),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, CustodyError::Io(error) if error.kind() == io::ErrorKind::NotFound)
+        );
+        return;
+    }
+    let (_root, mut guardian, writer_path, attempt_path, scope) = spawn_missing_attempt_guardian(
+        "guardian::tests::guardian_retires_after_unlinked_writer_evidence_and_quiescence",
+        CHILD_ARGS,
+        vec![b"/usr/bin/true".to_vec()],
+    );
+    assert!(wait_for_guardian(&mut guardian).success());
+    assert!(!writer_path.join(scope.attempt.to_string()).exists());
+    assert!(!attempt_path.join("process-exit.json").exists());
+    let writer_dir = Directory::open_anchor(&writer_path).unwrap();
+    let _lease = writer_dir
+        .try_lock(
+            OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )
+        .unwrap();
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
 #[test]
 #[allow(clippy::disallowed_methods)]
 fn guardian_missing_attempt_after_rename_stops_publication_and_settlement() {

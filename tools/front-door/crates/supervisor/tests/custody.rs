@@ -355,7 +355,37 @@ fn start(
     extra: &[OsString],
     plan: CapturePlan,
 ) -> Result<(CustodyLease, CustodyHandle)> {
-    let (writer, handle, _) = start_with_custody_identity(root, name, scenario, extra, plan)?;
+    // Run the existing escape scenarios with the provider held before it
+    // forks, until a scoped observation has actually succeeded. The escape
+    // itself still happens and detaches before its parent can be observed.
+    let state = root.join("PROVENANT_STATE_DIR");
+    let scoped_escape = state.join("s2-live-tree").is_file()
+        && matches!(
+            scenario,
+            "s2-detach-provider" | "s2-registered-detach-provider"
+        );
+    let mut args = extra.to_vec();
+    let warm = if scoped_escape {
+        let seen = state.join("s2-live-tree-seen");
+        match std::fs::remove_file(&seen) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let socket = root.join(format!("{name}-scoped-warm.sock"));
+        let listener = UnixListener::bind(&socket)?;
+        args.push(socket.into_os_string());
+        Some((listener, seen))
+    } else {
+        None
+    };
+    let (writer, handle, _) = start_with_custody_identity(root, name, scenario, &args, plan)?;
+    if let Some((listener, seen)) = warm {
+        let mut stream = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+        byte(&mut stream, b'R')?;
+        wait_for_file(&seen)?;
+        stream.write_all(b"S")?;
+    }
     Ok((writer, handle))
 }
 fn start_with_custody_identity(
@@ -1177,6 +1207,9 @@ fn owner_process(root: &Path) -> Result<()> {
     Ok(())
 }
 fn owner_with_descendant(root: &Path) -> Result<()> {
+    // This caller is detached without the separate fixture-owner cancellation
+    // hook: the guardian must follow its ordinary production cleanup path.
+    assert!(std::env::var_os(provenant_supervisor::FIXTURE_OWNER_PID_ENV).is_none());
     let (writer, _handle) = start(
         root,
         "orphan-tree",
@@ -2329,6 +2362,52 @@ fn guardian_exits_after_owner_and_tracked_descendant_are_gone(root: &Path) -> Re
     assert!(!settled.unresolved_cleanup, "{settled:?}");
     Ok(())
 }
+fn guardian_retires_after_owner_and_evidence_are_removed(root: &Path) -> Result<()> {
+    let descendant_listener = UnixListener::bind(root.join("orphan-descendant.sock"))?;
+    let provider_listener = UnixListener::bind(root.join("orphan-provider.sock"))?;
+    let owner_listener = UnixListener::bind(root.join("owner-ready.sock"))?;
+    let mut owner = fixture::ChildGuard::new(fixture::command("s2-owner-tree", root)?.spawn()?);
+    let mut descendant_stream =
+        fixture::fixture_accept(&descendant_listener, Duration::from_secs(5))?;
+    byte(&mut descendant_stream, b'R')?;
+    let descendant = process_identity(read_pid_line(&mut descendant_stream)?)?;
+    let mut provider_stream = fixture::fixture_accept(&provider_listener, Duration::from_secs(5))?;
+    byte(&mut provider_stream, b'R')?;
+    let mut owner_stream = fixture::fixture_accept(&owner_listener, Duration::from_secs(5))?;
+    byte(&mut owner_stream, b'R')?;
+    let writer = root.join("orphan-tree-writer");
+    let evidence = writer.join(scope().attempt.to_string());
+    wait_for_descendant(&evidence.join("reservation.json"), &descendant)?;
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let provider = reservation_identity(&writer, "provider")?;
+    // Preserve only a fixture cleanup record if a later assertion fails.
+    let cleanup_record = root.join("cleanup-record");
+    std::fs::create_dir(&cleanup_record)?;
+    std::fs::copy(
+        evidence.join("reservation.json"),
+        cleanup_record.join("reservation.json"),
+    )?;
+    std::fs::remove_dir_all(&evidence)?;
+    owner.kill()?;
+    bounded_reap(&mut owner)?;
+    drop(owner_stream);
+    drop(provider_stream);
+    wait_for_identity_absence(&provider)?;
+    assert!(
+        matches!(fixture::RecordedBootObserver.observe(guardian.pid),
+        ProcessObservation::Present(fact) if fact.identity == guardian)
+    );
+    assert!(
+        Directory::open_anchor(&writer)?
+            .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
+            .is_err()
+    );
+    drop(descendant_stream);
+    wait_for_identity_absence(&descendant)?;
+    wait_for_identity_absence(&guardian)?;
+    assert!(!root.join("orphan-tree-attempt/process-exit.json").exists());
+    Ok(())
+}
 fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -> Result<()> {
     let descendant_socket = root.join("descendant.sock");
     let provider_socket = root.join("provider.sock");
@@ -2618,6 +2697,10 @@ const CASES: &[Case] = &[
         guardian_exits_after_owner_and_tracked_descendant_are_gone,
     ),
     (
+        "guardian_retires_after_owner_and_evidence_are_removed",
+        guardian_retires_after_owner_and_evidence_are_removed,
+    ),
+    (
         "retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive",
         retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive,
     ),
@@ -2742,20 +2825,31 @@ fn settle_writers(root: &Path) -> Result<()> {
 }
 
 fn run_case(name: &str) -> Result<()> {
-    let root = provenant_os::fixture::short_tempdir("terminal-checkpoint.sock", |root| {
-        tempfile::Builder::new().prefix("s").tempdir_in(root)
-    })?;
-    let cleanup = fixture::ProcessCleanupGuard::new(root.path());
     let case = CASES
         .iter()
         .find(|(label, _)| *label == name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown custody test"))?;
-    let result = (case.1)(root.path());
-    if result.is_ok() {
+    let escape = matches!(
+        name,
+        "escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures"
+            | "escapee_is_ended_only_when_the_host_reports_no_nested_runs"
+            | "detached_descendant_in_the_attempt_sandbox_is_found_and_ended"
+    );
+    for scoped in [false, true].into_iter().take(if escape { 2 } else { 1 }) {
+        let root = provenant_os::fixture::short_tempdir("terminal-checkpoint.sock", |root| {
+            tempfile::Builder::new().prefix("s").tempdir_in(root)
+        })?;
+        let cleanup = fixture::ProcessCleanupGuard::new(root.path());
+        if scoped {
+            let state = root.path().join("PROVENANT_STATE_DIR");
+            std::fs::create_dir(&state)?;
+            std::fs::write(state.join("s2-live-tree"), b"enabled")?;
+        }
+        (case.1)(root.path())?;
         settle_writers(root.path())?;
         cleanup.disarm();
     }
-    result
+    Ok(())
 }
 
 /// The system clock, with wall time jumped forward once the marker appears,

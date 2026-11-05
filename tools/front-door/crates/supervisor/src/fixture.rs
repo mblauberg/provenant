@@ -937,6 +937,20 @@ pub fn dispatch() -> io::Result<bool> {
             // exit at once so no census can follow the parent edge. The
             // registered variant also leaves a nested owner whose custody the
             // macOS census cannot prove, which forbids stops by descent.
+            let warm_index = if scenario == "s2-detach-provider" {
+                5
+            } else {
+                6
+            };
+            if let Ok(path) = fixture_path(&args, warm_index) {
+                let mut warm = std::os::unix::net::UnixStream::connect(path)?;
+                warm.write_all(b"R")?;
+                let mut command = [0_u8; 1];
+                warm.read_exact(&mut command)?;
+                if command != *b"S" {
+                    return Err(io::Error::other("unexpected fixture command"));
+                }
+            }
             let root = std::env::current_dir()?;
             let extra = [
                 fixture_path(&args, 3)?.into_os_string(),

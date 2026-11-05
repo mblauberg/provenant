@@ -633,6 +633,10 @@ impl Driver<'_> {
     ) -> Result<()> {
         let mut warnings = Vec::new();
         let mut omitted_warnings = 0_u64;
+        // Keep the original inode and path even if the caller later removes
+        // its state. A rename alone must not end a publication retry.
+        let writer_evidence_identity = DirectoryIdentity::of(&self.writer_dir).ok();
+        let writer_evidence_path = self.writer_dir.current_path().ok();
         let warn = |warnings: &mut Vec<String>, omitted: &mut u64, label: &str| {
             if warnings.len() < 24 {
                 warnings.push(label.to_owned());
@@ -802,7 +806,7 @@ impl Driver<'_> {
         let mut census_reactor_failed = false;
         let mut reactor_warning_recorded = false;
         let mut process_watch_unavailable = false;
-        let cleanup_complete;
+        let mut cleanup_complete;
         let mut drain_deadline = None;
         let mut cleanup_pending = false;
         loop {
@@ -1397,9 +1401,33 @@ impl Driver<'_> {
             // The exit must agree with a durable reservation. A visible
             // replacement followed by failed directory sync is not a durable
             // transition; retain the locks and retry the same proven facts.
-            // Intentionally unbounded: dropping custody before durable proof
-            // would admit a second writer. Signals cannot waive this invariant.
+            // A linked evidence directory may recover from ENOSPC or a sync
+            // error, so keep custody and retry indefinitely. An unlinked one
+            // cannot accept a reservation at all. In that case only, finish
+            // the same full-census and fresh-lease proof before retiring; do
+            // not publish an exit or clear a fence without its reservation.
             while !self.persist_reservation() {
+                if writer_evidence_identity.is_some_and(|identity| {
+                    attempt_removed(&self.writer_dir, writer_evidence_path.as_deref(), identity)
+                }) {
+                    if !cleanup_complete {
+                        cleanup_complete = self
+                            .cleanup(
+                                &mut child,
+                                plan,
+                                stop_reason == Some(machine::StopReason::ExplicitCancellation),
+                                &mut warnings,
+                                &mut omitted_warnings,
+                            )
+                            .unwrap_or(false);
+                    }
+                    if cleanup_complete {
+                        return Err(CustodyError::Io(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "writer evidence directory removed before exit publication",
+                        )));
+                    }
+                }
                 let _ = self.reactor.wait(&[], Duration::from_millis(25));
             }
         }
