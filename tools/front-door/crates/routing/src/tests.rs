@@ -4960,6 +4960,23 @@ fn a_malformed_persisted_exclusion_fails_closed_for_its_row_only()
 }
 
 #[test]
+fn review_project_overrides_order_and_shape_slots_through_loader()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = load_routing(
+        "schema_version=1\n[domains.routing.review.lenses]\norder=['flexibility','tests','reliability']\n[domains.routing.review.shapes.standard]\nreviewers=[{pool='junior',count=2}]\n",
+    )??;
+    let review = &config.domains.routing.review;
+    let panel = review.panel(&review.shapes["standard"], None, &[], false, &[]);
+    let lenses: Vec<_> = panel
+        .reviewers
+        .iter()
+        .flat_map(|r| r.lenses.iter().map(String::as_str))
+        .collect();
+    assert_eq!(lenses, ["flexibility", "tests"]);
+    Ok(())
+}
+
+#[test]
 fn review_path_lens_rules_load_replace_or_clear_the_bundled_table_through_the_loader()
 -> Result<(), Box<dyn std::error::Error>> {
     let paths = vec!["crates/x/tests/a.rs".to_owned(), "docs/e2e/b.md".to_owned()];

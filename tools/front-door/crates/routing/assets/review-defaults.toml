@@ -21,7 +21,7 @@ min_monthly_allowance_usd = 60
 [review.shapes.quick]
 reviewers = [{ pool = "junior", count = 1 }]
 [review.shapes.standard]
-reviewers = [{ pool = "junior", count = 3, distinct_families = true }]
+reviewers = [{ pool = "junior", count = 5, distinct_families = true }]
 [review.shapes.deep]
 reviewers = [
   { pool = "junior", count = 4, distinct_families = true },
@@ -51,9 +51,9 @@ order = [
   "tests",
   "design-fit-reuse",
   "simplicity",
+  "reliability",
   "conventions-readability",
   "refactor-cleanup",
-  "reliability",
   "flexibility",
 ]
 [review.lenses.by_kind.docs]

@@ -20,8 +20,9 @@ provenant run --preset review-council --prompt-file BRIEF.md \
   --set 'parameters.spec="#N"' --set 'parameters.risk_tags=["security"]' --plan on --explain
 ```
 
-The default is a planner-led panel under the HARNESS review floors. The chair
-checks its recorded plan and supplies missing reviewers or lenses; today's
+Lens coverage comes first: cover every question the change needs, and record
+family separation as a bonus when available. The default is a planner-led panel
+under the HARNESS review floors. The chair checks its recorded plan and supplies missing reviewers or lenses; today's
 planner can only narrow the runtime-selected catalogue. The base lenses are
 `correctness-spec`,
 `design-fit-reuse`, `simplicity`, `conventions-readability`, `tests`,
@@ -35,8 +36,9 @@ each finding and a senior synthesis gives each a disposition. For a quick fan-ou
 
 For a native panel, take the lens list from `provenant review TARGET --explain`,
 which prints the selected shape, lenses and the reason without dispatching. Launch
-one independent read-only sub-agent per selected lens in parallel. Include the cross-family leg the review ladder asks for,
-then have the chair synthesise findings and dispositions across the panel.
+one independent read-only sub-agent per selected lens in parallel. Prefer the
+cross-family leg the review ladder asks for, then have the chair synthesise
+findings and dispositions across the panel.
 
 Review a stacked PR against its own base; do not re-review lower PRs. See the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
 

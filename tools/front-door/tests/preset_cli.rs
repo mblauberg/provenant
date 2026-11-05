@@ -450,6 +450,40 @@ fn scrubbed(program: &str) -> Command {
 }
 
 #[test]
+fn review_explain_snapshots_substantial_default_panel() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let brief = temp.path().join("brief");
+    std::fs::write(&brief, "Review this change")?;
+    let output = fixture_cli()
+        .current_dir(&root)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args(["review", "HEAD", "--brief-file"])
+        .arg(&brief)
+        .args([
+            "--risk",
+            "substantial",
+            "--range",
+            "HEAD..HEAD",
+            "--explain",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout)?;
+    let snapshot = "  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=reliability pool=junior\n";
+    assert!(text.contains(snapshot), "{text}");
+    assert!(text.starts_with("review standard (by_risk;"), "{text}");
+    Ok(())
+}
+
+#[test]
 fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -485,7 +519,7 @@ fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error
         text.starts_with("review deep (by_kind; size=unknown; kind=integration; risk=routine)\n"),
         "{text}"
     );
-    let snapshot = "  risk tags: security\n  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=conventions-readability pool=senior\n  lens=refactor-cleanup pool=senior\n  lens=reliability pool=senior\n  lens=flexibility pool=senior\n  lens=security-privacy pool=senior\n";
+    let snapshot = "  risk tags: security\n  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=reliability pool=senior\n  lens=conventions-readability pool=senior\n  lens=refactor-cleanup pool=senior\n  lens=flexibility pool=senior\n  lens=security-privacy pool=senior\n";
     assert!(text.contains(snapshot), "{text}");
     Ok(())
 }
