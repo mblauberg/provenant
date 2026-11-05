@@ -3418,14 +3418,20 @@ fn graph_attempt_usage(
 fn decode_graph_document(
     bytes: &[u8],
 ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
-    let value: serde_json::Value =
-        provenant_records::decode(bytes, provenant_records::Limits::default())
-            .map_err(|_| FacadeError::invalid("graph document is not a valid record"))?;
-    match value
-        .get("schema_version")
+    #[derive(serde::Deserialize)]
+    struct Header {
+        schema_version: Option<serde_json::Value>,
+    }
+    // Check the version before decoding the graph, so a future schema can
+    // request an upgrade even when its node fields are unknown to this reader.
+    let header: Header = provenant_records::decode(bytes, provenant_records::Limits::default())
+        .map_err(|_| FacadeError::invalid("graph document is not a valid record"))?;
+    match header
+        .schema_version
+        .as_ref()
         .and_then(serde_json::Value::as_u64)
     {
-        Some(1 | 2) => serde_json::from_value(value)
+        Some(1 | 2) => provenant_records::decode(bytes, provenant_records::Limits::default())
             .map_err(|error| FacadeError::invalid(format!("graph document: {error}"))),
         Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
             reader_release: env!("CARGO_PKG_VERSION").into(),

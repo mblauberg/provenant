@@ -1,5 +1,22 @@
 #[cfg(test)]
 #[test]
+fn graph_document_decoder_checks_header_before_typed_graph() {
+    for version in [1, 2] {
+        let source = format!(r#"{{"schema_version":{version},"graph_id":"test","nodes":[]}}"#);
+        let document = decode_graph_document(source.as_bytes()).unwrap();
+        assert_eq!(document.schema_version, version);
+    }
+    assert!(matches!(
+        decode_graph_document(br#"{"schema_version":3,"nodes":"future shape"}"#),
+        Err(FacadeError::UpgradeRequired { version: 3, .. })
+    ));
+    assert!(decode_graph_document(br#"{"schema_version":1,"schema_version":2}"#).is_err());
+    assert!(decode_graph_document(br#"{"schema_version":1,"nodes":"invalid"}"#).is_err());
+    assert!(decode_graph_document(br#"{"graph_id":"test","nodes":[]}"#).is_err());
+}
+
+#[cfg(test)]
+#[test]
 fn cli_failure_uses_stderr_without_structured_json() {
     let error = cli_failure(b"not json", b"specific failure\nadditional detail\n");
     assert!(matches!(error, ServiceError::Cli { code, message, data }
