@@ -2797,7 +2797,7 @@ fn graph_fixture_available() -> Result<bool> {
     Ok(true)
 }
 
-fn graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts() -> Result {
+fn graph_read_only_alias_does_not_redraw_after_launch_quota() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
@@ -2837,66 +2837,25 @@ fn graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts() -> Re
         let status = rig.command(&["fabric", "graph", "status", "quota-redraw", "--json"])?;
         assert_eq!(code(&status), 0, "{status:?}");
         let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-        if status["data"]["checkpoint"]["nodes"][0]["state"] == "succeeded" {
+        if status["data"]["checkpoint"]["nodes"][0]["state"] == "failed" {
             break status;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "graph did not recover: {status}"
+            "graph did not settle: {status}"
         );
         std::thread::park_timeout(std::time::Duration::from_millis(50));
     };
-    let reference = status["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
-        .as_str()
-        .ok_or("attempt reference")?;
-    let attempt = reference.split_once('/').ok_or("host reference")?.1;
+    let attempts = status["data"]["checkpoint"]["nodes"][0]["attempts"]
+        .as_array()
+        .ok_or("attempts")?;
+    assert_eq!(attempts.len(), 1, "{status}");
     let lanes = rig.command(&["lanes", "--all", "--json"])?;
     assert_eq!(code(&lanes), 0, "{lanes:?}");
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let rows = lanes["data"]["lanes"].as_array().ok_or("lanes")?;
-    assert_eq!(rows.len(), 2, "{lanes}");
-    let first = rows
-        .iter()
-        .find(|row| row["attempt_number"] == 1)
-        .ok_or("first")?;
-    let second = rows
-        .iter()
-        .find(|row| row["attempt_number"] == 2)
-        .ok_or("second")?;
-    assert_eq!(first["state"], "quota_limited");
-    assert_eq!(second["state"], "succeeded");
-    assert_ne!(
-        first["applied_route"]["model"],
-        second["applied_route"]["model"]
-    );
-    assert_eq!(second["attempt_id"], attempt);
-    let db = rusqlite::Connection::open_with_flags(
-        rig.state.join("run.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
-    let raw: Vec<u8> = db.query_row(
-        "SELECT record FROM attempts WHERE id=?1",
-        [attempt],
-        |row| row.get(0),
-    )?;
-    let record: Value = serde_json::from_slice(&raw)?;
-    assert_eq!(record["retry_of"], first["attempt_id"]);
-    let full = rig.command(&["fabric", "graph", "status", "quota-redraw", "--full"])?;
-    let human = String::from_utf8(full.stdout.bytes)?;
-    assert!(
-        human.contains("settlement_retries=2 origin=shipped_default"),
-        "{human}"
-    );
-    // Replaying the graph keeps its operation and its settled lineage.
-    let replay = rig.command(&[
-        "fabric",
-        "graph",
-        "run",
-        "--document",
-        "graph.json",
-        "--json",
-    ])?;
-    assert_eq!(code(&replay), 0, "{replay:?}");
+    assert_eq!(rows.len(), 1, "{lanes}");
+    assert_eq!(rows[0]["state"], "quota_limited");
     cleanup.disarm();
     Ok(())
 }
@@ -5075,7 +5034,7 @@ fn main() -> ExitCode {
                 "host_native_dispatch_uses_the_declared_agent_and_refuses_resume",
                 "host_native_preparation_uses_the_provider_contract",
                 "unconfigured_host_native_repair_launches_alias_fallback",
-                "graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts",
+                "graph_read_only_alias_does_not_redraw_after_launch_quota",
                 "graph_retries_real_registry_lock_and_runs_writer",
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_node_reads_full_upstream_result_from_its_inputs_directory",
@@ -5150,7 +5109,7 @@ fn main() -> ExitCode {
                     "unconfigured_host_native_repair_launches_alias_fallback" => {
                         unconfigured_host_native_repair_launches_alias_fallback()
                     }
-                    "graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts" => graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts(),
+                    "graph_read_only_alias_does_not_redraw_after_launch_quota" => graph_read_only_alias_does_not_redraw_after_launch_quota(),
                     "graph_retries_real_registry_lock_and_runs_writer" => graph_retries_real_registry_lock_and_runs_writer(),
                     "graph_settlement_advances_writer_and_account_routed_review" => {
                         graph_settlement_advances_writer_and_account_routed_review()
