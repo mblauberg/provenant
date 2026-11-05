@@ -1002,8 +1002,7 @@ fn factory(
     })
 }
 
-/// Wake only expired journals. The snapshot is a discovery hint; the deadline
-/// is checked again while holding the same journal lock as explicit advance.
+/// Discover pending journals and check deadlines under the same lock as explicit advance.
 pub(crate) fn tick_graphs(
     resolved: &crate::roots::Resolved,
     now: provenant_core::WallTime,
@@ -1049,9 +1048,7 @@ pub(crate) fn tick_graphs(
                     }
                     return Ok(false);
                 };
-                if !checkpoint.cancelled && !graph_wake_due(&checkpoint, now) {
-                    return Ok(false);
-                }
+                let due_at_start = checkpoint.cancelled || graph_wake_due(&checkpoint, now);
                 let clock = SystemClock::new();
                 let cancel = CancelToken::new();
                 let budget = WaitBudget::cli(clock.mono_now(), 55)?;
@@ -1080,7 +1077,29 @@ pub(crate) fn tick_graphs(
                     journal.clear_stale_pending()?;
                     return Ok(false);
                 };
-                if !graph_wake_due(&checkpoint, clock.wall_now()?) {
+                match std::fs::metadata(&execution.directory) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let reason = format!(
+                            "graph {id}: worktree is missing; restore it or cancel this graph"
+                        );
+                        if FileJournal::read_advance_error(&resolved.roots.state, project, &id)?
+                            .as_deref()
+                            != Some(reason.as_str())
+                        {
+                            FileJournal::set_advance_error(
+                                &resolved.roots.state,
+                                project,
+                                &id,
+                                Some(&reason),
+                            )?;
+                            report.warnings.push(reason);
+                        }
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => {}
+                }
+                if !due_at_start || !graph_wake_due(&checkpoint, clock.wall_now()?) {
                     return Ok(false);
                 }
                 let context =

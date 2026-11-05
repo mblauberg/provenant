@@ -443,6 +443,7 @@ fn seed_state(directory: &Directory) -> &'static str {
 pub(crate) struct Graphs {
     pub advanced: usize,
     pub errors: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -516,6 +517,7 @@ fn tick(
         crate::fabric::tick_graphs(&resolved, now, workers).unwrap_or_else(|error| Graphs {
             advanced: 0,
             errors: vec![error.to_string()],
+            warnings: Vec::new(),
         });
     // Task errors are isolated: a failed graph or collection must not prevent
     // later hooks from running. GC cadence is serialised across manual ticks
@@ -590,18 +592,27 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
         Ok(data) => {
             let failed = !data.graphs.errors.is_empty()
                 || data.tasks.iter().any(|task| task.error.is_some());
-            let human = format!(
+            let mut human = format!(
                 "tick: graphs={} errors={} gc={} seed={}\n",
                 data.graphs.advanced,
                 data.graphs.errors.len(),
                 data.tasks[0].state,
                 data.tasks[1].state
             );
+            for warning in &data.graphs.warnings {
+                human.push_str(&format!("warning: {warning}\n"));
+            }
             let rows = data
                 .graphs
                 .errors
                 .iter()
                 .cloned()
+                .chain(
+                    data.graphs
+                        .warnings
+                        .iter()
+                        .map(|warning| format!("warning: {warning}")),
+                )
                 .chain(data.tasks.iter().filter_map(|task| {
                     task.error
                         .as_ref()

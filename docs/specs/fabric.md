@@ -1422,7 +1422,10 @@ or does not match, the next tick can advance the graph. Pending markers make
 tick discovery independent of the number of terminal checkpoints; a missing
 sentinel or daily collection rebuilds them. A failed advance is recorded as
 `advance_error` until the next success; `resume` is the manual path. A lane
-settlement error is recorded on its matching graph.
+settlement error is recorded on its matching graph. When a pending graph's
+worktree is missing, tick reports the graph once and continues with other
+work; restoring the worktree or cancelling the graph resolves the condition.
+Pending graphs remain protected from checkpoint retention.
 - Why: dependants progress without scanning unrelated terminal graphs.
 - Test: `crates/fabric-runtime/src/graph.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory`;
   `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`;

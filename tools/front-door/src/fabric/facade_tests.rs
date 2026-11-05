@@ -134,6 +134,72 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
+    fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::tick_warns_once_for_missing_worktree_and_advances_another_graph")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, GraphJournal};
+        struct Seed { actor: String, at: provenant_core::WallTime }
+        impl graph::AttemptOwner for Seed {
+            type Error = FacadeError;
+            fn actor(&self) -> String { self.actor.clone() }
+            fn wall_now(&self) -> Option<provenant_core::WallTime> { Some(self.at) }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute, _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>)
+                -> Result<graph::AttemptObservation, Self::Error> { Err(FacadeError::OwnerUnavailable) }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new().map_err(|e| format!("rig: {e}"))?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone()).map_err(|e| format!("roots: {e}"))?;
+        let context = Context::open(roots.clone(), &rig.home, &rig.project).map_err(|e| format!("context: {e}"))?;
+        let project = context.identity.project;
+        let clock = SystemClock;
+        let now = clock.wall_now()?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 10)?;
+        let mut seed = Seed { actor: context.identity.inbox.actor.to_string(), at: provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)? };
+        for id in ["a-missing", "b-present"] {
+            if id == "a-missing" { seed.at = now; }
+            else { seed.at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?; }
+            let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+                "schema_version":1, "graph_id":id, "decision_session":"chair-session",
+                "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{
+                    "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
+                    "default":"hold", "timeout_seconds":60
+                }}]
+            }))?;
+            let mut journal = graph::FileJournal::open(&roots.state, project, id, budget, &cancel, &clock)?;
+            journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+                directory: if id == "a-missing" { rig.root.join("removed-worktree") } else { rig.project.clone() },
+                document: document.clone() })?;
+            graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default()).map_err(|e| format!("seed: {e}"))?;
+        }
+        let resolved = crate::roots::Resolved { assets: rig.project.clone(), home: rig.home.clone(),
+            project: rig.project.clone(), roots: roots.clone(), claude_config: None, codex_home: None };
+        let first = tick_graphs(&resolved, now, &FreeWorkers)?;
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert_eq!(first.advanced, 1);
+        assert_eq!(first.warnings.len(), 1);
+        assert!(first.warnings[0].contains("a-missing"));
+        let second = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert!(second.warnings.is_empty());
+        assert_eq!(graph::FileJournal::collect_terminal(&roots.state, project, i128::MAX, &cancel, &clock)?, 1);
+        assert!(graph::FileJournal::read_checkpoint(&roots.state, project, "a-missing")?.is_some());
+        let mut journal = graph::FileJournal::open(&roots.state, project, "a-missing", budget, &cancel, &clock)?;
+        let mut checkpoint = journal.load("a-missing")?.ok_or("missing graph")?;
+        checkpoint.cancelled = true;
+        checkpoint.nodes[0].state = graph::NodeState::Skipped;
+        checkpoint.asks.clear();
+        checkpoint.wake_at = None;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        assert_eq!(graph::FileJournal::collect_terminal(&roots.state, project, i128::MAX, &cancel, &clock)?, 1);
+        assert!(graph::FileJournal::read_checkpoint(&roots.state, project, "a-missing")?.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::graph_cancel_persists_reason_and_skips_pending_node")? {
             return Ok(());
