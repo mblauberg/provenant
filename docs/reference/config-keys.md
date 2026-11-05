@@ -12,6 +12,7 @@ Set these in `[domains.lanes]` in the host configuration. Omit a key for its def
 |---|---|---|
 | `user_skills` | discover | Discover host user skills for lanes read-only. off disables host user skill discovery unless overridden by domains.lanes.projects.{project_id}.user_skills or route policy lane.user_skills. Route policy wins over project, then host. Inspect value, default and origin with config show or config schema. (discover or off). |
 | `skill_stage_max_bytes` | 16777216 | Maximum bytes copied into an attempt's read-only user skill tree. Content exceeding the bound is skipped with a warning. Inspect value and origin with config show. (bytes, 0 or more). |
+| `projects.{project}.capabilities` | [] | Capabilities granted by default to this project's writer lanes; node settings and invocation flags may override them. Read-only lanes do not inherit them. (postgres). |
 | `projects.{project}.shared_paths` | [] | Existing paths shared read-write with this project's writers. Absolute, ~/ and primary-checkout-relative paths are accepted. Git, credential, protected and executable paths are omitted with a warning. Read-only lanes receive no additional writes. (existing absolute, ~/ or checkout-relative paths). |
 | `projects.{project}.exec_roots` | [] | Read-and-execute directory subtrees relative to the primary checkout. Entries escaping that checkout, missing, protected, credential or writable targets are ignored with a warning naming the configuration key. (directory paths relative to the primary checkout). |
 

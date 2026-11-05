@@ -24,6 +24,8 @@ mod project_paths;
 mod source_tree;
 
 use command::*;
+#[cfg(test)]
+pub(super) use confinement::apply_lane_capabilities;
 use confinement::*;
 use continuation::*;
 use observation::*;

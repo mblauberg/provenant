@@ -200,7 +200,7 @@ pub(super) fn prepare_command(
     if let Some(alias) = &paths.temporary_alias {
         alias_temporary_env(&mut spec.env, &scratch, &alias.join("command"));
     }
-    spec.profile.spec.allow_database_ipc = task.access.database_ipc;
+    apply_lane_capabilities(&mut spec.profile.spec, &task.access);
     let common_git_path = repository
         .as_ref()
         .map(|path| path.to_path_buf())

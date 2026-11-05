@@ -206,6 +206,12 @@ checkout-relative toolchain directories without write access. Both default to
 empty arrays; `config show` reports their effective value and origin. See
 [project paths](providers.md#project-paths-and-host-checkout-identity).
 
+A project can set `domains.lanes.projects.<project>.capabilities = ["postgres"]`
+to grant database IPC to its writer lanes by default. A graph node may supply
+`capabilities`, including an empty array to remove the default. Read-only lanes
+do not inherit project defaults. `--capability` adds a grant and
+`--no-capability` removes it for an invocation.
+
 Build slots gate builds, not lanes. A writer is admitted on the writer caps
 and the memory and disk floors alone, however many writers are live, so one
 project's idle writers never block another's. The slots are a build throttle,

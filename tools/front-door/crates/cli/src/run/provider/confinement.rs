@@ -1,5 +1,13 @@
 use super::*;
 
+/// Bind declared lane capabilities to the provider's confinement profile.
+pub(in crate::run) fn apply_lane_capabilities(
+    profile: &mut provenant_confinement::permissions::ProviderProfileSpec,
+    access: &run::LaneAccess,
+) {
+    profile.allow_database_ipc = access.database_ipc;
+}
+
 /// The host directory under which every graph node's materialised upstream
 /// results live, one subdirectory per project, graph and node.
 pub fn graph_inputs_directory(state_root: &Path) -> PathBuf {
