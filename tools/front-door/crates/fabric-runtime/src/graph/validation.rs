@@ -54,7 +54,7 @@ pub(super) fn document_requires_schema_v2(document: &GraphDocument) -> bool {
 
 pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
     if let Some(composite) = &node.composite {
-        return composite
+        let mut kinds = composite
             .exports
             .iter()
             .flat_map(|input| input.outputs.iter().copied())
@@ -64,6 +64,10 @@ pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
                 }
                 kinds
             });
+        if composite.reduce_verdict && !kinds.contains(&OutputKind::Verdict) {
+            kinds.push(OutputKind::Verdict);
+        }
+        return kinds;
     }
     let mut kinds = vec![
         OutputKind::Result,

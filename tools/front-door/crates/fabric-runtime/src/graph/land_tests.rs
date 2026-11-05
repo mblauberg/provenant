@@ -567,6 +567,39 @@ fn a_failed_review_routed_to_land_never_calls_the_host() {
 }
 
 #[test]
+fn reduced_review_requires_every_counted_member_to_judge_the_land_head() {
+    for (other_head, allowed) in [(WRITE_HEAD, true), (REPAIR_HEAD, false)] {
+        let (owner, land) = land_outcome(
+            json!([
+                {"id":"write", "access":"worktree_write", "worktree":"/wt/feature", "delivery":"pr",
+                 "prompt":"write it", "route":{"alias":"senior"}},
+                {"id":"reviews", "kind":"composite", "access":"read_only", "depends_on":["write"],
+                 "composite":{"reduce_verdict":true,"min_successful":1,
+                    "nodes":[
+                        {"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"},"source":{"type":"commit","commit":WRITE_HEAD}},
+                        {"id":"b","access":"read_only","prompt":"review","route":{"alias":"senior"},"source":{"type":"commit","commit":other_head}}
+                    ],"exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]}},
+                {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["reviews"],
+                 "inputs":[{"node":"reviews", "outputs":["verdict"]}],
+                 "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}},
+                {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["write"],
+                 "condition":{"type":"ci", "target":"feature/x"}},
+                {"id":"land", "kind":"land", "access":"read_only", "depends_on":["accepted", "ci"],
+                 "land":{"node":"write", "tier":"routine"}}
+            ]),
+            "VERDICT: PASS",
+        );
+        assert_eq!(!owner.lands.is_empty(), allowed);
+        if !allowed {
+            assert_eq!(
+                land.advance_error_code.as_deref(),
+                Some("land_review_required")
+            );
+        }
+    }
+}
+
+#[test]
 fn ci_output_never_substitutes_for_review() {
     // write, CI, a verdict gate on CI's own PASS, land: no reviewer ran.
     let (owner, land) = land_outcome(

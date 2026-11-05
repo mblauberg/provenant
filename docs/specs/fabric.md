@@ -329,7 +329,7 @@ The graph runtime owns static admission for presets, raw documents and planner
 fragments. It validates schema capability, the configured structural limits,
 the expanded plan, the worst-case checkpoint envelope and selected output
 kinds before submission. Recovery uses the same schema-capability predicate.
-For composites, the declared exports are the static public capability; admission
+For composites, the declared exports and any reduced verdict are the static public capability; admission
 checks consumers against that contract and validates export references and
 selector shapes. Whether a selected member actually made an output available is
 runtime evidence and remains visible in the composite settlement.
@@ -631,6 +631,12 @@ retain their usual failure semantics. Disposition validation still applies.
 A partial composite waits for its members to settle, exports the successful
 members and names unavailable members in its result. A blocked node reports
 its blocking upstream node and state in status.
+
+A composite may declare `reduce_verdict = true`. It computes a verdict without
+an attempt from its successful exporting members: request changes is worse than
+inconclusive, then approve with nits, then approve. A missing or invalid verdict
+is inconclusive. The composite fails its coverage minimum when no member succeeds,
+even if its configured minimum is zero.
 
 A node may declare `dispositions`, a list of allowed values. At settlement its
 findings block must parse and every finding must carry a `disposition` from
@@ -1037,7 +1043,9 @@ outside the writer's chain, never a gate, loop, decision or land output such
 as CI's `PASS`, and judged the head
 through its pinned `source` commit or, without one, as the newest head of the
 writer's chain upstream of it. A composite input has no subject of its own, so
-it resolves to the member that exported its verdict, recursively: a council
+it resolves to the member that exported its verdict, recursively. A reduced
+verdict instead requires every successful exporting member to be a read-only
+reviewer of the pinned head. A council
 pinned to an earlier head never vouches for a later one that merely precedes
 its boundary. Otherwise the node fails without calling the
 host and names the heads that were reviewed, so a failed gate whose `on_fail`

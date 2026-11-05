@@ -11,6 +11,9 @@ pub struct CompositeSpec {
     /// their count. Absent, a failed member blocks the composite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_successful: Option<usize>,
+    /// Reduce successful exporting members' verdicts using the worst outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reduce_verdict: bool,
     pub nodes: Vec<GraphNode>,
     pub exports: Vec<GraphInput>,
 }
@@ -307,6 +310,7 @@ fn children(
             node.read_roots.clear();
             node.composite = Some(CompositeSpec {
                 min_successful: spec.min_successful,
+                reduce_verdict: spec.reduce_verdict,
                 nodes: Vec::new(),
                 exports: spec
                     .exports
@@ -350,7 +354,7 @@ fn outputs(
     let mut finding_members = Vec::new();
     let mut truncation_header = None;
     let mut inherited_notices = Vec::new();
-    let partial = spec.min_successful.is_some();
+    let partial = spec.min_successful.is_some() || spec.reduce_verdict;
     let unavailable = unavailable(spec, checkpoint, positions);
     for export in &spec.exports {
         let member = &checkpoint.nodes[positions[&export.node]];
@@ -430,6 +434,37 @@ fn outputs(
                 .warnings
                 .push(bounded(&format!("unavailable {entry}"), WARNING_BYTES));
         }
+    }
+    if spec.reduce_verdict {
+        use provenant_records::workflow::ReviewVerdict;
+        let rank = |verdict| match verdict {
+            ReviewVerdict::Approve => 0,
+            ReviewVerdict::ApproveWithNits => 1,
+            ReviewVerdict::Inconclusive => 2,
+            ReviewVerdict::RequestChanges => 3,
+        };
+        let verdict = exporting_members(spec, positions)
+            .into_iter()
+            .map(|index| &checkpoint.nodes[index])
+            .filter(|member| member.state == NodeState::Succeeded)
+            .map(|member| {
+                member
+                    .outputs
+                    .as_ref()
+                    .and_then(|output| {
+                        if output.verdict_error.is_some() {
+                            return None;
+                        }
+                        output
+                            .verdict
+                            .as_deref()
+                            .and_then(ReviewVerdict::from_token)
+                    })
+                    .unwrap_or(ReviewVerdict::Inconclusive)
+            })
+            .max_by_key(|verdict| rank(*verdict));
+        selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
+        selected.verdict_error = None;
     }
     if selected
         .findings
@@ -660,7 +695,7 @@ fn unavailable(
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> Vec<String> {
-    if spec.min_successful.is_none() {
+    if spec.min_successful.is_none() && !spec.reduce_verdict {
         return Vec::new();
     }
     exporting_members(spec, positions)
@@ -686,7 +721,14 @@ fn coverage_shortfall(
     positions: &BTreeMap<String, usize>,
 ) -> Option<String> {
     let members = exporting_members(spec, positions);
-    let minimum = spec.min_successful?.min(members.len());
+    let minimum = if spec.reduce_verdict {
+        spec.min_successful
+            .unwrap_or(members.len())
+            .max(1)
+            .min(members.len().max(1))
+    } else {
+        spec.min_successful?.min(members.len())
+    };
     let succeeded = members
         .iter()
         .filter(|member| checkpoint.nodes[**member].state == NodeState::Succeeded)
@@ -755,7 +797,7 @@ fn state(
     if node
         .composite
         .as_ref()
-        .is_some_and(|spec| spec.min_successful.is_some())
+        .is_some_and(|spec| spec.min_successful.is_some() || spec.reduce_verdict)
     {
         // The group's own dependencies decide first; the rules below judge
         // its members, whose failures are the point of a partial group.

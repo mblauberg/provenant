@@ -541,6 +541,7 @@ fn admitted_deferred_review_fits_checkpoint_after_expansion() {
         commit: oid.clone(),
     });
     root.composite = Some(CompositeSpec {
+        reduce_verdict: false,
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
@@ -611,6 +612,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
     outer.route = None;
     outer.prompt.clear();
     outer.composite = Some(CompositeSpec {
+        reduce_verdict: false,
         min_successful: Some(1),
         nodes: vec![review],
         exports: vec![GraphInput {
@@ -654,6 +656,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         commit: oid.clone(),
     });
     root.composite = Some(CompositeSpec {
+        reduce_verdict: false,
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
@@ -1959,6 +1962,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     synthesis.depends_on.clear();
     synthesis.inputs.clear();
     outer.composite = Some(CompositeSpec {
+        reduce_verdict: false,
         min_successful: None,
         nodes: vec![synthesis],
         exports: vec![input("synthesis")],
@@ -3210,6 +3214,89 @@ fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
         ..Default::default()
     };
     (document, owner)
+}
+
+#[test]
+fn reduced_review_uses_worst_verdict_and_requires_coverage() {
+    for (answers, minimum, expected, passes) in [
+        (
+            vec![Some("VERDICT: PASS"), Some("VERDICT: FAIL")],
+            1,
+            Some("VERDICT: REQUEST_CHANGES"),
+            false,
+        ),
+        (
+            vec![Some("VERDICT: FAIL"), Some("VERDICT: PASS")],
+            1,
+            Some("VERDICT: REQUEST_CHANGES"),
+            false,
+        ),
+        (
+            vec![Some("VERDICT: PASS"), Some("no verdict")],
+            1,
+            Some("VERDICT: INCONCLUSIVE"),
+            false,
+        ),
+        (
+            vec![Some("VERDICT: PASS"), Some("VERDICT: PASS")],
+            1,
+            Some("VERDICT: APPROVE"),
+            true,
+        ),
+        (vec![None, None], 0, None, false),
+        (vec![Some("VERDICT: PASS"), None], 2, None, false),
+    ] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "reduced-review", "nodes": [
+                {"id":"reviews", "kind":"composite", "access":"read_only",
+                 "composite":{"min_successful":minimum,"reduce_verdict":true,
+                     "nodes":[{"id":"a","access":"read_only","prompt":"a","route":{"alias":"fixture"}},
+                              {"id":"b","access":"read_only","prompt":"b","route":{"alias":"fixture"}}],
+                     "exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]}},
+                {"id":"gate","kind":"gate","access":"read_only","depends_on":["reviews"],
+                 "inputs":[{"node":"reviews","outputs":["verdict"]}],
+                 "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+            ]
+        })).unwrap();
+        let mut owner = FakeOwner {
+            observations: answers
+                .into_iter()
+                .map(|answer| match answer {
+                    Some(text) => terminal_with_result(AttemptOutcome::Succeeded, text),
+                    None => terminal(AttemptOutcome::AdapterUnavailable),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let composite = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "reviews")
+            .unwrap();
+        assert!(composite.attempts.is_empty());
+        assert_eq!(
+            composite
+                .outputs
+                .as_ref()
+                .and_then(|out| out.verdict.as_deref()),
+            expected
+        );
+        if expected.is_none() {
+            assert_eq!(
+                composite.advance_error_code.as_deref(),
+                Some("coverage_below_minimum")
+            );
+        }
+        let gate = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "gate")
+            .unwrap();
+        assert_eq!(gate.gate.as_ref().is_some_and(|gate| gate.passed), passes);
+    }
 }
 
 #[test]
@@ -8025,6 +8112,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
             })
             .collect();
         root.composite = Some(CompositeSpec {
+            reduce_verdict: false,
             min_successful: Some(7),
             exports: lenses
                 .iter()
@@ -8172,6 +8260,7 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
     lens.distinct_from = Some(DistinctFrom::Writer);
     lens.distinct_strength = Some(FamilyStrength::Require);
     root.composite = Some(CompositeSpec {
+        reduce_verdict: false,
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {

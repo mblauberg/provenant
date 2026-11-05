@@ -763,6 +763,14 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
                 outputs.push(*output);
             }
         }
+        if root
+            .composite
+            .as_ref()
+            .is_some_and(|spec| spec.reduce_verdict)
+            && !outputs.contains(&OutputKind::Verdict)
+        {
+            outputs.push(OutputKind::Verdict);
+        }
         return vec![GraphInput {
             extra: Default::default(),
             node: root.id.clone(),
