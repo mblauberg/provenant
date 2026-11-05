@@ -190,10 +190,20 @@ const HOST_ID_BYTES: usize = 256;
 const MAX_UNKNOWN_USAGE: usize = 64;
 const MAX_USAGE_EVENTS: usize = 128;
 
+/// Configuration layer that supplied a launch retry limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchRetrySource {
+    Default,
+    Profile,
+    Override,
+}
+
 /// Bounded retries for transient launch failures.
 #[derive(Debug, Clone, Copy)]
 pub struct LaunchRetryPolicy {
     pub limit: u32,
+    pub limit_source: LaunchRetrySource,
     pub first_seconds: u64,
     pub max_seconds: u64,
 }
@@ -201,6 +211,7 @@ impl Default for LaunchRetryPolicy {
     fn default() -> Self {
         Self {
             limit: 3,
+            limit_source: LaunchRetrySource::Default,
             first_seconds: 5,
             max_seconds: 600,
         }
@@ -803,6 +814,10 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                 failures: 0,
                 deadline: None,
                 wake_at: None,
+                limit: None,
+                limit_source: None,
+                code: None,
+                next: None,
                 reason: None,
             });
         retry.failures = retry.failures.saturating_add(1);
@@ -821,6 +836,10 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                     .map_or(deadline, |wake| wake.min(deadline)),
             );
             let projected = launch_diagnostic(error);
+            retry.limit = Some(policy.limit);
+            retry.limit_source = Some(policy.limit_source);
+            retry.code = Some(bounded(&projected.code, 128));
+            retry.next = projected.next.as_deref().map(|next| bounded(next, 1024));
             retry.reason = Some(bounded(
                 projected.detail.as_deref().unwrap_or(&projected.code),
                 MAX_ADVANCE_ERROR_BYTES,
@@ -2254,6 +2273,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             failures: 0,
                             deadline,
                             wake_at: None,
+                            limit: None,
+                            limit_source: None,
+                            code: None,
+                            next: None,
                             reason: deadline.is_none().then(|| {
                                 "wall clock unavailable; launch retry timing is unavailable".into()
                             }),

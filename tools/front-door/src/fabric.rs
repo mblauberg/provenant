@@ -4579,6 +4579,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         Ok(provenant_fabric_runtime::graph::LaunchRetryPolicy {
             limit: u32::try_from(value("lanes.launch_retry_limit")?)
                 .map_err(|_| FacadeError::StateCorrupt)?,
+            limit_source: match config
+                .knobs
+                .get("lanes.launch_retry_limit")
+                .ok_or(FacadeError::StateCorrupt)?
+                .source
+            {
+                provenant_config::KnobSource::Default => {
+                    provenant_fabric_runtime::graph::LaunchRetrySource::Default
+                }
+                provenant_config::KnobSource::Profile => {
+                    provenant_fabric_runtime::graph::LaunchRetrySource::Profile
+                }
+                provenant_config::KnobSource::Override => {
+                    provenant_fabric_runtime::graph::LaunchRetrySource::Override
+                }
+            },
             first_seconds: value("lanes.launch_retry_first_seconds")?,
             max_seconds: value("lanes.launch_retry_max_seconds")?,
         })

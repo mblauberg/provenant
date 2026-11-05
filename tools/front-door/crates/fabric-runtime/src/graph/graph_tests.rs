@@ -8152,12 +8152,20 @@ fn launch_retry_backoff_cap_is_at_least_the_first_delay() {
             limit: 2,
             first_seconds: 10,
             max_seconds: 2,
+            ..Default::default()
         }),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
     let first = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(retry_of(&first.checkpoint).wake_at, Some(at(10)));
+    assert_eq!(retry_of(&first.checkpoint).limit, Some(2));
+    assert_eq!(
+        retry_of(&first.checkpoint).limit_source,
+        Some(LaunchRetrySource::Default)
+    );
+    assert_eq!(retry_of(&first.checkpoint).code.as_deref(), Some("busy"));
+    assert!(retry_of(&first.checkpoint).next.is_some());
     owner.now = Some(at(10));
     let second = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(retry_of(&second.checkpoint).wake_at, Some(at(20)));

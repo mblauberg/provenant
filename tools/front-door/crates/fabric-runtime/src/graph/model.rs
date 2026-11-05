@@ -21,6 +21,15 @@ pub struct LaunchRetry {
     /// Earliest next launch, for the host tick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_at: Option<provenant_core::WallTime>,
+    /// Budget and diagnostic recorded when the retry was scheduled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_source: Option<LaunchRetrySource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
     /// Why the last launch failed, bounded, kept for status while waiting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
