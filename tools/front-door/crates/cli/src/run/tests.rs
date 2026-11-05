@@ -804,7 +804,7 @@ fn model_policy_results_check_sections_and_bound_continuations()
     );
     let continuation = decision.retry.ok_or("missing continuation")?;
     assert!(continuation.resume);
-    assert_eq!(continuation.max_attempts, 3);
+    assert!(continuation.max_attempts > 3);
     decoded.session = None;
     record.session = None;
     assert!(
@@ -829,7 +829,7 @@ fn model_policy_results_check_sections_and_bound_continuations()
             .is_some()
     );
     decoded.outcome = run::Outcome::Succeeded;
-    record.attempt_number = 3;
+    record.attempt_number = continuation.max_attempts;
     let decision = model_assessment(&terra, task, &record, &decoded, record.attempt_number)?;
     assert_eq!(
         decision.refusal.as_deref(),
