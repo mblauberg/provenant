@@ -886,7 +886,133 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
             diagnostic(&format!("pre-push: refused: {error}"));
             error.into()
         })
-    })
+    })?;
+    if let Some(settings) = local_gate_settings(globals, &project)? {
+        run_local_gate(&settings, &project)?;
+    }
+    Ok(())
+}
+
+fn local_gate_settings(
+    globals: &Globals,
+    project: &Path,
+) -> Result<Option<provenant_cli::domains::LocalGateSettings>, Error> {
+    use provenant_cli::domains::LocalGateMode;
+    // Like the conflict-marker setting, an unreadable host configuration has
+    // no known local-gate policy and falls back silently.
+    let Ok(resolved) = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::At(project),
+        crate::roots::Product::Optional,
+    ) else {
+        return Ok(None);
+    };
+    let Ok(config) =
+        provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)
+    else {
+        return Ok(None);
+    };
+    let land = &config.domains.pr.land;
+    if land.local_gate.mode != LocalGateMode::Enforce
+        && land.local_gate.commands.is_empty()
+        && land
+            .projects
+            .values()
+            .all(|project| project.local_gate.is_none())
+    {
+        return Ok(Some(land.local_gate.clone()));
+    }
+    let id = match with_git(|runtime, executor, budget, cancel| {
+        crate::pr::landing::project_id(&resolved.roots, runtime, executor, project, budget, cancel)
+    }) {
+        Ok(id) => id,
+        Err(_) if land.local_gate.mode == LocalGateMode::Enforce => {
+            return Err("local gate settings unavailable".into());
+        }
+        Err(_) => return Ok(None),
+    };
+    let enforce = id
+        .as_deref()
+        .and_then(|id| land.projects.get(id))
+        .and_then(|project| project.local_gate.as_ref())
+        .and_then(|gate| gate.mode)
+        .unwrap_or(land.local_gate.mode)
+        == LocalGateMode::Enforce;
+    let settings = crate::pr::landing::policy::LandPolicy::resolve(
+        land,
+        &config.origins,
+        id.as_deref(),
+        None,
+        &Default::default(),
+    )
+    .and_then(|policy| policy.settings());
+    match settings {
+        Ok(settings) => Ok(Some(settings.local_gate)),
+        Err(_) if enforce => Err("local gate settings unavailable".into()),
+        Err(_) => Ok(None),
+    }
+}
+
+fn run_local_gate(
+    settings: &provenant_cli::domains::LocalGateSettings,
+    project: &Path,
+) -> Result<(), Error> {
+    use provenant_cli::domains::LocalGateMode;
+    if settings.mode == LocalGateMode::Off || settings.commands.is_empty() {
+        return Ok(());
+    }
+    let executor = match SystemExecutor::new(1) {
+        Ok(executor) => executor,
+        Err(error) if settings.mode == LocalGateMode::Warn => {
+            diagnostic(&format!(
+                "pre-push: warning: local gate unavailable: {error}"
+            ));
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    run_local_gate_with(settings, project, &executor)
+}
+
+fn run_local_gate_with(
+    settings: &provenant_cli::domains::LocalGateSettings,
+    project: &Path,
+    executor: &dyn provenant_os::exec::Executor,
+) -> Result<(), Error> {
+    use provenant_cli::domains::LocalGateMode;
+    use provenant_os::exec::{ExecOptions, StreamPolicy, Termination};
+    for command in &settings.commands {
+        let argv = ["sh".into(), "-c".into(), command.into()];
+        let mut options = ExecOptions::new(
+            &argv,
+            project,
+            Duration::from_secs(settings.timeout_seconds),
+        );
+        options.process_group = true;
+        options.cleanup_process_group = true;
+        options.stdout = StreamPolicy::Discard;
+        options.stderr = StreamPolicy::Discard;
+        let failure = match executor.execute(options) {
+            Ok(outcome) if outcome.timed_out => Some("timed out".to_string()),
+            Ok(outcome) => match outcome.termination {
+                Termination::Exit(0) => None,
+                Termination::Exit(code) => Some(format!("exit status {code}")),
+                Termination::Signal(signal) => Some(format!("signal {signal}")),
+            },
+            Err(error) => Some(format!("execution failed: {error}")),
+        };
+        if let Some(failure) = failure {
+            let message = format!(
+                "local gate command {:?}: {failure}",
+                command.chars().take(200).collect::<String>()
+            );
+            if settings.mode == LocalGateMode::Enforce {
+                return Err(message.into());
+            }
+            diagnostic(&format!("pre-push: warning: {message}"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -897,6 +1023,81 @@ mod answer_delivery_tests {
     use super::*;
     #[allow(unused_imports)]
     use serde_json::json;
+
+    #[test]
+    fn local_gate_modes_and_checkout() -> Result<(), Error> {
+        use provenant_cli::domains::{LocalGateMode, LocalGateSettings};
+        let dir = tempfile::tempdir()?;
+        let mut settings = LocalGateSettings {
+            mode: LocalGateMode::Enforce,
+            commands: vec!["test -f marker".into()],
+            timeout_seconds: 2,
+        };
+        std::fs::write(dir.path().join("marker"), "")?;
+        run_local_gate(&settings, dir.path())?;
+        settings.commands = vec!["exit 17".into()];
+        let failure = run_local_gate(&settings, dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains("exit 17") && failure.contains("exit status 17"));
+        settings.mode = LocalGateMode::Warn;
+        run_local_gate(&settings, dir.path())?;
+        settings.mode = LocalGateMode::Off;
+        settings.commands = vec!["touch should-not-exist".into()];
+        run_local_gate(&settings, dir.path())?;
+        assert!(!dir.path().join("should-not-exist").exists());
+        settings.mode = LocalGateMode::Enforce;
+        settings.commands.clear();
+        run_local_gate(&settings, dir.path())?;
+        Ok(())
+    }
+
+    #[test]
+    fn local_gate_cleans_up_background_processes() -> Result<(), Error> {
+        let dir = tempfile::tempdir()?;
+        let settings = provenant_cli::domains::LocalGateSettings {
+            mode: provenant_cli::domains::LocalGateMode::Enforce,
+            commands: vec!["(sleep 1; touch escaped) &".into()],
+            timeout_seconds: 2,
+        };
+        run_local_gate(&settings, dir.path())?;
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(!dir.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn local_gate_timeout_obeys_mode() -> Result<(), Error> {
+        use provenant_cli::domains::{LocalGateMode, LocalGateSettings};
+        use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor, Termination};
+        struct Timeout;
+        impl Executor for Timeout {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                Ok(ExecOutcome {
+                    termination: Termination::Signal(9),
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                    timed_out: true,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let mut settings = LocalGateSettings {
+            mode: LocalGateMode::Enforce,
+            commands: vec!["slow check".into()],
+            timeout_seconds: 1,
+        };
+        let failure = run_local_gate_with(&settings, Path::new("."), &Timeout)
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains("slow check") && failure.contains("timed out"));
+        settings.mode = LocalGateMode::Warn;
+        run_local_gate_with(&settings, Path::new("."), &Timeout)?;
+        Ok(())
+    }
 
     #[test]
     fn hook_config_read_is_quiet_and_keeps_errors() -> Result<(), Error> {

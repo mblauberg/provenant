@@ -28,6 +28,24 @@ pub fn validate_task_title(title: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Compute the Levenshtein distance between strings in Unicode scalar values.
+pub fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut row: Vec<_> = (0..=right.len()).collect();
+    for (i, a) in left.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, b) in right.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (row[j] + 1)
+                .min(above + 1)
+                .min(diagonal + usize::from(a != *b));
+            diagonal = above;
+        }
+    }
+    row[right.len()]
+}
+
 #[cfg(test)]
 mod title_tests {
     use super::validate_task_title;

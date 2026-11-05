@@ -332,6 +332,12 @@ fn parse_findings(
         for source in copies {
             let mut entry = entry.clone();
             if let Some(source) = source {
+                if entry.contains_key("disposition")
+                    && !entry.contains_key("propagates")
+                    && let Some(marker) = source.extra.get("propagates")
+                {
+                    entry.insert("propagates".into(), marker.clone());
+                }
                 let inherited = serde_json::to_value(source)
                     .map_err(|_| fail("id", "cannot encode upstream finding"))?;
                 for (field, value) in inherited
@@ -762,6 +768,25 @@ pub(super) fn render_input(
         } else {
             Vec::new()
         };
+        if input.outputs.contains(&OutputKind::Findings)
+            && !input.outputs.contains(&OutputKind::Result)
+        {
+            for warning in outputs
+                .warnings
+                .iter()
+                .filter(|w| w.starts_with("unavailable "))
+            {
+                let section = format!(
+                    "{} warning: {}\n",
+                    input.node,
+                    warning.replace('<', "\\u003c")
+                );
+                if section.len() + INPUT_CLOSE.len() > cap.saturating_sub(prompt.len()) {
+                    return (prompt, true);
+                }
+                prompt.push_str(&section);
+            }
+        }
         if !truncation.is_empty() {
             let warnings = serde_json::to_string(&truncation).unwrap_or_default();
             let section = format!(
@@ -937,7 +962,7 @@ pub(super) fn upstream_results(
                     .any(|warning| warning.starts_with("composite findings truncated:"))
             });
         if input.outputs.contains(&OutputKind::Result)
-            || (truncated && input.outputs.contains(&OutputKind::Findings))
+            || input.outputs.contains(&OutputKind::Findings)
         {
             collect(
                 &input.node,

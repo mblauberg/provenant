@@ -18,7 +18,7 @@ lens  role=- tier=- family=any kind=plan access=read_only worktree=-
 evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
   read_roots: ["<project>"]
   source: {"node":"implement","type":"node"}
-  inputs: [{"node":"lens","outputs":["result","findings"]},{"node":"implement","outputs":["findings"]}]
+  inputs: [{"node":"lens","outputs":["findings"]},{"node":"implement","outputs":["findings"]}]
 Roles:
   lens.adversarial  origin=bundled digest=<digest>
   lens.concurrency-data-errors  origin=bundled digest=<digest>

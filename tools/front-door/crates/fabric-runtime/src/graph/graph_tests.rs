@@ -1430,6 +1430,88 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
     assert_eq!(finding.extra["verification"], "upheld");
 }
 
+#[test]
+fn settled_copies_keep_origin_and_evidence_for_downstream_disposition() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["lens".into()];
+    verify.inputs = vec![input("lens")];
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["lens".into(), "verify".into()];
+    synthesis.inputs = vec![input("lens"), input("verify")];
+    let mut downstream = node("downstream", route("first"));
+    downstream.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    downstream.depends_on = vec!["lens".into(), "synthesis".into()];
+    downstream.inputs = vec![input("lens"), input("synthesis")];
+    let decision = findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#);
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"original\":\"lens-evidence\"")),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(
+                    ",\"verification\":\"verified-evidence\",\"propagates\":\"lens:F1\"",
+                )),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &decision),
+            terminal_with_result(AttemptOutcome::Succeeded, &decision),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![
+            node("lens", route("first")),
+            verify,
+            synthesis,
+            downstream,
+        ]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let settled = &run.checkpoint.nodes[3];
+    assert_eq!(
+        settled.state,
+        NodeState::Succeeded,
+        "{:?}",
+        settled.advance_error
+    );
+    let findings = &settled.outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), 3);
+    assert!(findings.iter().all(|f| f.id == "F1"
+        && f.disposition.as_deref() == Some("accepted")
+        && f.reason.as_deref() == Some("verified")));
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|f| f
+                .extra
+                .get("original")
+                .is_some_and(|v| v == "lens-evidence"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|f| f
+                .extra
+                .get("verification")
+                .is_some_and(|v| v == "verified-evidence"))
+            .count(),
+        1
+    );
+}
+
 // Small: the verifier sees a composite-qualified ID and synthesis accepts its bare alias.
 #[test]
 fn composite_qualified_propagation_resolves_identity_only_disposition() {
@@ -6951,6 +7033,152 @@ fn review_plan_schema_validation() {
     });
     document.nodes[0].kind = None;
     assert!(validate_plan(&document).is_err());
+}
+
+#[test]
+fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_lens() {
+    let oid = "1".repeat(40);
+    for invalid in [false, true] {
+        let mut review = node("review", route("first"));
+        review.kind = Some(NodeKind::Plan);
+        review.route = None;
+        review.source = Some(SourceBinding::Commit {
+            commit: oid.clone(),
+        });
+        review.review = Some(ReviewSpec {
+            shape: None,
+            risk_tier: None,
+            kind: None,
+            size: None,
+            risk_tags: vec![],
+            worktree: None,
+            lenses: vec![],
+            min_successful: Some(0),
+            max_nodes: 9,
+        });
+        let mut root = node("review--review", route("first"));
+        root.kind = Some(NodeKind::Composite);
+        root.route = None;
+        root.prompt.clear();
+        let lenses: Vec<_> = (0..8)
+            .map(|i| {
+                let mut lens = node(&format!("lens-{i}"), route("first"));
+                lens.require_findings = true;
+                lens
+            })
+            .collect();
+        root.composite = Some(CompositeSpec {
+            min_successful: Some(7),
+            exports: lenses
+                .iter()
+                .map(|lens| GraphInput {
+                    extra: Default::default(),
+                    node: lens.id.clone(),
+                    outputs: vec![OutputKind::Result, OutputKind::Findings],
+                })
+                .collect(),
+            nodes: lenses,
+        });
+        let mut nodes = composites::expand(&graph(vec![root]), &plans::generous())
+            .unwrap()
+            .nodes;
+        for member in nodes.iter_mut().filter(|member| member.composite.is_none()) {
+            member.source = Some(SourceBinding::Commit {
+                commit: oid.clone(),
+            });
+        }
+        let addition = Expansion {
+            review: Some(ReviewResolution {
+                subject: oid.parse().unwrap(),
+                base: "2".repeat(40).parse().unwrap(),
+                measured_size: "small".into(),
+                shape: "deep".into(),
+                source: "fixture".into(),
+            }),
+            extra: Default::default(),
+            source: "review".into(),
+            continuation: false,
+            nodes,
+            patterns: vec![],
+        };
+        let mut evaluate = node("evaluate", route("first"));
+        evaluate.depends_on = vec!["review".into()];
+        evaluate.inputs = vec![GraphInput {
+            extra: Default::default(),
+            node: "review".into(),
+            outputs: vec![OutputKind::Findings],
+        }];
+        let mut document = graph(vec![review, evaluate]);
+        document.schema_version = 2;
+        let large = format!("{}\n{}", "x".repeat(250_000), findings_text(&entry("")));
+        let bad = "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a\",\"summary\":\"bad\",\"status\":1}]}\n```";
+        let mut observations: VecDeque<_> = (0..8)
+            .map(|i| {
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    if invalid && i == 0 { bad } else { &large },
+                )
+            })
+            .collect();
+        observations.push_back(terminal_with_result(AttemptOutcome::Succeeded, "evaluated"));
+        let mut owner = FakeOwner {
+            observations,
+            review_expansion: Some(addition),
+            materialise: Some(|requests| MaterialisedInputs {
+                directory: Some("/inputs".into()),
+                index: Some("/inputs/index.json".into()),
+                entries: requests
+                    .iter()
+                    .map(|request| MaterialisedInput::File {
+                        label: request.label.clone(),
+                        path: format!("/inputs/{}.md", request.label).into(),
+                        bytes: 250_000,
+                        omitted: 0,
+                    })
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+        let limits = crate::config::GraphLimits {
+            node_prompt_bytes: 256 * 1024,
+            ..plans::generous()
+        };
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut MemoryJournal::default(),
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            run.checkpoint
+                .nodes
+                .iter()
+                .find(|n| n.id == "evaluate")
+                .unwrap()
+                .state,
+            NodeState::Succeeded
+        );
+        let prompt = owner.prompts.last().unwrap();
+        assert!(prompt.len() <= limits.node_prompt_bytes);
+        for i in usize::from(invalid)..8 {
+            assert!(
+                prompt.contains(&format!("/inputs/review--review--lens-{i}.md")),
+                "{prompt}"
+            );
+            assert!(
+                prompt.contains(&format!("review--review--lens-{i}:F1")),
+                "{prompt}"
+            );
+        }
+        if invalid {
+            assert!(
+                prompt.contains("unavailable review--review--lens-0"),
+                "{prompt}"
+            );
+        }
+    }
 }
 
 /// A resolved review lens is pinned to a commit, yet it still finds the writer
