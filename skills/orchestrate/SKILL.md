@@ -8,6 +8,9 @@ description: "Use for Fabric graphs, presets, fan-out, councils, repair loops an
 Parallelise independent reads, reviews, hypotheses and disjoint writes. Keep
 coupled writes in one lane. Start with 3 to 5 lanes unless the work is
 mechanical; each lane needs a checkable return that earns its coordination cost.
+Slice larger work into lanes of about three acceptance items each, merged into
+one integration branch (`big-batch`'s `integration_branch`). Keep long lanes for
+coupled work that cannot be split.
 
 ## Choose the graph
 
@@ -26,6 +29,10 @@ mechanical; each lane needs a checkable return that earns its coordination cost.
 `scope-then-run` includes a writer: use it only when building is authorised.
 `deliver` opens a PR and can land by default; check those actions against the
 envelope. `single`, `chain` and the fan-out primitives default to read-only.
+
+Launch by route alias (`--route senior` for a direct task, or the preset's
+`route` parameter), not by exact model. `provenant route list` shows the
+aliases; the attempt receipt records the resolved `adapter/model@effort`.
 
 ## How it runs
 
