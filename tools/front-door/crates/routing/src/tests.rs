@@ -2603,7 +2603,7 @@ fn availability_access_and_scoped_quota_are_independent_gates()
     context.availability = &records;
     assert_eq!(
         reason(&resolve(&query, &context)?),
-        Some(&RouteExclusionReason::StaleAvailability)
+        Some(&RouteExclusionReason::DisclosureDenied)
     );
     let records = [availability()];
     context.availability = &records;
@@ -2688,6 +2688,21 @@ fn availability_access_and_scoped_quota_are_independent_gates()
         reason(&resolve(&query, &context)?),
         Some(&RouteExclusionReason::Exhausted)
     );
+    for (expires, expected) in [(120, Some(RouteExclusionReason::AuthRequired)), (99, None)] {
+        let auth = [quota(
+            "codex/test",
+            "opaque-account",
+            QuotaStatus::AuthRequired,
+            1,
+            80,
+            expires,
+        )?];
+        let auth_context = RoutingContext {
+            quota: &auth,
+            ..context
+        };
+        assert_eq!(reason(&resolve(&query, &auth_context)?), expected.as_ref());
+    }
     let newer_unknown = [
         quota(
             "codex/test",
@@ -4669,10 +4684,7 @@ fn account_evidence_reasons_carry_their_repair_text() {
     ] {
         assert!(exclusion_detail(&reason).contains(text), "{reason:?}");
     }
-    assert_eq!(
-        exclusion_detail(&RouteExclusionReason::Exhausted),
-        "Exhausted"
-    );
+    assert!(exclusion_detail(&RouteExclusionReason::Exhausted).contains("reset"));
 }
 
 #[test]
@@ -5376,10 +5388,7 @@ fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::err
     for observed in [
         vec![],
         one(State::Ready, None, fresh),
-        one(State::Unknown, Some(Why::SignedOut), fresh),
         one(State::Unknown, Some(Why::UnreachablePeer), fresh),
-        one(State::Unavailable, Some(Why::LoginExpired), fresh),
-        one(State::Unavailable, Some(Why::SignedOut), fresh),
         one(State::Unavailable, Some(Why::CommandFailure), fresh),
     ] {
         assert!(
@@ -5394,6 +5403,8 @@ fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::err
             RouteExclusionReason::MissingExecutable,
         ),
         (Why::AccountMismatch, RouteExclusionReason::AccountMismatch),
+        (Why::SignedOut, RouteExclusionReason::AuthRequired),
+        (Why::LoginExpired, RouteExclusionReason::LoginExpired),
         (Why::Exhausted, RouteExclusionReason::ProviderRefused),
         (Why::ProviderRefusal, RouteExclusionReason::ProviderRefused),
     ] {
@@ -5402,6 +5413,30 @@ fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::err
             other => panic!("{why:?} must exclude: {other:?}"),
         }
     }
+    for (why, expected) in [
+        (Why::SignedOut, RouteExclusionReason::AuthRequired),
+        (Why::LoginExpired, RouteExclusionReason::LoginExpired),
+        (Why::AccountMismatch, RouteExclusionReason::AccountMismatch),
+    ] {
+        assert!(
+            matches!(status(one(State::Unknown, Some(why), fresh))?, RouteReadiness::Unavailable { reason, .. } if reason == expected)
+        );
+    }
+    let account_wide = observation(
+        "codex",
+        "opaque-account",
+        "*",
+        State::Unknown,
+        Some(Why::SignedOut),
+        fresh,
+    );
+    assert!(matches!(
+        status(vec![account_wide])?,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::AuthRequired,
+            ..
+        }
+    ));
     // At or beyond expiry, and before the observation, it reads unknown.
     for window in [(80, 100), (80, 90), (101, 200)] {
         assert!(matches!(

@@ -39,7 +39,7 @@ pub struct RoutingContext<'a> {
     pub quota_policies: &'a [provenant_quota::QuotaPolicy],
     /// Readiness lookup supplied by the composition edge, called with the
     /// scope and `now` in unix seconds. Routing performs no I/O; `None` reads
-    /// every route as unknown. Only an `unavailable` verdict excludes a route.
+    /// every route as unknown. Current positive authentication evidence also excludes a route.
     pub readiness: Option<ReadinessLookup<'a>>,
     /// Fixture-only capability facts; production always uses the adapter table.
     #[cfg(test)]
@@ -1050,6 +1050,12 @@ fn account_reason<'q>(
     if reason.is_none() {
         reason = readiness_reason(model, availability, context);
     }
+    if reason.is_none()
+        && latest_reading(model, availability, context, true)
+            .is_some_and(|q| q.snapshot.status == QuotaStatus::AuthRequired)
+    {
+        reason = Some(RouteExclusionReason::AuthRequired);
+    }
     // Explicit exact IDs use the executable/account preflight too. The provider
     // owns model availability; named routes and pools require catalogue entries.
     let quota = latest_reading(model, availability, context, true);
@@ -1116,6 +1122,9 @@ pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
         RouteExclusionReason::Exhausted => {
             "exhausted; wait for the quota reset or select another account".to_owned()
         }
+        RouteExclusionReason::AuthRequired => {
+            "authentication required; sign in to the selected account".to_owned()
+        }
         RouteExclusionReason::LoginExpired => {
             "login expired; check the selected account with `provenant quota`".to_owned()
         }
@@ -1169,6 +1178,23 @@ fn readiness_reason(
                 },
                 now,
             );
+            if read.observed_scope.is_some()
+                && read.observed_unix_seconds.is_some_and(|at| at <= now)
+                && read.expires_unix_seconds.is_some_and(|expiry| expiry > now)
+            {
+                match read.reason {
+                    Some(provenant_quota::ReadinessReason::SignedOut) => {
+                        return Some(RouteExclusionReason::AuthRequired);
+                    }
+                    Some(provenant_quota::ReadinessReason::LoginExpired) => {
+                        return Some(RouteExclusionReason::LoginExpired);
+                    }
+                    Some(provenant_quota::ReadinessReason::AccountMismatch) => {
+                        return Some(RouteExclusionReason::AccountMismatch);
+                    }
+                    _ => {}
+                }
+            }
             if read.state != provenant_quota::ReadinessState::Unavailable {
                 return None;
             }
@@ -1176,9 +1202,7 @@ fn readiness_reason(
                 RouteReadiness::Unavailable {
                     reason:
                         RouteExclusionReason::UnknownAvailability
-                        | RouteExclusionReason::StaleAvailability
-                        | RouteExclusionReason::AuthRequired
-                        | RouteExclusionReason::LoginExpired,
+                        | RouteExclusionReason::StaleAvailability,
                     ..
                 } => None,
                 RouteReadiness::Unavailable { reason, .. } => Some(reason),
@@ -1201,9 +1225,9 @@ fn uncertainty(
         return Some(format!("{reason:?}"));
     }
     if latest_reading(model, availability, context, true)
-        .is_some_and(|q| q.snapshot.status == QuotaStatus::AuthRequired)
+        .is_some_and(|q| q.snapshot.status == QuotaStatus::Unknown)
     {
-        return Some("authentication unverified".into());
+        return Some("unknown quota".into());
     }
     if latest_reading(model, availability, context, false).is_some()
         && latest_reading(model, availability, context, true).is_none()
@@ -1494,8 +1518,9 @@ fn candidate(
                 a,
                 reason,
                 (
-                    uncertainty(model, a, context).is_none(),
                     !spent,
+                    uncertainty(model, a, context).is_none_or(|why| why == "stale quota"),
+                    latest_reading(model, a, context, true).is_some(),
                     !avoid_cooling || !cooling(model, a.account_key.as_deref(), context),
                     !standby,
                     headroom,
@@ -1531,7 +1556,13 @@ fn candidate(
                 })
                 .unwrap_or_default(),
             availability_ref: a.fixture_ref.clone(),
-            expires_unix_seconds: a.expires_unix_seconds,
+            // A stale observation is not renewed; this bounds the lifetime of
+            // the routing decision that permits a launch despite uncertainty.
+            expires_unix_seconds: if a.expires_unix_seconds <= context.now_seconds() {
+                context.now_seconds().saturating_add(60)
+            } else {
+                a.expires_unix_seconds
+            },
         },
         _ => RouteReadiness::Unavailable {
             extra: Default::default(),
