@@ -23,6 +23,8 @@ use std::{
     time::Duration,
 };
 
+pub(crate) const SETUP_WAIT_LOCK: &str = "setup-wait.lock";
+
 #[cfg(test)]
 thread_local! {
     pub(crate) static FAIL_IMPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -417,7 +419,10 @@ pub struct LaunchConfinement {
 impl LaunchConfinement {
     /// Prepare Git while custody is held, then replace every handle that was
     /// bound to the common config before Git changed it.
-    pub(crate) fn prepare_git(&mut self) -> Result<Option<provenant_os::fs::LockGuard>> {
+    pub(crate) fn prepare_git(
+        &mut self,
+        attempt: &Directory,
+    ) -> Result<Option<provenant_os::fs::LockGuard>> {
         let Some(writer) = self.writer.as_mut() else {
             return Ok(None);
         };
@@ -433,7 +438,14 @@ impl LaunchConfinement {
         let AccessMode::WorktreeWrite(authority) = &self.plan.permissions().mode else {
             return Ok(None);
         };
-        prepare_writer_git(writer, &self.state_root, &self.home, Some(authority)).map(Some)
+        prepare_writer_git(
+            writer,
+            &self.state_root,
+            &self.home,
+            Some(authority),
+            Some(attempt),
+        )
+        .map(Some)
     }
     pub(crate) fn command(
         &self,
@@ -570,6 +582,7 @@ fn prepare_writer_git(
     state: &Path,
     home: &Path,
     authority: Option<&provenant_confinement::permissions::WorktreeWriteAuthority>,
+    attempt: Option<&Directory>,
 ) -> Result<provenant_os::fs::LockGuard> {
     use provenant_core::{Clock, WaitBudget};
     use provenant_os::{clock::SystemClock, fs::LockMode};
@@ -602,6 +615,22 @@ fn prepare_writer_git(
             ));
         }
     }
+    // The marker is a lock, not a persistent assertion: if the launcher dies,
+    // observers immediately stop reporting a wait even if the file remains.
+    let waiting = attempt.and_then(|directory| {
+        directory
+            .lock(
+                OsStr::new(SETUP_WAIT_LOCK),
+                LockMode::Exclusive,
+                WaitBudget::up_to(
+                    clock.mono_now(),
+                    provenant_core::DurationMicros::from_micros(1_000_000),
+                ),
+                &cancel,
+                &clock,
+            )
+            .ok()
+    });
     let config_lock = writer
         .worktree
         .repo()
@@ -620,6 +649,7 @@ fn prepare_writer_git(
             },
             failure => anchored_error(failure, writer.worktree.repo().common_git_dir()),
         })?;
+    drop(waiting);
     let old_repo = writer.worktree.repo();
     let project = old_repo
         .common_git_dir()
@@ -1026,6 +1056,7 @@ fn record_cargo_setup_file(
 #[cfg(test)]
 mod cargo_setup_tests {
     use super::*;
+    use provenant_os::fs::LockMode;
 
     #[test]
     fn packed_writer_ref_and_upstream_are_prepared_with_fresh_handles()
@@ -1180,12 +1211,12 @@ mod cargo_setup_tests {
         };
         std::thread::scope(|scope| {
             let first = scope.spawn(|| {
-                prepare_writer_git(&mut writer, &state, &root, None)
+                prepare_writer_git(&mut writer, &state, &root, None, None)
                     .map(drop)
                     .map_err(|e| e.to_string())
             });
             let second = scope.spawn(|| {
-                prepare_writer_git(&mut second, &state, &root, None)
+                prepare_writer_git(&mut second, &state, &root, None, None)
                     .map(drop)
                     .map_err(|e| e.to_string())
             });
@@ -1208,10 +1239,32 @@ mod cargo_setup_tests {
             OsStr::new("provenant-lane-setup.lock"),
             provenant_os::fs::LockMode::Exclusive,
         )?;
-        let refused = match prepare_writer_git(&mut writer, &state, &root, None) {
-            Err(error) => error,
-            Ok(_) => panic!("held Git setup lock must block preparation"),
-        };
+        let attempt_path = root.join("attempt");
+        std::fs::create_dir(&attempt_path)?;
+        let attempt = Directory::open_anchor(&attempt_path)?;
+        let refused = std::thread::scope(|scope| {
+            let launch = scope
+                .spawn(|| prepare_writer_git(&mut writer, &state, &root, None, Some(&attempt)));
+            loop {
+                if matches!(
+                    attempt.try_lock_existing(OsStr::new(SETUP_WAIT_LOCK), LockMode::Exclusive),
+                    Err(FsError::LockTimeout { .. })
+                ) {
+                    break;
+                }
+                assert!(!launch.is_finished(), "launcher must publish its lock wait");
+                std::thread::yield_now();
+            }
+            match launch.join().expect("launcher panicked") {
+                Err(error) => error,
+                Ok(_) => panic!("held Git setup lock must block preparation"),
+            }
+        });
+        assert!(
+            attempt
+                .try_lock_existing(OsStr::new(SETUP_WAIT_LOCK), LockMode::Exclusive)
+                .is_ok()
+        );
         assert!(matches!(refused, RunError::SetupLockTimeout { seconds: 1 }));
         assert!(
             refused
@@ -1267,7 +1320,7 @@ mod cargo_setup_tests {
         let reflog = git_dir.join("logs/refs/remotes/origin/feature/nested");
         std::fs::create_dir_all(reflog.parent().ok_or("reflog parent")?)?;
         std::os::unix::fs::symlink(&target, &reflog)?;
-        let failure = prepare_writer_git(&mut writer, &state, &root, None)
+        let failure = prepare_writer_git(&mut writer, &state, &root, None, None)
             .err()
             .ok_or("symlinked tracking reflog must refuse")?;
         assert!(failure.to_string().contains(&reflog.display().to_string()));
@@ -1276,7 +1329,7 @@ mod cargo_setup_tests {
         let parent = reflog.parent().ok_or("reflog parent")?;
         std::fs::remove_dir(parent)?;
         std::os::unix::fs::symlink(&root, parent)?;
-        let failure = prepare_writer_git(&mut writer, &state, &root, None)
+        let failure = prepare_writer_git(&mut writer, &state, &root, None, None)
             .err()
             .ok_or("symlinked tracking reflog parent must refuse")?;
         assert!(failure.to_string().contains(&parent.display().to_string()));
@@ -1286,7 +1339,7 @@ mod cargo_setup_tests {
         let tracking_lock = git_dir.join("refs/remotes/origin/feature/nested.lock");
         std::fs::create_dir_all(tracking_lock.parent().ok_or("tracking lock parent")?)?;
         std::fs::write(&tracking_lock, b"held")?;
-        let failure = prepare_writer_git(&mut writer, &state, &root, None)
+        let failure = prepare_writer_git(&mut writer, &state, &root, None, None)
             .err()
             .ok_or("stale tracking lock must refuse")?;
         assert!(
@@ -1299,7 +1352,7 @@ mod cargo_setup_tests {
         run(&["remote", "remove", "origin"])?;
         let stale = git_dir.join("refs/heads/feature/nested.lock");
         std::fs::write(&stale, b"held")?;
-        let failure = prepare_writer_git(&mut writer, &state, &root, None)
+        let failure = prepare_writer_git(&mut writer, &state, &root, None, None)
             .err()
             .ok_or("stale lock must refuse")?;
         assert_eq!(failure.code(), "WRITER_REF_LOCKED", "{failure}");

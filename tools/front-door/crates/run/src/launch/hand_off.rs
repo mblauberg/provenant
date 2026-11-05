@@ -146,7 +146,7 @@ impl RunStore {
         // Keep the shared config lock until custody confirms the child launch.
         let mut _git_setup_lock = None;
         if let Some(confinement) = &mut plan.confinement {
-            _git_setup_lock = match confinement.prepare_git() {
+            _git_setup_lock = match confinement.prepare_git(&directory()?) {
                 Ok(lock) => lock,
                 Err(error) => {
                     lease

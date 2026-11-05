@@ -136,6 +136,8 @@ Git pin. Status and wait queue recovery. To retry directly, run
 Writers wait up to 120 seconds for the repository Git setup lock. Set
 `domains.fabric.lanes.setup_lock_wait_seconds` to a value from 1 to 14400 to
 change this bound; the lock continues to serialise setup for the repository.
+While a writer waits, `lanes` and `status` name `provenant-lane-setup.lock` as
+the waiting reason. If the launcher exits, its wait indication clears.
 
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
