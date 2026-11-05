@@ -132,10 +132,14 @@ enum Data {
 }
 
 pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
+    if matches!(command, Worktree::SessionList) {
+        return session_list(globals, workers);
+    }
     let name = match &command {
         Worktree::SeedBuild => "worktree seed-build",
         Worktree::Create { .. } => "worktree create",
         Worktree::List => "worktree list",
+        Worktree::SessionList => unreachable!(),
         Worktree::Remove(_) => "worktree remove",
     };
     let read_only = matches!(command, Worktree::List);
@@ -234,6 +238,7 @@ fn execute(
                     cancel,
                 )?),
                 Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
+                Worktree::SessionList => unreachable!(),
                 Worktree::Remove(mut args) => {
                     let upstream = if args.discard {
                         None
@@ -298,6 +303,49 @@ fn execute(
             })
         },
     )
+}
+
+/// The hook reads complete newline-delimited records even when its child
+/// deadline stops this command before the inventory is complete.
+fn session_list(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
+    use std::io::Write;
+    let result = (|| -> Result<(), Error> {
+        let resolved = roots::resolve(
+            globals,
+            roots::Workspace::Checkout,
+            roots::Product::Required,
+        )?;
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
+        let mut failed = false;
+        with_context(
+            &resolved.roots,
+            &resolved.home,
+            &resolved.project,
+            MUTATION_TIMEOUT,
+            workers,
+            |context, cancel| {
+                worktrees::list_streaming(context, cancel, |total, row| {
+                    if failed {
+                        return;
+                    }
+                    let event = match row {
+                        None => serde_json::json!({"total": total}),
+                        Some(row) => serde_json::json!({"worktree": row}),
+                    };
+                    failed = serde_json::to_writer(&mut output, &event).is_err()
+                        || output.write_all(b"\n").is_err()
+                        || output.flush().is_err();
+                })?;
+                Ok(())
+            },
+        )?;
+        if failed {
+            return Err(Error::GcObservation("cannot write worktree inventory"));
+        }
+        Ok(())
+    })();
+    if result.is_ok() { 0 } else { 1 }
 }
 
 #[derive(Serialize, Default)]

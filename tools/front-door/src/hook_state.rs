@@ -116,6 +116,30 @@ impl<'a> Cli<'a> {
         let message = envelope["error"]["message"].as_str().unwrap_or("refused");
         Err(provenant_workflow::session::clean(message, 120))
     }
+
+    /// Preserve complete inventory records even when the child hits its budget.
+    #[allow(clippy::disallowed_methods)]
+    fn worktree_listing(&self, deadline: Instant) -> Result<(Vec<WorktreeLine>, usize), String> {
+        let time = LISTING_TIME.min(deadline.saturating_duration_since(Instant::now()));
+        if time < Duration::from_millis(50) {
+            return Err("hook deadline reached".into());
+        }
+        let argv = self.argv(&["worktree", "session-list"]);
+        let mut options = ExecOptions::new(&argv, self.cwd, time);
+        options.stdout = StreamPolicy::Capture { limit: OUTPUT_CAP };
+        options.stderr = StreamPolicy::Capture { limit: 2048 };
+        let out = self
+            .executor
+            .execute(options)
+            .map_err(|_| "could not start".to_owned())?;
+        parse_worktree_stream(&out.stdout.bytes).ok_or_else(|| {
+            if out.timed_out {
+                "timed out".into()
+            } else {
+                "inventory unavailable".into()
+            }
+        })
+    }
 }
 
 fn unavailable_sources(state: &mut SessionState, want: &Want, reason: String) {
@@ -169,7 +193,7 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
         let settled = scope.spawn(move || cli.data(terminal_args, LISTING_TIME, deadline));
         let worktrees = want
             .worktrees
-            .then(|| scope.spawn(move || cli.data(&["worktree", "list"], LISTING_TIME, deadline)));
+            .then(|| scope.spawn(move || cli.worktree_listing(deadline)));
         let prs: Vec<_> = want
             .pr_refs
             .iter()
@@ -216,7 +240,10 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
         }
         if let Some(handle) = worktrees {
             match handle.join() {
-                Ok(Ok(list)) => state.worktrees = parse_worktrees(&list),
+                Ok(Ok((list, skipped))) => {
+                    state.worktrees = list;
+                    state.worktrees_skipped = skipped;
+                }
                 Ok(Err(reason)) => state.unavailable.push(Unavailable {
                     source: "worktrees".into(),
                     reason,
@@ -352,6 +379,38 @@ fn parse_worktrees(data: &Value) -> Vec<WorktreeLine> {
         })
         .collect()
 }
+
+/// Ignore a trailing partial record, but never treat it as a completed row.
+fn parse_worktree_stream(bytes: &[u8]) -> Option<(Vec<WorktreeLine>, usize)> {
+    let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
+    let header = lines.next()?;
+    if !header.ends_with(b"\n") {
+        return None;
+    }
+    let total = serde_json::from_slice::<Value>(header)
+        .ok()?
+        .get("total")?
+        .as_u64()?;
+    let total = usize::try_from(total).ok()?;
+    let mut entries = Vec::new();
+    for line in lines {
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            break;
+        };
+        let Some(entry) = event.get("worktree") else {
+            break;
+        };
+        if entries.len() >= total {
+            break;
+        }
+        entries.push(entry.clone());
+    }
+    let skipped = total.saturating_sub(entries.len().max(1));
+    Some((parse_worktrees(&Value::Array(entries)), skipped))
+}
 /// Read the first line of the CLI's status array; unknown fields stay unknown.
 fn pr_status(data: &Value) -> (String, String) {
     let data = data
@@ -381,6 +440,73 @@ fn pr_status(data: &Value) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn worktree_collector_keeps_rows_when_child_times_out() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("inventory");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '{\"total\":4}' '{\"worktree\":{\"path\":\"/primary\"}}' '{\"worktree\":{\"path\":\"/one\",\"branch\":\"refs/heads/one\"}}'\n/bin/sleep 5\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executor = SystemExecutor::new(1).unwrap();
+        let cli = Cli {
+            exe: script,
+            state_dir: None,
+            cwd: temp.path(),
+            executor: &executor,
+        };
+        let (trees, skipped) = cli
+            .worktree_listing(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].path, "/one");
+        assert_eq!(skipped, 2);
+    }
+
+    #[test]
+    fn worktree_stream_keeps_completed_rows_and_counts_skipped() {
+        use super::*;
+        let stream = b"{\"total\":4}\n{\"worktree\":{\"path\":\"/primary\"}}\n{\"worktree\":{\"path\":\"/one\",\"branch\":\"refs/heads/one\",\"dirty\":\"clean\",\"writer\":\"free\"}}\n{\"worktree\":{\"path\":\"/incomplete\"";
+        let (trees, skipped) = parse_worktree_stream(stream).unwrap();
+        assert_eq!(skipped, 2);
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].path, "/one");
+        let state = SessionState {
+            worktrees: trees,
+            worktrees_skipped: skipped,
+            active: vec![LaneLine {
+                id: "run/task/attempt".into(),
+                state: "running".into(),
+                route: "fixture".into(),
+                worktree: None,
+                branch: None,
+                reason: None,
+            }],
+            ..Default::default()
+        };
+        let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(digest.contains("/one"), "{digest}");
+        assert!(digest.contains("run/task/attempt"), "{digest}");
+        assert!(
+            digest.contains("2 worktrees skipped during inventory"),
+            "{digest}"
+        );
+        let single = SessionState {
+            worktrees_skipped: 1,
+            ..Default::default()
+        };
+        assert!(
+            single
+                .digest(provenant_workflow::session::DIGEST_LIMIT)
+                .contains("1 worktree skipped during inventory")
+        );
+        assert!(parse_worktree_stream(b"{\"total\":4}").is_none());
+        let (empty, skipped) = parse_worktree_stream(b"{\"total\":4}\n").unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(skipped, 3);
+    }
 
     #[test]
     fn shared_cli_setup_failure_marks_each_requested_source() {

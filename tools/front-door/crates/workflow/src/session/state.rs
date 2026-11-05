@@ -195,6 +195,8 @@ pub struct SessionState {
     /// PR numbers the chair named whose status could not be read.
     pub prs_unread: Vec<PrUnread>,
     pub worktrees: Vec<WorktreeLine>,
+    /// Linked worktrees the inventory could not inspect before its deadline.
+    pub worktrees_skipped: usize,
     pub unavailable: Vec<Unavailable>,
     /// How commands the output shows reach the store the collector used.
     pub commands: CommandPrefix,
@@ -340,7 +342,11 @@ impl SessionState {
                 .any(|unavailable| unavailable.source == "worktrees")
         {
             sections.push(Section {
-                title: format!("Worktrees ({})", self.worktrees.len()),
+                title: format!(
+                    "Worktrees ({}{})",
+                    self.worktrees.len(),
+                    plus(self.worktrees_skipped > 0)
+                ),
                 lines: self
                     .worktrees
                     .iter()
@@ -356,7 +362,13 @@ impl SessionState {
                     })
                     .collect(),
                 more: self.worktrees.len().saturating_sub(SECTION_LINES),
-                partial: None,
+                partial: (self.worktrees_skipped > 0).then(|| {
+                    format!(
+                        "{} worktree{} skipped during inventory",
+                        self.worktrees_skipped,
+                        if self.worktrees_skipped == 1 { "" } else { "s" }
+                    )
+                }),
             });
         }
         for name in &self.unavailable {
@@ -376,7 +388,7 @@ impl SessionState {
 
     /// Bounded text for a SessionStart hook. Read-only; nothing is saved.
     pub fn digest(&self, limit: usize) -> String {
-        let sections = self.sections(!self.worktrees.is_empty());
+        let sections = self.sections(!self.worktrees.is_empty() || self.worktrees_skipped > 0);
         if sections.is_empty() {
             return String::new();
         }
@@ -387,7 +399,7 @@ impl SessionState {
             (Some(lanes), Some(pr)) => format!("`{lanes}` and `{pr}`"),
             _ => "provenant lanes and provenant pr status with this hook's --state-dir".into(),
         };
-        if !self.worktrees.is_empty() {
+        if !self.worktrees.is_empty() || self.worktrees_skipped > 0 {
             match self.commands.runnable("worktree list") {
                 Some(command) => how.push_str(&format!(", and `{command}`")),
                 None => how.push_str(", and provenant worktree list with this hook's --state-dir"),

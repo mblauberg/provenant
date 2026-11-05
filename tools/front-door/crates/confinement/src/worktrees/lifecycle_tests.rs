@@ -35,6 +35,35 @@ use std::os::unix::fs::PermissionsExt;
 pub(super) struct FreeWorkers;
 
 #[test]
+fn streaming_inventory_reports_the_total_before_checked_rows() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let linked = create(
+        &context,
+        WorktreeCreate {
+            branch: "streamed".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let mut events = Vec::new();
+    let inventory = list_streaming(&context, &cancel(), |total, row| {
+        events.push((total, row.map(|row| row.path.clone())));
+    })?;
+    assert_eq!(events.first(), Some(&(2, None)));
+    assert_eq!(events.len(), 3);
+    assert!(events.iter().skip(1).all(|(total, _)| *total == 2));
+    assert!(
+        events
+            .iter()
+            .any(|(_, path)| path.as_ref() == Some(&linked.path))
+    );
+    assert_eq!(inventory.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Counting(AtomicUsize);

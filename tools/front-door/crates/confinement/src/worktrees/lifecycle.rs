@@ -109,6 +109,17 @@ pub fn list_with_observation(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeObservation>, WorktreeError> {
+    list_streaming(context, cancel, |_, _| {})
+}
+
+/// Report the inventory size before the census and each completed row after
+/// its normal checks. A caller can retain these advisory rows if its deadline
+/// expires; the complete inventory still follows the ordinary safety path.
+pub fn list_streaming(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+    mut report: impl FnMut(usize, Option<&WorktreeInfo>),
+) -> Result<Vec<WorktreeObservation>, WorktreeError> {
     validate_binding(context)?;
     let entries = {
         let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
@@ -121,6 +132,8 @@ pub fn list_with_observation(
         .filter(|entry| !entry.bare)
         .filter_map(|entry| canonicalize(&entry.path).ok().map(|path| (path, entry)))
         .collect();
+    let total = candidates.len();
+    report(total, None);
     let roots: Vec<_> = candidates.iter().map(|(path, _)| path.clone()).collect();
     let worker_states = context.workers.observe_roots(&roots);
     let primary = canonicalize(context.repo.root_path())?;
@@ -170,7 +183,7 @@ pub fn list_with_observation(
                 Err(_) => (WorktreeCondition::Unknown, WriterState::Unknown, true),
             }
         };
-        result.push(WorktreeObservation {
+        let observation = WorktreeObservation {
             info: WorktreeInfo {
                 path,
                 branch: branch_text,
@@ -181,7 +194,9 @@ pub fn list_with_observation(
             },
             observed,
             registration_unknown,
-        });
+        };
+        report(total, Some(&observation.info));
+        result.push(observation);
     }
     Ok(result)
 }

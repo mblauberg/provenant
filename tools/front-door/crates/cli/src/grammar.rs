@@ -1241,6 +1241,9 @@ pub enum Worktree {
     },
     /// List worktrees
     List,
+    /// Stream advisory worktree inventory for the SessionStart collector.
+    #[command(hide = true)]
+    SessionList,
     /// Remove a worktree or merged ones, allowing declared ignored output
     Remove(Remove),
 }
