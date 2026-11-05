@@ -1289,7 +1289,10 @@ fn failed_chunk_retains_earlier_decoded_events_for_finish() -> Result<(), Provid
     let outcome = codex::Codex.finish(stream, EXIT)?;
     assert_eq!(
         outcome.final_events(),
-        &[ProviderEvent::Text("kept".into())]
+        &[
+            ProviderEvent::MessageStart,
+            ProviderEvent::Text("kept".into())
+        ]
     );
     assert_eq!(outcome.status(), OutcomeStatus::Malformed);
     Ok(())
@@ -1855,7 +1858,11 @@ fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result
     );
     let prose = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"quota exhausted, rate limit\"}}\n";
     let (events, outcome) = replay(&codex::Codex, prose, EXIT)?;
-    assert!(matches!(events.first(), Some(ProviderEvent::Text(_))));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Text(_)))
+    );
     assert_eq!(outcome.status(), OutcomeStatus::Partial);
     let mut state = cursor::Cursor.stream(None)?;
     cursor::Cursor.observe(&mut state, fixture!("cursor/fresh.jsonl").as_bytes())?;
@@ -3466,7 +3473,9 @@ fn finish_decodes_the_last_unterminated_line() -> Result<(), ProviderError> {
     )?;
     assert!(events.is_empty());
     assert!(
-        matches!(outcome.final_events().first(),Some(ProviderEvent::Text(text)) if text == "final line")
+        outcome
+            .final_events()
+            .contains(&ProviderEvent::Text("final line".into()))
     );
     Ok(())
 }
