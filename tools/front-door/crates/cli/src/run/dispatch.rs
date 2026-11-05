@@ -1272,9 +1272,15 @@ pub(super) fn dispatch_inner(
             if !fallback.is_empty() {
                 return unsupported("route fallback with --host");
             }
+            if !lane_access.attachments.is_empty() {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: remote transport cannot provide image_input or attachment read grants"
+                );
+            }
             if lane_access.network.is_some()
                 || !lane_access.read_roots.is_empty()
-                || !lane_access.attachments.is_empty()
                 || !lane_access.write_roots.is_empty()
                 || network.is_some()
             {

@@ -54,6 +54,7 @@ requests. Steering (input into a live session) has no request surface yet.
 Repeat `run --attach PATH` to grant a lane read access to image files. Claude
 receives their paths in the prompt; Codex receives image arguments. Other
 adapters warn that `image_input` is unavailable while retaining the read grant.
+Remote dispatch cannot transfer these files and warns when attachments are omitted.
 Cursor has no effort control on its command line, so its
 catalogue models record none.
 
