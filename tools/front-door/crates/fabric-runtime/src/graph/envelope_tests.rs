@@ -280,6 +280,10 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     next: Some(worst(1024)),
                     reason: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
                 }),
+                launch_block: (!boundary && node.composite.is_none() && node.decide.is_none() && node.land.is_none()).then(|| LaunchBlock {
+                    extra: Default::default(), failures: Some(u8::MAX), limit: Some(u32::MAX),
+                    limit_source: Some(LaunchRetrySource::Override), next: Some(worst(1024)),
+                }),
                 loop_pause_code: node.loop_body.as_ref().map(|_| "c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 outputs: Some(if boundary {
                     gate_outputs(false)

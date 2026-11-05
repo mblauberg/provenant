@@ -396,6 +396,106 @@ fn call(
     Ok(result.structured_content)
 }
 #[test]
+fn graph_status_returns_the_recorded_wait_projection() -> Result<(), Box<dyn Error>> {
+    struct GraphFixture(provenant_fabric_runtime::graph::GraphCheckpoint);
+    local_inbox_owner!(GraphFixture);
+    impl F3Facade for GraphFixture {
+        type Identity = Fact;
+        type Submit = Fact;
+        type Run = Fact;
+        type Hosts = Fact;
+        fn identity(
+            &mut self,
+            _: IdentityInput,
+            _: WaitBudget,
+            _: &CancelToken,
+        ) -> Result<Fact, FacadeError> {
+            Err(FacadeError::OwnerUnavailable)
+        }
+        fn submit(
+            &mut self,
+            _: SubmitInput,
+            _: WaitBudget,
+            _: &CancelToken,
+        ) -> Result<Fact, FacadeError> {
+            Err(FacadeError::OwnerUnavailable)
+        }
+        fn run(
+            &mut self,
+            _: RunInput,
+            _: WaitBudget,
+            _: &CancelToken,
+        ) -> Result<Fact, FacadeError> {
+            Err(FacadeError::OwnerUnavailable)
+        }
+        fn hosts(
+            &mut self,
+            _: HostsInput,
+            _: WaitBudget,
+            _: &CancelToken,
+        ) -> Result<Fact, FacadeError> {
+            Err(FacadeError::OwnerUnavailable)
+        }
+        fn output(
+            &mut self,
+            _: OutputInput,
+            _: WaitBudget,
+            _: &CancelToken,
+        ) -> Result<OutputResult, FacadeError> {
+            Err(FacadeError::OwnerUnavailable)
+        }
+        fn graph(
+            &mut self,
+            _: GraphInput,
+            _: WaitBudget,
+            _: &CancelToken,
+        ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+            Ok(provenant_fabric_runtime::graph::GraphRun {
+                status: provenant_fabric_runtime::graph::GraphStatus::Pending,
+                outcome: None,
+                checkpoint: self.0.clone(),
+                advance_error: None,
+            })
+        }
+    }
+    let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint = serde_json::from_value(
+        json!({
+            "schema_version":1, "graph_id":"g-test", "plan_digest":"digest", "nodes":[
+                {"id":"n", "state":"running", "worktree":null, "attempts":[],
+                 "launch_retry":{"failures":1,"limit":3,"limit_source":"override","code":"writer_lock_busy","next":"wait for the lock","reason":"busy"}}
+            ]
+        }),
+    )?;
+    let before = serde_json::to_vec(&checkpoint)?;
+    let expected = serde_json::to_value(checkpoint.wait_views())?;
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.join("state"));
+    let root = inputs.resolve(&Resolver)?.state;
+    let clock = TestClock::new(
+        WallTime::from_micros(2_000_000_000_000_000)?,
+        MonoTime::from_micros(0),
+    );
+    let coordination = CoordinationService::open(
+        &root,
+        ProjectId::from_bytes([1; 16]),
+        ActorId::from_bytes([2; 16]),
+        &clock,
+        &ThreadPause,
+        &CancelToken::new(),
+    )?;
+    let mut service = Service::new(coordination, GraphFixture(checkpoint.clone()), &clock);
+    let response = ToolCall::parse("fabric_graph", json!({"op":"status","id":"g-test"}))?
+        .execute(&mut service, &CancelToken::new())?
+        .structured_content;
+    assert_eq!(response["waits"], expected);
+    assert_eq!(response["waits"][0]["limit_source"], "override");
+    assert_eq!(serde_json::to_vec(&checkpoint)?, before);
+    Ok(())
+}
+
+#[test]
 fn lane_graph_status_reaches_the_owner() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;

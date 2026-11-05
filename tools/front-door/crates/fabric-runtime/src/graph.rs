@@ -38,9 +38,11 @@ mod outputs;
 mod pattern_plan;
 mod plans;
 mod validation;
+mod wait_view;
 #[doc(hidden)]
 pub use plans::prompt as rendered_prompt;
 pub use validation::minimum_schema_version;
+pub use wait_view::NodeWaitView;
 #[cfg(test)]
 mod admission_tests;
 use budget::*;
@@ -822,6 +824,15 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
             });
         retry.failures = retry.failures.saturating_add(1);
         retry.deadline = Some(deadline);
+        let projected = launch_diagnostic(error);
+        retry.limit = Some(policy.limit);
+        retry.limit_source = Some(policy.limit_source);
+        retry.code = Some(bounded(&projected.code, 128));
+        retry.next = projected.next.as_deref().map(|next| bounded(next, 1024));
+        retry.reason = Some(bounded(
+            projected.detail.as_deref().unwrap_or(&projected.code),
+            MAX_ADVANCE_ERROR_BYTES,
+        ));
         if now < deadline && u32::from(retry.failures) <= policy.limit {
             let delay = provenant_core::retry::Backoff::new(
                 std::time::Duration::from_secs(policy.first_seconds),
@@ -835,15 +846,6 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                     .and_then(|duration| now.checked_add(duration).ok())
                     .map_or(deadline, |wake| wake.min(deadline)),
             );
-            let projected = launch_diagnostic(error);
-            retry.limit = Some(policy.limit);
-            retry.limit_source = Some(policy.limit_source);
-            retry.code = Some(bounded(&projected.code, 128));
-            retry.next = projected.next.as_deref().map(|next| bounded(next, 1024));
-            retry.reason = Some(bounded(
-                projected.detail.as_deref().unwrap_or(&projected.code),
-                MAX_ADVANCE_ERROR_BYTES,
-            ));
             asks::refresh_wake(checkpoint);
             return journal.save(checkpoint).map_err(GraphError::Journal);
         }
@@ -882,10 +884,11 @@ fn apply_launch_block(
         .unwrap_or("inspect the node's inputs and state before retrying");
     let recovery = if error
         .downcast_ref::<crate::coordination::facade::FacadeError>()
-        .is_some_and(|e| {
+        .is_none_or(|e| {
             matches!(
                 e,
                 crate::coordination::facade::FacadeError::LaunchUnknown { .. }
+                    | crate::coordination::facade::FacadeError::DispatchUnobserved { .. }
             )
         }) {
         String::new()
@@ -910,23 +913,56 @@ fn apply_launch_block(
     progress.state = NodeState::Blocked;
     // Keep the attempt row even when launch handoff is uncertain. A guardian
     // may already exist, and cancellation needs its identity and custody.
-    progress.launch_retry = None;
+    let retry = progress.launch_retry.take();
+    progress.launch_block = Some(LaunchBlock {
+        extra: Default::default(),
+        failures: retry.as_ref().map(|retry| retry.failures),
+        limit: retry.as_ref().and_then(|retry| retry.limit),
+        limit_source: retry.as_ref().and_then(|retry| retry.limit_source),
+        next: Some(bounded(&format!("{action}{recovery}"), 1024)),
+    });
 }
 
 /// Apply expiration of a recorded launch window without I/O.
-fn apply_launch_deadline_block(progress: &mut NodeProgress, reason: &str) {
+fn apply_launch_deadline_block(graph_id: &str, progress: &mut NodeProgress, reason: &str) {
+    let retry = progress.launch_retry.take();
+    let uncertain = retry
+        .as_ref()
+        .and_then(|retry| retry.code.as_deref())
+        .is_none_or(|code| matches!(code, "launch_unknown" | "dispatch_unobserved"));
+    let action = retry
+        .as_ref()
+        .and_then(|retry| retry.next.as_deref())
+        .unwrap_or("inspect the launch before retrying");
+    let recovery = if uncertain {
+        String::new()
+    } else if graph_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        format!(
+            "; after correcting the cause, cancel with `provenant fabric graph cancel {graph_id}` and rerun with a new graph_id"
+        )
+    } else {
+        "; inspect and cancel the graph before rerunning with a new graph_id".into()
+    };
+    let next = bounded(&format!("{action}{recovery}"), 1024);
     progress.advance_error_code = Some("launch_retry_exhausted".into());
-    progress.advance_error = Some(format!(
-        "node {}: the launch failed: {}; {}",
-        progress.id,
-        reason,
-        launch_diagnostic(&crate::coordination::facade::FacadeError::Busy)
-            .next
-            .as_deref()
-            .unwrap_or("retry the graph advance")
+    progress.advance_error = Some(bounded(
+        &format!(
+            "node {}: the launch failed: {}; {}",
+            progress.id, reason, next
+        ),
+        MAX_ADVANCE_ERROR_BYTES,
     ));
     progress.state = NodeState::Blocked;
-    progress.launch_retry = None;
+    progress.launch_block = Some(LaunchBlock {
+        extra: Default::default(),
+        failures: retry.as_ref().map(|retry| retry.failures),
+        limit: retry.as_ref().and_then(|retry| retry.limit),
+        limit_source: retry.as_ref().and_then(|retry| retry.limit_source),
+        next: Some(next),
+    });
 }
 
 /// Record the identity and route selected for a new attempt without I/O.
@@ -953,6 +989,7 @@ fn apply_starting_attempt(
         usage: None,
     });
     progress.state = NodeState::Running;
+    progress.launch_block = None;
     // A retry must not replay the preceding attempt's family snapshot.
     progress.separation = None;
 }
@@ -1224,6 +1261,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         advance_error: None,
                         advance_error_code: None,
                         launch_retry: None,
+                        launch_block: None,
                         outputs: None,
                         attempts: Vec::new(),
                     })
@@ -1896,7 +1934,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     };
                     if !accepted {
                         let reason = retry.reason.clone().unwrap_or_default();
-                        apply_launch_deadline_block(&mut checkpoint.nodes[node_index], &reason);
+                        apply_launch_deadline_block(
+                            &checkpoint.graph_id,
+                            &mut checkpoint.nodes[node_index],
+                            &reason,
+                        );
                         asks::refresh_wake(&mut checkpoint);
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
@@ -2263,6 +2305,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         (!node.inputs.is_empty()).then_some(cap),
                     );
                     if let Some(seconds) = owner.admission_timeout_seconds() {
+                        let policy = owner.launch_retry_policy().map_err(GraphError::Run)?;
                         let deadline = owner.wall_now().and_then(|now| {
                             DurationMicros::from_seconds(seconds)
                                 .ok()
@@ -2273,8 +2316,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             failures: 0,
                             deadline,
                             wake_at: None,
-                            limit: None,
-                            limit_source: None,
+                            limit: Some(policy.limit),
+                            limit_source: Some(policy.limit_source),
                             code: None,
                             next: None,
                             reason: deadline.is_none().then(|| {

@@ -740,14 +740,24 @@ and fail with reason `timeout` after the configured timeout (two hours by
 default). The checkpoint retains the first observation time, last state,
 `head_sha`, check names, elapsed seconds and check summary. The compact and full
 graph status show a running CI gate's check names, head SHA and elapsed time.
-Status refreshes elapsed time from the same host boot's monotonic clock without
-querying CI or saving a new checkpoint. Timeout uses the host's monotonic clock,
+Status reports the recorded elapsed time without querying CI or reading the
+clock, so the same checkpoint gives the same status. Timeout uses the host's monotonic clock,
 so wall clock changes do not affect it. If the host boot changes or the monotonic clock moves backwards,
 the gate re-anchors its timeout to the new host stamp. The checkpoint retains
 the re-anchor count; after three re-anchors, another such change settles the
 gate as `timeout` with a reason naming the re-anchor limit. Replay restores
 waiting without querying the host; explicit graph advance, resume and attempt
 settlement re-evaluate the gate. Graph status reads the saved snapshot.
+Graph status derives one `waits` entry per node from the checkpoint. Each entry
+contains `wait` (`approval`, `ci`, `land`, `launch_retry` or `none`),
+`disposition`, cause `code`, reason, attempt key and reference, route, failures,
+limit, limit source, `wake_at` and `next`. Missing recorded facts are
+`unavailable`; no scheduled wake is `none`. A quota stop is terminal with code
+`usage_limited` and no wake. Launch retry records its limit and source with the
+failure, and an exhausted launch retains that budget when it blocks. Human CLI
+and MCP status use the same projection. Reading it never advances a node or
+changes the checkpoint.
+
 Pending CI gates persist their next `wake_at` and observation count in the
 checkpoint. The graph's `wake_at` is the earliest running CI deadline or open
 node ask deadline. The host's `provenant tick` advances pending graphs whose

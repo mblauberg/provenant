@@ -781,7 +781,7 @@ mod result_tests {
     }
 
     #[test]
-    fn graph_status_compact_and_json_remain_unchanged() {
+    fn graph_status_compact_and_json_show_recorded_waits() {
         let run = graph_status_fixture();
         let ordinary = super::graph_human(&run);
         let globals = provenant_cli::Globals::default();
@@ -802,10 +802,10 @@ mod result_tests {
             ordinary
         );
         assert!(ordinary.contains("  ordinary: Failed outcome=TaskFailed\n"));
-        assert!(ordinary.contains("  composite: Running (1 members)\n"));
+        assert!(ordinary.contains("  composite: Running (1 members) wait=none disposition=running"));
         assert!(ordinary.contains("  member: Running CI waiting"));
         assert!(!ordinary.contains("loop-member"));
-        assert!(!ordinary.contains("attempt="));
+        assert!(ordinary.contains("wait=ci disposition=retry"));
         let result = provenant_records::CommandResult::new(
             "fabric graph status",
             provenant_records::Outcome::Ok,
@@ -834,6 +834,11 @@ mod result_tests {
         assert_eq!(outputs[0], outputs[1]);
         let json: serde_json::Value = serde_json::from_slice(&outputs[0]).unwrap();
         assert_eq!(json["data"], serde_json::to_value(&run).unwrap());
+        let waits = json["data"]["waits"].as_array().unwrap();
+        let ci = waits.iter().find(|view| view["node"] == "member").unwrap();
+        assert_eq!(ci["wait"], "ci");
+        assert_eq!(ci["disposition"], "retry");
+        assert_eq!(ci["wake_at"], "none");
     }
 
     #[test]
@@ -1265,7 +1270,7 @@ mod result_tests {
     }
 
     #[test]
-    fn graph_status_shows_waiting_ci_checks_head_and_live_elapsed() {
+    fn graph_status_shows_recorded_waiting_ci_checks_and_head() {
         let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(serde_json::json!({
                 "schema_version": 1,
@@ -1284,10 +1289,8 @@ mod result_tests {
                 }]
             }))
             .unwrap();
-        let mut display = checkpoint.clone();
-        super::graph_status_elapsed(&mut display, "boot-a", 66_000_000);
-        let run = super::graph_snapshot(display);
-        let expected = "CI waiting elapsed=65s checks=build, tests head=abc123";
+        let run = super::graph_snapshot(checkpoint.clone());
+        let expected = "CI waiting elapsed=10s checks=build, tests head=abc123";
         assert!(super::graph_human(&run).contains(expected));
         let summary = super::graph_summary(&serde_json::to_value(&run).unwrap());
         assert_eq!(summary.lines[1], format!("ci running: {expected}"));
@@ -1305,11 +1308,6 @@ mod result_tests {
         nested.checkpoint.nodes.push(parent);
         assert!(super::graph_human(&nested).contains(expected));
 
-        for (boot, now) in [("boot-b", 66_000_000), ("boot-a", 0)] {
-            let mut display = checkpoint.clone();
-            super::graph_status_elapsed(&mut display, boot, now);
-            assert_eq!(display.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 10);
-        }
         assert_eq!(
             super::graph_ci_waiting(0, std::iter::empty(), None),
             "CI waiting elapsed=0s checks=awaiting registration"

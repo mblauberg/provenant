@@ -8283,6 +8283,11 @@ fn launch_retry_limit_blocks_after_configured_failures() {
             Some("launch_retry_exhausted")
         );
         assert_eq!(owner.calls.len(), limit as usize + 1);
+        let block = node.launch_block.as_ref().expect("retained launch budget");
+        assert_eq!(block.failures, Some(limit as u8 + 1));
+        assert_eq!(block.limit, Some(limit));
+        assert_eq!(block.limit_source, Some(LaunchRetrySource::Default));
+        assert!(block.next.is_some());
     }
 }
 
@@ -8468,7 +8473,7 @@ fn launch_errors_retry_until_the_persisted_deadline() {
     );
     let reason = progress.advance_error.as_deref().expect("blocked reason");
     assert!(reason.contains("service is busy"));
-    assert!(!reason.contains("new graph_id"));
+    assert!(reason.contains("new graph_id"));
     assert_eq!(owner.calls.len(), 4);
 
     // A blocked node never launches again.
@@ -8608,13 +8613,54 @@ fn nonterminal_observation_transitions_need_no_owner_or_journal() {
 }
 
 #[test]
+fn uncertain_launch_block_never_suggests_a_new_graph() {
+    use crate::coordination::facade::FacadeError;
+    for error in [
+        FacadeError::LaunchUnknown {
+            operation_id: provenant_core::OperationId::parse("op").unwrap(),
+        },
+        FacadeError::DispatchUnobserved {
+            reason: "unobserved".into(),
+        },
+    ] {
+        let mut progress: NodeProgress = serde_json::from_value(serde_json::json!({
+            "id":"one", "state":"running", "worktree":null, "attempts":[]
+        }))
+        .unwrap();
+        apply_launch_block("graph", &mut progress, &error, true);
+        let next = progress
+            .launch_block
+            .as_ref()
+            .unwrap()
+            .next
+            .as_deref()
+            .unwrap();
+        assert!(!next.contains("new graph_id"), "{next}");
+    }
+    let mut progress: NodeProgress = serde_json::from_value(serde_json::json!({
+        "id":"one", "state":"running", "worktree":null, "attempts":[],
+        "launch_retry":{"failures":1,"reason":"unknown"}
+    }))
+    .unwrap();
+    apply_launch_deadline_block("graph", &mut progress, "unknown");
+    assert!(
+        !progress
+            .launch_block
+            .unwrap()
+            .next
+            .unwrap()
+            .contains("new graph_id")
+    );
+}
+
+#[test]
 fn launch_deadline_transition_needs_only_node_and_reason() {
     let mut progress: NodeProgress = serde_json::from_value(serde_json::json!({
         "id":"one", "state":"running", "worktree":null, "attempts":[],
         "launch_retry":{"failures":1,"reason":"busy"}
     }))
     .unwrap();
-    apply_launch_deadline_block(&mut progress, "busy");
+    apply_launch_deadline_block("graph", &mut progress, "busy");
     assert_eq!(progress.state, NodeState::Blocked);
     assert_eq!(
         progress.advance_error_code.as_deref(),

@@ -10,7 +10,7 @@ mod preset_graph;
 use graph_human::graph_ci_waiting;
 pub(crate) use graph_human::graph_human;
 use graph_human::graph_summary;
-use graph_status::{graph_snapshot, graph_status_elapsed};
+use graph_status::graph_snapshot;
 pub use peer::{hosts, peer};
 #[cfg(test)]
 #[allow(unused_imports)] // unused where integration tests include this file
@@ -6232,7 +6232,7 @@ impl Factory {
             }
         };
         if matches!(input, GraphInput::Status { .. }) {
-            let mut checkpoint = match FileJournal::read_status_checkpoint(
+            let checkpoint = match FileJournal::read_status_checkpoint(
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,
@@ -6245,12 +6245,6 @@ impl Factory {
                 }
                 Err(error) => return Err(graph_journal_error(error)),
             };
-            if let (Ok(boot), Ok(now)) = (
-                self.clock.boot_identity(),
-                self.clock.host_monotonic_micros(),
-            ) {
-                graph_status_elapsed(&mut checkpoint, &boot, now);
-            }
             let mut run = graph_snapshot(checkpoint);
             let sidecar_error = FileJournal::read_advance_error(
                 &self.context.roots.state,
@@ -6858,7 +6852,23 @@ pub fn graph(
             if waiting {
                 human = graph_waiting_human(&data, globals);
             }
-            crate::emit(&graph_command_result(command, data), globals, &human, false)
+            if command == "fabric graph status" && !globals.json {
+                // Every waiting node is part of status, including compact output.
+                let complete = provenant_cli::Globals {
+                    json: false,
+                    full: true,
+                    state_dir: globals.state_dir.clone(),
+                    project: globals.project.clone(),
+                };
+                crate::emit(
+                    &graph_command_result(command, data),
+                    &complete,
+                    &human,
+                    false,
+                )
+            } else {
+                crate::emit(&graph_command_result(command, data), globals, &human, false)
+            }
         }
         Err(error) => {
             let mut message = error.to_string();

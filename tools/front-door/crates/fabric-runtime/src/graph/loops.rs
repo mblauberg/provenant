@@ -577,6 +577,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 advance_error: None,
                 advance_error_code: None,
                 launch_retry: None,
+                launch_block: None,
                 outputs: None,
                 attempts: vec![],
             })

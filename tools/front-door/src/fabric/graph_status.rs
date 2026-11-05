@@ -1,29 +1,3 @@
-/// Refresh display time without querying CI or changing the durable checkpoint.
-pub(super) fn graph_status_elapsed(
-    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
-    boot: &str,
-    now: u64,
-) {
-    use provenant_fabric_runtime::graph::{CiState, NodeState};
-    for node in &mut checkpoint.nodes {
-        if node.state != NodeState::Running {
-            continue;
-        }
-        let Some(ci) = &mut node.ci else {
-            continue;
-        };
-        let Some(first) = &ci.first_observed_stamp else {
-            continue;
-        };
-        if ci.state == CiState::Pending
-            && first.boot_identity == boot
-            && now >= first.host_monotonic_micros
-        {
-            ci.elapsed_seconds = (now - first.host_monotonic_micros) / 1_000_000;
-        }
-    }
-}
-
 pub(super) fn graph_snapshot(
     mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
 ) -> provenant_fabric_runtime::graph::GraphRun {

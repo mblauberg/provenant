@@ -1175,17 +1175,103 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     Ok(())
 }
 
-/// Status refreshes the live CI wait time, so snapshots compare without it.
-fn without_elapsed(checkpoint: &Value) -> Value {
-    let mut checkpoint = checkpoint.clone();
-    if let Some(nodes) = checkpoint["nodes"].as_array_mut() {
-        for node in nodes {
-            if let Some(ci) = node["ci"].as_object_mut() {
-                ci.remove("elapsed_seconds");
-            }
-        }
+#[test]
+fn graph_waits_match_across_cli_and_mcp_without_writing() -> Result {
+    use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
+    };
+    use provenant_os::clock::SystemClock;
+    let rig = TestRig::new()?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
+    let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
+    roots.state_dir = Some(rig.state.clone());
+    let state = roots.resolve(&provenant_os::fs::SystemPathResolver)?.state;
+    let nodes: Vec<Value> = ["approval", "ci", "land", "retry", "exhausted", "quota"]
+        .into_iter().map(|id| json!({"id":id, "access":"read_only", "prompt":"fixture", "route":{"alias":"senior"}})).collect();
+    let document: GraphDocument = serde_json::from_value(
+        json!({"schema_version":1,"graph_id":"wait-fixture","nodes":nodes}),
+    )?;
+    let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"wait-fixture", "plan_digest":"digest", "nodes":[
+            {"id":"approval","state":"running","worktree":null,"attempts":[]},
+            {"id":"ci","state":"running","worktree":null,"attempts":[],"ci":{"state":"pending","summary":"checks pending"}},
+            {"id":"land","state":"running","worktree":null,"attempts":[],"land":{"tier":"routine","policy":"auto","policy_source":"default","branch":"feature","head":"head","note":"waiting"}},
+            {"id":"retry","state":"running","worktree":null,"attempts":[{"launched":true,"key":{"graph_id":"wait-fixture","node_id":"retry","route_index":0},"route":{"alias":"senior"},"state":"starting","attempt_ref":"host/1","outcome":null,"launch_actor":"actor"}],"launch_retry":{"failures":1,"limit":3,"limit_source":"override","code":"writer_lock_busy","next":"wait for lock","reason":"busy"}},
+            {"id":"exhausted","state":"blocked","worktree":null,"attempts":[],"advance_error_code":"launch_retry_exhausted","launch_block":{"failures":2,"limit":1,"limit_source":"override","next":"inspect custody"}},
+            {"id":"quota","state":"failed","worktree":null,"attempts":[],"advance_error_code":"usage_limited"}
+        ], "asks":[{"ask_id":"a","kind":"decide","node":"approval","session":"chair","title":"Decision","body":"Choose","options":[],"resolved":false,"closed":false}]
+    }))?;
+    // Large recorded detail must not hide later waiting nodes in compact status.
+    checkpoint.nodes[1].ci.as_mut().ok_or("ci")?.summary = "x".repeat(1024);
+    checkpoint.nodes[4].advance_error = Some("y".repeat(1024));
+    checkpoint.nodes[3]
+        .launch_retry
+        .as_mut()
+        .ok_or("retry")?
+        .wake_at = Some(provenant_core::WallTime::from_micros(
+        1_800_000_000_000_000,
+    )?);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    {
+        let mut journal = FileJournal::open(
+            &state,
+            project,
+            "wait-fixture",
+            WaitBudget::cli(clock.mono_now(), 10)?,
+            &cancel,
+            &clock,
+        )?;
+        journal.bind(GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            review_base: None,
+            directory: rig.project.clone(),
+            document,
+        })?;
+        journal.save(&checkpoint)?;
     }
-    checkpoint
+    let path = rig
+        .state
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-wait-fixture.json");
+    let before = std::fs::read(&path)?;
+    let status = rig.command(&["fabric", "graph", "status", "wait-fixture", "--json"])?;
+    assert_eq!(code(&status), 0);
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    let expected = serde_json::to_value(checkpoint.wait_views())?;
+    assert_eq!(status["data"]["waits"], expected);
+    assert_ne!(status["data"]["waits"][3]["wake_at"], "none");
+    let human = rig.command(&["fabric", "graph", "status", "wait-fixture"])?;
+    assert_eq!(code(&human), 0);
+    let human = String::from_utf8_lossy(&human.stdout.bytes);
+    assert!(human.contains("quota: Failed"), "{human}");
+    for wait in ["approval", "ci", "land", "launch_retry", "none"] {
+        assert!(human.contains(&format!("wait={wait}")), "{human}");
+    }
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":"status","method":"tools/call","params":{"name":"fabric_graph","arguments":{"op":"status","id":"wait-fixture"}}}),
+        ],
+    )?;
+    let result = &replies
+        .iter()
+        .find(|reply| reply["id"] == "status")
+        .ok_or("MCP status")?["result"];
+    assert_eq!(result["structuredContent"]["waits"], expected);
+    let again = rig.command(&["fabric", "graph", "status", "wait-fixture", "--json"])?;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&again.stdout.bytes)?,
+        status
+    );
+    assert_eq!(std::fs::read(path)?, before);
+    Ok(())
 }
 
 #[test]
@@ -1255,14 +1341,22 @@ fn pending_ci_graph_status_is_a_snapshot() -> Result {
         .join(project)
         .join("graph-pending-ci.advance-error");
     std::fs::write(&marker, "journal lock timed out")?;
+    let journal = marker.with_file_name("graph-pending-ci.json");
+    let before = std::fs::read(&journal)?;
     // If status queried CI, the new response could release the downstream node.
     std::fs::write(&response, check_runs("completed", Some("success")))?;
     let status = rig.command(&["fabric", "graph", "status", "pending-ci", "--json"])?;
     assert_eq!(code(&status), 0);
     let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert_eq!(&status["data"]["checkpoint"], checkpoint);
+    assert_eq!(status["data"]["waits"][0]["wait"], "ci");
+    let human = rig.command(&["fabric", "graph", "status", "pending-ci"])?;
+    assert_eq!(code(&human), 0);
+    assert!(String::from_utf8_lossy(&human.stdout.bytes).contains("wait=ci disposition=retry"));
+    let again = rig.command(&["fabric", "graph", "status", "pending-ci", "--json"])?;
     assert_eq!(
-        without_elapsed(&status["data"]["checkpoint"]),
-        without_elapsed(checkpoint)
+        serde_json::from_slice::<Value>(&again.stdout.bytes)?,
+        status
     );
     assert_eq!(status["data"]["advance_error"], "journal lock timed out");
     let frames = mcp(
@@ -1276,10 +1370,12 @@ fn pending_ci_graph_status_is_a_snapshot() -> Result {
         .find(|frame| frame["id"] == "status")
         .ok_or("graph status")?["result"];
     assert_ne!(result["isError"], true, "{result}");
+    assert_eq!(&result["structuredContent"]["checkpoint"], checkpoint);
     assert_eq!(
-        without_elapsed(&result["structuredContent"]["checkpoint"]),
-        without_elapsed(checkpoint)
+        result["structuredContent"]["waits"],
+        status["data"]["waits"]
     );
+    assert_eq!(std::fs::read(&journal)?, before);
     assert_eq!(
         result["structuredContent"]["advance_error"],
         "journal lock timed out"

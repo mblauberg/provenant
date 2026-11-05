@@ -240,6 +240,11 @@ Recovery uses the existing commands:
 For a background launch, retain its printed ID and check `provenant status` or
 `provenant lanes`; a successful submission alone does not prove that a writer
 started or completed.
+For a graph, `provenant fabric graph status GRAPH_ID` reports each node's
+wait kind, disposition, cause, recorded attempt and route, budget, wake and next
+action. `--json` and MCP `fabric_graph` status expose the same `waits` facts;
+`unavailable` means the owner did not record that fact, and `none` means no
+wake is scheduled. Status reads the saved checkpoint and does not schedule work.
 
 `provenant resume ATTEMPT --prompt-file followup.md` generates and prints an
 operation ID; supply `--operation-id ID` for a planned retry. It pins the prior

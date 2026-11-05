@@ -35,6 +35,17 @@ pub struct LaunchRetry {
     pub reason: Option<String>,
 }
 
+/// The recorded launch budget and remedy retained after a node blocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchBlock {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub failures: Option<u8>,
+    pub limit: Option<u32>,
+    pub limit_source: Option<LaunchRetrySource>,
+    pub next: Option<String>,
+}
+
 /// Canonical encoding length, or `usize::MAX` when the value cannot be encoded.
 pub(super) fn canonical_len<T: Serialize>(value: &T) -> usize {
     CanonicalV1::bytes(value).map_or(usize::MAX, |bytes| bytes.as_bytes().len())
@@ -804,6 +815,8 @@ pub struct NodeProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_retry: Option<LaunchRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_block: Option<LaunchBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
     /// One durable row per route actually tried, in route order.
     pub attempts: Vec<GraphAttempt>,
@@ -1027,15 +1040,30 @@ pub enum GraphStatus {
     Paused,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphRun {
     pub status: GraphStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<GraphOutcome>,
     pub checkpoint: GraphCheckpoint,
     /// Why the last automatic advance failed, as recorded for `status`.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub advance_error: Option<String>,
+}
+
+impl Serialize for GraphRun {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("GraphRun", 5)?;
+        state.serialize_field("status", &self.status)?;
+        if let Some(outcome) = &self.outcome {
+            state.serialize_field("outcome", outcome)?;
+        }
+        state.serialize_field("checkpoint", &self.checkpoint)?;
+        if let Some(error) = &self.advance_error {
+            state.serialize_field("advance_error", error)?;
+        }
+        state.serialize_field("waits", &self.checkpoint.wait_views())?;
+        state.end()
+    }
 }
 
 /// What the checkpoint already knows about an attempt.

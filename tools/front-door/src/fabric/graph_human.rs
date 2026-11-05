@@ -30,7 +30,8 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
             bounded_reason(reason)
         ));
     }
-    for node in &run.checkpoint.nodes {
+    let waits = run.checkpoint.wait_views();
+    for (node, view) in run.checkpoint.nodes.iter().zip(&waits) {
         let substituted = node
             .attempts
             .iter()
@@ -43,7 +44,12 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
             && (members.contains(&node.id) || node.round.is_some())
             && waiting_ci.is_none()
             && !substituted
-            && node.state != provenant_fabric_runtime::graph::NodeState::Failed
+            && !matches!(
+                node.state,
+                provenant_fabric_runtime::graph::NodeState::Failed
+                    | provenant_fabric_runtime::graph::NodeState::Running
+                    | provenant_fabric_runtime::graph::NodeState::Blocked
+            )
         {
             continue;
         }
@@ -117,6 +123,18 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         }
         if let Some(head) = &node.source_commit {
             human.push_str(&format!(" source={head}"));
+        }
+        if matches!(
+            node.state,
+            provenant_fabric_runtime::graph::NodeState::Running
+                | provenant_fabric_runtime::graph::NodeState::Blocked
+        ) || node.advance_error_code.as_deref() == Some("usage_limited")
+        {
+            human.push_str(&format!(
+                " wait={} disposition={} code={} reason={} attempt={} route={} failures={} limit={} limit_source={} wake_at={} next={}",
+                view.wait, view.disposition, view.code, view.reason, view.attempt, view.route,
+                view.failures, view.limit, view.limit_source, view.wake_at, view.next,
+            ));
         }
         human.push('\n');
         if full && let Some(outputs) = &node.outputs {
