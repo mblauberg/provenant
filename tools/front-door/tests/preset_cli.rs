@@ -579,6 +579,70 @@ fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn partial_graph_run_and_status_agree() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("partial.toml"),
+        r#"
+stages = [
+  { id = "group", min_successful = 1, parallel = [
+    { id = "pass", kind = "gate", condition = { type = "budget" } },
+    { id = "fail", kind = "gate", depends_on = ["pass"], inputs = [{ node = "pass", outputs = ["verdict"] }], condition = { type = "verdict", expected = "FAIL", threshold = "all" } }
+  ] },
+  { id = "after", kind = "gate", condition = { type = "budget" } }
+]
+"#,
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "partial graph")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", "partial", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--wait", "1s"])
+        .output()?;
+    let result: serde_json::Value = serde_json::from_slice(&run.stdout)?;
+    assert!(run.status.success(), "{result}");
+    assert_eq!(result["data"]["graph"]["outcome"], "partial", "{result}");
+    let id = result["data"]["graph_id"].as_str().ok_or("graph id")?;
+    let status = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["fabric", "graph", "status", id])
+        .output()?;
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(
+        status["data"]["outcome"],
+        result["data"]["graph"]["outcome"]
+    );
+    Ok(())
+}
+
+#[test]
 fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
