@@ -63,6 +63,37 @@ fn default_branch(project: &Path) -> Result<String> {
     Ok(serde_json::from_slice::<Repository>(&bytes)?.branch.name)
 }
 
+/// Resolve the remote-tracking base through the command's bounded facts session.
+fn base_commit(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    project: &Path,
+    remote: &str,
+    base: &str,
+) -> Result<Option<String>> {
+    use provenant_confinement::{
+        repo::GitRefName,
+        worktrees::{self, WorktreeError},
+    };
+    let Ok(reference) = GitRefName::remote_tracking(format!("{remote}/{base}")) else {
+        return Ok(None);
+    };
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    Ok(worktrees::with_context(
+        roots,
+        home,
+        project,
+        &clock,
+        &cancel,
+        |context| match context.facts.resolve_commit(context, reference, &cancel) {
+            Ok(oid) => Ok(Some(oid.to_string())),
+            Err(WorktreeError::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        },
+    )?)
+}
+
 fn plan(
     command: &PrOpen,
     globals: &Globals,
@@ -133,17 +164,7 @@ fn plan(
     }
     let git = Git::new()?;
     let remote = git.remote_of(project, &base)?;
-    let base_sha = git
-        .full(
-            project,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("{remote}/{base}"),
-            ],
-        )?
-        .map(|text| text.trim().to_owned());
+    let base_sha = base_commit(&resolved.roots, &resolved.home, project, &remote, &base)?;
     if !command.dry_run {
         // The body states this head, so refuse a branch that is elsewhere.
         let listed = git
@@ -282,5 +303,54 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
             )
         }
         Err(error) => fail(LEAF, Outcome::Error, "PR", &error.to_string(), globals),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)] // The PR test driver includes this module without libtest.
+    use super::*;
+
+    #[test]
+    fn base_commit_uses_bounded_repository_facts() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        for path in [&home, &state, &project] {
+            std::fs::create_dir_all(path)?;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+        provenant_os::fixture::run_git(
+            &project,
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        )?;
+        let expected = String::from_utf8(provenant_os::fixture::run_git(
+            &project,
+            &["rev-parse", "HEAD"],
+        )?)?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        assert_eq!(
+            base_commit(&roots, &home, &project, "origin", "main")?,
+            Some(expected.trim().to_owned())
+        );
+        assert_eq!(
+            base_commit(&roots, &home, &project, "origin", "missing")?,
+            None
+        );
+        provenant_os::fixture::run_git(
+            &project,
+            &["update-ref", "refs/remotes/origin/équipe", "HEAD"],
+        )?;
+        assert_eq!(
+            base_commit(&roots, &home, &project, "origin", "équipe")?,
+            Some(expected.trim().to_owned())
+        );
+        Ok(())
     }
 }
