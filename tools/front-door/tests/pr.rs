@@ -478,6 +478,7 @@ fn land_plain_singleton_uses_batch_driver() -> Result {
         "{calls}"
     );
     assert!(!rig.project.join("merge-args").exists());
+    assert_rest_only(&rig)?;
     Ok(())
 }
 

@@ -1855,6 +1855,71 @@ mod graph_land_tests {
     }
 
     #[test]
+    fn graph_land_resolves_its_pull_request_via_rest() {
+        use std::os::unix::fs::PermissionsExt;
+        const MARKER: &str = "PROVENANT_GRAPH_LAND_REST_CHILD";
+        const HEAD: &str = "1111111111111111111111111111111111111111";
+        mod rest_calls {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/rest_calls.rs"
+            ));
+        }
+        if let Some(path) = std::env::var_os(MARKER) {
+            let project = std::path::PathBuf::from(path);
+            let observed = graph_land(
+                &project,
+                &project,
+                "feature",
+                HEAD,
+                false,
+                &provenant_confinement::worktrees::SystemWorkerObserver,
+            );
+            assert!(
+                matches!(observed, LandObservation::Pending { reason } if reason.contains("#7 awaits"))
+            );
+            let calls = std::fs::read_to_string(project.join("calls")).unwrap();
+            assert!(rest_calls::rest_only(&calls), "{calls}");
+            assert!(!rest_calls::rest_only(&format!(
+                "{calls}pr list --head feature\n"
+            )));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(&gh, r##"#!/bin/sh
+echo "$*" >> calls
+case "$*" in
+  *"/pulls"*) echo '[[{"number":7,"state":"open","merged_at":null,"head":{"sha":"1111111111111111111111111111111111111111","ref":"feature","repo":{"full_name":"owner/repo"}},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main","repo":{"full_name":"owner/repo"}}}]]' ;;
+  *) echo '{"owner":{"login":"owner"}}' ;;
+esac
+"##).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pr::land::graph_land_tests::graph_land_resolves_its_pull_request_via_rest",
+                "--nocapture",
+            ])
+            .env(MARKER, dir.path())
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn a_land_report_maps_to_a_graph_observation() {
         assert_eq!(
             observation(&report(

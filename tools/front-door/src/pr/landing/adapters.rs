@@ -1269,6 +1269,110 @@ esac
     }
 
     #[test]
+    fn batch_driver_uses_rest_forge_calls() {
+        use crate::pr::landing::{
+            driver,
+            fakes::{FakeAlarms, FakeGate, FakeRepo},
+            policy::LandPolicy,
+        };
+        use provenant_cli::domains::{
+            LandOverride, LandSettings, PrCiMode, PrCiSettings, Publication,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        const MARKER: &str = "PROVENANT_BATCH_REST_CHILD";
+        const HEAD: &str = "1111111111111111111111111111111111111111";
+        if let Some(path) = std::env::var_os(MARKER) {
+            let project = PathBuf::from(path);
+            let mut forge = GhForge::new(&project);
+            let mut repo = FakeRepo {
+                target: "a".repeat(40),
+                valid_commit_ids: true,
+                ..Default::default()
+            };
+            let mut gate = FakeGate {
+                auto: true,
+                ..Default::default()
+            };
+            let settings = LandSettings {
+                batch_wait_seconds: 0,
+                publish: Publication::RestOrdered,
+                pr_ci: PrCiSettings {
+                    mode: PrCiMode::None,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let policy = LandPolicy::resolve(
+                &settings,
+                &Default::default(),
+                None,
+                None,
+                &LandOverride::default(),
+            )
+            .unwrap();
+            let definition = super::super::receipt::tests::definition();
+            let report = driver::run(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &mut FakeAlarms::default(),
+                driver::Request {
+                    numbers: &[7],
+                    target: "main",
+                    settings: &settings,
+                    policy: &policy,
+                    gate: &definition,
+                    shadow: false,
+                    state: &project,
+                },
+            )
+            .unwrap();
+            assert_eq!(report.outcomes.get(&7), Some(&Outcome::Landed));
+            let calls = std::fs::read_to_string(project.join("calls")).unwrap();
+            assert!(rest_calls::rest_only(&calls), "{calls}");
+            assert!(calls.contains(&format!("sha={HEAD}")), "{calls}");
+            assert!(!rest_calls::rest_only(&format!(
+                "{calls}api graphql -f query=x\n"
+            )));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(&gh, r##"#!/bin/sh
+echo "$*" >> calls
+case "$*" in
+  *"--method PUT"*) echo '{"merged":true,"sha":"00000000000000000000000000000000000003e8"}' ;;
+  *"pulls/7/reviews"*) echo '[[{"id":1,"user":{"login":"reviewer"},"state":"APPROVED","commit_id":"1111111111111111111111111111111111111111"}]]' ;;
+  *"pulls/7"*) echo '{"state":"open","head":{"sha":"1111111111111111111111111111111111111111","ref":"feature","repo":{"full_name":"owner/repo"}},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main","repo":{"full_name":"owner/repo"}},"mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"fixture","user":{"login":"author"}}' ;;
+  *) echo '{"html_url":"https://github.com/owner/repo","full_name":"owner/repo"}' ;;
+esac
+"##).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pr::landing::adapters::tests::batch_driver_uses_rest_forge_calls",
+                "--nocapture",
+            ])
+            .env(MARKER, dir.path())
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn lost_revert_creation_response_adopts_matching_pull_request() {
         let mut lookups = 0;
         let result = reconcile_revert_creation(Err(LandingError::PublicationUnknown), || {
