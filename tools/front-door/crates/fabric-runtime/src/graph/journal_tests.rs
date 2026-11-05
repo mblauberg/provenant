@@ -501,3 +501,110 @@ fn bound_attempt_manifest_survives_file_journal_reopen_and_reattachment() {
         base_dir
     );
 }
+
+#[test]
+fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
+    struct BoundOwner {
+        head: String,
+        bindings: usize,
+        sources: Vec<String>,
+    }
+    impl AttemptOwner for BoundOwner {
+        type Error = Infallible;
+        fn actor(&self) -> String {
+            "fixture".into()
+        }
+        fn bind_implicit_writer(
+            &mut self,
+            _: &str,
+        ) -> Result<Option<ImplicitWriterBinding>, Infallible> {
+            self.bindings += 1;
+            Ok(Some(ImplicitWriterBinding {
+                extra: Default::default(),
+                worktree: "/fixture/lane".into(),
+                source_commit: self.head.clone(),
+            }))
+        }
+        fn observe_or_start(
+            &mut self,
+            _: &AttemptKey,
+            node: NodeInput<'_>,
+            _: &GraphRoute,
+            _: AccessMode,
+            worktree: Option<&str>,
+            _: Replay<'_>,
+        ) -> Result<AttemptObservation, Infallible> {
+            assert_eq!(worktree, Some("/fixture/lane"));
+            self.sources.push(node.source_commit.unwrap().to_owned());
+            Ok(AttemptObservation::Pending {
+                attempt_ref: Some("fixture-attempt".into()),
+            })
+        }
+    }
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let directory = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs =
+        provenant_core::RootInputs::new(directory.join("home"), directory.join("checkout"));
+    inputs.state_dir = Some(directory.join("state"));
+    std::fs::create_dir(directory.join("state")).unwrap();
+    std::fs::set_permissions(
+        directory.join("state"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2, "graph_id":"implicit-reattach", "nodes":[{
+            "id":"write", "prompt":"write", "access":"worktree_write", "worktree":"lane",
+            "route":{"adapter":"fixture","model":"fixture/model"}
+        }]
+    }))
+    .unwrap();
+    let execution = GraphExecution {
+        extra: Default::default(),
+        directory: directory.clone(),
+        document: document.clone(),
+        review_base: None,
+        integration_base: None,
+    };
+    let first_head = "1".repeat(40);
+    let mut owner = BoundOwner {
+        head: first_head.clone(),
+        bindings: 0,
+        sources: Vec::new(),
+    };
+    let first = {
+        let mut journal =
+            FileJournal::open(&root, project, "implicit-reattach", budget, &cancel, &clock)
+                .unwrap();
+        journal.bind(execution.clone()).unwrap();
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint
+    };
+    owner.head = "2".repeat(40);
+    let replay = {
+        let mut journal =
+            FileJournal::open(&root, project, "implicit-reattach", budget, &cancel, &clock)
+                .unwrap();
+        journal.bind(execution).unwrap();
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint
+    };
+    assert_eq!(owner.bindings, 1);
+    assert_eq!(owner.sources, vec![first_head.clone(), first_head]);
+    assert_eq!(
+        first.nodes[0].attempts[0].key,
+        replay.nodes[0].attempts[0].key
+    );
+    assert_eq!(
+        first.nodes[0].implicit_writer,
+        replay.nodes[0].implicit_writer
+    );
+}
