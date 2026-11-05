@@ -813,11 +813,80 @@ pub struct RoutePreview {
     pub supported_efforts: Option<Vec<String>>,
     pub nearest_models: Vec<String>,
     pub pacing: Vec<provenant_routing::PacingPreview>,
+    /// Recorded model-scoped evidence, separate from live executable availability.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recorded_readiness: Vec<RecordedReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_diagnostic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota: Option<provenant_quota::QuotaSnapshot>,
 }
+#[derive(Serialize)]
+pub struct RecordedReadiness {
+    pub host: String,
+    pub account: String,
+    pub account_key: String,
+    pub model: String,
+    pub observation: provenant_quota::ReadinessRead,
+}
+
+fn recorded_model_readiness(
+    settings: &provenant_providers::accounts::Settings,
+    model: &ModelId,
+    pools: &[String],
+    selected: Option<&str>,
+    hint: Option<&str>,
+    lookup: impl Fn(&provenant_quota::ReadinessScope) -> provenant_quota::ReadinessRead,
+) -> Vec<RecordedReadiness> {
+    let mut seen = BTreeSet::new();
+    settings
+        .with_derived_accounts()
+        .entries
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            if entry.adapter != model.adapter()
+                || selected.is_some_and(|key| key != entry.key)
+                || hint.is_some_and(|hint| {
+                    hint != id
+                        && hint != entry.label
+                        && hint != entry.key
+                        && hint != format!("{}/{}", entry.adapter, entry.key)
+                })
+                || !seen.insert((entry.adapter.clone(), entry.key.clone()))
+                || provenant_records::AdapterSpec::get(&entry.adapter)
+                    .is_some_and(|spec| !spec.account_serves_model(&entry.key, model.model()))
+            {
+                return None;
+            }
+            let mut scope = provenant_quota::ReadinessScope {
+                host: provenant_quota::LOCAL_HOST.into(),
+                adapter: entry.adapter,
+                account_key: entry.key.clone(),
+                route: model.as_str().into(),
+            };
+            let mut observation = lookup(&scope);
+            if observation.state != provenant_quota::ReadinessState::Unavailable {
+                for pool in pools {
+                    scope.route.clone_from(pool);
+                    let pool_observation = lookup(&scope);
+                    if pool_observation.state == provenant_quota::ReadinessState::Unavailable {
+                        observation = pool_observation;
+                        break;
+                    }
+                }
+            }
+            Some(RecordedReadiness {
+                host: scope.host.clone(),
+                account: entry.label,
+                account_key: entry.key,
+                model: model.as_str().into(),
+                observation,
+            })
+        })
+        .take(128)
+        .collect()
+}
+
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
 /// served by the `opencode-go` provider. Free (Zen) and other configured
 /// providers must not inherit its account-level exhaustion.
@@ -2243,6 +2312,24 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                     _ => None,
                 };
                 let pacing = provenant_routing::pacing_preview(&model, context);
+                let accounts =
+                    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+                        .domains
+                        .accounts;
+                let recorded_readiness = recorded_model_readiness(
+                    &accounts,
+                    &model,
+                    &context.catalogue.admission_pools(&model),
+                    route.account_key.as_deref(),
+                    query.account.as_deref(),
+                    |scope| {
+                        crate::quota::read_readiness(
+                            roots.state.as_path(),
+                            scope,
+                            now.unix_seconds(),
+                        )
+                    },
+                );
                 let entry = context.catalogue.model(&model);
                 let allow_unknown_partial_headroom = context
                     .config
@@ -2262,6 +2349,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                         Vec::new()
                     },
                     pacing,
+                    recorded_readiness,
                     login_diagnostic,
                     quota,
                 })))
@@ -2572,6 +2660,15 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }),
         diagnostics
     );
+    for record in &preview.recorded_readiness {
+        text.push_str(&format!(
+            "recorded readiness {} [{}] for {}: {}\n",
+            record.account.escape_debug(),
+            record.account_key.escape_debug(),
+            record.model,
+            crate::quota::readiness_words(&record.observation)
+        ));
+    }
     if let Some(diagnostic) = &preview.login_diagnostic {
         text.push_str(&format!("login: {diagnostic}\n"));
     }
@@ -2880,6 +2977,122 @@ mod route_tests {
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
     use std::error::Error;
+
+    #[test]
+    fn recorded_route_readiness_keeps_model_and_account_scope() -> Result<(), Box<dyn Error>> {
+        use provenant_quota::{
+            ReadinessFile, ReadinessReason, ReadinessScope, ReadinessState, RouteReadiness,
+        };
+        let settings: provenant_providers::accounts::Settings =
+            serde_json::from_value(serde_json::json!({"entries":{
+                "one":{"adapter":"codex","label":"one","key":"key-one","directory":"/fixture/one"},
+                "two":{"adapter":"codex","label":"two","key":"key-two","directory":"/fixture/two"}
+            }}))?;
+        let model = super::ModelId::parse("codex/gpt-6-luna")?;
+        let scope = ReadinessScope {
+            host: provenant_quota::LOCAL_HOST.into(),
+            adapter: "codex".into(),
+            account_key: "key-one".into(),
+            route: model.as_str().into(),
+        };
+        let file = ReadinessFile {
+            records: vec![
+                RouteReadiness {
+                    schema_version: 1,
+                    scope: scope.clone(),
+                    state: ReadinessState::Unavailable,
+                    reason: Some(ReadinessReason::ProviderRefusal),
+                    observed_unix_seconds: 10,
+                    expires_unix_seconds: 20,
+                    reset_unix_seconds: None,
+                    evidence_ref: Some("fixture".into()),
+                },
+                RouteReadiness {
+                    schema_version: 1,
+                    scope: ReadinessScope {
+                        account_key: "key-two".into(),
+                        ..scope.clone()
+                    },
+                    state: ReadinessState::Ready,
+                    reason: None,
+                    observed_unix_seconds: 11,
+                    expires_unix_seconds: 20,
+                    reset_unix_seconds: None,
+                    evidence_ref: Some("fixture".into()),
+                },
+                RouteReadiness {
+                    schema_version: 1,
+                    scope: ReadinessScope {
+                        account_key: "key-two".into(),
+                        route: "verified-pool".into(),
+                        ..scope.clone()
+                    },
+                    state: ReadinessState::Unavailable,
+                    reason: Some(ReadinessReason::Exhausted),
+                    observed_unix_seconds: 12,
+                    expires_unix_seconds: 20,
+                    reset_unix_seconds: None,
+                    evidence_ref: Some("fixture".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        let rows = super::recorded_model_readiness(
+            &settings,
+            &model,
+            &[],
+            None,
+            Some("one"),
+            |requested| file.get(requested, 15),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].host, provenant_quota::LOCAL_HOST);
+        assert_eq!(rows[0].account_key, "key-one");
+        assert_eq!(rows[0].model, model.as_str());
+        assert_eq!(
+            rows[0].observation.reason,
+            Some(ReadinessReason::ProviderRefusal)
+        );
+        assert_eq!(rows[0].observation.observed_scope.as_ref(), Some(&scope));
+        assert_eq!(rows[0].observation.observed_unix_seconds, Some(10));
+        let other = super::recorded_model_readiness(
+            &settings,
+            &model,
+            &[],
+            None,
+            Some("two"),
+            |requested| file.get(requested, 15),
+        );
+        assert_eq!(other[0].observation.state, ReadinessState::Ready);
+        assert_eq!(other[0].observation.observed_unix_seconds, Some(11));
+        let pooled = super::recorded_model_readiness(
+            &settings,
+            &model,
+            &["verified-pool".into()],
+            None,
+            Some("two"),
+            |requested| file.get(requested, 15),
+        );
+        assert_eq!(
+            pooled[0].observation.reason,
+            Some(ReadinessReason::Exhausted)
+        );
+        assert_eq!(
+            pooled[0].observation.observed_scope.as_ref().unwrap().route,
+            "verified-pool"
+        );
+        let other_model = super::ModelId::parse("codex/gpt-6.1-terra")?;
+        let other = super::recorded_model_readiness(
+            &settings,
+            &other_model,
+            &[],
+            None,
+            Some("one"),
+            |requested| file.get(requested, 15),
+        );
+        assert_eq!(other[0].observation.state, ReadinessState::Unknown);
+        Ok(())
+    }
 
     fn exclusion_roots(temp: &tempfile::TempDir) -> Result<provenant_core::Roots, Box<dyn Error>> {
         use std::path::Path;

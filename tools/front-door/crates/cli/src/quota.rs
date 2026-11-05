@@ -1924,6 +1924,9 @@ pub fn readiness_words(readiness: &ReadinessRead) -> String {
     if let Some(reason) = reason {
         result.push_str(&format!(" ({reason})"));
     }
+    if let Some(scope) = &readiness.observed_scope {
+        result.push_str(&format!("; scope {}", scope.route.escape_debug()));
+    }
     if let Some(observed) = readiness.observed_unix_seconds {
         result.push_str(&format!("; observed {observed}"));
     }

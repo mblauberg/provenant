@@ -46,6 +46,8 @@ struct AgyAccount {
 struct LoginAccount {
     adapter: String,
     label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_key: Option<String>,
     reason: Option<provenant_quota::ProbeFailure>,
     last_success_unix_seconds: Option<i64>,
     login_expiry: Option<provenant_quota::LoginExpiryView>,
@@ -57,6 +59,7 @@ fn login_account(row: provenant_quota::AccountRow) -> LoginAccount {
     LoginAccount {
         adapter: row.account.adapter,
         label: row.account.label,
+        account_key: Some(row.account.account_key),
         reason: row.error,
         last_success_unix_seconds: row.snapshot.map(|snapshot| snapshot.observed_unix_seconds),
         login_expiry: row.login_expiry,
@@ -369,8 +372,28 @@ fn valid_remote(report: &Report) -> bool {
         && report.login_accounts.iter().all(|row| {
             [&row.adapter, &row.label].iter().all(|text| {
                 !text.is_empty() && text.len() <= 128 && !text.chars().any(char::is_control)
+            }) && row.account_key.as_ref().is_none_or(|key| {
+                !key.is_empty() && key.len() <= 128 && !key.chars().any(char::is_control)
             }) && row.readiness.as_ref().is_none_or(|readiness| {
-                readiness
+                readiness.observed_scope.as_ref().is_none_or(|scope| {
+                    scope.adapter == row.adapter
+                        && row
+                            .account_key
+                            .as_ref()
+                            .is_some_and(|key| key == &scope.account_key)
+                        && [
+                            &scope.host,
+                            &scope.adapter,
+                            &scope.account_key,
+                            &scope.route,
+                        ]
+                        .iter()
+                        .all(|value| {
+                            !value.is_empty()
+                                && value.len() <= 512
+                                && !value.chars().any(char::is_control)
+                        })
+                }) && readiness
                     .evidence_ref
                     .as_ref()
                     .is_none_or(|value| value.len() <= 256 && !value.chars().any(char::is_control))
@@ -630,6 +653,7 @@ mod tests {
                 label: "work".into(),
             },
             readiness: Some(provenant_quota::ReadinessRead {
+                observed_scope: None,
                 state: provenant_quota::ReadinessState::Unavailable,
                 reason: Some(provenant_quota::ReadinessReason::LoginExpired),
                 observed_unix_seconds: Some(100),
@@ -671,6 +695,7 @@ mod tests {
         };
         let value = serde_json::to_value(super::login_account(row)).unwrap();
         assert_eq!(value["label"], "work");
+        assert_eq!(value["account_key"], "key");
         assert_eq!(value["reason"], "login_expired");
         assert_eq!(value["last_success_unix_seconds"], 80);
         assert_eq!(value["login_expiry"]["state"], "expired");
@@ -730,6 +755,22 @@ mod tests {
         )
         .unwrap();
         assert!(super::valid_remote(&report));
+
+        let mut scoped: super::Report = serde_json::from_str(
+            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[{"adapter":"fixture","label":"work","account_key":"key","reason":null,"last_success_unix_seconds":null,"login_expiry":null,"repair":null,"readiness":{"state":"unavailable","reason":"signed_out","observed_unix_seconds":1,"expires_unix_seconds":2,"reset_unix_seconds":null,"evidence_ref":"fixture","observed_scope":{"host":"local","adapter":"fixture","account_key":"key","route":"*"}}}]}"#,
+        ).unwrap();
+        assert!(super::valid_remote(&scoped));
+        scoped.login_accounts[0]
+            .readiness
+            .as_mut()
+            .unwrap()
+            .observed_scope
+            .as_mut()
+            .unwrap()
+            .account_key = "other".into();
+        assert!(!super::valid_remote(&scoped));
+        scoped.login_accounts[0].account_key = None;
+        assert!(!super::valid_remote(&scoped));
 
         let mut report: super::Report = serde_json::from_str(
             r#"{"claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],"peer_agent":"stopped","login_accounts":[],"warnings":[]}"#,

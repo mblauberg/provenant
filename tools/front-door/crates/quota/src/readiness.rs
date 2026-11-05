@@ -114,6 +114,9 @@ impl LoginObservation {
 /// What a reader learns for one route: a verdict that is never ready by default.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadinessRead {
+    /// Scope that supplied this evidence; absent when no valid record matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_scope: Option<ReadinessScope>,
     pub state: ReadinessState,
     pub reason: Option<ReadinessReason>,
     /// Time of the matching, valid scoped evidence, including stale observations.
@@ -131,6 +134,7 @@ impl ReadinessRead {
     /// Unknown, for the given reason.
     pub fn unknown(reason: ReadinessReason) -> Self {
         Self {
+            observed_scope: None,
             state: ReadinessState::Unknown,
             reason: Some(reason),
             observed_unix_seconds: None,
@@ -248,19 +252,24 @@ impl ReadinessFile {
             }
             if now >= r.expires_unix_seconds {
                 return ReadinessRead {
+                    observed_scope: Some(r.scope.clone()),
                     observed_unix_seconds: Some(r.observed_unix_seconds),
                     expires_unix_seconds: Some(r.expires_unix_seconds),
+                    evidence_ref: r.evidence_ref.clone(),
                     ..ReadinessRead::unknown(ReadinessReason::Stale)
                 };
             }
             if r.state == ReadinessState::Unknown {
                 return ReadinessRead {
+                    observed_scope: Some(r.scope.clone()),
                     observed_unix_seconds: Some(r.observed_unix_seconds),
                     expires_unix_seconds: Some(r.expires_unix_seconds),
+                    evidence_ref: r.evidence_ref.clone(),
                     ..ReadinessRead::unknown(r.reason.unwrap_or(ReadinessReason::NotProbed))
                 };
             }
             ReadinessRead {
+                observed_scope: Some(r.scope.clone()),
                 state: r.state,
                 reason: r.reason,
                 observed_unix_seconds: Some(r.observed_unix_seconds),
@@ -289,6 +298,7 @@ impl ReadinessFile {
             && login.state(now, 0) == LoginExpiryState::Expired
         {
             return ReadinessRead {
+                observed_scope: Some(login.scope.clone()),
                 state: ReadinessState::Unavailable,
                 reason: Some(ReadinessReason::LoginExpired),
                 observed_unix_seconds: Some(login.observed_unix_seconds),
@@ -593,10 +603,13 @@ mod tests {
                     (reason == ReadinessReason::Stale).then_some(10)
                 );
                 if reason == ReadinessReason::Stale {
+                    assert_eq!(read.observed_scope.as_ref(), Some(&scope));
+                    assert_eq!(read.evidence_ref.as_deref(), Some("probe:1"));
                     assert_eq!(read.project(), provenant_records::RouteReadiness::stale());
                 }
             } else {
                 assert_eq!(read.state, ReadinessState::Unavailable);
+                assert_eq!(read.observed_scope.as_ref(), Some(&scope));
                 assert_eq!(read.observed_unix_seconds, Some(10));
             }
         }
@@ -652,6 +665,11 @@ mod tests {
         assert_eq!(file.get(&scope, 20).observed_unix_seconds, Some(10));
         assert_eq!(file.get(&scope, 9).state, ReadinessState::Unknown);
         assert_eq!(file.get(&scope, 20).state, ReadinessState::Unknown);
+        let mut account_only = file.clone();
+        account_only.records[0].scope.route = ACCOUNT_ROUTE.into();
+        let model_read = account_only.get(&scope, 10);
+        assert_eq!(model_read.state, ReadinessState::Unknown);
+        assert!(model_read.observed_scope.is_none());
         for other in [
             ReadinessScope {
                 host: "other".into(),
