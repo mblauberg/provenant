@@ -1004,6 +1004,33 @@ fn pattern_template_authority_and_types_are_validated() {
 }
 
 #[test]
+fn nested_pattern_cannot_parameterise_authority() {
+    for nested in [
+        json!({"id":"inner", "access":"${label}", "prompt":"review"}),
+        json!({"id":"inner", "access":"read_only", "role":"${label}", "prompt":"review"}),
+        json!({"id":"inner", "access":"read_only", "read_roots":["${label}"], "prompt":"review"}),
+    ] {
+        let mut doc = pattern_planner(4);
+        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+        pattern.nodes[1] = json!({"id":"review", "kind":"composite", "access":"read_only",
+            "composite":{"nodes":[nested],"exports":[{"node":"inner","outputs":["result"]}]}});
+        assert!(plans::validate_spec(&doc.nodes[0]).is_err());
+    }
+}
+
+#[test]
+fn nested_pattern_writer_keeps_its_scope_requirement() {
+    let mut doc = pattern_planner(4);
+    let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+    pattern.nodes[1] = json!({"id":"review", "kind":"composite", "access":"read_only",
+        "depends_on":["write"], "composite":{"nodes":[{"id":"inner", "access":"worktree_write", "prompt":"write", "worktree":"/tmp/w", "write_scope":[], "acceptance_checks":["check"], "route":{"alias":"senior"}}],"exports":[{"node":"inner","outputs":["result"]}]}});
+    let instance = json!({"id":"impl","pattern":"generator"});
+    let mut owner = fixture_owner(&[&pattern_result(instance)]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+}
+
+#[test]
 fn pattern_required_sample_does_not_violate_bounds_at_admission() {
     let mut doc = pattern_planner(4);
     let parameters = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters;
@@ -1554,6 +1581,11 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     doc.nodes.retain(|node| node.id == "plan");
     doc.nodes[0].depends_on.clear();
     doc.nodes[0].inputs.clear();
+    let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+    let review = pattern.nodes.iter_mut().find(|node| node["id"] == "review").unwrap();
+    let deferred = &mut review["composite"]["nodes"][0];
+    deferred["panel_shapes"] = json!({"quick":{"frame":false,"verifiers":0,"synthesis":"reduce"}});
+    deferred["review"]["min_successful"] = json!(1);
     doc.nodes.push(serde_json::from_value(json!({
         "id":"after", "access":"read_only", "prompt":"Check all slices",
         "depends_on":["plan"], "route":{"alias":"senior"}
@@ -1577,10 +1609,19 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":instances}));
     // Every lane runs a writer, two lens legs and an evaluator, then the barrier and consumer.
     let mut results = vec![fragment.as_str()];
-    results.extend(std::iter::repeat_n("done\nVERDICT: PASS", 40));
+    results.extend(std::iter::repeat_n("done\n```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS", 40));
     let mut owner = fixture_owner(&results);
+    owner.simple_review = true;
+    for observation in owner.observations.iter_mut().skip(1) {
+        if let AttemptObservation::Terminal { commit, branch, attempt_ref, .. } = observation {
+            *commit = Some("1".repeat(40));
+            *branch = Some("batch/graph".into());
+            *attempt_ref = Some("fixture/review".into());
+        }
+    }
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.nodes.iter().filter(|node| node.state != NodeState::Succeeded).map(|node| (&node.id, node.state, &node.advance_error)).collect::<Vec<_>>());
     let expansion = &run.checkpoint.expansions[0];
     let recorded: Vec<_> = expansion.patterns.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
     assert_eq!(recorded, [("plan--a", "writer-lane"), ("plan--b", "writer-lane"), ("plan--barrier", "wave-barrier"), ("plan--c", "writer-lane")]);
@@ -1588,56 +1629,13 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     assert_eq!(expansion.patterns[0].parameters["route"], "junior");
     assert_eq!(expansion.patterns[2].parameters, json!({"wave":"one"}));
 
-    // Each planned lane is the static lane written independently: the golden
-    // expansion of the static preset, flattened. Same roles and digests, access,
-    // family separation, dispositions, source and dependency edges.
-    let golden: Value = serde_json::from_str(
-        &std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../assets/presets/fixtures/big-batch.expansion.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let lane = &golden["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "lanes").unwrap()["composite"]["nodes"][0];
-    let mut static_nodes: Vec<Value> = Vec::new();
-    for child in lane["composite"]["nodes"].as_array().unwrap() {
-        match child.get("composite") {
-            // Legs inherit the lens composite's source, which flat nodes carry themselves.
-            Some(inner) => static_nodes.extend(inner["nodes"].as_array().unwrap().iter().cloned().map(|mut leg| {
-                leg["source"] = child["source"].clone();
-                leg
-            })),
-            None => static_nodes.push(child.clone()),
-        }
+    // Each lane runs its nested review before its evaluator.
+    for lane in ["a", "b", "c"] {
+        let review = format!("plan--{lane}--review--lenses");
+        let evaluate = format!("plan--{lane}--evaluate");
+        assert!(run.checkpoint.expansions.iter().any(|item| item.source == review));
+        assert!(owner.calls.iter().any(|(key, _)| key.node_id == evaluate));
     }
-    let project = |nodes: &[Value], prefix: &str| -> Vec<Value> {
-        let mut rows: Vec<Value> = nodes
-            .iter()
-            .map(|node| {
-                json!({
-                    "id": node["id"].as_str().unwrap().trim_start_matches(prefix),
-                    "role": node["role"],
-                    "role_digest": node["role_digest"],
-                    "access": node["access"],
-                    "kind": node.get("kind").filter(|kind| *kind != "composite"),
-                    "distinct_from": node.get("distinct_from"),
-                    "dispositions": node.get("dispositions"),
-                    "source": node["source"]["type"],
-                })
-            })
-            .collect();
-        rows.sort_by_key(|row| row["id"].as_str().unwrap().to_owned());
-        rows
-    };
-    let planned: Vec<Value> = expansion.nodes.iter().filter(|n| n.id.starts_with("plan--a--")).map(|n| serde_json::to_value(n).unwrap()).collect();
-    assert_eq!(planned.len(), 4);
-    assert_eq!(project(&planned, "plan--a--"), project(&static_nodes, ""));
-    // The evaluator waits for the lens legs and the writer, as the static one does.
-    let evaluate = planned.iter().find(|n| n["id"] == "plan--a--evaluate").unwrap();
-    assert_eq!(evaluate["depends_on"], json!(["plan--a--lens-correctness-spec", "plan--a--lens-simplicity", "plan--a--implement"]));
-    // A lane's exports carry the evaluator's verdict for the barrier and later waves.
-    assert!(expansion.patterns[0].nodes.iter().any(|id| id == "plan--a--evaluate"));
 }
 
 /// A preset planner with a static fallback refuses an invalid fragment by

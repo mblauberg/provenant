@@ -191,8 +191,9 @@ summary to one line. Use this canonical array form:
 ```
 For no findings, use `{"schema_version":1,"findings":[]}`.
 Put the findings block before the verdict line.
-End with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not
-include another verdict line elsewhere in the result.
+After all findings and prose, end with exactly one final non-empty line:
+VERDICT: PASS, VERDICT: FAIL, or VERDICT: INCONCLUSIVE. A closed handoff
+fence may follow. Do not include another verdict line elsewhere in the result.
 """
 
 [roles."lens.correctness-spec"]
@@ -271,8 +272,9 @@ summary to one line. Use this canonical array form:
 ```
 For no findings, use `{"schema_version":1,"findings":[]}`.
 Put the findings block before the verdict line.
-End with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not
-include another verdict line elsewhere in the result.
+After all findings and prose, end with exactly one final non-empty line:
+VERDICT: PASS, VERDICT: FAIL, or VERDICT: INCONCLUSIVE. A closed handoff
+fence may follow. Do not include another verdict line elsewhere in the result.
 """
 
 [roles."lens.reliability"]

@@ -367,6 +367,18 @@ fn outputs(
         let Some(source) = member.outputs.as_ref() else {
             continue;
         };
+        if spec.reduce_verdict
+            && member
+                .separation
+                .as_ref()
+                .is_some_and(|separation| separation.outcome == SeparationOutcome::Unavailable)
+            && selected.warnings.len() < MAX_WARNINGS
+        {
+            selected.warnings.push(bounded(
+                &format!("{}: no separate model family was available", export.node),
+                WARNING_BYTES,
+            ));
+        }
         for warning in source
             .warnings
             .iter()

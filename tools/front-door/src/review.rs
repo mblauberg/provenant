@@ -41,6 +41,9 @@ fn lower(command: provenant_cli::Review) -> Result<provenant_cli::Dispatch, Stri
             .push(format!("parameters.review_shape={}", quoted(&shape)?));
     }
     if let Some(range) = command.range {
+        dispatch
+            .preset_set
+            .push(format!("parameters.selection_range={}", quoted(&range)?));
         let base = range
             .split_once("...")
             .or_else(|| range.split_once(".."))
@@ -66,6 +69,10 @@ fn lower(command: provenant_cli::Review) -> Result<provenant_cli::Dispatch, Stri
 
 #[cfg(test)]
 mod tests {
+    #[allow(
+        unused_imports,
+        reason = "the worktree driver includes this module without libtest functions"
+    )]
     use super::*;
     #[test]
     fn review_identity_is_content_based_unless_fresh() {

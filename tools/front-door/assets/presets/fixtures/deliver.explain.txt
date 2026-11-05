@@ -1,6 +1,6 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":16,"edges":34,"limit_reason":null,"max_attempts":10,"nodes":17,"prompt_bytes":10458}
+Inspection: {"dependency_depth":13,"edges":25,"limit_reason":null,"max_attempts":4,"nodes":14,"prompt_bytes":5650}
 Preset selection: deliver (override)
 Review shape: standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 Pending "delivery_target": "Delivery target is checked before delivery."
@@ -26,22 +26,10 @@ ci  role=- tier=- family=any kind=composite access=read_only worktree=-
   exports: [{"node":"repair","outputs":["result","findings"]}]
 review  role=- tier=- family=any kind=composite access=read_only worktree=-
   inputs: [{"node":"write","outputs":["result"]}]
-  subject  role=plan.review tier=senior family=any kind=- access=read_only worktree=-
-    read_roots: ["<project>"]
-    source: {"node":"write","type":"head"}
   lenses  role=- tier=- family=any kind=plan access=read_only worktree=-
-    read_roots: ["<project>"]
-    source: {"node":"subject","type":"node"}
-    inputs: [{"node":"subject","outputs":["result"]}]
-  verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
-    read_roots: ["<project>"]
-    source: {"node":"subject","type":"node"}
-    inputs: [{"node":"lenses","outputs":["result"]}]
-  synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
-    read_roots: ["<project>"]
-    source: {"node":"subject","type":"node"}
-    inputs: [{"node":"verify","outputs":["result","findings"]},{"node":"lenses","outputs":["result","findings"]},{"node":"subject","outputs":["findings"]}]
-  exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
+    read_roots: ["<project>","<root>/skills"]
+    source: {"node":"write","type":"head"}
+  exports: [{"node":"lenses","outputs":["result","findings","verdict","commit"]}]
 accept  role=- tier=- family=any kind=gate access=read_only worktree=-
   inputs: [{"node":"review","outputs":["verdict"]}]
 land  role=- tier=- family=any kind=land access=read_only worktree=-

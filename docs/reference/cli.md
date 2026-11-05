@@ -2497,6 +2497,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--range` | `{"description": "Git range whose changed paths select the shape", "name": "range"}` |
 | `--exclude` | `{"description": "Keep a provider, account or exact model out of every reviewer pool (repeatable); see &#96;provenant route resolve --help&#96;", "name": "exclude", "repeatable": true}` |
 | `--explain` | `{"defaults": ["false"], "description": "Show the selected panel without dispatching reviewers", "name": "explain", "values": ["true", "false"]}` |
+| `--plan` | `{"description": "Planner front-end: auto, on or off", "name": "plan", "values": ["auto", "on", "off"]}` |
+| `--fresh` | `{"defaults": ["false"], "description": "Start a new graph even if this review already ran", "name": "fresh", "values": ["true", "false"]}` |
 | `--wait` | `{"bounds": [1, 14400], "defaults": ["3600"], "description": "Overall wait limit (seconds or a duration such as 30m)", "name": "wait"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -2516,6 +2518,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "range",
         "exclude",
         "explain",
+        "plan",
+        "fresh",
         "wait"
       ],
       "multiple": true,

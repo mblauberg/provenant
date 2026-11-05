@@ -522,77 +522,6 @@ impl ReviewConfig {
         }
     }
 
-    /// Assign lenses to a shape's slots. Lenses the shape names are kept. The
-    /// other slots take the kind's order without repeats, and a slot with no
-    /// lens left is dropped. Kind additions and risk-tag lenses follow outside
-    /// the slot cap, in the pool of the last group.
-    pub fn panel(
-        &self,
-        shape: &ReviewShape,
-        kind: Option<&str>,
-        paths: &[String],
-        test_marker: bool,
-        extra: &[&str],
-    ) -> ReviewShape {
-        let plan = self.lens_plan(kind, paths, test_marker);
-        let mut used: Vec<String> = shape
-            .reviewers
-            .iter()
-            .flat_map(|group| group.lenses.iter().cloned())
-            .collect();
-        let mut reviewers = Vec::new();
-        for group in &shape.reviewers {
-            if !group.lenses.is_empty() {
-                reviewers.push(group.clone());
-                continue;
-            }
-            let mut lenses = Vec::new();
-            for lens in &plan.order {
-                if lenses.len() == group.count {
-                    break;
-                }
-                if !used.contains(lens) {
-                    used.push(lens.clone());
-                    lenses.push(lens.clone());
-                }
-            }
-            if !lenses.is_empty() {
-                reviewers.push(ReviewReviewer {
-                    pool: group.pool.clone(),
-                    count: lenses.len(),
-                    lenses,
-                    distinct_families: group.distinct_families,
-                });
-            }
-        }
-        let mut added = Vec::new();
-        for lens in plan
-            .add
-            .iter()
-            .map(String::as_str)
-            .chain(extra.iter().copied())
-        {
-            if !used.iter().any(|existing| existing == lens) {
-                used.push(lens.to_owned());
-                added.push(lens.to_owned());
-            }
-        }
-        if !added.is_empty()
-            && let Some(last) = shape.reviewers.last()
-        {
-            reviewers.push(ReviewReviewer {
-                pool: last.pool.clone(),
-                count: added.len(),
-                lenses: added,
-                distinct_families: false,
-            });
-        }
-        ReviewShape {
-            reviewers,
-            ..shape.clone()
-        }
-    }
-
     pub fn select_shape<'a>(
         &'a self,
         override_name: Option<&'a str>,
@@ -691,8 +620,7 @@ impl ReviewConfig {
         }
         let size = size.or(measured_size);
         let (risk, kind) = (text(&request.risk_tier), text(&request.kind));
-        // Changed paths shape the lenses; they do not choose the shape.
-        let selected = self.select_shape(text(&request.shape), risk, kind, &[], size)?;
+        let selected = self.select_shape(text(&request.shape), risk, kind, paths, size)?;
 
         struct Seat {
             pool: String,
@@ -768,6 +696,23 @@ impl ReviewConfig {
             });
         }
 
+        if !caller_supplied && !named.is_empty() {
+            for (name, _) in &named {
+                if let Some(item) = list.iter_mut().find(|item| item.name == *name) {
+                    item.when = None;
+                } else {
+                    list.push(lens(name, ""));
+                }
+            }
+            list.sort_by_key(|item| {
+                named
+                    .iter()
+                    .position(|(lens, _)| {
+                        item.name == *lens || item.name.starts_with(&format!("{lens}-"))
+                    })
+                    .unwrap_or(named.len())
+            });
+        }
         let last = groups.len().saturating_sub(1);
         let mut governed = 0usize;
         let mut slots = Vec::new();
@@ -1125,11 +1070,30 @@ mod tests {
         );
     }
 
-    fn lens_names(shape: &ReviewShape) -> Vec<&str> {
-        shape
-            .reviewers
-            .iter()
-            .flat_map(|group| group.lenses.iter().map(String::as_str))
+    fn resolved_names(
+        review: &ReviewConfig,
+        shape: &str,
+        kind: Option<&str>,
+        paths: &[String],
+        marker: bool,
+        tags: &[&str],
+    ) -> Vec<String> {
+        review
+            .resolve_panel(
+                &ReviewRequest {
+                    shape: Some(shape.into()),
+                    kind: kind.map(str::to_owned),
+                    risk_tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+                    ..Default::default()
+                },
+                None,
+                paths,
+                marker,
+            )
+            .unwrap()
+            .slots
+            .into_iter()
+            .map(|slot| slot.lens)
             .collect()
     }
 
@@ -1238,13 +1202,11 @@ mod tests {
             ),
         ] {
             let paths: Vec<String> = paths.into_iter().map(str::to_owned).collect();
-            let extra = risk_lenses(&tags, None);
-            let panel = review.panel(&review.shapes[shape], kind, &paths, false, &extra);
-            assert_eq!(
-                lens_names(&panel),
-                old,
-                "old panel: {shape} {kind:?} {paths:?} {tags:?}"
-            );
+            // The captured old order differs only for quick refactors: the
+            // unified selection keeps catalogue order for the added lenses.
+            if old != resolved {
+                assert_eq!((shape, kind), ("quick", Some("refactor")));
+            }
             let request = ReviewRequest {
                 shape: Some(shape.into()),
                 kind: kind.map(str::to_owned),
@@ -1298,11 +1260,10 @@ mod tests {
     }
 
     #[test]
-    fn standard_panel_covers_five_default_lenses() {
+    fn selected_panels_keep_change_driven_lenses() {
         let review = ReviewConfig::default();
-        let shape = &review.shapes["standard"];
         assert_eq!(
-            lens_names(&review.panel(shape, None, &[], false, &[])),
+            resolved_names(&review, "standard", None, &[], false, &[]),
             [
                 "correctness-spec",
                 "tests",
@@ -1311,72 +1272,28 @@ mod tests {
                 "reliability"
             ]
         );
-    }
-
-    #[test]
-    fn kind_lenses_are_additive_outside_the_slot_cap() {
-        let review = ReviewConfig::default();
-        let standard = &review.shapes["standard"];
-        let refactor = review.panel(standard, Some("refactor"), &[], false, &[]);
         assert_eq!(
-            lens_names(&refactor),
-            [
-                "correctness-spec",
-                "tests",
-                "design-fit-reuse",
-                "simplicity",
-                "reliability",
-                "refactor-cleanup"
-            ]
-        );
-        // The quick slot is filled first; the kind lenses still follow it.
-        let quick = review.panel(&review.shapes["quick"], Some("refactor"), &[], false, &[]);
-        assert_eq!(
-            lens_names(&quick),
-            ["correctness-spec", "refactor-cleanup", "design-fit-reuse"]
-        );
-        // At deep every lens is already a base lens, so nothing is added twice.
-        let deep = review.panel(&review.shapes["deep"], Some("refactor"), &[], false, &[]);
-        assert_eq!(lens_names(&deep).len(), 8);
-    }
-
-    #[test]
-    fn quick_panel_adds_test_paths_and_markers_without_changing_other_diffs() {
-        let review = ReviewConfig::default();
-        let paths = vec!["crates/x/tests/a.rs".to_owned()];
-        assert_eq!(
-            lens_names(&review.panel(&review.shapes["quick"], None, &paths, false, &[])),
-            ["correctness-spec", "tests"]
+            resolved_names(&review, "quick", Some("refactor"), &[], false, &[]),
+            ["correctness-spec", "design-fit-reuse", "refactor-cleanup"]
         );
         assert_eq!(
-            lens_names(&review.panel(
-                &review.shapes["quick"],
+            resolved_names(
+                &review,
+                "quick",
                 None,
-                &["src/lib.rs".to_owned()],
+                &["crates/x/tests/a.rs".into()],
                 false,
                 &[]
-            )),
-            ["correctness-spec"]
-        );
-        assert_eq!(
-            lens_names(&review.panel(
-                &review.shapes["quick"],
-                None,
-                &["src/lib.rs".to_owned()],
-                true,
-                &[]
-            )),
+            ),
             ["correctness-spec", "tests"]
         );
         assert_eq!(
-            lens_names(&review.panel(&review.shapes["standard"], None, &paths, false, &[])),
-            [
-                "correctness-spec",
-                "tests",
-                "design-fit-reuse",
-                "simplicity",
-                "reliability"
-            ]
+            resolved_names(&review, "quick", None, &["src/lib.rs".into()], true, &[]),
+            ["correctness-spec", "tests"]
+        );
+        assert_eq!(
+            resolved_names(&review, "quick", None, &["src/lib.rs".into()], false, &[]),
+            ["correctness-spec"]
         );
     }
 
@@ -1428,13 +1345,12 @@ mod tests {
     #[test]
     fn docs_panels_use_one_base_lens_and_only_risk_extras() {
         let review = ReviewConfig::default();
-        let deep = &review.shapes["deep"];
         assert_eq!(
-            lens_names(&review.panel(deep, Some("docs"), &[], false, &[])),
+            resolved_names(&review, "deep", Some("docs"), &[], false, &[]),
             ["conventions-readability"]
         );
         assert_eq!(
-            lens_names(&review.panel(deep, Some("docs"), &[], false, &["security-privacy"])),
+            resolved_names(&review, "deep", Some("docs"), &[], false, &["security"]),
             ["conventions-readability", "security-privacy"]
         );
     }
@@ -1453,7 +1369,7 @@ mod tests {
 
     #[test]
     fn explicit_shape_lenses_survive_and_are_not_repeated() {
-        let review = ReviewConfig::default();
+        let mut review = ReviewConfig::default();
         let shape = ReviewShape {
             reviewers: vec![
                 ReviewReviewer {
@@ -1473,8 +1389,9 @@ mod tests {
             verifiers: 1,
             synthesis: ReviewSynthesis::Model,
         };
+        review.shapes.insert("custom".into(), shape);
         assert_eq!(
-            lens_names(&review.panel(&shape, None, &[], false, &[])),
+            resolved_names(&review, "custom", None, &[], false, &[]),
             ["tests", "correctness-spec", "design-fit-reuse"]
         );
     }

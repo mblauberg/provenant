@@ -29,8 +29,8 @@ planner can only narrow the runtime-selected catalogue. The base lenses are
 `refactor-cleanup`, `reliability`, and `flexibility`; risk tags add
 `security-privacy`, `concurrency-data-errors` and `adversarial`. Integration
 heads get the full panel; the runtime may select `conventions-readability` alone
-for docs, so add the policy-required coverage. A verifier tries to falsify
-each finding and a senior synthesis gives each a disposition. For a quick fan-out without a graph:
+for docs, so add the policy-required coverage. Standard and deep include a
+verifier and synthesis; quick reduces the lens verdicts. To choose a shape directly, run
 `provenant review TARGET --brief-file B --shape quick|standard|deep`.
 `deliver` already runs this council on the newest head.
 

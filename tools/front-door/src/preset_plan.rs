@@ -519,7 +519,14 @@ pub fn apply(
         .ok_or_else(|| {
             format!("preset {name}: plan.replaces names no top-level stage: {replaces}")
         })?;
-    let fallback_stage = stages[position].clone();
+    let mut fallback_stage = stages[position].clone();
+    let reduced = fallback_stage
+        .get("reduce_verdict")
+        .and_then(Value::as_bool)
+        == Some(true);
+    if reduced {
+        fallback_stage["outputs"] = json!(["result", "findings", "verdict", "commit"]);
+    }
     let mut planner = json!({
         "id": "plan",
         "role": "plan.shape",
@@ -533,19 +540,27 @@ pub fn apply(
     if let Some(roots) = extra_roots {
         planner["read_roots"] = roots;
     }
-    stages[position] = planner;
+    if reduced {
+        planner["source"] = json!("${subject}");
+        stages[position] = json!({"id":replaces, "parallel":[planner], "reduce_verdict":true,
+            "min_successful":fallback_stage.get("min_successful").cloned().unwrap_or(json!(1)),
+            "exports":[{"node":"plan","outputs":["result","findings","verdict","commit"]}]});
+    } else {
+        stages[position] = planner;
+    }
     // Explicit references to the replaced stage must follow its planner too.
     for stage in stages.iter_mut().skip(position + 1) {
         if let Some(deps) = stage.get_mut("depends_on").and_then(Value::as_array_mut) {
             for dep in deps {
-                if dep.as_str() == Some(replaces.as_str()) {
+                if !reduced && dep.as_str() == Some(replaces.as_str()) {
                     *dep = json!("plan");
                 }
             }
         }
         if let Some(inputs) = stage.get_mut("inputs").and_then(Value::as_array_mut) {
             for input in inputs {
-                if input.get("node").and_then(Value::as_str) == Some(replaces.as_str()) {
+                if !reduced && input.get("node").and_then(Value::as_str) == Some(replaces.as_str())
+                {
                     input["node"] = json!("plan");
                 }
             }
@@ -801,6 +816,39 @@ fn lower_pattern(
             .and_then(Value::as_str)
             .ok_or("pattern nodes need an id")?
             .to_owned();
+        if entry.contains_key("preset") {
+            let mut parameters = bound.clone();
+            if let Some(limit) = values.get("spec_max_bytes") {
+                parameters["spec_max_bytes"] = limit.clone();
+            }
+            // Pattern worktrees are not available until launch. Bind the shared
+            // batch spec once, as for the other catalogue leaves.
+            let key = json!([
+                parameters.get("spec"),
+                parameters.get("worktree"),
+                parameters.get("spec_max_bytes")
+            ])
+            .to_string();
+            layers
+                .spec_contexts
+                .borrow_mut()
+                .insert(key, context.as_ref().map(|text| text.replace("${", "$ {")));
+            let (mut stack, mut origins, mut repo_files) =
+                (Vec::new(), BTreeMap::new(), Vec::new());
+            let mut builder = StageBuilder {
+                layers,
+                name,
+                prompt: &brief,
+                parameters,
+                roles,
+                stack: &mut stack,
+                origins: &mut origins,
+                repo_files: &mut repo_files,
+                scope: "",
+            };
+            builder.entry(&Value::Object(entry), &id, &[], &mut nodes, 0)?;
+            continue;
+        }
         // The runtime appends the write scope and acceptance checks itself.
         let mut kept = Vec::new();
         for key in ["write_scope", "acceptance_checks"] {
@@ -870,10 +918,22 @@ fn lower_pattern(
 
 /// Attach the lowered catalogue to the built planner node.
 pub fn attach(nodes: &mut [Value], plan: Value) -> Result<(), String> {
-    let node = nodes
-        .iter_mut()
-        .find(|node| node["id"] == "plan")
-        .ok_or("the planner node was not built")?;
+    fn find(nodes: &mut [Value]) -> Option<&mut Value> {
+        for node in nodes {
+            if node["id"] == "plan" {
+                return Some(node);
+            }
+            if let Some(children) = node
+                .pointer_mut("/composite/nodes")
+                .and_then(Value::as_array_mut)
+                && let Some(found) = find(children)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let node = find(nodes).ok_or("the planner node was not built")?;
     let mut plan = plan;
     if let Some(fallback) = node
         .as_object_mut()

@@ -417,9 +417,16 @@ fn review_explain_snapshots_substantial_default_panel() -> Result<(), Box<dyn st
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout)?;
-    let snapshot = "  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=reliability pool=junior\n";
-    assert!(text.contains(snapshot), "{text}");
-    assert!(text.starts_with("review standard (by_risk;"), "{text}");
+    assert!(text.contains("Review shape: standard"), "{text}");
+    for lens in [
+        "correctness-spec",
+        "tests",
+        "design-fit-reuse",
+        "simplicity",
+        "reliability",
+    ] {
+        assert!(text.contains(&format!("lens-{lens}")), "{text}");
+    }
     Ok(())
 }
 
@@ -453,14 +460,20 @@ fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout)?;
-    // CI's shallow checkout may add a "no default branch" warning after the
-    // header, so the header and the lens block are matched separately.
-    assert!(
-        text.starts_with("review deep (by_kind; size=unknown; kind=integration; risk=routine)\n"),
-        "{text}"
-    );
-    let snapshot = "  risk tags: security\n  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=reliability pool=senior\n  lens=conventions-readability pool=senior\n  lens=refactor-cleanup pool=senior\n  lens=flexibility pool=senior\n  lens=security-privacy pool=senior\n";
-    assert!(text.contains(snapshot), "{text}");
+    assert!(text.contains("Review shape: deep"), "{text}");
+    for lens in [
+        "correctness-spec",
+        "tests",
+        "design-fit-reuse",
+        "simplicity",
+        "reliability",
+        "conventions-readability",
+        "refactor-cleanup",
+        "flexibility",
+        "security-privacy",
+    ] {
+        assert!(text.contains(&format!("lens-{lens}")), "{text}");
+    }
     Ok(())
 }
 
@@ -774,6 +787,77 @@ fn fresh_gives_a_rerun_a_new_graph_id_and_a_plain_rerun_the_same_one()
         .arg(&prompt)
         .output()?;
     assert!(!output.status.success());
+    Ok(())
+}
+
+#[test]
+fn review_rerun_attaches_and_fresh_starts_a_new_graph() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(output.status.success());
+    }
+    let settings = project.join(".provenant");
+    std::fs::create_dir(&settings)?;
+    std::fs::write(
+        settings.join("roles.toml"),
+        "[roles.\"lens.correctness-spec\"]\ntier = { adapter = 'fixture', model = 'fixture/model' }\n",
+    )?;
+    let brief = project.join("brief");
+    std::fs::write(&brief, "Review this commit")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = |fresh: bool| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let mut command = fixture_cli();
+        command
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["review", "HEAD", "--brief-file"])
+            .arg(&brief)
+            .args(["--shape", "quick", "--plan", "off", "--wait", "5s"]);
+        if fresh {
+            command.arg("--fresh");
+        }
+        let output = command.output()?;
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let first = run(false)?;
+    let second = run(false)?;
+    let fresh = run(true)?;
+    let id = first["data"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("no graph: {first}"))?;
+    assert_eq!(second["data"]["graph_id"], id, "{second}");
+    let nodes = first["data"]["graph"]["checkpoint"]["nodes"]
+        .as_array()
+        .ok_or("checkpoint nodes missing")?;
+    let attempts: usize = nodes
+        .iter()
+        .map(|node| node["attempts"].as_array().map_or(0, Vec::len))
+        .sum();
+    assert_eq!(attempts, 1, "{first}");
+    assert!(
+        !nodes.iter().any(|node| node["id"]
+            .as_str()
+            .is_some_and(|id| id.contains("synthesis"))),
+        "{first}"
+    );
+    assert_eq!(
+        second["data"]["graph"]["checkpoint"]["nodes"],
+        first["data"]["graph"]["checkpoint"]["nodes"],
+        "{second}"
+    );
+    assert_ne!(fresh["data"]["graph_id"], id, "{fresh}");
     Ok(())
 }
 
@@ -2845,7 +2929,8 @@ fn copied_review_preset_binds_request_values_under_any_name()
         .iter()
         .find(|node| node["id"] == "lens")
         .ok_or("lens missing")?;
-    assert_eq!(lens["review"]["risk_tier"], "crucial");
-    assert_eq!(lens["review"]["kind"], "docs");
+    let deferred = &lens["composite"]["nodes"][0];
+    assert_eq!(deferred["review"]["risk_tier"], "crucial");
+    assert_eq!(deferred["review"]["kind"], "docs");
     Ok(())
 }

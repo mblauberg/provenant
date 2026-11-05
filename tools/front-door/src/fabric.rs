@@ -4238,6 +4238,48 @@ struct ReviewMeasure {
     measured: provenant_routing::Measured,
 }
 
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the worktree driver includes test helpers without libtest functions"
+)]
+pub(crate) fn fixture_review_expansion(
+    node: &provenant_fabric_runtime::graph::GraphNode,
+    subject: &str,
+    shape: &str,
+) -> Result<
+    provenant_fabric_runtime::graph::Expansion,
+    provenant_fabric_runtime::graph::ReviewResolveError,
+> {
+    use provenant_fabric_runtime::graph::ReviewResolveError;
+    let routing = provenant_routing::RoutingConfig::default();
+    let panel = routing
+        .review
+        .resolve_panel(
+            &provenant_routing::ReviewRequest {
+                shape: Some(shape.into()),
+                ..Default::default()
+            },
+            None,
+            &[],
+            false,
+        )
+        .map_err(ReviewResolveError::Failed)?;
+    let subject = provenant_core::GitOid::parse(subject)
+        .map_err(|error| ReviewResolveError::Failed(error.to_string()))?;
+    let measure = ReviewMeasure {
+        routing,
+        directory: PathBuf::new(),
+        subject,
+        base: subject,
+        measured: provenant_routing::Measured {
+            size: Some("small"),
+            warning: None,
+        },
+    };
+    BoundGraphOwner::review_expansion(node, &measure, &panel, "fixture".into())
+}
+
 impl BoundGraphOwner<'_> {
     fn review_git(&self, directory: &Path, args: &[&str]) -> Result<String, String> {
         use provenant_os::exec::{ExecOptions, Executor, Termination};
@@ -4340,11 +4382,11 @@ impl BoundGraphOwner<'_> {
             .get("lens_templates")
             .and_then(serde_json::Value::as_object)
             .ok_or_else(|| failed("deferred review carries no lens templates".into()))?;
-        let root_id = format!("{}--review", node.id);
+        let root_id = format!("{}--r", node.id);
         let panel_templates = node.extra.get("panel_templates").and_then(serde_json::Value::as_object)
             .ok_or_else(|| failed("deferred review carries no panel templates; finish old reviews before upgrading".into()))?;
-        let lens_id = format!("{root_id}--lenses");
-        let frame_id = format!("{root_id}--frame");
+        let lens_id = format!("{root_id}--p");
+        let frame_id = format!("{root_id}--f");
         let subject = measure.subject.to_string();
         let mut members: Vec<GraphNode> = Vec::new();
         for slot in &panel.slots {
@@ -4477,6 +4519,7 @@ impl BoundGraphOwner<'_> {
                 .ok_or_else(|| failed(format!("invalid {key} template")))?;
             map.insert("id".into(), serde_json::json!(id));
             map.insert("source".into(), pinned.clone());
+            map.insert("read_roots".into(), serde_json::json!(node.read_roots));
             map.insert("depends_on".into(), serde_json::json!(deps));
             map.insert("inputs".into(), inputs);
             serde_json::from_value(value)
@@ -4495,15 +4538,16 @@ impl BoundGraphOwner<'_> {
         children.extend(members);
         let mut previous = lens_id.clone();
         for index in 0..verifiers {
-            let id = format!("{root_id}--verify-{}", index + 1);
+            let id = format!("{root_id}--v-{}", index + 1);
             let inputs = serde_json::json!([{"node":previous,"outputs":["result","findings"]}]);
             children.push(template("verifier", &id, vec![previous], inputs)?);
             previous = id;
         }
+        let verifier_output = (reduction && previous != lens_id).then(|| previous.clone());
         let output = if reduction {
             lens_id.clone()
         } else {
-            let id = format!("{root_id}--synthesis");
+            let id = format!("{root_id}--s");
             let mut inputs =
                 vec![serde_json::json!({"node":lens_id,"outputs":["result","findings"]})];
             if previous != lens_id {
@@ -4517,10 +4561,17 @@ impl BoundGraphOwner<'_> {
             children.push(template("synthesis", &id, deps, serde_json::json!(inputs))?);
             id
         };
+        let mut root_exports = vec![
+            serde_json::json!({"node":output,"outputs":["result","findings","verdict","commit"]}),
+        ];
+        if let Some(verifier) = verifier_output {
+            root_exports.push(serde_json::json!({"node":verifier,"outputs":["result","findings"]}));
+        }
         let root: GraphNode = serde_json::from_value(serde_json::json!({
             "id":root_id, "kind":"composite", "access":"read_only", "depends_on":node.depends_on,
-            "composite":{"nodes":[],"exports":[{"node":output,"outputs":["result","findings","verdict","commit"]}]}
-        })).map_err(|error| failed(format!("review composite does not lower: {error}")))?;
+            "composite":{"nodes":[],"exports":root_exports}
+        }))
+        .map_err(|error| failed(format!("review composite does not lower: {error}")))?;
         let mut nodes = vec![root];
         nodes.extend(children);
         Ok(Expansion {
@@ -4682,11 +4733,37 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 })
                 .collect(),
         };
-        let panel = measure
+        let mut panel = measure
             .routing
             .review
             .resolve_panel(&request, measure.measured.size, &paths, marker)
             .map_err(ReviewResolveError::Failed)?;
+        // A graph retains the stage configuration it was lowered with. The
+        // launch still chooses the shape from the pinned subject.
+        if let Some(shape) = node
+            .extra
+            .get("panel_shapes")
+            .and_then(|shapes| shapes.get(&panel.shape))
+        {
+            panel.frame = shape
+                .get("frame")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| {
+                    ReviewResolveError::Failed("invalid deferred review frame".into())
+                })?;
+            panel.verifiers = shape
+                .get("verifiers")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| {
+                    ReviewResolveError::Failed("invalid deferred verifier count".into())
+                })?;
+            panel.synthesis =
+                serde_json::from_value(shape.get("synthesis").cloned().unwrap_or_default())
+                    .map_err(|error| {
+                        ReviewResolveError::Failed(format!("invalid deferred synthesis: {error}"))
+                    })?;
+        }
         let mut source = format!(
             "{}; size={}; kind={}; risk={}",
             panel.source,

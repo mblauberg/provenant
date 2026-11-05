@@ -589,6 +589,16 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
     // A consumer that read the planner's result also reads what the fragment's
     // pattern instances export, as it would read the static composite.
     let exported = fragment_exports(document, expansion);
+    let fallback_minimum = document
+        .nodes
+        .iter()
+        .find(|node| node.id == expansion.source)
+        .and_then(|node| node.plan.as_ref())
+        .and_then(|plan| plan.fallback.as_ref())
+        .filter(|fallback| fallback.nodes.len() == 1)
+        .and_then(|fallback| fallback.nodes[0].composite.as_ref())
+        .filter(|inner| inner.reduce_verdict)
+        .map(|inner| inner.min_successful);
     for node in &mut document.nodes {
         if node.dependencies().any(|name| name == &expansion.source) {
             if expansion.review.is_some() {
@@ -603,6 +613,31 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
             }
             if !expansion.continuation {
                 wire_exports(node, &expansion.source, &exported);
+                if expansion.review.is_none()
+                    && let Some(composite) = &mut node.composite
+                    && composite.reduce_verdict
+                    && composite
+                        .exports
+                        .iter()
+                        .any(|item| item.node == expansion.source)
+                {
+                    composite
+                        .exports
+                        .retain(|item| item.node != expansion.source);
+                    // The fallback's own reduced panel enforces the original
+                    // minimum, so its enclosing boundary counts that receipt.
+                    let reduced_fallback = fallback_minimum == Some(composite.min_successful)
+                        && exported.len() == 1
+                        && exported[0].node == format!("{}--fallback", expansion.source);
+                    if reduced_fallback {
+                        composite.min_successful = Some(1);
+                    }
+                    composite.exports.extend(exported.iter().cloned());
+                    node.composite_members
+                        .retain(|member| member != &expansion.source);
+                    node.composite_members
+                        .extend(exported.iter().map(|item| item.node.clone()));
+                }
                 if expansion.review.is_some() {
                     // A resolved review is a structural node, not an agent
                     // attempt, and has no result of its own to consume.
@@ -720,7 +755,7 @@ pub(super) fn validate_review_addition(
         addition
             .nodes
             .iter()
-            .find(|node| node.id == format!("{}--lenses", root.id))
+            .find(|node| node.id == format!("{}--p", root.id))
     } else {
         Some(root)
     };
@@ -737,20 +772,60 @@ pub(super) fn validate_review_addition(
                     .or_else(|| shape.get("verifiers"))
                     .and_then(serde_json::Value::as_u64);
                 let synthesis = shape.get("synthesis").and_then(serde_json::Value::as_str);
-                let expected_frame = format!("{}--frame", root.id);
-                let expected_synthesis = format!("{}--synthesis", root.id);
+                let expected_frame = format!("{}--f", root.id);
+                let expected_synthesis = format!("{}--s", root.id);
                 let actual_verifiers = addition
                     .nodes
                     .iter()
-                    .filter(|node| node.id.starts_with(&format!("{}--verify-", root.id)))
+                    .filter(|node| node.id.starts_with(&format!("{}--v-", root.id)))
                     .count();
                 let ordered = lenses.is_some_and(|group| {
                     let mut previous = group.id.clone();
-                    if frame == Some(true) && !group.depends_on.contains(&expected_frame) {
+                    if frame == Some(true) {
+                        let Some(framing) =
+                            addition.nodes.iter().find(|node| node.id == expected_frame)
+                        else {
+                            return false;
+                        };
+                        if !group.depends_on.contains(&expected_frame)
+                            || source
+                                .depends_on
+                                .iter()
+                                .any(|parent| !framing.depends_on.contains(parent))
+                        {
+                            return false;
+                        }
+                    } else if source
+                        .depends_on
+                        .iter()
+                        .any(|parent| !group.depends_on.contains(parent))
+                    {
                         return false;
                     }
+                    let members = addition
+                        .nodes
+                        .iter()
+                        .filter(|node| node.id.starts_with(&format!("{}--", group.id)));
+                    for member in members {
+                        if frame == Some(true) {
+                            if !member.depends_on.contains(&expected_frame)
+                                || !member.inputs.iter().any(|input| {
+                                    input.node == expected_frame
+                                        && input.outputs.contains(&OutputKind::Result)
+                                })
+                            {
+                                return false;
+                            }
+                        } else if source
+                            .depends_on
+                            .iter()
+                            .any(|parent| !member.depends_on.contains(parent))
+                        {
+                            return false;
+                        }
+                    }
                     for index in 0..actual_verifiers {
-                        let id = format!("{}--verify-{}", root.id, index + 1);
+                        let id = format!("{}--v-{}", root.id, index + 1);
                         let Some(verifier) = addition.nodes.iter().find(|node| node.id == id)
                         else {
                             return false;
@@ -821,16 +896,17 @@ pub(super) fn validate_review_addition(
     } else {
         true
     };
+    let Some(lens_root) = lenses else {
+        return Err("invalid review expansion".into());
+    };
     if addition.review.is_none()
         || !shape_matches
-        || lenses.is_none()
         || addition.nodes.iter().filter(|node| node.composite.is_none()).any(|node| !matches!(&node.source, Some(SourceBinding::Commit { commit }) if Some(commit) == subject.as_ref()))
         || addition.continuation
         || !addition.patterns.is_empty()
         || addition.nodes.len() < 2
         || addition.nodes.len() > spec.max_nodes
-        || lenses.and_then(|node| node.composite.as_ref()).is_none_or(|composite| {
-            let lens_root = lenses.expect("checked above");
+        || lens_root.composite.as_ref().is_none_or(|composite| {
             let mut exported = std::collections::BTreeSet::new();
             (!whole_panel && composite.reduce_verdict != spec.reduce_verdict)
                 || composite.min_successful != spec.min_successful.map(|n| if n == 0 { composite.exports.len().saturating_sub(1).max(1) } else { n })
@@ -844,18 +920,23 @@ pub(super) fn validate_review_addition(
                 })
         })
         || (whole_panel && root.composite.as_ref().is_none_or(|composite| {
-            let lens = lenses.expect("checked above");
+            let lens = lens_root;
             let reduced = lens.composite.as_ref().is_some_and(|group| group.reduce_verdict);
-            let output = if reduced { lens.id.clone() } else { format!("{}--synthesis", root.id) };
+            let output = if reduced { lens.id.clone() } else { format!("{}--s", root.id) };
+            let verifier_count = addition.nodes.iter().filter(|node| node.id.starts_with(&format!("{}--v-", root.id))).count();
+            let expected_exports = if reduced && verifier_count > 0 { 2 } else { 1 };
             composite.reduce_verdict || composite.min_successful.is_some()
-                || composite.exports.len() != 1 || composite.exports[0].node != output
+                || composite.exports.len() != expected_exports || composite.exports[0].node != output
                 || [OutputKind::Result, OutputKind::Findings, OutputKind::Verdict, OutputKind::Commit].iter().any(|kind| !composite.exports[0].outputs.contains(kind))
+                || (expected_exports == 2 && (composite.exports[1].node != format!("{}--v-{verifier_count}", root.id)
+                    || composite.exports[1].outputs != [OutputKind::Result, OutputKind::Findings]))
                 || !addition.nodes.iter().any(|node| node.id == output)
         }))
         || addition
             .nodes
             .iter()
-            .any(|node| node.access != AccessMode::ReadOnly || node.review.is_some())
+            .any(|node| node.access != AccessMode::ReadOnly || node.review.is_some()
+                || node.read_roots.iter().any(|root| !source.read_roots.contains(root)))
     {
         return Err("invalid review expansion".into());
     }
@@ -1011,6 +1092,17 @@ fn prepare(
     document: &GraphDocument,
     trusted: bool,
 ) -> Result<(), String> {
+    prepare_nested(child, node, spec, document, trusted, false)
+}
+
+fn prepare_nested(
+    child: &mut GraphNode,
+    node: &PlannedNode,
+    spec: &PlanSpec,
+    document: &GraphDocument,
+    trusted: bool,
+    nested: bool,
+) -> Result<(), String> {
     if !trusted {
         // A planner may narrow but never widen the access its own node holds.
         if let Some(role) = &child.role
@@ -1040,11 +1132,48 @@ fn prepare(
             ));
         }
     }
-    if !spec.kinds.contains(&child.kind.unwrap_or(NodeKind::Task)) {
+    if !spec.kinds.contains(&child.kind.unwrap_or(NodeKind::Task))
+        && !(trusted
+            && (child.kind == Some(NodeKind::Composite) || (nested && child.review.is_some())))
+    {
         return Err(format!(
             "fragment kind {:?} was not declared",
             child.kind.unwrap_or(NodeKind::Task)
         ));
+    }
+    if let Some(composite) = &mut child.composite {
+        for member in &mut composite.nodes {
+            prepare_nested(member, node, spec, document, trusted, true)?;
+        }
+    }
+    if trusted && nested && child.review.is_some() {
+        if child.access != AccessMode::ReadOnly {
+            return Err("review expansion must be read-only".into());
+        }
+        return Ok(());
+    }
+    // Fixed read-only preset leaves already carry their authored prompts.
+    if trusted
+        && nested
+        && child.access == AccessMode::ReadOnly
+        && child.composite.is_none()
+        && !matches!(child.kind, Some(NodeKind::Gate | NodeKind::Decide))
+    {
+        if child.prompt.trim().is_empty() {
+            return Err("fragment agent requires a prompt".into());
+        }
+        if child.route.is_none() && child.routes.is_none() {
+            child.route = Some(GraphRoute {
+                extra: Default::default(),
+                alias: Some("senior".into()),
+                adapter: None,
+                name: None,
+                model: None,
+                effort: None,
+                account: None,
+            });
+        }
+        return Ok(());
     }
     // Gate evidence lives in its condition and a decision in its question.
     // Writer nodes carry explicit scope; all agents carry acceptance prose.

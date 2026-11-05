@@ -67,6 +67,7 @@ struct FakeOwner {
     models: std::collections::BTreeMap<String, String>,
     review_expansion: Option<Expansion>,
     review_calls: usize,
+    simple_review: bool,
     require_distinct: Vec<bool>,
     deadlines: Vec<Option<u64>>,
     families: std::collections::BTreeMap<String, String>,
@@ -120,6 +121,20 @@ impl AttemptOwner for FakeOwner {
         _subject: &str,
     ) -> Result<Expansion, ReviewResolveError> {
         self.review_calls += 1;
+        if self.simple_review {
+            let root = format!("{}--r", _node.id);
+            let group = format!("{root}--p");
+            let lens = format!("{group}--lens");
+            return serde_json::from_value(serde_json::json!({
+                "source":_node.id, "continuation":false, "patterns":[],
+                "review":{"subject":_subject,"base":"2".repeat(40),"measured_size":"small","shape":"quick","source":"fixture"},
+                "nodes":[
+                    {"id":root,"kind":"composite","access":"read_only","depends_on":_node.depends_on,"composite":{"nodes":[],"exports":[{"node":group,"outputs":["result","findings","verdict","commit"]}]}},
+                    {"id":group,"kind":"composite","access":"read_only","depends_on":_node.depends_on,"composite":{"nodes":[],"min_successful":1,"reduce_verdict":true,"exports":[{"node":lens,"outputs":["result","findings","commit"]}]}},
+                    {"id":lens,"access":"read_only","prompt":"review","depends_on":_node.depends_on,"source":{"type":"commit","commit":_subject},"route":{"alias":"senior"}}
+                ]
+            })).map_err(|error| ReviewResolveError::Failed(error.to_string()));
+        }
         self.review_expansion
             .clone()
             .ok_or(ReviewResolveError::Unsupported)
@@ -1006,6 +1021,41 @@ fn family_group_passes_peers_and_records_shared_family() {
             }
         );
     }
+}
+
+#[test]
+fn reduced_panel_reports_unavailable_family_separation() {
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2, "graph_id":"family-warning", "nodes":[{
+            "id":"panel", "kind":"composite", "access":"read_only", "composite":{
+                "reduce_verdict":true, "nodes":[
+                    {"id":"one", "access":"read_only", "prompt":"review", "family_group":"panel", "route":{"alias":"senior"}},
+                    {"id":"two", "access":"read_only", "prompt":"review", "family_group":"panel", "route":{"alias":"senior"}}
+                ], "exports":[{"node":"one","outputs":["result"]},{"node":"two","outputs":["result"]}]
+            }
+        }]
+    })).unwrap();
+    document.schema_version = 2;
+    let mut owner = FakeOwner {
+        family_pool: vec!["same".into()],
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let panel = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "panel")
+        .unwrap();
+    assert!(
+        panel
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("family"))
+    );
 }
 
 #[test]
@@ -8385,6 +8435,15 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         commit: "4".repeat(40),
     });
     assert!(plans::validate_review_addition(&document, &wrong_subject).is_err());
+    let mut wider_root = addition.clone();
+    wider_root
+        .nodes
+        .iter_mut()
+        .find(|node| node.composite.is_none())
+        .unwrap()
+        .read_roots
+        .push("/outside".into());
+    assert!(plans::validate_review_addition(&document, &wider_root).is_err());
 
     let mut changed_reduction = addition.clone();
     changed_reduction
@@ -8650,9 +8709,9 @@ fn deferred_panel_replay_keeps_the_recorded_reduction() {
         "source":"review", "continuation":false, "patterns":[],
         "review":{"subject":subject,"base":"2".repeat(40),"measured_size":"small","shape":"quick","source":"fixture"},
         "nodes":[
-            {"id":"review--review","kind":"composite","access":"read_only","composite":{"nodes":[],"exports":[{"node":"review--review--lenses","outputs":["result","findings","verdict","commit"]}]}},
-            {"id":"review--review--lenses","kind":"composite","access":"read_only","composite":{"nodes":[],"min_successful":1,"reduce_verdict":true,"exports":[{"node":"review--review--lenses--lens","outputs":["result","findings","commit"]}]}},
-            {"id":"review--review--lenses--lens","access":"read_only","prompt":"review","source":{"type":"commit","commit":subject},"route":{"alias":"senior"}}
+            {"id":"review--r","kind":"composite","access":"read_only","composite":{"nodes":[],"exports":[{"node":"review--r--p","outputs":["result","findings","verdict","commit"]}]}},
+            {"id":"review--r--p","kind":"composite","access":"read_only","composite":{"nodes":[],"min_successful":1,"reduce_verdict":true,"exports":[{"node":"review--r--p--lens","outputs":["result","findings","commit"]}]}},
+            {"id":"review--r--p--lens","access":"read_only","prompt":"review","source":{"type":"commit","commit":subject},"route":{"alias":"senior"}}
         ]
     })).unwrap();
     assert!(plans::validate_review_addition(&document, &addition).is_ok());

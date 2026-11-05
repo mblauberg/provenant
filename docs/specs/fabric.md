@@ -343,8 +343,10 @@ expansion. Checkpoint and envelope versions remain 1. A review specification
 requires a read-only plan node with a source and no ordinary plan specification.
 Older hosts reject version 2 and require an upgrade.
 
-A deferred review resolves after its subject is pinned. The host returns a
-read-only composite expansion; the runtime validates and journals it before
+A deferred review resolves after its subject is pinned. The host builds the
+whole selected panel as a read-only composite expansion: any frame, lenses,
+verifiers and synthesis or reduction use that same commit. The runtime checks
+its shape and read roots against the admitted node and journals it before
 running its members. Resume replays the journal without resolving again. The
 host supplies the models of previous attempts and the families of accepted
 attempts so alias retries can avoid a refused model and grouped lenses can
@@ -436,9 +438,8 @@ Bundled `scout-swarm`, `generator-evaluator`, `review`, `big-batch`,
 evaluating lenses, combined review, a full batch, scouting and scoping before
 a run, and delivery through CI to land respectively. Scouts use junior tiers and remain read-only;
 implementation uses senior tiers; the end-of-batch refactor uses principal.
-The `generator-evaluator` default lenses are correctness-spec and simplicity;
-add `tests` or `design-fit-reuse` through its `lenses` list to challenge test
-quality and reuse. Junior reviews on senior or principal work are
+The `generator-evaluator` uses the `review` shape and lens defaults; an
+explicit `lenses` list replaces the default selection. Junior reviews on senior or principal work are
 advisory. Counted acceptance reviews must meet the author's tier under
 `HARNESS.md`; add principal coverage for high-risk areas and principal-authored
 refactors. Synthesis reconciles evidence rather than taking a majority vote.

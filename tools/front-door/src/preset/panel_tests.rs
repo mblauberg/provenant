@@ -136,6 +136,9 @@ fn review_spec_states_only_what_the_stage_sets() {
     layers.review = Some(selector(review));
     let spec = |parameters: Value| {
         let (mut stack, mut origins, mut repo_files) = (Vec::new(), BTreeMap::new(), Vec::new());
+        if parameters.get("lenses").is_some() {
+            origins.insert("parameters.lenses".into(), "cli".into());
+        }
         StageBuilder {
             layers: &layers,
             name: "review",
@@ -195,7 +198,7 @@ fn unknown_size_reads_pending_only_when_launch_measures_it() {
 }
 
 #[test]
-fn default_preset_scans_test_paths_without_changing_shape_selection() {
+fn default_preset_uses_configured_path_shape_and_test_lens() {
     let mut review = ReviewConfig::default();
     review
         .select
@@ -220,7 +223,7 @@ fn default_preset_scans_test_paths_without_changing_shape_selection() {
         ..Default::default()
     })
     .unwrap();
-    assert_eq!(hint.name, "quick");
+    assert_eq!(hint.name, "deep");
     assert!(
         hint.source.contains("by_paths:**/tests/**"),
         "{}",
@@ -240,5 +243,46 @@ fn plan_additions_are_included_once_even_when_lenses_are_caller_supplied() {
             serde_json::json!({"name": "review"}),
             serde_json::json!({"name": "tests"})
         ]
+    );
+}
+
+#[test]
+fn explicit_selection_range_uses_its_own_tip_for_paths_and_size() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let seen = Rc::new(RefCell::new(Vec::<Vec<String>>::new()));
+    let captured = seen.clone();
+    let selector = review_selector_with_git(
+        ReviewConfig::default(),
+        PathBuf::from("/repo"),
+        None,
+        Box::new(move |_, args| {
+            captured
+                .borrow_mut()
+                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            Ok(match args[0] {
+                "diff" if args.contains(&"--name-only") => "src/tests/a.rs\0".into(),
+                "diff" if args.contains(&"--numstat") => "1\t0\tsrc/tests/a.rs\n".into(),
+                _ => String::new(),
+            })
+        }),
+    );
+    let hint = selector(&ShapeQuery {
+        range: Some("main..other"),
+        head: Some("reviewed"),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(hint.plan.change_add.iter().any(|name| name == "tests"));
+    let calls = seen.borrow();
+    assert!(
+        calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg == "main..other"))
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|args| args == &["merge-base", "main", "other"])
     );
 }

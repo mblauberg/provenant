@@ -11,7 +11,9 @@
       "parameters.kind.default": "bundled",
       "parameters.kind.doc": "bundled",
       "parameters.kind.type": "bundled",
-      "parameters.lenses": "bundled",
+      "parameters.lenses.default": "bundled",
+      "parameters.lenses.inherit_explicit": "bundled",
+      "parameters.lenses.type": "bundled",
       "parameters.local_check_policy": "bundled",
       "parameters.local_check_policy.default": "bundled",
       "parameters.local_check_policy.doc": "bundled",
@@ -33,6 +35,9 @@
       "parameters.risk_tier.doc": "bundled",
       "parameters.risk_tier.inherit": "bundled",
       "parameters.risk_tier.type": "bundled",
+      "parameters.selection_range.default": "bundled",
+      "parameters.selection_range.doc": "bundled",
+      "parameters.selection_range.type": "bundled",
       "parameters.size.default": "bundled",
       "parameters.size.doc": "bundled",
       "parameters.size.type": "bundled",
@@ -113,63 +118,67 @@
           "doc": "Change kind, for example refactor, integration, or docs.",
           "type": "string"
         },
-        "lenses": [
-          {
-            "name": "correctness-spec",
-            "tier": "",
-            "when": ""
-          },
-          {
-            "name": "tests",
-            "tier": "",
-            "when": ""
-          },
-          {
-            "name": "design-fit-reuse",
-            "tier": "",
-            "when": ""
-          },
-          {
-            "name": "simplicity",
-            "tier": "",
-            "when": ""
-          },
-          {
-            "name": "reliability",
-            "tier": "",
-            "when": ""
-          },
-          {
-            "name": "conventions-readability",
-            "tier": "",
-            "when": ""
-          },
-          {
-            "name": "refactor-cleanup",
-            "tier": "",
-            "when": ""
-          },
-          {
-            "name": "flexibility",
-            "tier": "",
-            "when": ""
-          },
-          {
-            "name": "security-privacy",
-            "tier": "",
-            "when": "security"
-          },
-          {
-            "name": "concurrency-data-errors",
-            "tier": "",
-            "when": "concurrency"
-          },
-          {
-            "name": "adversarial",
-            "tier": "",
-            "when": "terminal"
-          }
-        ],
+        "lenses": {
+          "default": [
+            {
+              "name": "correctness-spec",
+              "tier": "",
+              "when": ""
+            },
+            {
+              "name": "tests",
+              "tier": "",
+              "when": ""
+            },
+            {
+              "name": "design-fit-reuse",
+              "tier": "",
+              "when": ""
+            },
+            {
+              "name": "simplicity",
+              "tier": "",
+              "when": ""
+            },
+            {
+              "name": "reliability",
+              "tier": "",
+              "when": ""
+            },
+            {
+              "name": "conventions-readability",
+              "tier": "",
+              "when": ""
+            },
+            {
+              "name": "refactor-cleanup",
+              "tier": "",
+              "when": ""
+            },
+            {
+              "name": "flexibility",
+              "tier": "",
+              "when": ""
+            },
+            {
+              "name": "security-privacy",
+              "tier": "",
+              "when": "security"
+            },
+            {
+              "name": "concurrency-data-errors",
+              "tier": "",
+              "when": "concurrency"
+            },
+            {
+              "name": "adversarial",
+              "tier": "",
+              "when": "terminal"
+            }
+          ],
+          "inherit_explicit": true,
+          "type": "list"
+        },
         "local_check_policy": {
           "default": "",
           "doc": "Local check policy inherited by nested presets; empty uses the layered roles library.",
@@ -198,6 +207,11 @@
           "default": "",
           "doc": "Risk tier that selects the review shape.",
           "inherit": true,
+          "type": "string"
+        },
+        "selection_range": {
+          "default": "",
+          "doc": "Optional Git range used to select lenses and shape; empty measures the subject against base.",
           "type": "string"
         },
         "size": {
@@ -270,7 +284,9 @@
                 "node": "lens",
                 "outputs": [
                   "result",
-                  "findings"
+                  "findings",
+                  "verdict",
+                  "commit"
                 ]
               }
             ],

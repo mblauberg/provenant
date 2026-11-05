@@ -4996,12 +4996,16 @@ fn review_project_overrides_order_and_shape_slots_through_loader()
         "schema_version=1\n[domains.routing.review.lenses]\norder=['flexibility','tests','reliability']\n[domains.routing.review.shapes.standard]\nreviewers=[{pool='junior',count=2}]\n",
     )??;
     let review = &config.domains.routing.review;
-    let panel = review.panel(&review.shapes["standard"], None, &[], false, &[]);
-    let lenses: Vec<_> = panel
-        .reviewers
-        .iter()
-        .flat_map(|r| r.lenses.iter().map(String::as_str))
-        .collect();
+    let panel = review.resolve_panel(
+        &crate::ReviewRequest {
+            shape: Some("standard".into()),
+            ..Default::default()
+        },
+        None,
+        &[],
+        false,
+    )?;
+    let lenses: Vec<_> = panel.slots.iter().map(|slot| slot.lens.as_str()).collect();
     assert_eq!(lenses, ["flexibility", "tests"]);
     Ok(())
 }

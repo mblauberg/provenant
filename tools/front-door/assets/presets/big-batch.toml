@@ -30,19 +30,15 @@ guidance = """Split the work into waves of writer lanes. Give each lane its own 
 
 [[plan.patterns]]
 name = "writer-lane"
-# The same per-lane review as the static generator-evaluator lane: the lens
-# legs judge the commit the writer made, and the evaluator reconciles their
-# findings. A pattern cannot nest composites, so the lens legs sit beside the
-# writer and each depends on it.
+# The lane uses the same review flow as the static generator-evaluator lane.
 exports = [
   { node = "implement", outputs = ["branch", "commit"] },
   { node = "evaluate", outputs = ["result", "findings", "verdict"] },
 ]
 nodes = [
   { id = "implement", role = "write.implement", title = "Lane ${lane}", brief = "Lane ${lane}. Time budget: ${budget_seconds} seconds; commit your work and stop with a handoff before it passes.", deadline_seconds = "${budget_seconds}", worktree = "${worktree}", delivery = "integrate:${integration_branch}", tier = "${route}", write_scope = "${scope}", acceptance_checks = "${acceptance}" },
-  { id = "lens-correctness-spec", role = "lens.correctness-spec", item = { name = "correctness-spec", tier = "senior" }, depends_on = ["implement"], source = { type = "node", node = "implement" }, inputs = [{ node = "implement", outputs = ["result"] }], acceptance_checks = ["Check the committed change against the spec", "End with one exact VERDICT line"] },
-  { id = "lens-simplicity", role = "lens.simplicity", item = { name = "simplicity", tier = "senior" }, depends_on = ["implement"], source = { type = "node", node = "implement" }, inputs = [{ node = "implement", outputs = ["result"] }], acceptance_checks = ["Name what can be deleted or simplified", "End with one exact VERDICT line"] },
-  { id = "evaluate", role = "review.evaluator", tier = "senior", depends_on = ["lens-correctness-spec", "lens-simplicity", "implement"], source = { type = "node", node = "implement" }, inputs = [{ node = "lens-correctness-spec", outputs = ["result"] }, { node = "lens-simplicity", outputs = ["result"] }], acceptance_checks = ["Give every finding one disposition", "End with one exact VERDICT line"] },
+  { id = "review", preset = "review", depends_on = ["implement"], parameters = { subject = { type = "node", node = "implement" }, worktree = "${worktree}", base = "${base}", spec = "${spec}", spec_max_bytes = "${spec_max_bytes}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
+  { id = "evaluate", role = "review.evaluator", tier = "senior", depends_on = ["review", "implement"], source = { type = "node", node = "implement" }, inputs = [{ node = "review", outputs = ["result", "findings"] }], acceptance_checks = ["Give every finding one disposition", "End with one exact VERDICT line"] },
 ]
 
 [plan.patterns.parameters]

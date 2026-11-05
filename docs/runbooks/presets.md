@@ -45,16 +45,16 @@ verdict; missing or invalid verdicts count as inconclusive.
 `export_first` adds outputs from the first member only; those outputs are
 unavailable if that member fails.
 
-For a commit-subject review, `shape_stages` names the frame, parallel panel,
-verifier and synthesis stages controlled by the selected review shape. When a
-plan is applied or the subject comes from another node, those stages are left
-to their existing planner or launch-time path.
+`shape_stages` names the frame, parallel panel, verifier and synthesis stages
+controlled by the selected review shape. When a subject is not yet pinned, one
+deferred node builds those stages after the subject is known.
 
 A `for_each` stage may declare `review_lenses = true` to apply the review
 shape and risk-tag selection to its list.
 
 A typed child parameter can declare `inherit = true` to receive a matching
-parent parameter unless the stage supplies its own value.
+parent parameter unless the stage supplies its own value. `inherit_explicit = true`
+forwards only a parent override, leaving the child's own default otherwise.
 
 A string parameter can declare `tracker_advice = true` to request tracker advice
 for its supplied spec before a run.
@@ -425,8 +425,9 @@ thresholds below do not yet enforce those floors or every triggered lens.
 against the spec, design fit and reuse, simplicity, conventions and
 readability, and tests. `security-privacy` and `concurrency-data-errors` join
 when `risk_tags` names `security` or `concurrency`, and `adversarial` joins
-when it names `terminal`; `risk_tier = "terminal"` counts as that tag. `generator-evaluator` takes the same list, with
-correctness against the spec and simplicity by default. Every lens prompt
+when it names `terminal`; `risk_tier = "terminal"` counts as that tag.
+`generator-evaluator` uses the same shape and lens defaults; an explicit
+`lenses` parameter replaces its list. Every lens prompt
 carries the same context. The reviewer has read access to the whole
 repository, treats the diff stat and slices as navigation aids rather than the
 scope, reads callers, existing utilities and architecture, and reviews against
@@ -445,12 +446,13 @@ frame states both when the shape includes it. Prompts live in
 `skills/code-review/references/lenses/`. For a commit subject without an
 applied plan, the quick shape skips framing and uses a deterministic reduction
 of its lens verdicts; standard and deep run a verifier and synthesis by default.
-Kind, path and risk-tag additions can add lenses to quick. The verifier tries to
+Kind, path and risk-tag additions can add lenses to quick. Added refactor
+lenses follow the configured catalogue order. The verifier tries to
 falsify every finding, and synthesis gives each finding one disposition:
 accepted, rejected or deferred, with a reason. The
 `generator-evaluator` evaluator does the same over its lens findings. Its
-`min_lenses` parameter defaults to 0 (all selected lenses but one, at least
-one); set a positive number to require that many, including the full panel.
+`min_lenses` parameter defaults to 0 (the risk-tier review minimum, at least
+one); set a positive number to require that many.
 Preset explain shows the parameter and its origin. Unavailable lenses are
 named in the evaluator input. A malformed findings block makes that lens
 unavailable and counts against the threshold, just like a failed lens. The
@@ -461,10 +463,13 @@ bounded export.
 A review of a `head` or `node` subject with no `size` or `review_shape`
 (`deliver`, `generator-evaluator`, `big-batch`) cannot be measured when the
 graph expands, because the commit does not exist yet. The graph (schema 2,
-with `review_base`) carries one deferred `review` node that holds a lowered
-prompt for every candidate lens. When the subject is pinned the host measures
-it, picks the shape and lenses, and adds the panel to the graph. Pass `size` or
+with `review_base`) carries one deferred `review` node with the panel stage
+templates. When the subject is pinned the host measures it, picks the shape
+and lenses, and builds the whole panel against that commit. Pass `size` or
 `review_shape` to keep a static panel. `--explain` shows the size as pending.
+`provenant review` uses content identity: repeating the same request attaches to
+its graph, while `--fresh` starts a new graph. `--range` selects paths and size
+from that Git range; the target remains the reviewed commit.
 
 A `fan-out` stage with `distinct_families = true` (the `distinct_families`
 parameter) labels its branches as one family group, so the scheduler prefers
@@ -492,7 +497,9 @@ only successful lenses flow to verification and synthesis, after an
 when fewer than `min_reviews` lenses succeed, which stops the council for the
 chair to substitute a lens through a different lens or decide. `min_reviews`
 currently defaults by `risk_tier` (`substantial` 1,
-`crucial` and `terminal` 2) and is at least 1; it is capped at the lens count.
+`crucial` and `terminal` 2) and is at least 1. Model panels cap it at the
+lens count; reduced panels retain the declared minimum, so a coverage shortfall
+cannot produce approval.
 A lens that ran and found blocking issues still blocks through its verdict.
 Councils where every lens succeeds are unchanged.
 
@@ -801,8 +808,8 @@ commit bindings. Planner output cannot refer to named presets.
 `provenant run --preset big-batch --plan on` replaces the static `lanes` stage
 with a principal planner that chooses from the preset's `[plan]` catalogue:
 `writer-lane` (write scope, acceptance subset, route, budget) and
-`wave-barrier`. Each planned lane runs the writer, the default lens legs and
-the evaluator, as the static lane does. The planner sits after `scout` so the
+`wave-barrier`. Each planned lane runs the writer, a nested review and the
+evaluator, as the static lane does. The planner sits after `scout` so the
 plan uses the research; position is per preset. The planner may assign only the
 registered writer worktrees: the project's linked worktrees by default, or
 `--set 'parameters.worktrees=["/path/a","/path/b"]'`. Overlapping write scopes

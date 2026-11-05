@@ -1,6 +1,6 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":26,"edges":69,"limit_reason":null,"max_attempts":51,"nodes":38,"prompt_bytes":59692}
+Inspection: {"dependency_depth":20,"edges":51,"limit_reason":null,"max_attempts":39,"nodes":32,"prompt_bytes":51448}
 Preset selection: big-batch (override)
 Review shape: deep (by_kind; size=unknown; kind=integration; risk=unknown), standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: on -> on (planning requested)
@@ -39,24 +39,15 @@ plan  role=plan.shape tier=principal family=any kind=plan access=read_only workt
       source: {"commit":"<commit>","type":"commit"}
       acceptance_checks: "${acceptance}"
       deadline_seconds: "${budget_seconds}"
-    lens-correctness-spec  role=lens.correctness-spec tier=senior family=distinct_from_writer kind=- access=read_only worktree=-
-      reference: skill:code-review/references/reviewer-context.md <digest>
-      reference: skill:code-review/references/lenses/correctness-spec.md <digest>
-      read_roots: ["${worktree}","<root>/skills"]
-      source: {"node":"implement","type":"node"}
-      inputs: [{"node":"implement","outputs":["result"]}]
-      acceptance_checks: ["Check the committed change against the spec","End with one exact VERDICT line"]
-    lens-simplicity  role=lens.simplicity tier=senior family=any kind=- access=read_only worktree=-
-      reference: skill:code-review/references/reviewer-context.md <digest>
-      reference: skill:code-review/references/lenses/simplicity.md <digest>
-      read_roots: ["${worktree}","<root>/skills"]
-      source: {"node":"implement","type":"node"}
-      inputs: [{"node":"implement","outputs":["result"]}]
-      acceptance_checks: ["Name what can be deleted or simplified","End with one exact VERDICT line"]
+    review  role=- tier=- family=any kind=composite access=read_only worktree=-
+      lenses  role=- tier=- family=any kind=plan access=read_only worktree=-
+        read_roots: ["${worktree}","<root>/skills"]
+        source: {"node":"implement","type":"node"}
+      exports: [{"node":"lenses","outputs":["result","findings","verdict","commit"]}]
     evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
       read_roots: ["${worktree}"]
       source: {"node":"implement","type":"node"}
-      inputs: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]},{"node":"implement","outputs":["findings"]}]
+      inputs: [{"node":"review","outputs":["result","findings"]},{"node":"implement","outputs":["findings"]}]
       acceptance_checks: ["Give every finding one disposition","End with one exact VERDICT line"]
   pattern wave-barrier:
     barrier  role=plan.wave tier=senior family=any kind=synthesise access=read_only worktree=-
@@ -127,22 +118,10 @@ repair  role=- tier=- family=any kind=loop access=read_only worktree=-
     acceptance_checks: ["Resolve accepted findings","Run targeted checks and commit"]
   review  role=- tier=- family=any kind=composite access=read_only worktree=-
     inputs: [{"node":"fix","outputs":["result"]}]
-    subject  role=plan.review tier=senior family=any kind=- access=read_only worktree=-
-      read_roots: ["<project>"]
-      source: {"node":"fix","type":"node"}
     lenses  role=- tier=- family=any kind=plan access=read_only worktree=-
-      read_roots: ["<project>"]
-      source: {"node":"subject","type":"node"}
-      inputs: [{"node":"subject","outputs":["result"]}]
-    verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
-      read_roots: ["<project>"]
-      source: {"node":"subject","type":"node"}
-      inputs: [{"node":"lenses","outputs":["result"]}]
-    synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
-      read_roots: ["<project>"]
-      source: {"node":"subject","type":"node"}
-      inputs: [{"node":"verify","outputs":["result","findings"]},{"node":"lenses","outputs":["result","findings"]},{"node":"subject","outputs":["findings"]}]
-    exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
+      read_roots: ["<project>","<root>/skills"]
+      source: {"node":"fix","type":"node"}
+    exports: [{"node":"lenses","outputs":["result","findings","verdict","commit"]}]
   accept  role=- tier=- family=any kind=gate access=read_only worktree=-
     inputs: [{"node":"review","outputs":["verdict"]}]
 Roles:
@@ -169,7 +148,10 @@ Roles:
   scout.codebase  origin=bundled digest=<digest>
   scout.external  origin=bundled digest=<digest>
   write.implement  origin=bundled digest=<digest>
+Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
 Substituted external: web -> junior (route web is not defined in the routing configuration)
+Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
+Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
 Warning: preset review: omitted lens "security-privacy": requires risk tag security

@@ -508,7 +508,7 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
-const SPEC_KEYS: [&str; 9] = [
+const SPEC_KEYS: [&str; 10] = [
     "type",
     "default",
     "min",
@@ -518,6 +518,7 @@ const SPEC_KEYS: [&str; 9] = [
     "bind",
     "tracker_advice",
     "inherit",
+    "inherit_explicit",
 ];
 const TYPE_NAMES: [&str; 6] = ["string", "integer", "number", "boolean", "list", "table"];
 
@@ -862,6 +863,12 @@ fn flatten_parameters(
         if value.get("inherit").is_some_and(|flag| !flag.is_boolean()) {
             return Err(fail("inherit must be a boolean".into()));
         }
+        if value
+            .get("inherit_explicit")
+            .is_some_and(|flag| !flag.is_boolean())
+        {
+            return Err(fail("inherit_explicit must be a boolean".into()));
+        }
         for bound in ["min", "max"] {
             if let Some(limit) = value.get(bound)
                 && !limit.is_number()
@@ -1050,6 +1057,7 @@ pub fn expand_with(
     if let Some(context) = &layers.plan {
         plan = planner::decide(layers, context, name, &config, &origins, prompt)?;
         if plan.as_ref().is_some_and(|decision| decision.applied) {
+            apply_shape_stages(layers, name, &mut config, &origins, prompt)?;
             catalogue = Some(planner::apply(
                 layers,
                 context,
@@ -1085,7 +1093,8 @@ pub fn expand_with(
             && !path.split('.').any(|part| part == "shape_stages")
             && !((path.ends_with(".bind")
                 || path.ends_with(".tracker_advice")
-                || path.ends_with(".inherit"))
+                || path.ends_with(".inherit")
+                || path.ends_with(".inherit_explicit"))
                 && (path.starts_with("parameters.") || path.contains(".parameters.")))
     });
     if let Some(trusted) = trusted
@@ -2245,6 +2254,33 @@ fn build_stages(
                 .ok_or("deferred review synthesis missing")?;
             let node = &mut nodes[position];
             node["panel_templates"] = json!({"frame": frame_node, "verifier": verifier_node, "synthesis": synthesis_node});
+            let mut roots = node
+                .get("read_roots")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for template in [
+                Some(&frame_node),
+                verifier_node.as_ref(),
+                Some(&synthesis_node),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for root in template
+                    .get("read_roots")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if !roots.contains(root) {
+                        roots.push(root.clone());
+                    }
+                }
+            }
+            if !roots.is_empty() {
+                node["read_roots"] = json!(roots);
+            }
             if let Some(count) = verifier_override {
                 node["panel_verifiers"] = json!(count);
             }
@@ -2252,7 +2288,9 @@ fn build_stages(
                 if let Some(value) = frame_node.get(key) {
                     node[key] = value.clone();
                 } else {
-                    node.as_object_mut().unwrap().remove(key);
+                    node.as_object_mut()
+                        .ok_or("deferred review must be a table")?
+                        .remove(key);
                 }
             }
             // The original bound covers the lens group and its candidates.
@@ -2261,6 +2299,10 @@ fn build_stages(
                 .shape_hint(true)?
                 .ok_or("deferred review needs shape configuration")?;
             node["panel_shapes"] = json!(hint.panel_shapes);
+            node["panel_max_verifiers"] = json!(
+                hint.max_verifiers
+                    .max(verifier_override.unwrap_or(0) as usize)
+            );
             let stages = hint
                 .max_panel_stages
                 .max(verifier_override.unwrap_or(0) as usize + 2);
@@ -2350,8 +2392,14 @@ fn apply_shape_stages(
             config["exports"] =
                 json!([{ "node": panel, "outputs": ["result", "findings", "verdict", "commit"] }]);
         }
-        return Ok(());
+        if unresolved {
+            return Ok(());
+        }
     }
+    let declared_verifiers = parameters
+        .get("verifiers")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let (mut stack, mut local, mut files) = (Vec::new(), origins.clone(), Vec::new());
     let builder = StageBuilder {
         layers,
@@ -2410,8 +2458,22 @@ fn apply_shape_stages(
             .ok_or("missing review panel")?;
         stage["reduce_verdict"] = json!(true);
         stage["export_first"] = json!(["commit"]);
-        config["exports"] =
-            json!([{ "node": panel, "outputs": ["result", "findings", "verdict", "commit"] }]);
+        let mut exports =
+            vec![json!({ "node": panel, "outputs": ["result", "findings", "verdict", "commit"] })];
+        let verifier_count = if explicit_verifiers {
+            declared_verifiers
+        } else {
+            shape.verifiers as u64
+        };
+        if verifier_count > 0 {
+            let id = if verifier_count == 1 {
+                verifier.clone()
+            } else {
+                format!("{verifier}-{verifier_count}")
+            };
+            exports.push(json!({"node": id, "outputs": ["result", "findings"]}));
+        }
+        config["exports"] = json!(exports);
     }
     Ok(())
 }
@@ -2710,8 +2772,13 @@ impl StageBuilder<'_> {
                     .into_iter()
                     .flatten()
                     .filter_map(|(key, spec)| {
-                        (spec.get("inherit").and_then(Value::as_bool) == Some(true))
-                            .then_some(key.clone())
+                        let always = spec.get("inherit").and_then(Value::as_bool) == Some(true);
+                        let explicit = spec.get("inherit_explicit").and_then(Value::as_bool)
+                            == Some(true)
+                            && self.origins.get(&format!("parameters.{key}")).is_some_and(
+                                |origin| !self.layers.is_initial_origin(self.name, key, origin),
+                            );
+                        (always || explicit).then_some(key.clone())
                     })
                     .collect();
                 for key in inherited {
@@ -3224,14 +3291,29 @@ pub(crate) fn confine_pattern_roots(node: &mut Value, policy: &ReadRoots) -> Res
             .unwrap_or("?")
             .to_owned();
         let mut parameters = Vec::new();
-        for root in pattern
-            .get("nodes")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|child| child.get("read_roots").and_then(Value::as_array))
-            .flatten()
-        {
+        fn collect_roots<'a>(value: &'a Value, roots: &mut Vec<&'a Value>) {
+            match value {
+                Value::Object(map) => {
+                    if let Some(items) = map.get("read_roots").and_then(Value::as_array) {
+                        roots.extend(items);
+                    }
+                    for (key, child) in map {
+                        if key != "read_roots" {
+                            collect_roots(child, roots);
+                        }
+                    }
+                }
+                Value::Array(items) => {
+                    for item in items {
+                        collect_roots(item, roots);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut roots = Vec::new();
+        collect_roots(&pattern["nodes"], &mut roots);
+        for root in roots {
             let text = root.as_str().ok_or("read_roots entries must be strings")?;
             if !text.contains("${") {
                 continue;
@@ -4346,7 +4428,9 @@ pub(crate) fn run_with_review(
                     .as_array_mut()
                     .ok_or("missing graph nodes")?,
                 &mut |node| {
-                    if node.get("references").is_some() && node["access"] == "read_only" {
+                    if (node.get("references").is_some() || node.get("review").is_some())
+                        && node["access"] == "read_only"
+                    {
                         let mut list = node
                             .get("read_roots")
                             .and_then(Value::as_array)

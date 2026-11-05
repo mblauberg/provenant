@@ -31,7 +31,7 @@ guidance = """Each catalogue pattern is one lens the review panel allows for thi
 [[plan.patterns]]
 for_each = "lenses"
 name = "lens-${item.name}"
-exports = [{ node = "lens", outputs = ["result", "findings"] }]
+exports = [{ node = "lens", outputs = ["result", "findings", "verdict", "commit"] }]
 nodes = [
   { id = "lens", role = "lens.${item.name}", source = "${subject}", tier = "${tier}", require_findings = true, acceptance_checks = ["Review the pinned commit through this lens only", "End with one exact VERDICT line"] },
 ]
@@ -44,6 +44,7 @@ local_check_policy = { type = "string", inherit = true, default = "", doc = "Loc
 subject = { type = "table", inherit = true, default = { type = "commit", commit = "HEAD" }, doc = "Immutable review subject: a commit, a node or the integration head." }
 worktree = { type = "string", default = "", doc = "Worktree the reviewers may read." }
 base = { type = "string", default = "", doc = "Diff reference the change is measured from, for example origin/main." }
+selection_range = { type = "string", default = "", doc = "Optional Git range used to select lenses and shape; empty measures the subject against base." }
 spec_max_bytes = { type = "integer", default = 16384, min = 1, max = 65536, doc = "Maximum bytes of a file spec included in each review brief." }
 spec = { type = "string", default = "", doc = "Issue number or file the change answers." }
 review_shape = { type = "string", default = "", doc = "Review depth override from routing review shapes (quick, standard, deep)." }
@@ -57,7 +58,10 @@ risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional 
 # Lens tiers left empty come from the routing review shape. Set a tier to override.
 # Slots fill in this order; routing's review.lenses.order and kind rules reorder or
 # extend it unless a caller supplies its own list, which keeps its order.
-lenses = [
+[parameters.lenses]
+type = "list"
+inherit_explicit = true
+default = [
   { name = "correctness-spec", tier = "", when = "" },
   { name = "tests", tier = "", when = "" },
   { name = "design-fit-reuse", tier = "", when = "" },

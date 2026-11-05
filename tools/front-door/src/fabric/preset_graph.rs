@@ -322,13 +322,27 @@ fn document_model_verdict(
     let bytes = std::fs::read(document).ok()?;
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_slice(&bytes).ok()?;
-    let last = document.nodes.last()?;
+    let last = document
+        .nodes
+        .iter()
+        .find(|node| {
+            node.composite
+                .as_ref()
+                .is_some_and(|group| group.reduce_verdict)
+        })
+        .or_else(|| document.nodes.last())?;
     let outputs = checkpoint
         .nodes
         .iter()
         .find(|node| node.id == last.id)?
         .outputs
         .as_ref()?;
+    review_verdict(outputs)
+}
+
+fn review_verdict(
+    outputs: &provenant_fabric_runtime::graph::NodeOutputs,
+) -> Option<provenant_records::workflow::ReviewVerdict> {
     if outputs.verdict_error.is_some() {
         return None;
     }
@@ -388,6 +402,31 @@ fn shell_path(path: &std::path::Path) -> String {
 mod tests {
     use super::private_graph_directory_refusal;
     use std::path::Path;
+
+    #[test]
+    fn review_exit_evidence_requires_a_valid_approval() {
+        use provenant_records::workflow::ReviewVerdict;
+        let outputs = |verdict: Option<&str>, error: Option<&str>| {
+            serde_json::from_value(serde_json::json!({
+                "schema_version":2, "result":null, "verdict":verdict, "verdict_error":error,
+                "findings":[], "branch":null, "commit":null, "warnings":[]
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            super::review_verdict(&outputs(Some("VERDICT: PASS"), None)),
+            Some(ReviewVerdict::Approve)
+        );
+        assert_eq!(
+            super::review_verdict(&outputs(Some("VERDICT: FAIL"), None)),
+            Some(ReviewVerdict::RequestChanges)
+        );
+        assert_eq!(super::review_verdict(&outputs(None, None)), None);
+        assert_eq!(
+            super::review_verdict(&outputs(Some("VERDICT: PASS"), Some("invalid"))),
+            None
+        );
+    }
 
     #[test]
     fn registry_lock_timeout_retries_only_after_admission() {

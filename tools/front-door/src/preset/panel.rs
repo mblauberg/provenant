@@ -17,6 +17,8 @@ pub struct ShapeQuery<'a> {
     pub size: Option<&'a str>,
     /// Diff reference the change is measured from.
     pub base: Option<&'a str>,
+    /// Optional explicit range used for selection.
+    pub range: Option<&'a str>,
     /// Revision to measure, resolved in `worktree`.
     pub head: Option<&'a str>,
     /// Worktree to measure in; the project directory when absent.
@@ -42,6 +44,7 @@ pub struct ShapeHint {
     pub synthesis: ReviewSynthesis,
     /// Largest number of non-lens stages a deferred shape may add.
     pub max_panel_stages: usize,
+    pub max_verifiers: usize,
     /// Shape stages captured with the deferred review for replay validation.
     pub panel_shapes: std::collections::BTreeMap<String, Value>,
     /// Reviewer pools in shape order, one entry per reviewer.
@@ -115,15 +118,29 @@ fn review_selector_with_git(
         let cwd = query
             .worktree
             .map_or_else(|| directory.clone(), |tree| directory.join(tree));
-        let base = query
-            .base
+        if query.range.is_some_and(|range| range.starts_with('-')) {
+            return Err("git range must not begin with -".into());
+        }
+        let range_parts = query.range.map(|range| {
+            range
+                .split_once("...")
+                .or_else(|| range.split_once(".."))
+                .unwrap_or((range, ""))
+        });
+        let range_base = range_parts.map(|(base, _)| if base.is_empty() { "HEAD" } else { base });
+        let range_head = range_parts.and_then(|(_, head)| (!head.is_empty()).then_some(head));
+        let base = range_base
+            .or(query.base)
             .map(str::to_owned)
             .or_else(|| default_base(&run_git, &cwd));
         // A deferred review is measured against its pinned commit by the host;
         // the expansion-time working tree says nothing about it.
         if let Some(base) = base.as_deref().filter(|_| !query.defer) {
-            let tip = query.head.unwrap_or("HEAD");
-            let range = format!("{base}...{tip}");
+            let tip = range_head.or(query.head).unwrap_or("HEAD");
+            let range = query
+                .range
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{base}...{tip}"));
             match run_git(
                 &cwd,
                 &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
@@ -145,7 +162,11 @@ fn review_selector_with_git(
                 Err(error) => warnings.push(format!("cannot scan test markers: {error}")),
             }
         }
-        let size = match (query.size, query.shape, query.base.filter(|_| !query.defer)) {
+        let size = match (
+            query.size,
+            query.shape,
+            base.as_deref().filter(|_| !query.defer),
+        ) {
             (Some(size), _, _) => {
                 if !["small", "medium", "large"].contains(&size) {
                     return Err(format!("unknown review size '{size}'"));
@@ -153,18 +174,18 @@ fn review_selector_with_git(
                 Some(size)
             }
             (None, None, Some(base)) => {
-                let measured =
-                    review
-                        .size
-                        .measure(kind, base, query.head.unwrap_or("HEAD"), &mut |args| {
-                            run_git(&cwd, args)
-                        });
+                let measured = review.size.measure(
+                    kind,
+                    base,
+                    range_head.or(query.head).unwrap_or("HEAD"),
+                    &mut |args| run_git(&cwd, args),
+                );
                 warnings.extend(measured.warning);
                 measured.size
             }
             _ => None,
         };
-        let selected = review.select_shape(query.shape, query.risk, kind, &[], size)?;
+        let selected = review.select_shape(query.shape, query.risk, kind, &paths, size)?;
         let plan = review.lens_plan(kind, &paths, test_marker);
         let lens_reason = plan
             .matched_paths
@@ -187,6 +208,7 @@ fn review_selector_with_git(
                 })
                 .max()
                 .unwrap_or(0),
+            max_verifiers: review.shapes.values().map(|shape| shape.verifiers).max().unwrap_or(0),
             panel_shapes: review.shapes.iter().map(|(name, shape)| (name.clone(), json!({
                 "frame": shape.frame, "verifiers": shape.verifiers, "synthesis": shape.synthesis,
             }))).collect(),
@@ -222,6 +244,7 @@ fn review_selector_with_git(
                 .by_paths
                 .values()
                 .flat_map(|rule| rule.add.iter().cloned())
+                .chain(review.shapes.values().flat_map(|shape| shape.reviewers.iter().flat_map(|group| group.lenses.iter().cloned())))
                 .chain(std::iter::once("tests".to_owned()))
                 .collect(),
             ..Default::default()
@@ -325,6 +348,7 @@ impl StageBuilder<'_> {
             kind,
             size: text("size"),
             base: text("base"),
+            range: text("selection_range"),
             head,
             worktree: text("worktree"),
             defer,
@@ -363,10 +387,22 @@ impl StageBuilder<'_> {
         let hint = self.shape_hint(false)?;
         let shape = hint.as_ref();
         let plan = shape.map(|shape| &shape.plan);
-        let caller_supplied = self
-            .origins
-            .get("parameters.lenses")
-            .is_some_and(|origin| !self.layers.is_initial_origin(self.name, "lenses", origin));
+        let caller_supplied = !list.is_empty()
+            && self
+                .origins
+                .get("parameters.lenses")
+                .is_some_and(|origin| !self.layers.is_initial_origin(self.name, "lenses", origin));
+        if list.is_empty()
+            && let Some(shape) = shape
+        {
+            list.extend(shape.default_lenses.iter().map(|name| {
+                let when = provenant_routing::RISK_TAG_LENSES
+                    .iter()
+                    .find_map(|(tag, lens)| (*lens == name).then_some(*tag))
+                    .unwrap_or("");
+                json!({"name":name, "tier":"", "when":when})
+            }));
+        }
         if let Some(plan) = plan {
             // A caller's own list keeps its lenses and order; only what the
             // change itself triggers (test paths and markers) is added to it.
@@ -396,6 +432,21 @@ impl StageBuilder<'_> {
                     .iter()
                     .position(|name| item["name"] == *name)
                     .unwrap_or(plan.order.len())
+            });
+        }
+        if let Some(shape) = shape.filter(|_| !caller_supplied) {
+            let names: Vec<_> = shape.named.iter().map(|(name, _)| name.clone()).collect();
+            append_plan_additions(&mut list, &names);
+            for item in &mut list {
+                if names.iter().any(|name| item["name"] == *name) {
+                    item["when"] = json!("");
+                }
+            }
+            list.sort_by_key(|item| {
+                names
+                    .iter()
+                    .position(|name| item["name"] == *name)
+                    .unwrap_or(names.len())
             });
         }
         let limit = shape.map_or(usize::MAX, |shape| shape.slots.len().max(1));
@@ -662,7 +713,7 @@ impl StageBuilder<'_> {
         let caller_supplied = self
             .origins
             .get("parameters.lenses")
-            .is_none_or(|origin| !self.layers.is_initial_origin(self.name, "lenses", origin));
+            .is_some_and(|origin| !self.layers.is_initial_origin(self.name, "lenses", origin));
         for lens in self
             .parameters
             .get("lenses")
