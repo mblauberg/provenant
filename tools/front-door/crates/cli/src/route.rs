@@ -814,6 +814,8 @@ pub struct RoutePreview {
     pub nearest_models: Vec<String>,
     pub pacing: Vec<provenant_routing::PacingPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_diagnostic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub quota: Option<provenant_quota::QuotaSnapshot>,
 }
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
@@ -2158,6 +2160,32 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                                     )))
                     })
                     .and_then(|r| r.snapshot.clone());
+                let login_diagnostic = match &route.readiness {
+                    RouteReadiness::Unavailable {
+                        reason:
+                            reason @ (provenant_records::RouteExclusionReason::AuthRequired
+                            | provenant_records::RouteExclusionReason::LoginExpired
+                            | provenant_records::RouteExclusionReason::AccountMismatch),
+                        ..
+                    } => {
+                        let selected = route.account_key.as_deref();
+                        let config =
+                            provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
+                        let entry = config.domains.accounts.entries.values().find(|entry| {
+                            entry.adapter == route.adapter && Some(entry.key.as_str()) == selected
+                        });
+                        let last = records
+                            .iter()
+                            .find(|record| {
+                                record.account.adapter == route.adapter
+                                    && Some(record.account.account_key.as_str()) == selected
+                            })
+                            .and_then(|record| record.snapshot.as_ref())
+                            .map(|snapshot| snapshot.observed_unix_seconds);
+                        Some(crate::quota::login_diagnostic(entry, last, reason))
+                    }
+                    _ => None,
+                };
                 let pacing = provenant_routing::pacing_preview(&model, context);
                 let entry = context.catalogue.model(&model);
                 let allow_unknown_partial_headroom = context
@@ -2178,6 +2206,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                         Vec::new()
                     },
                     pacing,
+                    login_diagnostic,
                     quota,
                 })))
             },
@@ -2457,6 +2486,9 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }),
         diagnostics
     );
+    if let Some(diagnostic) = &preview.login_diagnostic {
+        text.push_str(&format!("login: {diagnostic}\n"));
+    }
     text.push_str(&format!("model policy sources={}\n{}\ncompaction break-even turns (15k summary, zero rework): {:?}\n", preview.model_policy.sources.join(", "), preview.model_policy.policy.guidance(), preview.compaction_break_even_turns));
     for note in &preview.exclusion_notes {
         text.push_str(&format!("note: {note}\n"));

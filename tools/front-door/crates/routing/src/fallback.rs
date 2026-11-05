@@ -9,6 +9,24 @@ pub enum FallbackOutcome {
     Other,
 }
 
+impl FallbackOutcome {
+    /// Classify a pre-launch readiness exclusion without treating login
+    /// failures as quota exhaustion.
+    pub fn from_exclusion(reason: &provenant_records::RouteExclusionReason) -> Self {
+        use provenant_records::RouteExclusionReason as Reason;
+        match reason {
+            Reason::AuthRequired | Reason::LoginExpired | Reason::AccountMismatch => {
+                Self::AuthRequired
+            }
+            Reason::Exhausted | Reason::FreeTierRefused | Reason::ProviderRefused => {
+                Self::UsageLimited
+            }
+            Reason::MissingExecutable => Self::AdapterUnavailable,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// Evidence about whether the attempt left local launch preparation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FallbackHandoff {
@@ -65,12 +83,21 @@ mod tests {
     #[test]
     fn switching_requires_safe_outcome_and_every_guard() {
         let base = FallbackPolicy {
-            outcome: FallbackOutcome::AuthRequired,
+            outcome: FallbackOutcome::from_exclusion(
+                &provenant_records::RouteExclusionReason::LoginExpired,
+            ),
             handoff: FallbackHandoff::Local,
             custody_released: true,
             budget_remaining: true,
             pinned: false,
         };
+        assert_eq!(base.outcome, FallbackOutcome::AuthRequired);
+        assert_eq!(
+            FallbackOutcome::from_exclusion(
+                &provenant_records::RouteExclusionReason::AccountMismatch,
+            ),
+            FallbackOutcome::AuthRequired
+        );
         for outcome in [
             FallbackOutcome::AuthRequired,
             FallbackOutcome::UsageLimited,

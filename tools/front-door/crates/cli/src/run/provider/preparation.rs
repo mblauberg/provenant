@@ -3,6 +3,18 @@ use super::*;
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const DEPENDENCY_STDERR_TAIL: usize = 4096;
 
+pub(super) fn violates_account_pin(
+    selected_key: Option<&str>,
+    selected_adapter: Option<&str>,
+    candidate_key: Option<&str>,
+    candidate_adapter: &str,
+) -> bool {
+    selected_key.is_some_and(|key| {
+        candidate_key != Some(key)
+            || selected_adapter.is_some_and(|adapter| adapter != candidate_adapter)
+    })
+}
+
 // Resolve only PATH, leaving the rest of the daemon environment intact. The
 // login shell runs from the account home, never the writer's checkout.
 fn host_dependency_path(
@@ -773,7 +785,7 @@ pub(super) fn prepare_candidates(
                     provenant_records::run::PreparationFailure::AdapterUnavailable,
                 ),
             })?;
-            if matching.any(|other| other.key != entry.key) {
+            if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
                 return Err(PrepareError::Other(format!(
                     "account alias {label} is ambiguous; use its exact registered key"
                 )));
@@ -782,6 +794,20 @@ pub(super) fn prepare_candidates(
         })
         .transpose()?
         .or(prior_account);
+    let selected_adapter = resume
+        .and_then(|prior| prior.applied_route.as_ref())
+        .and_then(|route| route.provider.as_deref())
+        .or_else(|| {
+            selected.and_then(|key| {
+                entries
+                    .iter()
+                    .find(|entry| {
+                        entry.key == key
+                            && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
+                    })
+                    .map(|entry| entry.adapter.as_str())
+            })
+        });
     let host = provenant_config::bind_host(roots)
         .map_err(|e| e.to_string())?
         .to_string();
@@ -856,9 +882,23 @@ pub(super) fn prepare_candidates(
             }
             .allows_switch();
             if !allowed {
+                if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
+                    && let Some(last) = reasons.last_mut()
+                {
+                    last.detail.push_str(if named_pool {
+                        "; fallback retry budget exhausted"
+                    } else {
+                        "; no eligible fallback remains"
+                    });
+                }
                 break;
             }
             let Ok(next) = resolve(&rejected) else {
+                if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
+                    && let Some(last) = reasons.last_mut()
+                {
+                    last.detail.push_str("; no eligible fallback remains");
+                }
                 break;
             };
             redraws += 1;
@@ -873,16 +913,31 @@ pub(super) fn prepare_candidates(
         if rejected.contains(&model) {
             continue;
         }
+        let pinned = violates_account_pin(
+            selected,
+            selected_adapter,
+            route.account_key.as_deref(),
+            &route.adapter,
+        );
         if candidate > 0
             && !(provenant_routing::FallbackPolicy {
                 outcome: previous_outcome,
                 handoff: provenant_routing::FallbackHandoff::Local,
                 custody_released: true,
                 budget_remaining: true,
-                pinned: selected.is_some_and(|key| route.account_key.as_deref() != Some(key)),
+                pinned,
             })
             .allows_switch()
         {
+            if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
+                && let Some(last) = reasons.last_mut()
+            {
+                last.detail.push_str(if pinned {
+                    "; fallback unavailable because the account is pinned"
+                } else {
+                    "; fallback unavailable under the route policy"
+                });
+            }
             break;
         }
         rejected.push(model);
@@ -1000,15 +1055,30 @@ pub(super) fn prepare_candidates(
                     continue;
                 }
             }
-            if matches!(
-                reason,
-                provenant_records::RouteExclusionReason::AuthRequired
-            ) {
-                previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
+            let outcome = provenant_routing::FallbackOutcome::from_exclusion(reason);
+            if outcome == provenant_routing::FallbackOutcome::AuthRequired {
+                previous_outcome = outcome;
+                let key = selected.or(route.account_key.as_deref());
+                let entry = entries.iter().find(|entry| {
+                    entry.adapter == route.adapter && Some(entry.key.as_str()) == key
+                });
+                let last_success = crate::quota::read_cache(roots).ok().and_then(|records| {
+                    records
+                        .into_iter()
+                        .find(|record| {
+                            record.account.adapter == route.adapter
+                                && Some(record.account.account_key.as_str()) == key
+                        })
+                        .and_then(|record| {
+                            record
+                                .snapshot
+                                .map(|snapshot| snapshot.observed_unix_seconds)
+                        })
+                });
                 reasons.push(skip(
                     &label,
                     SkipKind::AuthRequired,
-                    provenant_routing::exclusion_detail(reason),
+                    crate::quota::login_diagnostic(entry, last_success, reason),
                 ));
                 continue;
             }
@@ -1022,17 +1092,7 @@ pub(super) fn prepare_candidates(
                 reasons.push(skip(&label, SkipKind::AuthRequired, detail));
                 continue;
             }
-            previous_outcome = match reason {
-                provenant_records::RouteExclusionReason::Exhausted
-                | provenant_records::RouteExclusionReason::FreeTierRefused
-                | provenant_records::RouteExclusionReason::ProviderRefused => {
-                    provenant_routing::FallbackOutcome::UsageLimited
-                }
-                provenant_records::RouteExclusionReason::MissingExecutable => {
-                    provenant_routing::FallbackOutcome::AdapterUnavailable
-                }
-                _ => provenant_routing::FallbackOutcome::Other,
-            };
+            previous_outcome = outcome;
             // An adapter left out of `access` names its confinement error, not the router's denial.
             let detail = plan_errors
                 .get(route.adapter.as_str())

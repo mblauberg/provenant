@@ -87,6 +87,12 @@ pub trait QuotaEffects {
     fn readiness_reason(&self, failure: crate::ProbeFailure) -> crate::ReadinessReason {
         failure.readiness_reason()
     }
+
+    /// The selected account's expiry, if the provider established it during
+    /// the latest capture. Never return credential material or provider output.
+    fn login_expiry_unix_seconds(&self) -> Option<i64> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

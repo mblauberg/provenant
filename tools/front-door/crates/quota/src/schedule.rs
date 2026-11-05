@@ -107,7 +107,7 @@ pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option
             .delay(failures.saturating_sub(1))
             .as_secs()
         }
-        ProbeFailure::Auth | ProbeFailure::AccountMismatch => 900,
+        ProbeFailure::Auth | ProbeFailure::LoginExpired | ProbeFailure::AccountMismatch => 900,
         ProbeFailure::IsolatedKeychainUnavailable => 3600,
         ProbeFailure::MissingCli | ProbeFailure::Disabled => 86400,
         ProbeFailure::Malformed | ProbeFailure::ProbeDirectory => 120,
@@ -166,6 +166,7 @@ pub fn reserve(
         expected: current.cloned(),
         replacement: Some(record),
         readiness_probe_result: None,
+        login_probe_expiry: None,
     })
 }
 pub fn complete(
@@ -229,6 +230,7 @@ pub fn complete(
         expected: Some(current.clone()),
         replacement: Some(next),
         readiness_probe_result: None,
+        login_probe_expiry: None,
     })
 }
 /// `None` is unknown detection, never an authoritative empty account list.
@@ -296,6 +298,7 @@ pub fn plan_tick_with_settings(
                 expected: Some(record.clone()),
                 replacement: None,
                 readiness_probe_result: None,
+                login_probe_expiry: None,
             });
         }
     }
@@ -502,6 +505,7 @@ pub fn report(
         };
         accounts.push(AccountRow {
             account: record.account.clone(),
+            login_expiry: None,
             snapshot: record.snapshot.clone(),
             status,
             resets_at: reset_seconds,
@@ -996,6 +1000,110 @@ mod tests {
         assert_eq!(row.snapshot.unwrap().observed_unix_seconds, 50);
         assert!(failed.check(Some(&r)).is_err());
     }
+    #[test]
+    fn expired_login_keeps_last_snapshot_without_creating_a_refusal() {
+        let a = account();
+        let mut record = AccountRecord::empty(a.clone());
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: a.clone(),
+            revision: 0,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 50,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![],
+        });
+        let reserved = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&record),
+            &a,
+            400,
+            "claim",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let failed = complete(
+            &reserved,
+            "claim",
+            420,
+            Err(ProbeFailure::LoginExpired),
+            None,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        assert_eq!(failed.snapshot, record.snapshot);
+        assert!(failed.refusals.is_empty());
+        let row = report(
+            crate::source::TEST_POLICIES,
+            &[failed],
+            &[],
+            &QuotaQuery { adapter: None },
+            420,
+            "report.json".into(),
+        )
+        .unwrap()
+        .accounts
+        .remove(0);
+        assert_eq!(row.status, QuotaStatus::AuthRequired);
+        assert_eq!(row.error, Some(ProbeFailure::LoginExpired));
+        assert_eq!(row.snapshot.unwrap().observed_unix_seconds, 50);
+    }
+
+    #[test]
+    fn expired_login_preserves_scoped_claude_refusal_until_its_reset() {
+        let scope = account();
+        let mut record = AccountRecord::empty(scope.clone());
+        record.last_error = Some(ProbeFailure::LoginExpired);
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: scope.clone(),
+            revision: 0,
+            status: QuotaStatus::Exhausted,
+            observed_unix_seconds: 100,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![crate::QuotaWindow {
+                pool: "weekly_scoped:fixture".into(),
+                window_seconds: Some(604800),
+                used_basis_points: 10_000,
+                resets_unix_seconds: Some(200),
+            }],
+            details: None,
+        });
+        record.refusals.push(crate::Refusal {
+            extra: Default::default(),
+            account: scope,
+            model: "claude/fixture".into(),
+            pool: Some("weekly_scoped:fixture".into()),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(200),
+        });
+        for (now, expected_refusals) in [(150, 1), (200, 0)] {
+            let row = report(
+                crate::source::TEST_POLICIES,
+                &[record.clone()],
+                &[],
+                &QuotaQuery { adapter: None },
+                now,
+                "fixture".into(),
+            )
+            .unwrap()
+            .accounts
+            .remove(0);
+            assert_eq!(row.status, QuotaStatus::AuthRequired);
+            assert_eq!(row.error, Some(ProbeFailure::LoginExpired));
+            assert_eq!(row.refusals.len(), expected_refusals);
+            assert_eq!(row.snapshot.unwrap().observed_unix_seconds, 100);
+            assert!(!row.free_pool_refusal);
+        }
+    }
+
     #[test]
     fn account_mismatch_reports_auth_required_with_its_own_error() {
         let a = account();
@@ -1611,6 +1719,25 @@ mod zen_tests {
             assert_eq!(report.accounts[1].status, expected);
             assert_eq!(report.accounts[1].resets_at, None);
             assert_eq!(report.accounts[1].free_pool_refusal, now == 101);
+        }
+        records[1].last_error = Some(ProbeFailure::Auth);
+        for (now, expected) in [
+            (101, QuotaStatus::Exhausted),
+            (3700, QuotaStatus::AuthRequired),
+        ] {
+            let report = report(
+                crate::source::TEST_POLICIES,
+                &records,
+                &detections,
+                &QuotaQuery { adapter: None },
+                now,
+                "report.json".into(),
+            )
+            .unwrap();
+            let row = &report.accounts[1];
+            assert_eq!(row.status, expected);
+            assert_eq!(row.error, Some(ProbeFailure::Auth));
+            assert_eq!(row.free_pool_refusal, now == 101);
         }
     }
 

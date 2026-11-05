@@ -5019,6 +5019,7 @@ fn readiness_over(
     move |scope, now| {
         provenant_quota::ReadinessFile {
             schema_version: 1,
+            login: None,
             records: records
                 .iter()
                 .filter(|r| {
@@ -5093,6 +5094,7 @@ fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::err
     // Unavailable excludes with the projected reason.
     for (why, expected) in [
         (Why::SignedOut, RouteExclusionReason::AuthRequired),
+        (Why::LoginExpired, RouteExclusionReason::LoginExpired),
         (
             Why::MissingExecutable,
             RouteExclusionReason::MissingExecutable,
@@ -5200,6 +5202,17 @@ fn unavailable_account_moves_selection_to_an_alternate_account()
             );
             assert!(matches!(chosen.readiness, RouteReadiness::Ready { .. }));
         }
+        let expired = observation(
+            "codex",
+            first,
+            "*",
+            State::Unavailable,
+            Some(Why::LoginExpired),
+            (80, 120),
+        );
+        let chosen = pick(vec![expired])?;
+        assert_eq!(chosen.account_key.as_deref(), Some(other));
+        assert!(matches!(chosen.readiness, RouteReadiness::Ready { .. }));
     }
     // A refusal for one model does not cover the account's other models.
     let other_model = refused("work", "codex/gpt-6.1-terra");

@@ -101,16 +101,14 @@ pub(super) fn account_observation_error(
     if matches!(
         error,
         ProviderError::LoginRequired
-            | ProviderError::CredentialUnavailable
             | ProviderError::CredentialNotFound
             | ProviderError::CredentialExpired
     ) {
         AccountObservationError::AuthRequired(format!(
-            "{} account {} needs sign-in; run `{}` for this account",
+            "{} account {} needs sign-in; {}",
             entry.adapter,
             entry.label,
-            AdapterSpec::get(&entry.adapter)
-                .map_or("provenant accounts list", |spec| spec.login_hint),
+            crate::quota::login_repair(Some(entry)),
         ))
     } else {
         AccountObservationError::Other(detect_failure(entry, error))

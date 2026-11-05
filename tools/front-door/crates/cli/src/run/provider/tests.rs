@@ -3574,6 +3574,25 @@ fn a_task_may_read_only_its_own_nodes_graph_inputs() -> Result<(), Box<dyn std::
 fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::{ProviderError, accounts::Registration};
+    assert!(!violates_account_pin(None, None, Some("other"), "codex"));
+    assert!(!violates_account_pin(
+        Some("key"),
+        Some("codex"),
+        Some("key"),
+        "codex"
+    ));
+    assert!(violates_account_pin(
+        Some("key"),
+        Some("codex"),
+        Some("other"),
+        "codex"
+    ));
+    assert!(violates_account_pin(
+        Some("key"),
+        Some("codex"),
+        Some("key"),
+        "claude"
+    ));
     let entries: Vec<Registration> = ["work", "personal"].into_iter().map(|label| {
         serde_json::from_value(serde_json::json!({"adapter": "codex", "label": label, "key": label, "directory": format!("/fixture/{label}")}))
     }).collect::<Result<_, _>>()?;
@@ -3594,6 +3613,7 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
             panic!("login failure lost its type")
         };
         assert!(detail.contains("codex login"));
+        assert!(detail.contains(&format!("CODEX_HOME='/fixture/{}'", entry.label)));
         failures.insert((entry.adapter.clone(), entry.key.clone()), detail);
     }
     assert!(unavailable_auth_detail(&route, None, &entries, &failures).is_some());
@@ -3602,6 +3622,10 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
     assert!(unavailable_auth_detail(&route, Some("work"), &entries, &failures).is_some());
     assert!(matches!(
         account_observation_error(&entries[0], &ProviderError::IdentityMismatch),
+        AccountObservationError::Other(_)
+    ));
+    assert!(matches!(
+        account_observation_error(&entries[0], &ProviderError::CredentialUnavailable),
         AccountObservationError::Other(_)
     ));
     Ok(())

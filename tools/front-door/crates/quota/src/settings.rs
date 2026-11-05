@@ -19,6 +19,9 @@ pub struct Settings {
     /// Disk cap in bytes for each account's quota history (current file plus one rotated).
     #[serde(default = "default_history_max_bytes")]
     pub history_max_bytes: u64,
+    /// Advance warning window; zero disables advance warnings.
+    #[serde(default = "default_login_warning_seconds")]
+    pub login_expiry_warning_seconds: u64,
 }
 /// Omitted intervals retain the provider default, in seconds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +47,10 @@ impl Settings {
 }
 fn default_history_max_bytes() -> u64 {
     crate::DEFAULT_HISTORY_MAX_BYTES
+}
+pub const DEFAULT_LOGIN_WARNING_SECONDS: u64 = 3600;
+fn default_login_warning_seconds() -> u64 {
+    DEFAULT_LOGIN_WARNING_SECONDS
 }
 /// Most accounts a single quota probe tick may run at once.
 pub const MAX_PARALLEL: u64 = 16;
@@ -97,6 +104,7 @@ impl Default for Settings {
             display: Display::default(),
             calibration: BTreeMap::new(),
             history_max_bytes: default_history_max_bytes(),
+            login_expiry_warning_seconds: default_login_warning_seconds(),
         }
     }
 }
@@ -169,6 +177,7 @@ impl DomainConfig for Settings {
 pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("max_parallel", 1, MAX_PARALLEL as i64),
     FieldMetadata::int("wall_budget_seconds", 1, MAX_WALL_BUDGET_SECONDS as i64),
+    FieldMetadata::int("login_expiry_warning_seconds", 0, i64::MAX),
     FieldMetadata::int(
         "history_max_bytes",
         crate::MIN_HISTORY_MAX_BYTES as i64,
@@ -184,7 +193,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
 ];
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "quota",
-    |_| "max_parallel = 3\nwall_budget_seconds = 55\nhistory_max_bytes = 4194304\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
+    |_| "max_parallel = 3\nwall_budget_seconds = 55\nhistory_max_bytes = 4194304\nlogin_expiry_warning_seconds = 3600\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
 )
 .with_boundary_check(|error| error.code == "ceiling")
 .with_fields(FIELD_METADATA);
@@ -196,6 +205,17 @@ mod tests {
         toml_edit::de::from_str(text)
     }
     const BASE: &str = "max_parallel = 3\nwall_budget_seconds = 55\n";
+    #[test]
+    fn login_warning_defaults_and_overrides() {
+        let defaults = parse(BASE).unwrap();
+        assert_eq!(defaults.login_expiry_warning_seconds, 3600);
+        for seconds in [0, 900, 86_400] {
+            let settings =
+                parse(&format!("{BASE}login_expiry_warning_seconds = {seconds}\n")).unwrap();
+            assert_eq!(settings.login_expiry_warning_seconds, seconds);
+            assert!(settings.validate().is_empty());
+        }
+    }
     #[test]
     fn polling_defaults_and_adapter_overrides_reach_scheduling() {
         use crate::schedule::{Power, Trigger, interval, next_due};

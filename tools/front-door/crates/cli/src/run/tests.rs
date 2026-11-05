@@ -6188,13 +6188,61 @@ fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn s
             Registry::default().decode_captures(&route, b"", stderr, &exit, temp.path(), None)?;
         assert_eq!(decoded.outcome, run::Outcome::AuthRequired, "{adapter}");
         assert!(
-            decoded.reason.as_deref().unwrap().contains(
-                provenant_records::AdapterSpec::get(adapter)
-                    .unwrap()
-                    .login_hint
-            )
+            decoded
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("account-specific login remedy unavailable")
         );
     }
+    Ok(())
+}
+
+#[test]
+fn settled_auth_uses_only_the_selected_registered_account() -> Result<(), Box<dyn std::error::Error>>
+{
+    use run::Providers;
+    let temp = tempfile::tempdir()?;
+    let mut inputs =
+        provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+    inputs.state_dir = Some(temp.path().join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
+    std::fs::write(
+        roots.state.as_path().join("config.toml"),
+        "schema_version = 1\n[domains.accounts.entries.work]\nadapter = 'codex'\nlabel = 'work'\nkey = 'key'\ndirectory = '/fixture/work'\n",
+    )?;
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/example".into()),
+        account_key: Some("key".into()),
+        ..Default::default()
+    };
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    let decoded = Registry {
+        roots: Some(&roots),
+        ..Default::default()
+    }
+    .decode_captures(
+        &route,
+        b"",
+        include_bytes!("../../../../tests/fixtures/providers/codex/auth-required.stderr"),
+        &exit,
+        temp.path(),
+        None,
+    )?;
+    assert_eq!(decoded.outcome, run::Outcome::AuthRequired);
+    let reason = decoded.reason.unwrap();
+    assert!(reason.contains("work [codex]"), "{reason}");
+    assert!(
+        reason.contains("CODEX_HOME='/fixture/work' codex login"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("last successful observation unknown"),
+        "{reason}"
+    );
     Ok(())
 }
 

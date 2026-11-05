@@ -11,6 +11,16 @@ and pacing policy; pacing and readiness apply at dispatch. Use
 `provenant route resolve NAME` also accepts a route name or an unambiguous
 model name. Unknown or ambiguous names report suggestions and examples.
 
+An observed expired login projects as `login_expired` for routing; it does
+not create a quota refusal. Existing scoped quota refusals retain their own
+clearing rules. `provenant quota` shows the last reading and, when the account
+registration is known, the login context for recovery.
+Pre-launch fallback treats this reason as an authentication outage and uses the
+same pin, budget, custody and launch-state guards as other authentication
+failures. When there is no eligible fallback, the account is pinned or the
+fallback budget is exhausted, the refusal says why. A launched or uncertain
+effect is not repeated automatically.
+
 `provenant route list --valid` lists catalogued model/effort pairs accepted by
 resolution and the configured Go allowance floor. It includes an unspecified
 effort row where accepted. Combine it with `--adapter` or `--pool`. It does not
