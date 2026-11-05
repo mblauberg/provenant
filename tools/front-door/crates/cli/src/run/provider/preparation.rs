@@ -678,7 +678,7 @@ pub(super) fn prepare_candidates(
             let executable =
                 locate(spec.name).map_err(AccountObservationError::VersionUnavailable)?;
             entry.directory = canonical(&directory)
-                .map_err(|detail| default_directory_error(&directory, detail))?;
+                .map_err(|detail| default_directory_error(spec, &directory, detail))?;
             entry.key = provenant_providers::accounts::detect(
                 &executor,
                 spec.name,

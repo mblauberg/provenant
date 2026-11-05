@@ -81,13 +81,18 @@ impl AccountObservationError {
     }
 }
 
-pub(super) fn default_directory_error(path: &Path, detail: String) -> AccountObservationError {
+pub(super) fn default_directory_error(
+    spec: &AdapterSpec,
+    path: &Path,
+    detail: String,
+) -> AccountObservationError {
     if std::fs::symlink_metadata(path)
         .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
     {
-        AccountObservationError::AuthRequired(
-            "default Codex login is missing; run `codex login`".into(),
-        )
+        AccountObservationError::AuthRequired(format!(
+            "default {} login is missing; run `{}`",
+            spec.name, spec.login_hint
+        ))
     } else {
         AccountObservationError::Other(detail)
     }

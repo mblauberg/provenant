@@ -4489,13 +4489,21 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
 fn absent_default_login_differs_from_directory_integrity_errors()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
-    let missing = temp.path().join("missing-codex");
+    let mut spec = *AdapterSpec::get("codex").unwrap();
+    spec.name = "fixture";
+    spec.login_hint = "fixture login";
+    let missing = temp.path().join("missing");
+    assert!(
+        default_directory_error(&spec, &missing, "not found".into())
+            .to_string()
+            .contains("fixture")
+    );
     assert_eq!(
-        default_directory_error(&missing, "not found".into()).skip_kind(),
+        default_directory_error(&spec, &missing, "not found".into()).skip_kind(),
         SkipKind::AuthRequired
     );
     assert_eq!(
-        default_directory_error(temp.path(), "permission denied".into()).skip_kind(),
+        default_directory_error(&spec, temp.path(), "permission denied".into()).skip_kind(),
         SkipKind::Account
     );
     #[cfg(unix)]
@@ -4503,7 +4511,7 @@ fn absent_default_login_differs_from_directory_integrity_errors()
         let broken = temp.path().join("broken-link");
         std::os::unix::fs::symlink(&missing, &broken)?;
         assert_eq!(
-            default_directory_error(&broken, "broken link".into()).skip_kind(),
+            default_directory_error(&spec, &broken, "broken link".into()).skip_kind(),
             SkipKind::Account
         );
     }
