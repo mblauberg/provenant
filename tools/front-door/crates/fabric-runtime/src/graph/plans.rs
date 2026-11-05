@@ -723,7 +723,8 @@ pub(super) fn validate_review_addition(
         || addition.nodes.len() > spec.max_nodes
         || root.composite.as_ref().is_none_or(|composite| {
             let mut exported = std::collections::BTreeSet::new();
-            composite.min_successful != spec.min_successful.map(|n| if n == 0 { composite.exports.len().saturating_sub(1).max(1) } else { n })
+            composite.reduce_verdict != spec.reduce_verdict
+                || composite.min_successful != spec.min_successful.map(|n| if n == 0 { composite.exports.len().saturating_sub(1).max(1) } else { n })
                 || composite.exports.is_empty()
                 || composite.exports.iter().any(|export| {
                     export.outputs.is_empty() || !exported.insert(&export.node)

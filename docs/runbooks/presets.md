@@ -40,6 +40,8 @@ and is dropped. Parameter files and `--set` retain their usual precedence.
 
 A parallel group can declare `zero_minimum = "all_but_one"` so a zero
 `min_successful` requires all but one member, at least one.
+It can declare `reduce_verdict = true` to export the worst successful member
+verdict; missing or invalid verdicts count as inconclusive.
 
 A `for_each` stage may declare `review_lenses = true` to apply the review
 shape and risk-tag selection to its list.

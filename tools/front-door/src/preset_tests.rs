@@ -399,6 +399,49 @@ kind = "synthesise"
 }
 
 #[test]
+fn declared_parallel_reduction_keeps_the_worst_verdict() {
+    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+    let mut layers = Layers::empty();
+    layers.insert("test", "reduced-panel", "stages=[{id='panel',reduce_verdict=true,parallel=[{id='first',prompt='review'},{id='second',prompt='review'}]}]\n").unwrap();
+    let document: GraphDocument = serde_json::from_value(
+        expand(&layers, "reduced-panel", "brief", &[])
+            .unwrap()
+            .document,
+    )
+    .unwrap();
+    for failing in ["panel--first", "panel--second"] {
+        let mut owner = PresetOwner {
+            failing: vec![failing.into()],
+            ..Default::default()
+        };
+        let config = provenant_fabric_runtime::config::GraphConfig::default();
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut PresetJournal::default(),
+            &config.limits,
+            &config.budget,
+        )
+        .unwrap();
+        let panel = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "panel")
+            .unwrap();
+        assert_eq!(
+            panel
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.verdict.as_deref())
+                .and_then(provenant_records::workflow::ReviewVerdict::from_token),
+            Some(provenant_records::workflow::ReviewVerdict::RequestChanges)
+        );
+        assert_eq!(owner.launched.len(), 2);
+    }
+}
+
+#[test]
 fn raw_node_kinds_and_control_role_profiles_keep_their_configuration() {
     use provenant_fabric_runtime::graph::{GraphDocument, NodeKind};
     let cases = [

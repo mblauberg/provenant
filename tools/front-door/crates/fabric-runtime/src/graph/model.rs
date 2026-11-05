@@ -152,6 +152,8 @@ pub struct ReviewSpec {
     #[serde(default)]
     pub lenses: Vec<ReviewLens>,
     pub min_successful: Option<usize>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reduce_verdict: bool,
     pub max_nodes: usize,
 }
 

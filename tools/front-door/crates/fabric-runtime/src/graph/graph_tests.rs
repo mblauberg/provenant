@@ -517,6 +517,7 @@ fn admitted_deferred_review_fits_checkpoint_after_expansion() {
         worktree: None,
         lenses: vec![],
         min_successful: Some(1),
+        reduce_verdict: false,
         max_nodes: 2,
     });
     let mut nodes = vec![review];
@@ -615,6 +616,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         worktree: None,
         lenses: vec![],
         min_successful: Some(1),
+        reduce_verdict: false,
         max_nodes: 3,
     });
     let mut outer = node("outer", route("first"));
@@ -8106,6 +8108,7 @@ fn review_plan_schema_validation() {
         worktree: None,
         lenses: vec![],
         min_successful: None,
+        reduce_verdict: false,
         max_nodes: 4,
     });
     let mut document = graph(vec![reader]);
@@ -8140,6 +8143,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
             worktree: None,
             lenses: vec![],
             min_successful: Some(0),
+            reduce_verdict: false,
             max_nodes: 9,
         });
         let mut root = node("review--review", route("first"));
@@ -8292,6 +8296,7 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         worktree: None,
         lenses: vec![],
         min_successful: Some(1),
+        reduce_verdict: false,
         max_nodes: 3,
     });
     let mut root = node("review--review", route("first"));
@@ -8335,6 +8340,26 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         nodes,
         patterns: vec![],
     };
+    let mut document = graph(vec![write, review]);
+    document.schema_version = 2;
+    let mut changed_reduction = addition.clone();
+    changed_reduction
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "review--review")
+        .unwrap()
+        .composite
+        .as_mut()
+        .unwrap()
+        .reduce_verdict = true;
+    assert!(plans::validate_review_addition(&document, &changed_reduction).is_err());
+    let mut declared_reduction = document.clone();
+    declared_reduction.nodes[1]
+        .review
+        .as_mut()
+        .unwrap()
+        .reduce_verdict = true;
+    assert!(plans::validate_review_addition(&declared_reduction, &changed_reduction).is_ok());
     let writer_done = AttemptObservation::Terminal {
         attempt_ref: Some("host/7".into()),
         outcome: AttemptOutcome::Succeeded,
@@ -8350,8 +8375,6 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         review_expansion: Some(addition),
         ..Default::default()
     };
-    let mut document = graph(vec![write, review]);
-    document.schema_version = 2;
     advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(owner.distinct_from.last(), Some(&vec!["host/7".to_owned()]));
 }

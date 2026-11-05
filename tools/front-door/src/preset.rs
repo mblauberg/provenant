@@ -2277,6 +2277,9 @@ impl StageBuilder<'_> {
             return Err("composite expansion depth exceeds the limit".into());
         }
         let object = entry.as_object().ok_or("stage entries must be tables")?;
+        if object.contains_key("reduce_verdict") && !object.contains_key("parallel") {
+            return Err("reduce_verdict requires a parallel group".into());
+        }
         if let Some(mode) = object.get("zero_minimum")
             && (mode.as_str() != Some("all_but_one") || !object.contains_key("parallel"))
         {
@@ -2545,6 +2548,7 @@ impl StageBuilder<'_> {
                 {
                     object.remove("min_successful");
                     object.remove("zero_minimum");
+                    object.remove("reduce_verdict");
                     object.remove("exports");
                     (deferred, true)
                 } else {
@@ -2583,10 +2587,21 @@ impl StageBuilder<'_> {
                             }
                         })
                         .transpose()?;
-                    (
-                        composite(&id, children, exports, deps, &outputs, min_successful),
-                        true,
-                    )
+                    let reduce_verdict = object
+                        .remove("reduce_verdict")
+                        .map(|value| {
+                            interpolate(&value, &self.parameters, self.prompt, index as usize)?
+                                .as_bool()
+                                .ok_or_else(|| "reduce_verdict must be a boolean".to_owned())
+                        })
+                        .transpose()?
+                        .unwrap_or(false);
+                    let mut group =
+                        composite(&id, children, exports, deps, &outputs, min_successful);
+                    if reduce_verdict {
+                        group["composite"]["reduce_verdict"] = json!(true);
+                    }
+                    (group, true)
                 }
             } else if let Some(stages) = object.remove("stages") {
                 let mut children = Vec::new();

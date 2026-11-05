@@ -4411,6 +4411,7 @@ impl BoundGraphOwner<'_> {
             "depends_on": node.depends_on,
             "composite": {
                 "min_successful": spec.min_successful.map(|n| if n == 0 { members.len().saturating_sub(1).max(1) } else { n }),
+                "reduce_verdict": spec.reduce_verdict,
                 "nodes": [],
                 "exports": exports,
             },

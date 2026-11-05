@@ -691,6 +691,15 @@ impl StageBuilder<'_> {
                     usize::try_from(count).map_err(|_| "min_successful is too large".to_owned())
                 })
                 .transpose()?,
+            reduce_verdict: group
+                .get("reduce_verdict")
+                .map(|value| {
+                    super::interpolate(value, &self.parameters, self.prompt, 1)?
+                        .as_bool()
+                        .ok_or_else(|| "reduce_verdict must be a boolean".to_owned())
+                })
+                .transpose()?
+                .unwrap_or(false),
             max_nodes: names.len().saturating_add(1).max(2),
         })
     }
