@@ -2827,6 +2827,18 @@ fn embedded_graph_nodes_reject_unknown_fields() {
             "raw-plan-fallback",
             "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', mispelled = true }], exports = [] } }",
         ),
+        (
+            "invalid-raw-composite",
+            "kind = 'composite', composite = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', mispelled = true }], exports = [] }",
+        ),
+        (
+            "invalid-raw-loop",
+            "kind = 'loop', loop = { max_rounds = 1, until = 'member', body = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', mispelled = true }] }",
+        ),
+        (
+            "invalid-raw-plan-fallback",
+            "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', mispelled = true }], exports = [] } }",
+        ),
     ] {
         let mut layers = Layers::empty();
         layers

@@ -160,6 +160,48 @@ fn unknown_embedded_node_field(
     None
 }
 
+/// When a known field has the wrong type, typed decoding cannot reach nested
+/// extras. Inspect each embedded node independently on that error path.
+fn unknown_embedded_node_in_invalid_value(value: &Value) -> Option<String> {
+    for path in ["/composite/nodes", "/loop/body", "/plan/fallback/nodes"] {
+        let Some(children) = value.pointer(path).and_then(Value::as_array) else {
+            continue;
+        };
+        for child in children {
+            let id = child
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            if let Ok(node) =
+                serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(child.clone())
+            {
+                if let Some(field) = node.extra.keys().next() {
+                    return Some(format!("node {id}: unknown leaf field: {field}"));
+                }
+                if let Some(error) = unknown_embedded_node_field(&node) {
+                    return Some(error);
+                }
+            } else if let Some(fields) = child.as_object() {
+                for (key, value) in fields {
+                    if key == "id" || key == "access" {
+                        continue;
+                    }
+                    let probe = json!({"id": "probe", "access": "read_only", (key): value});
+                    if serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(probe)
+                        .is_ok_and(|node| node.extra.contains_key(key))
+                    {
+                        return Some(format!("node {id}: unknown leaf field: {key}"));
+                    }
+                }
+            }
+            if let Some(error) = unknown_embedded_node_in_invalid_value(child) {
+                return Some(error);
+            }
+        }
+    }
+    None
+}
+
 impl Layers {
     #[allow(
         clippy::expect_used,
@@ -1862,15 +1904,22 @@ fn lower_leaf(
             }
             node.extra.keys().next().cloned()
         }
-        Err(_) => probe.iter().find_map(|(key, value)| {
-            if key == "id" || key == "access" {
-                return None;
+        Err(_) => {
+            if let Some(error) =
+                unknown_embedded_node_in_invalid_value(&Value::Object(probe.clone()))
+            {
+                return Err(error);
             }
-            let candidate = json!({"id": id, "access": "read_only", (key): value});
-            serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(candidate)
-                .ok()
-                .and_then(|node| node.extra.contains_key(key).then(|| key.clone()))
-        }),
+            probe.iter().find_map(|(key, value)| {
+                if key == "id" || key == "access" {
+                    return None;
+                }
+                let candidate = json!({"id": id, "access": "read_only", (key): value});
+                serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(candidate)
+                    .ok()
+                    .and_then(|node| node.extra.contains_key(key).then(|| key.clone()))
+            })
+        }
     };
     if let Some(key) = unknown {
         return Err(format!("node {id}: unknown leaf field: {key}"));
