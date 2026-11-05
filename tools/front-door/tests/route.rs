@@ -456,7 +456,7 @@ fn fallback_warnings_are_revision_scoped() -> Result {
     )?;
     let third = rig.command(&["route", "list"])?;
     let stderr = String::from_utf8(third.stderr.bytes)?;
-    assert!(stderr.contains("unknown_fallback"), "{stderr}");
+    assert_eq!(stderr.matches("unknown_fallback").count(), 1, "{stderr}");
     Ok(())
 }
 
