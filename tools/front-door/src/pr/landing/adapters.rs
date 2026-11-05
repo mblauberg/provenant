@@ -4,9 +4,12 @@ use super::{
     model::*,
     ports::{
         AlarmSink, Approval, Forge, GateRunner, MergeTree, PullRequestInfo, PullRequestState, Repo,
+        StackMember, StackMembership,
     },
 };
-use crate::pr::{TimedOut, execute_with, git::Git, git::plain_ref, merge_with, rest_pull, wait};
+use crate::pr::{
+    RestPull, TimedOut, execute_with, git::Git, git::plain_ref, merge_with, rest_pull, wait,
+};
 use provenant_cli::domains::MergeMethod;
 use provenant_os::exec::Termination;
 use std::{
@@ -67,6 +70,29 @@ fn object_id(value: &str) -> Result<&str, LandingError> {
         Err(LandingError::Failed(format!(
             "not a full object id: {value}"
         )))
+    }
+}
+
+/// Interpret the documented asynchronous merge result. Unknown shapes must
+/// stay uncertain: the request may already have changed the forge.
+fn async_merge_result(value: &serde_json::Value) -> Result<Option<String>, LandingError> {
+    match value["status"].as_str() {
+        Some("merged") => {
+            let sha = value["details"]["sha"]
+                .as_str()
+                .ok_or(LandingError::PublicationUnknown)?;
+            object_id(sha).map_err(|_| LandingError::PublicationUnknown)?;
+            Ok(Some(sha.to_owned()))
+        }
+        Some("pending") => Ok(None),
+        Some("failed") => Err(LandingError::Refused(
+            value["details"]["message"]
+                .as_str()
+                .unwrap_or("asynchronous merge failed")
+                .to_owned(),
+        )),
+        // Enqueued is not merged; its final outcome must be reconciled.
+        _ => Err(LandingError::PublicationUnknown),
     }
 }
 
@@ -144,6 +170,189 @@ impl GhForge {
             })
             .collect())
     }
+
+    #[allow(clippy::disallowed_methods, reason = "bounded forge polling")]
+    fn merge_stack(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError> {
+        object_id(head)?;
+        let membership = self
+            .pull_request(number)?
+            .stack
+            .ok_or(LandingError::PublicationUnknown)?;
+        let members = self.stack_members(membership.number)?;
+        let position = members
+            .iter()
+            .position(|member| member.number == number)
+            .ok_or(LandingError::PublicationUnknown)?;
+        if let Some(lower) = members[..position]
+            .iter()
+            .find(|member| member.state != PullRequestState::Merged)
+        {
+            return Err(LandingError::Refused(format!(
+                "pull request #{number} has unmerged lower pull request #{}",
+                lower.number
+            )));
+        }
+        let upper = members[position + 1..]
+            .iter()
+            .find(|member| member.state == PullRequestState::Open)
+            .map(|member| member.number);
+        let method = match method {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        };
+        let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{number}/merge-async");
+        let sha = format!("sha={head}");
+        let merge_method = format!("merge_method={method}");
+        let deadline = std::time::Instant::now() + self.budget;
+        let reader = self.reader();
+        let output = reader
+            .request(
+                &[
+                    "gh",
+                    "api",
+                    "--method",
+                    "PUT",
+                    &endpoint,
+                    "-H",
+                    "X-GitHub-Api-Version:2026-03-10",
+                    "-f",
+                    &sha,
+                    "-f",
+                    &merge_method,
+                    "-f",
+                    "merge_action=direct_merge",
+                ],
+                true,
+            )
+            .map_err(|_| LandingError::PublicationUnknown)?;
+        if output.termination != Termination::Exit(0) {
+            // In particular, 409 can name an existing in-flight request whose
+            // options differ from ours. Recovery must observe the forge first.
+            return Err(LandingError::PublicationUnknown);
+        }
+        let mut result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)
+            .map_err(|_| LandingError::PublicationUnknown)?;
+        loop {
+            if let Some(sha) = async_merge_result(&result)? {
+                let observed = self
+                    .pull_request(number)
+                    .map_err(|_| LandingError::PublicationUnknown)?;
+                if observed.state == PullRequestState::Merged
+                    && observed.head == head
+                    && observed.merged_commit.as_deref() == Some(&sha)
+                {
+                    if let Some(upper) = upper {
+                        loop {
+                            let next = self
+                                .pull_request(upper)
+                                .map_err(|_| LandingError::PublicationUnknown)?;
+                            if next.state != PullRequestState::Open
+                                || next.base_branch == membership.base_branch
+                            {
+                                break;
+                            }
+                            let left =
+                                deadline.saturating_duration_since(std::time::Instant::now());
+                            if left.is_zero() {
+                                return Err(LandingError::PublicationUnknown);
+                            }
+                            std::thread::sleep(Duration::from_secs(1).min(left));
+                        }
+                    }
+                    return Ok(sha);
+                }
+                return Err(LandingError::PublicationUnknown);
+            }
+            let details = &result["details"];
+            if details["expected_head_sha"].as_str() != Some(head)
+                || details["merge_method"].as_str() != Some(method)
+                || details["merge_action"].as_str() != Some("direct_merge")
+            {
+                return Err(LandingError::PublicationUnknown);
+            }
+            let uuid = details["uuid"]
+                .as_str()
+                .ok_or(LandingError::PublicationUnknown)?;
+            if uuid.len() != 36 || !uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+                return Err(LandingError::PublicationUnknown);
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(LandingError::PublicationUnknown);
+            }
+            std::thread::sleep(Duration::from_secs(1).min(left));
+            let bytes = self
+                .get(&[
+                    &format!("{endpoint}/{uuid}"),
+                    "-H",
+                    "X-GitHub-Api-Version:2026-03-10",
+                ])
+                .map_err(|_| LandingError::PublicationUnknown)?;
+            result =
+                serde_json::from_slice(&bytes).map_err(|_| LandingError::PublicationUnknown)?;
+        }
+    }
+}
+
+fn pull_info(number: u64, pull: RestPull) -> PullRequestInfo {
+    let merged = pull.merged_at.is_some();
+    PullRequestInfo {
+        number,
+        head: pull.head.sha.to_string(),
+        base_branch: pull.base.branch,
+        author: pull.user.map(|user| user.login).unwrap_or_default(),
+        state: if merged {
+            PullRequestState::Merged
+        } else if pull.state == "open" {
+            PullRequestState::Open
+        } else {
+            PullRequestState::Closed
+        },
+        merged_commit: if merged { pull.merge_commit_sha } else { None },
+        stack: pull.stack.map(|stack| StackMembership {
+            number: stack.number,
+            size: stack.size,
+            position: stack.position,
+            base_branch: stack.base.branch,
+        }),
+    }
+}
+
+fn stack_members(value: &serde_json::Value) -> Result<Vec<StackMember>, LandingError> {
+    let members = value["pull_requests"]
+        .as_array()
+        .ok_or_else(|| LandingError::Failed("stack response has no pull requests".into()))?;
+    let mut seen = std::collections::BTreeSet::new();
+    members
+        .iter()
+        .map(|member| {
+            let number = member["number"]
+                .as_u64()
+                .filter(|number| *number != 0 && seen.insert(*number))
+                .ok_or_else(|| {
+                    LandingError::Failed("stack has invalid pull request number".into())
+                })?;
+            let state = match (member["state"].as_str(), member.get("merged_at")) {
+                (Some("closed"), Some(serde_json::Value::String(date))) if !date.is_empty() => {
+                    PullRequestState::Merged
+                }
+                (Some("closed"), Some(serde_json::Value::Null)) => PullRequestState::Closed,
+                (Some("open"), Some(serde_json::Value::Null)) => PullRequestState::Open,
+                _ => {
+                    return Err(LandingError::Failed(
+                        "stack has invalid pull request state".into(),
+                    ));
+                }
+            };
+            Ok(StackMember { number, state })
+        })
+        .collect()
 }
 
 /// Fold per-check results: any failure fails, then pending, then missing,
@@ -219,6 +428,19 @@ fn encode_branch(branch: &str) -> String {
 }
 
 impl Forge for GhForge {
+    fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError> {
+        let endpoint = format!("repos/{{owner}}/{{repo}}/stacks/{number}");
+        let bytes = self.get(&[&endpoint, "-H", "X-GitHub-Api-Version:2026-03-10"])?;
+        let response: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            LandingError::Failed(format!("GitHub returned invalid stack JSON: {error}"))
+        })?;
+        if response["number"].as_u64() != Some(number) {
+            return Err(LandingError::Failed(
+                "stack response number does not match request".into(),
+            ));
+        }
+        stack_members(&response)
+    }
     fn set_project_path(&mut self, path: &Path) {
         self.project = path.to_owned();
     }
@@ -250,21 +472,7 @@ impl Forge for GhForge {
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
         let pull =
             rest_pull(&|argv| self.reader().read(argv), &number.to_string()).map_err(failed)?;
-        let merged = pull.merged_at.is_some();
-        Ok(PullRequestInfo {
-            number,
-            head: pull.head.sha.to_string(),
-            base_branch: pull.base.branch,
-            author: pull.user.map(|user| user.login).unwrap_or_default(),
-            state: if merged {
-                PullRequestState::Merged
-            } else if pull.state == "open" {
-                PullRequestState::Open
-            } else {
-                PullRequestState::Closed
-            },
-            merged_commit: if merged { pull.merge_commit_sha } else { None },
-        })
+        Ok(pull_info(number, pull))
     }
     fn target_branch(&mut self) -> Result<String, LandingError> {
         self.json("repos/{owner}/{repo}")?["default_branch"]
@@ -301,6 +509,65 @@ impl Forge for GhForge {
             );
         }
         Ok(latest.into_values().flatten().collect())
+    }
+    fn latest_review(
+        &mut self,
+        number: u64,
+        author: &str,
+    ) -> Result<Option<super::head_move::ReviewedHead>, LandingError> {
+        let reviews = self.pages(&format!(
+            "repos/{{owner}}/{{repo}}/pulls/{number}/reviews?per_page=100"
+        ))?;
+        let mut latest =
+            std::collections::BTreeMap::<String, (&str, u64, &serde_json::Value)>::new();
+        for review in &reviews {
+            if !matches!(
+                review["state"].as_str(),
+                Some("APPROVED" | "DISMISSED" | "CHANGES_REQUESTED")
+            ) {
+                continue;
+            }
+            let (Some(at), Some(id), Some(head)) = (
+                review["submitted_at"].as_str(),
+                review["id"].as_u64(),
+                review["commit_id"].as_str(),
+            ) else {
+                continue;
+            };
+            let Some(reviewer) = review["user"]["login"]
+                .as_str()
+                .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(author))
+            else {
+                continue;
+            };
+            if object_id(head).is_err() {
+                continue;
+            }
+            let key = reviewer.to_ascii_lowercase();
+            if latest
+                .get(&key)
+                .is_none_or(|(previous, previous_id, _)| (at, id) > (*previous, *previous_id))
+            {
+                latest.insert(key, (at, id, review));
+            }
+        }
+        let accepted = latest
+            .values()
+            .copied()
+            .filter(|(_, _, review)| review["state"].as_str() == Some("APPROVED"))
+            .max_by_key(|(at, id, _)| (*at, *id));
+        let latest = accepted.or_else(|| {
+            latest
+                .values()
+                .copied()
+                .max_by_key(|(at, id, _)| (*at, *id))
+        });
+        Ok(latest.map(|(_, _, review)| super::head_move::ReviewedHead {
+            head: review["commit_id"].as_str().unwrap_or_default().to_owned(),
+            // The REST review does not contain its approval-time base.
+            base: None,
+            valid: review["state"].as_str() == Some("APPROVED"),
+        }))
     }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
@@ -382,6 +649,14 @@ impl Forge for GhForge {
                 merge_label(method)
             ))
         })
+    }
+    fn merge_stack(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError> {
+        GhForge::merge_stack(self, number, head, method)
     }
     fn may_push_directly(&mut self, branch: &str) -> Result<bool, LandingError> {
         let verdict = (|| -> Result<(), String> {
@@ -850,6 +1125,32 @@ impl Repo for GitRepo<'_> {
         let spec = format!("{}^{{tree}}", object_id(commit)?);
         self.ok(&["rev-parse", "--verify", &spec])
     }
+    fn parents(&mut self, commit: &str) -> Result<Vec<String>, LandingError> {
+        self.ensure(commit)?;
+        let commit = object_id(commit)?;
+        let output = self.ok(&["rev-list", "--parents", "-n", "1", commit])?;
+        let mut words = output.split_whitespace();
+        if words.next() != Some(commit) {
+            return Err(LandingError::Failed(
+                "git returned an unexpected commit".into(),
+            ));
+        }
+        words
+            .map(|parent| object_id(parent).map(str::to_owned))
+            .collect()
+    }
+    fn review_delta(
+        &mut self,
+        _old: &str,
+        _new: &str,
+    ) -> Result<super::ports::DeltaStats, LandingError> {
+        // Until all file-kind and protected-path evidence is available, the
+        // statistics are incomplete and cannot prove a small delta.
+        Ok(super::ports::DeltaStats {
+            complete: false,
+            files: Vec::new(),
+        })
+    }
 }
 
 // ----- GateRunner --------------------------------------------------------
@@ -1085,9 +1386,161 @@ fn deliver_alarm(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn async_stack_result_distinguishes_merged_pending_and_unknown() {
+        let sha = "6dcb09b5b57875f334f61aebed695e2e4193db5e";
+        assert_eq!(
+            async_merge_result(&serde_json::json!({"status":"merged","details":{"sha":sha}}))
+                .unwrap(),
+            Some(sha.into())
+        );
+        assert_eq!(async_merge_result(&serde_json::json!({"status":"pending","details":{"uuid":"630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42"}})).unwrap(), None);
+        assert!(matches!(
+            async_merge_result(&serde_json::json!({"status":"enqueued"})),
+            Err(LandingError::PublicationUnknown)
+        ));
+        assert!(matches!(
+            async_merge_result(&serde_json::json!({"status":"merged","details":{"sha":"bad"}})),
+            Err(LandingError::PublicationUnknown)
+        ));
+        assert!(matches!(
+            async_merge_result(
+                &serde_json::json!({"status":"failed","details":{"message":"rejected"}})
+            ),
+            Err(LandingError::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn documented_async_stack_responses_drive_real_forge() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        const MARKER: &str = "PROVENANT_ASYNC_STACK_CHILD";
+        const HEAD: &str = "1111111111111111111111111111111111111111";
+        if let Some(path) = std::env::var_os(MARKER) {
+            let project = PathBuf::from(path);
+            let mut forge = GhForge::new(&project);
+            assert_eq!(
+                forge.merge_stack(7, HEAD, MergeMethod::Squash).unwrap(),
+                HEAD
+            );
+            let calls = std::fs::read_to_string(project.join("calls")).unwrap();
+            assert!(rest_calls::rest_only(&calls), "{calls}");
+            assert!(calls.contains(&format!("sha={HEAD}")), "{calls}");
+            assert!(calls.contains("merge_method=squash"), "{calls}");
+            assert!(calls.contains("merge_action=direct_merge"), "{calls}");
+            assert!(
+                calls.contains("merge-async/630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42"),
+                "{calls}"
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(&gh, r##"#!/bin/sh
+echo "$*" >> calls
+case "$*" in
+  *"--method PUT"*) touch merged; echo '{"status":"pending","details":{"uuid":"630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42","merge_method":"squash","merge_action":"direct_merge","expected_head_sha":"1111111111111111111111111111111111111111"}}' ;;
+  *"merge-async/"*) echo '{"status":"merged","details":{"sha":"1111111111111111111111111111111111111111"}}' ;;
+  *"stacks/42"*) echo '{"number":42,"pull_requests":[{"number":7,"state":"open","merged_at":null},{"number":8,"state":"open","merged_at":null}]}' ;;
+  *"pulls/8"*) echo '{"state":"open","head":{"sha":"1111111111111111111111111111111111111111","ref":"upper"},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main"},"merged_at":null,"title":"upper"}' ;;
+  *"pulls/7"*)
+    if test -e merged; then
+      echo '{"state":"closed","head":{"sha":"1111111111111111111111111111111111111111","ref":"lower"},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main"},"merged_at":"2026-01-01T00:00:00Z","merge_commit_sha":"1111111111111111111111111111111111111111","title":"lower"}'
+    else
+      echo '{"state":"open","head":{"sha":"1111111111111111111111111111111111111111","ref":"lower"},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main"},"merged_at":null,"title":"lower","stack":{"number":42,"size":2,"position":1,"base":{"ref":"main"}}}'
+    fi ;;
+  *) exit 1 ;;
+esac
+"##).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pr::landing::adapters::tests::documented_async_stack_responses_drive_real_forge",
+                "--nocapture",
+            ])
+            .env(MARKER, dir.path())
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     use crate::pr::landing::fakes::FakeForge;
     use serde_json::json;
     use std::process::Command;
+
+    #[test]
+    fn pull_info_reads_stack_membership_from_rest() {
+        let head = "1".repeat(40);
+        let mut payload = json!({
+            "state":"open", "head":{"sha":head,"ref":"upper","repo":null},
+            "base":{"sha":head,"ref":"lower","repo":null},
+            "mergeable":true, "mergeable_state":"clean", "merged_at":null,
+            "merge_commit_sha":null, "title":"fixture", "user":{"login":"author"},
+            "stack":{"number":42,"size":2,"position":2,"base":{"ref":"main","sha":head}}
+        });
+        let info = pull_info(102, serde_json::from_value(payload.clone()).unwrap());
+        assert_eq!(
+            info.stack,
+            Some(StackMembership {
+                number: 42,
+                size: 2,
+                position: 2,
+                base_branch: "main".into()
+            })
+        );
+        payload.as_object_mut().unwrap().remove("stack");
+        assert_eq!(
+            pull_info(102, serde_json::from_value(payload).unwrap()).stack,
+            None
+        );
+    }
+
+    #[test]
+    fn stack_response_retains_bottom_to_top_order_and_state() {
+        let response = json!({"number":42,"base":{"ref":"main"},"pull_requests":[
+            {"number":101,"state":"closed","merged_at":"2026-01-01T00:00:00Z"},
+            {"number":102,"state":"open","merged_at":null},
+            {"number":103,"state":"open","merged_at":null}
+        ]});
+        assert_eq!(
+            stack_members(&response).unwrap(),
+            vec![
+                StackMember {
+                    number: 101,
+                    state: PullRequestState::Merged
+                },
+                StackMember {
+                    number: 102,
+                    state: PullRequestState::Open
+                },
+                StackMember {
+                    number: 103,
+                    state: PullRequestState::Open
+                },
+            ]
+        );
+        assert!(stack_members(&json!({"pull_requests":[{"number":101,"state":"open","merged_at":null},{"number":101,"state":"open","merged_at":null}]})).is_err());
+    }
+
+    mod rest_calls {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/rest_calls.rs"
+        ));
+    }
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = provenant_os::fixture::git_command()
@@ -1171,6 +1624,12 @@ mod tests {
             );
             let mut forge = GhForge::new(&project);
             let ssh = forge.repository_identity().unwrap();
+            const HEAD: &str = "1111111111111111111111111111111111111111";
+            assert_eq!(forge.pull_request(7).unwrap().head, HEAD);
+            assert!(forge.approvals(7, HEAD).unwrap().is_empty());
+            assert_eq!(forge.checks(HEAD).unwrap().len(), 1);
+            assert_eq!(forge.merge(7, HEAD, MergeMethod::Merge).unwrap(), HEAD);
+
             git(
                 &project,
                 &[
@@ -1189,6 +1648,19 @@ mod tests {
                 42
             );
             let calls = std::fs::read_to_string(project.join("calls")).unwrap();
+            let landing_calls = calls
+                .split("api repos/{owner}/{repo}/pulls --method POST")
+                .next()
+                .unwrap();
+            assert!(rest_calls::rest_only(landing_calls), "{landing_calls}");
+            assert!(!rest_calls::rest_only(&format!(
+                "{landing_calls}api graphql -f query=x\n"
+            )));
+            assert!(!rest_calls::rest_only(&format!(
+                "{landing_calls}pr list --head branch\n"
+            )));
+            assert!(calls.contains(&format!("sha={HEAD}")), "{calls}");
+            assert!(calls.contains("X-GitHub-Api-Version:2026-03-10"), "{calls}");
             assert_eq!(
                 calls
                     .lines()
@@ -1203,6 +1675,12 @@ mod tests {
         std::fs::write(&gh, r##"#!/bin/sh
 echo "$*" >> calls
 case "$*" in
+  *"--method PUT"*) echo '{"merged":true,"sha":"1111111111111111111111111111111111111111"}' ;;
+  *"check-runs?"*) echo '[{"total_count":0,"check_runs":[]}]' ;;
+  *"statuses?"*) echo '[[]]' ;;
+  *"git/commits/"*) echo '{"tree":{"sha":"2222222222222222222222222222222222222222"}}' ;;
+  *"pulls/7/reviews"*) echo '[[]]' ;;
+  *"pulls/7"*) echo '{"state":"open","head":{"sha":"1111111111111111111111111111111111111111","ref":"feature","repo":{"full_name":"Owner/Repo"}},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main","repo":{"full_name":"Owner/Repo"}},"mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"fixture"}' ;;
   *"--method POST"*) touch posted; echo 'HTTP 422 duplicate' >&2; exit 1 ;;
   *"--paginate"*)
     if test -e posted; then
@@ -1222,6 +1700,110 @@ esac
             .args([
                 "--exact",
                 "pr::landing::adapters::tests::gh_identity_and_revert_adoption_use_real_adapter",
+                "--nocapture",
+            ])
+            .env(MARKER, dir.path())
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn batch_driver_uses_rest_forge_calls() {
+        use crate::pr::landing::{
+            driver,
+            fakes::{FakeAlarms, FakeGate, FakeRepo},
+            policy::LandPolicy,
+        };
+        use provenant_cli::domains::{
+            LandOverride, LandSettings, PrCiMode, PrCiSettings, Publication,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        const MARKER: &str = "PROVENANT_BATCH_REST_CHILD";
+        const HEAD: &str = "1111111111111111111111111111111111111111";
+        if let Some(path) = std::env::var_os(MARKER) {
+            let project = PathBuf::from(path);
+            let mut forge = GhForge::new(&project);
+            let mut repo = FakeRepo {
+                target: "a".repeat(40),
+                valid_commit_ids: true,
+                ..Default::default()
+            };
+            let mut gate = FakeGate {
+                auto: true,
+                ..Default::default()
+            };
+            let settings = LandSettings {
+                batch_wait_seconds: 0,
+                publish: Publication::RestOrdered,
+                pr_ci: PrCiSettings {
+                    mode: PrCiMode::None,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let policy = LandPolicy::resolve(
+                &settings,
+                &Default::default(),
+                None,
+                None,
+                &LandOverride::default(),
+            )
+            .unwrap();
+            let definition = super::super::receipt::tests::definition();
+            let report = driver::run(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &mut FakeAlarms::default(),
+                driver::Request {
+                    numbers: &[7],
+                    target: "main",
+                    settings: &settings,
+                    policy: &policy,
+                    gate: &definition,
+                    shadow: false,
+                    state: &project,
+                },
+            )
+            .unwrap();
+            assert_eq!(report.outcomes.get(&7), Some(&Outcome::Landed));
+            let calls = std::fs::read_to_string(project.join("calls")).unwrap();
+            assert!(rest_calls::rest_only(&calls), "{calls}");
+            assert!(calls.contains(&format!("sha={HEAD}")), "{calls}");
+            assert!(!rest_calls::rest_only(&format!(
+                "{calls}api graphql -f query=x\n"
+            )));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(&gh, r##"#!/bin/sh
+echo "$*" >> calls
+case "$*" in
+  *"--method PUT"*) echo '{"merged":true,"sha":"00000000000000000000000000000000000003e8"}' ;;
+  *"pulls/7/reviews"*) echo '[[{"id":1,"user":{"login":"reviewer"},"state":"APPROVED","commit_id":"1111111111111111111111111111111111111111"}]]' ;;
+  *"pulls/7"*) echo '{"state":"open","head":{"sha":"1111111111111111111111111111111111111111","ref":"feature","repo":{"full_name":"owner/repo"}},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main","repo":{"full_name":"owner/repo"}},"mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"fixture","user":{"login":"author"}}' ;;
+  *) echo '{"html_url":"https://github.com/owner/repo","full_name":"owner/repo"}' ;;
+esac
+"##).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pr::landing::adapters::tests::batch_driver_uses_rest_forge_calls",
                 "--nocapture",
             ])
             .env(MARKER, dir.path())

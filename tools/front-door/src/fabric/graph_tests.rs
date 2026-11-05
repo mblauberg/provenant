@@ -824,6 +824,19 @@ mod result_tests {
     }
 
     #[test]
+    fn graph_status_shows_review_substitution_for_a_completed_member() {
+        let mut run = graph_status_fixture();
+        let member = &mut run.checkpoint.nodes[2];
+        member.state = provenant_fabric_runtime::graph::NodeState::Succeeded;
+        member.ci = None;
+        let mut attempt = run.checkpoint.nodes[0].attempts[1].clone();
+        attempt.review_substitution = true;
+        run.checkpoint.nodes[2].attempts.push(attempt);
+        assert!(super::graph_human(&run).contains("member: Succeeded (review substitute)"));
+        assert!(serde_json::to_value(&run).unwrap()["checkpoint"]["nodes"][2]["attempts"][0]["review_substitution"] == true);
+    }
+
+    #[test]
     fn graph_status_full_shows_node_warnings() {
         let mut run = graph_status_fixture();
         run.checkpoint.nodes[0].outputs = Some(serde_json::from_value(serde_json::json!({
