@@ -320,6 +320,10 @@ impl GraphLimits {
         self.bound("nodes", self.nodes)
     }
 
+    pub fn expansion_depth_bound(&self) -> GraphBound<'static> {
+        self.bound("expansion_depth", self.expansion_depth)
+    }
+
     /// Bounds for the transient composite expansion, including the safety
     /// minima used before admission checks the configured graph limits.
     fn composite_bound(name: &'static str, maximum: usize) -> GraphBound<'static> {

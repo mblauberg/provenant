@@ -5894,6 +5894,12 @@ fn structural_limit_pauses_and_host_limit_change_resumes() {
         paused.checkpoint.pause_code.as_deref(),
         Some("structural_limit")
     );
+    let reason = limits.nodes_bound().refusal(2).unwrap();
+    assert_eq!(document.admit(&limits).unwrap_err(), reason);
+    assert_eq!(
+        paused.checkpoint.pause_reason.as_deref(),
+        Some(reason.as_str())
+    );
     assert!(owner.calls.is_empty());
     let raised = crate::config::GraphLimits { nodes: 2, ..limits };
     let resumed = resume_with_budget(
@@ -5942,6 +5948,14 @@ fn fan_out_and_depth_pause_before_launch() {
             run.checkpoint.pause_code.as_deref(),
             Some("structural_limit")
         );
+        if limits.expansion_depth == 1 {
+            let reason = limits.expansion_depth_bound().refusal(2).unwrap();
+            assert_eq!(document.admit(&limits).unwrap_err(), reason);
+            assert_eq!(
+                run.checkpoint.pause_reason.as_deref(),
+                Some(reason.as_str())
+            );
+        }
         assert!(owner.calls.is_empty());
     }
 }

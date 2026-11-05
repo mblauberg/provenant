@@ -1588,6 +1588,17 @@ stages = [
             .as_str()
             .ok_or("missing admission reason")?;
         assert!(reason.contains(&format!("limits.{key}")), "{key}: {reason}");
+        if key == "expansion_depth" {
+            let limits = provenant_fabric_runtime::config::GraphLimits {
+                expansion_depth: 1,
+                ..Default::default()
+            };
+            assert_eq!(
+                Some(reason),
+                limits.expansion_depth_bound().refusal(2).as_deref()
+            );
+            assert!(reason.contains("domains.fabric.graph.limits"), "{reason}");
+        }
         assert!(value["data"].get("execution").is_none());
         assert!(value["data"].get("validation_error").is_none());
         let submitted = run(false)?;
