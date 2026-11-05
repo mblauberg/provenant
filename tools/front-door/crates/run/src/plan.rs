@@ -54,6 +54,15 @@ pub fn read_only_plan(
     read_only_plan_for_view(state, repo, binding, request, false)
 }
 
+/// A live checkout with no checkout write exceptions or writer lease.
+pub fn live_read_only_plan(
+    repo: &ReadOnlyRepo,
+    binding: &provenant_config::ProjectBinding,
+    request: PlanRequest,
+) -> Result<ConfinedPlan> {
+    ConfinedPlan::new(request.with_live_read_only_repo(repo, binding)?).map_err(RunError::Plan)
+}
+
 /// A read-only plan whose source files are in an independent attempt-owned tree.
 pub fn isolated_read_only_plan(
     state: &provenant_core::StateRoot,

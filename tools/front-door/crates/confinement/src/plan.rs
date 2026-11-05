@@ -72,6 +72,33 @@ impl PlanRequest {
         Ok(self)
     }
 
+    /// Bind a live checkout for reading without granting writes within it.
+    pub fn with_live_read_only_repo(
+        mut self,
+        repo: &crate::ReadOnlyRepo,
+        binding: &provenant_config::ProjectBinding,
+    ) -> Result<Self, PlanError> {
+        let source = PathGrant {
+            path: repo.root_path().to_owned(),
+            scope: PathScope::Subtree,
+        };
+        if self
+            .permissions
+            .write_roots
+            .iter()
+            .chain(std::iter::once(&self.permissions.scratch))
+            .chain(&self.permissions.private_state)
+            .any(|grant| grant.overlaps(&source))
+        {
+            return Err(PlanError::InvalidRoots);
+        }
+        self = self.with_read_only_repo(repo, binding, &ReadOnlyPolicy::default())?;
+        // Provider-owned grants are resolved later. A final protected-root
+        // denial keeps any such overlapping grant from writing the checkout.
+        self.permissions.protected_roots.push(source);
+        Ok(self)
+    }
+
     /// Resolve Git and write exceptions only from the trusted host repository.
     pub fn with_read_only_repo(
         mut self,

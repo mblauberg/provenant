@@ -553,9 +553,12 @@ fn child_access_within_impl(
         ));
     }
     // A child cannot select a different host-bound graph source.
-    if (child.access.source_root.is_some() || child.access.source_identity.is_some())
+    if (child.access.source_root.is_some()
+        || child.access.source_identity.is_some()
+        || child.access.source_live)
         && (child.access.source_root != parent.access.source_root
-            || child.access.source_identity != parent.access.source_identity)
+            || child.access.source_identity != parent.access.source_identity
+            || child.access.source_live != parent.access.source_live)
     {
         return Err(RunError::Validation(
             "child graph source exceeds parent access",

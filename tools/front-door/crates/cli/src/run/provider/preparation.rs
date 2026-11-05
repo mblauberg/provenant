@@ -550,7 +550,8 @@ pub(super) fn prepare_candidates(
         Some(writer) => writer.worktree.path().to_owned(),
         None => source_cwd(registry, task)?,
     };
-    let isolated = writer.is_none() && task.access.source_root.is_some();
+    let isolated =
+        writer.is_none() && task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
         super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
@@ -1402,23 +1403,30 @@ pub(super) fn prepare_candidates(
                     )
                 })
                 .map_err(|error| error.to_string()),
-            None => read_only_plan(roots, project_id, &source, &git, request, isolated).and_then(
-                |mut planned| {
-                    if isolated {
-                        planned.1 = Some(
-                            task.head
-                                .as_deref()
-                                .ok_or("graph source head missing")?
-                                .parse()
-                                .map_err(|_| "invalid graph source head")?,
-                        );
-                        planned.3 = Some(cwd.join(".git"));
-                    } else {
-                        require_source_head(task, planned.1)?;
-                    }
-                    Ok(planned)
-                },
-            ),
+            None => read_only_plan(
+                roots,
+                project_id,
+                &source,
+                &git,
+                request,
+                isolated,
+                task.access.source_live,
+            )
+            .and_then(|mut planned| {
+                if isolated {
+                    planned.1 = Some(
+                        task.head
+                            .as_deref()
+                            .ok_or("graph source head missing")?
+                            .parse()
+                            .map_err(|_| "invalid graph source head")?,
+                    );
+                    planned.3 = Some(cwd.join(".git"));
+                } else {
+                    require_source_head(task, planned.1)?;
+                }
+                Ok(planned)
+            }),
         }) {
             Ok(planned) => planned,
             Err(error) => {
