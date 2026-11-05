@@ -402,14 +402,44 @@ impl Context {
             executable,
             seconds: self.config.limits.peer_seconds,
         };
-        let exchanged = match within {
-            Some(within) => transport.exchange_within(peer, &request, budget, cancel, within),
-            None => transport.exchange(peer, &request, budget, cancel),
+        let started = clock.mono_now();
+        let exchange = |request: &PeerRequest| {
+            let elapsed = Duration::from_micros(
+                clock
+                    .mono_now()
+                    .as_micros()
+                    .saturating_sub(started.as_micros()),
+            );
+            match within {
+                Some(limit) => transport.exchange_within(
+                    peer,
+                    request,
+                    budget,
+                    cancel,
+                    limit.saturating_sub(elapsed),
+                ),
+                None => transport.exchange(peer, request, budget, cancel),
+            }
         };
-        match exchanged
-            .map_err(|error| peer_failure(&peer.destination, &error))?
-            .result
-        {
+        let exchanged = if matches!(request.action, PeerAction::Submit { .. }) {
+            let probe = PeerRequest::new(
+                host,
+                self.identity.host,
+                self.identity.inbox.agent.clone(),
+                request.project.clone(),
+                PeerAction::Health {
+                    extra: Default::default(),
+                },
+            );
+            submit_after_probe(
+                &peer.destination,
+                || exchange(&probe),
+                || exchange(&request),
+            )?
+        } else {
+            exchange(&request).map_err(|error| peer_failure(&peer.destination, &error))?
+        };
+        match exchanged.result {
             PeerResult::Error {
                 data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
                 ..
@@ -433,6 +463,77 @@ impl Context {
         }
         Ok(lease.lease_seconds)
     }
+}
+
+fn submit_after_probe(
+    peer: &str,
+    probe: impl FnOnce() -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerError>,
+    submit: impl FnOnce() -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerError>,
+) -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerFailure> {
+    let response = probe().map_err(|error| {
+        if matches!(
+            error,
+            PeerError::ProtocolMismatch { .. } | PeerError::Version
+        ) {
+            PeerFailure::new(
+                FacadeError::PeerVersion,
+                format!("{peer}: upgrade the peer with `provenant upgrade`"),
+            )
+        } else {
+            peer_failure(peer, &error)
+        }
+    })?;
+    check_submit_health(peer, response.result)?;
+    submit().map_err(|error| peer_failure(peer, &error))
+}
+
+/// Submission support was introduced with the health capability advertisement.
+fn check_submit_health(peer: &str, result: PeerResult) -> Result<(), PeerFailure> {
+    let PeerResult::Health { data, .. } = result else {
+        return Err(PeerFailure::new(
+            FacadeError::HomeUnavailable,
+            format!("{peer}: invalid health response"),
+        ));
+    };
+    let version = data.release.as_deref().and_then(|v| {
+        let core = v.split_once('+').map_or(v, |(core, _)| core);
+        let (core, prerelease) = core
+            .split_once('-')
+            .map_or((core, false), |(core, _)| (core, true));
+        let mut parts = core.split('.').map(str::parse::<u64>);
+        let version = (
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+        );
+        (parts.next().is_none() && !(prerelease && version == (1, 6, 5))).then_some(version)
+    });
+    if version.is_none_or(|version| version < (1, 6, 5)) || data.run_capabilities.is_none() {
+        return Err(PeerFailure::new(
+            FacadeError::PeerVersion,
+            format!(
+                "{peer}: peer release {} cannot report submission support; run `provenant upgrade` on the peer",
+                provenant_fabric_runtime::hosts::plain_text(
+                    data.release.as_deref().unwrap_or("unknown"),
+                    80
+                )
+            ),
+        ));
+    }
+    if !data
+        .run_capabilities
+        .is_some_and(|capabilities| capabilities.submit)
+    {
+        return Err(PeerFailure::new(
+            FacadeError::DispatchRefused {
+                reason: "peer does not support submission".into(),
+                disk: None,
+                fact: None,
+            },
+            format!("{peer}: submission capability is unavailable"),
+        ));
+    }
+    Ok(())
 }
 
 /// Configuration directories do not identify the active harness. Conflicting
@@ -565,6 +666,77 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn submit_preflight_refuses_old_or_incapable_stub_before_launch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::HostId;
+        use provenant_fabric_runtime::{
+            hosts::{PROTOCOL, PeerHealth, PeerResponse, PeerResult},
+            identity::CrossHostProjectKey,
+            runs::RunCapabilities,
+        };
+        use std::{cell::Cell, path::Path};
+        let host = HostId::from_bytes([2; 16]);
+        let project =
+            CrossHostProjectKey::from_home(Path::new("/home/a"), Path::new("/home/a/repo"))?;
+        for (release, submit, code) in [
+            ("1.6.4", true, Some("peer_version")),
+            ("1.6.5", false, Some("dispatch_refused")),
+            ("1.6.5", true, None),
+        ] {
+            let calls = Cell::new(0);
+            let stub = || {
+                calls.set(calls.get() + 1);
+                Ok(PeerResponse {
+                    extra: Default::default(),
+                    version: 1,
+                    protocol: PROTOCOL,
+                    host,
+                    project: project.clone(),
+                    result: PeerResult::Health {
+                        extra: Default::default(),
+                        data: PeerHealth {
+                            extra: Default::default(),
+                            host,
+                            available: true,
+                            execution: Some(submit),
+                            release: Some(release.into()),
+                            run_capabilities: Some(RunCapabilities {
+                                submit,
+                                list: true,
+                                status: true,
+                                wait: true,
+                                cancel: true,
+                                resume: true,
+                                output: true,
+                                events: true,
+                            }),
+                            readiness: None,
+                        },
+                    },
+                })
+            };
+            let result = super::submit_after_probe("worker", stub, stub);
+            if let Some(code) = code {
+                let error = result.unwrap_err();
+                assert_eq!(error.error.code(), code);
+                assert_eq!(calls.get(), 1);
+                if code == "peer_version" {
+                    assert!(
+                        error
+                            .detail
+                            .unwrap_or_default()
+                            .contains("provenant upgrade")
+                    );
+                }
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(calls.get(), 2);
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn prompt_limit_origin_distinguishes_default_from_explicit_same_value()
     -> Result<(), Box<dyn std::error::Error>> {
