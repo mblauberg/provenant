@@ -17,6 +17,21 @@ fn scratch_prepare_io_error_retains_its_cause() {
         if path == ".provenant/scratch"));
 }
 
+#[test]
+fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "waiter", "plan_digest": "plan", "nodes": []
+        }))?;
+    let now = provenant_core::WallTime::from_micros(1_000_000)?;
+    assert!(graph_wake_due(&checkpoint, now));
+    checkpoint.wake_at = Some(provenant_core::WallTime::from_micros(2_000_000)?);
+    assert!(!graph_wake_due(&checkpoint, now));
+    assert!(graph_wake_due(&checkpoint, checkpoint.wake_at.unwrap()));
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(dead_code)] // The worktree driver includes these helpers without libtest.
 pub(crate) mod peer_tests {

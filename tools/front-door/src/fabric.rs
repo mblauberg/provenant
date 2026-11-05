@@ -1143,7 +1143,7 @@ fn graph_wake_due(
             )
         })
     } else {
-        checkpoint.wake_at.is_some_and(|deadline| now >= deadline)
+        checkpoint.wake_at.is_none_or(|deadline| now >= deadline)
     }
 }
 fn landing_error(error: &(dyn std::error::Error + 'static)) -> FacadeError {
