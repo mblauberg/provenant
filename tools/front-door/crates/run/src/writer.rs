@@ -25,6 +25,110 @@ use std::{
 
 pub(crate) const SETUP_WAIT_LOCK: &str = "setup-wait.lock";
 
+// Serialise queue changes separately from the long-lived setup lock. Each
+// ticket is itself locked, so a killed waiter can be discarded by its peers.
+fn queued_setup_lock(
+    common: &Directory,
+    wait_seconds: u64,
+    cancel: &CancelToken,
+    clock: &dyn provenant_core::Clock,
+) -> Result<provenant_os::fs::LockGuard> {
+    use provenant_core::{DurationMicros, Pause, ThreadPause, WaitBudget};
+    use provenant_os::fs::LockMode;
+
+    let budget = WaitBudget::cli(clock.mono_now(), wait_seconds)
+        .map_err(error("set writer setup lock budget", None))?;
+    let timeout = || RunError::SetupLockTimeout {
+        seconds: wait_seconds,
+    };
+    let map_lock = |failure| match failure {
+        FsError::LockTimeout { .. } => timeout(),
+        failure => failure.into(),
+    };
+    let queue_name = OsStr::new("provenant-lane-setup-queue");
+    match common.mkdir(queue_name, 0o700) {
+        Ok(()) => {}
+        Err(failure) if failure.is_exists() => {}
+        Err(failure) => return Err(failure.into()),
+    }
+    let queue = common.open_directory(queue_name)?;
+    let manager = OsStr::new("queue.lock");
+    let guard = queue
+        .lock(manager, LockMode::Exclusive, budget, cancel, clock)
+        .map_err(map_lock)?;
+    // Lock files are stable inodes. Disposable markers name a sequence and a
+    // reusable slot; the queue mutex protects marker creation and removal.
+    let scan = |own_slot: Option<u64>| -> Result<Vec<(u64, u64)>> {
+        let mut active = Vec::new();
+        for item in queue.entries()? {
+            let item = item?;
+            let Some((sequence, slot)) = item
+                .to_str()
+                .and_then(|name| name.strip_prefix("ticket-"))
+                .and_then(|name| name.split_once('-'))
+                .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)))
+            else {
+                continue;
+            };
+            if Some(slot) == own_slot {
+                active.push((sequence, slot));
+                continue;
+            }
+            let slot_name = format!("slot-{slot}.lock");
+            match queue.try_lock_existing(OsStr::new(&slot_name), LockMode::Exclusive) {
+                Ok(_stale) => queue.unlink(&item)?,
+                Err(FsError::LockTimeout { .. }) => active.push((sequence, slot)),
+                Err(failure) => return Err(failure.into()),
+            }
+        }
+        Ok(active)
+    };
+    let active = scan(None)?;
+    let sequence = active
+        .iter()
+        .map(|(sequence, _)| *sequence)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(RunError::Validation("setup queue exhausted"))?;
+    let slot = (0..)
+        .find(|slot| !active.iter().any(|(_, used)| used == slot))
+        .ok_or(RunError::Validation("setup queue exhausted"))?;
+    let slot_name = format!("slot-{slot}.lock");
+    let held = queue.try_lock(OsStr::new(&slot_name), LockMode::Exclusive)?;
+    let ticket = format!("ticket-{sequence}-{slot}");
+    let ticket_name = OsStr::new(&ticket);
+    queue.create_new(ticket_name)?;
+    drop(guard);
+    loop {
+        let guard = queue
+            .lock(manager, LockMode::Exclusive, budget, cancel, clock)
+            .map_err(map_lock)?;
+        if budget.remaining(clock.mono_now()).as_micros() == 0 {
+            queue.unlink(ticket_name)?;
+            return Err(timeout());
+        }
+        let first = scan(Some(slot))?
+            .iter()
+            .all(|(other, _)| *other >= sequence);
+        if first {
+            match common
+                .try_lock_existing(OsStr::new("provenant-lane-setup.lock"), LockMode::Exclusive)
+            {
+                Ok(setup) => {
+                    queue.unlink(ticket_name)?;
+                    drop(held);
+                    return Ok(setup);
+                }
+                Err(FsError::LockTimeout { .. }) => {}
+                Err(failure) => return Err(failure.into()),
+            }
+        }
+        drop(guard);
+        ThreadPause.wait(DurationMicros::from_micros(20_000), cancel);
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     pub(crate) static FAIL_IMPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -631,24 +735,7 @@ fn prepare_writer_git(
             )
             .ok()
     });
-    let config_lock = writer
-        .worktree
-        .repo()
-        .common_dir()
-        .lock(
-            setup_name,
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), wait_seconds)
-                .map_err(error("set writer setup lock budget", None))?,
-            &cancel,
-            &clock,
-        )
-        .map_err(|failure| match failure {
-            provenant_os::fs::FsError::LockTimeout { .. } => RunError::SetupLockTimeout {
-                seconds: wait_seconds,
-            },
-            failure => anchored_error(failure, writer.worktree.repo().common_git_dir()),
-        })?;
+    let config_lock = queued_setup_lock(setup_dir, wait_seconds, &cancel, &clock)?;
     drop(waiting);
     let old_repo = writer.worktree.repo();
     let project = old_repo
@@ -1059,6 +1146,61 @@ mod cargo_setup_tests {
     use provenant_os::fs::LockMode;
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // Exercise real concurrent waiters.
+    fn setup_lock_serves_ten_slow_waiters_in_order()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let common = Directory::open_anchor(temp.path())?;
+        let initial =
+            common.try_lock(OsStr::new("provenant-lane-setup.lock"), LockMode::Exclusive)?;
+        let (send, receive) = std::sync::mpsc::channel();
+        let mut threads = Vec::new();
+        for index in 0..10 {
+            let path = temp.path().to_owned();
+            let send = send.clone();
+            threads.push(std::thread::spawn(move || {
+                let common = Directory::open_anchor(&path).unwrap();
+                let _lock = queued_setup_lock(
+                    &common,
+                    10,
+                    &CancelToken::new(),
+                    &provenant_os::clock::SystemClock::new(),
+                )
+                .unwrap();
+                send.send(index).unwrap();
+                std::thread::sleep(Duration::from_millis(25));
+            }));
+            let until = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let count = std::fs::read_dir(temp.path().join("provenant-lane-setup-queue"))
+                    .map(|entries| {
+                        entries
+                            .filter_map(std::result::Result::ok)
+                            .filter(|entry| {
+                                entry.file_name().to_string_lossy().starts_with("ticket-")
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                if count == index + 1 {
+                    break;
+                }
+                assert!(std::time::Instant::now() < until, "waiter did not queue");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        drop(initial);
+        let order: Vec<_> = (0..10)
+            .map(|_| receive.recv_timeout(Duration::from_secs(10)).unwrap())
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(order, (0..10).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    #[test]
     #[allow(clippy::disallowed_methods)] // Exercise a real process and wall-clock deadline.
     fn setup_lock_recovers_after_holder_dies() -> std::result::Result<(), Box<dyn std::error::Error>>
     {
@@ -1092,7 +1234,12 @@ mod cargo_setup_tests {
         child.kill()?;
         child.wait()?;
         assert!(matches!(held, Err(FsError::LockTimeout { .. })));
-        let _recovered = directory.try_lock_existing(name, LockMode::Exclusive)?;
+        let _recovered = queued_setup_lock(
+            &directory,
+            5,
+            &CancelToken::new(),
+            &provenant_os::clock::SystemClock::new(),
+        )?;
         Ok(())
     }
 

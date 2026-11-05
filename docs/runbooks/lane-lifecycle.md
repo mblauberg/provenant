@@ -133,7 +133,8 @@ After an unlaunched writer is rejected, reconciliation removes its retained
 Git pin. Status and wait queue recovery. To retry directly, run
 `provenant reconcile --id <run>` after resolving any reported cause.
 
-Writers wait up to 120 seconds for the repository Git setup lock. Set
+Writers queue in arrival order for the repository Git setup lock, waiting up to
+four hours by default. A dead waiter or holder releases its place. Set
 `domains.fabric.lanes.setup_lock_wait_seconds` to a value from 1 to 14400 to
 change this bound; the lock continues to serialise setup for the repository.
 While a writer waits, `lanes` and `status` name `provenant-lane-setup.lock` as

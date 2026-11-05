@@ -83,7 +83,7 @@ pub struct LaneBuildSettings {
 pub const DEFAULT_MAX_WRITER_LANES: u64 = 40;
 pub const DEFAULT_MAX_PROJECT_WRITER_LANES: u64 = 30;
 pub const DEFAULT_BUILD_WAIT_MINUTES: u64 = 30;
-pub const DEFAULT_SETUP_LOCK_WAIT_SECONDS: u64 = 120;
+pub const DEFAULT_SETUP_LOCK_WAIT_SECONDS: u64 = 14400;
 /// Default lane port space: 64 blocks of 16 ports from 30000, below the
 /// ephemeral ranges of macOS and Linux and one block per possible writer lane.
 pub const DEFAULT_LANE_PORT_BASE: u64 = 30000;
@@ -664,7 +664,7 @@ mod build_tests {
     fn setup_lock_wait_validates_bounds_and_automatic_default() {
         let defaults: LaneBuildSettings =
             toml_edit::de::from_str("setup_lock_wait_seconds = -1").unwrap();
-        assert_eq!(defaults.setup_lock_wait_seconds(), 120);
+        assert_eq!(defaults.setup_lock_wait_seconds(), 14400);
         let configured: LaneBuildSettings =
             toml_edit::de::from_str("setup_lock_wait_seconds = 17").unwrap();
         assert!(configured.invalid_keys().is_empty());
