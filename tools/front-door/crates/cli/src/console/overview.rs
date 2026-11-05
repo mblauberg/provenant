@@ -1,6 +1,6 @@
 //! Compact local menu read, composed from bounded owner batches.
 use super::{Error, Project};
-use provenant_core::{ActorId, CancelToken, ProjectId, Roots};
+use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, OverviewState, RunStore};
 use serde_json::{Value, json};
@@ -139,11 +139,20 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                     let Some(label) = labels.get(&item.project_id.to_string()) else {
                         continue;
                     };
-                    let (state, active, needs_attention, outcome_value) = lane_state(item.state);
+                    let active = !matches!(item.state, OverviewState::Terminal(_));
+                    let needs_attention = needs_attention(item.state);
+                    let row = crate::run::project_lane(
+                        &item.record,
+                        &[],
+                        roots.state.as_path(),
+                        &Default::default(),
+                        clock.wall_now().ok(),
+                        false,
+                    );
                     running += usize::from(active);
                     attention += usize::from(needs_attention);
                     if active || needs_attention {
-                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"run_id":item.run_id,"task_id":item.task_id,"attempt_id":item.attempt_id,"task_label":item.title,"state":state,"outcome":outcome_value,"attention":needs_attention}));
+                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"run_id":row.run_id,"task_id":row.task_id,"attempt_id":row.attempt_id,"task_label":item.title,"state":row.state,"cause":row.cause,"retry_of":row.retry_of,"superseded_by":row.superseded_by,"attention":needs_attention}));
                     }
                 }
                 if batch.truncated {
@@ -166,21 +175,8 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
     )
 }
 
-/// A lane's coarse state, whether it is active, whether it needs attention, and
-/// the terminal outcome in the snake_case vocabulary the board and tree emit.
-fn lane_state(state: OverviewState) -> (&'static str, bool, bool, Value) {
-    match state {
-        OverviewState::Queued => ("queued", true, false, Value::Null),
-        OverviewState::Starting => ("starting", true, false, Value::Null),
-        OverviewState::Running => ("running", true, false, Value::Null),
-        OverviewState::Settling => ("settling", true, false, Value::Null),
-        OverviewState::Terminal(outcome) => {
-            use provenant_run::Outcome;
-            let attention = !matches!(outcome, Outcome::Succeeded | Outcome::Cancelled);
-            let outcome = serde_json::to_value(outcome).unwrap_or(Value::Null);
-            ("terminal", false, attention, outcome)
-        }
-    }
+fn needs_attention(state: OverviewState) -> bool {
+    matches!(state, OverviewState::Terminal(outcome) if !matches!(outcome, provenant_run::Outcome::Succeeded | provenant_run::Outcome::Cancelled))
 }
 
 #[cfg(test)]
@@ -188,21 +184,16 @@ mod comparison_tests {
     use super::*;
 
     #[test]
-    fn terminal_lane_carries_its_outcome() {
-        use provenant_run::Outcome;
-        assert_eq!(
-            lane_state(OverviewState::Terminal(Outcome::TimedOut)),
-            ("terminal", false, true, json!("timed_out"))
-        );
-        assert_eq!(
-            lane_state(OverviewState::Terminal(Outcome::Succeeded)),
-            ("terminal", false, false, json!("succeeded"))
-        );
-        assert_eq!(
-            lane_state(OverviewState::Running),
-            ("running", true, false, Value::Null)
-        );
+    fn terminal_failures_need_attention() {
+        assert!(needs_attention(OverviewState::Terminal(
+            provenant_run::Outcome::TimedOut
+        )));
+        assert!(!needs_attention(OverviewState::Terminal(
+            provenant_run::Outcome::Succeeded
+        )));
+        assert!(!needs_attention(OverviewState::Running));
     }
+
     use provenant_fabric_runtime::inbox::{OverviewBatch, OverviewItem};
 
     #[test]

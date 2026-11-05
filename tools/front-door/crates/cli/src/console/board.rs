@@ -197,9 +197,17 @@ pub(super) fn read(
             }
             let attention = matches!(attempt.state, AttemptState::Terminal { outcome, .. }
                 if !matches!(outcome, Outcome::Succeeded | Outcome::Cancelled));
-            lanes.push(json!({"lane_id":{"host":host,"run_id":attempt.run_id,
-                "task_id":attempt.task_id,"attempt_id":attempt.attempt_id},
-                "chair":chair,"metadata":lane,"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),
+            let projected = crate::run::project_lane(
+                attempt,
+                &waits,
+                roots.state.as_path(),
+                &Default::default(),
+                clock.wall_now().ok(),
+                false,
+            );
+            lanes.push(json!({"lane_id":{"host":host,"run_id":projected.run_id,
+                "task_id":projected.task_id,"attempt_id":projected.attempt_id},
+                "chair":chair,"metadata":{"run":lane.run, "attempt":projected},"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),
                 "attention":attention,"usage_coverage":{"known":known,"missing":missing},
                 "observation_coverage":if observed.contains(&attempt.attempt_id) { "complete" } else { "unavailable" }}));
         }
@@ -567,7 +575,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|r| r["metadata"]["attempt"]["state"] == json!({"state":"queued"}))
+                .all(|r| r["metadata"]["attempt"]["state"] == json!("queued"))
         );
         Ok(())
     }

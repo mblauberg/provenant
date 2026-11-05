@@ -899,7 +899,7 @@ mod review_shape_tests {
     }
     #[test]
     fn text_reports_partial_run_and_actual_receipt() {
-        let data = json!({"shape":"deep","selection_source":"by_risk","reviewers":[{"run_id":"abc","operation_id":"op","applied_route":{"model":"codex/test","effort":"high"},"state":"failed","verdict":"unknown","result_path":"/output","substitution":true}]});
+        let data = json!({"shape":"deep","selection_source":"by_risk","reviewers":[{"run_id":"abc","operation_id":"op","applied_route":{"model":"codex/test","effort":"high"},"state":"failed","verdict":"unknown","result_path":{"kind":"path","root":"/","relative":{"encoding":"utf8","path":"output"}},"substitution":true}]});
         let text = review_text(&data);
         for expected in [
             "deep (by_risk; size=unknown; kind=unknown; risk=unknown)",
