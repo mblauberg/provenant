@@ -338,6 +338,7 @@ impl FileJournal {
             if metadata.modified_ns >= before_ns {
                 continue;
             }
+            collect_generated_scratch(&stored.execution)?;
             journal.directory.unlink(&name)?;
             for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
                 match journal.directory.unlink(&sidecar) {
@@ -695,6 +696,85 @@ fn stored_pending(stored: &StoredCheckpoint) -> bool {
             .asks
             .iter()
             .any(|ask| !ask.closed && (ask.resolved || checkpoint.cancelled))
+}
+
+/// Remove only content-addressed preset documents equal to this graph's retained
+/// document. The execution directory may already have been removed.
+fn collect_generated_scratch(execution: &GraphExecution) -> Result<(), JournalError> {
+    let directory = match Directory::open_anchor(&execution.directory) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut directory = directory;
+    for component in [".provenant", "scratch", "graphs"] {
+        directory = match directory.open_verified_directory(OsStr::new(component)) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+    }
+    let metadata = directory.metadata()?;
+    if metadata.uid != provenant_os::fs::effective_uid() || metadata.mode & 0o077 != 0 {
+        return Ok(());
+    }
+    let mut removed = false;
+    for entry in directory.entries()? {
+        let name = entry?;
+        let Some(filename) = name.to_str() else {
+            continue;
+        };
+        let Some(hash) = filename
+            .strip_prefix("preset-")
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            continue;
+        }
+        let Ok(metadata) = directory.metadata_at(&name, false) else {
+            continue;
+        };
+        if metadata.uid != provenant_os::fs::effective_uid()
+            || metadata.mode & 0o077 != 0
+            || metadata.links != 1
+        {
+            continue;
+        }
+        let Ok(bytes) = directory.read_stable(&name, 8_388_608) else {
+            continue;
+        };
+        if CanonicalV1::file_digest(&bytes)
+            .to_string()
+            .strip_prefix("sha256:")
+            != Some(hash)
+        {
+            continue;
+        }
+        if serde_json::from_slice::<GraphDocument>(&bytes)
+            .ok()
+            .as_ref()
+            != Some(&execution.document)
+        {
+            continue;
+        }
+        match directory.unlink(&name) {
+            Ok(()) => removed = true,
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if removed {
+        directory
+            .sync()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+    }
+    Ok(())
 }
 
 fn pending_marker_name(graph_id: &str) -> OsString {
