@@ -5825,6 +5825,27 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
             false,
         ),
         (
+            "reader review required before launch",
+            AccessMode::ReadOnly,
+            false,
+            AttemptOutcome::ReviewRequired,
+            false,
+        ),
+        (
+            "reader unclassified failure after launch",
+            AccessMode::ReadOnly,
+            true,
+            AttemptOutcome::OtherFailure,
+            false,
+        ),
+        (
+            "reader deadline before launch",
+            AccessMode::ReadOnly,
+            false,
+            AttemptOutcome::DeadlineExceeded,
+            false,
+        ),
+        (
             "writer auth refusal after launch",
             AccessMode::WorktreeWrite,
             true,

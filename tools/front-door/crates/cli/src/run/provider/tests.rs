@@ -8,9 +8,44 @@ fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
         ProviderError::CredentialNotFound,
         ProviderError::CredentialExpired,
     ] {
-        assert_eq!(
-            provider_preparation_fallback(&error),
-            FallbackOutcome::AuthRequired
+        let outcome = provider_preparation_fallback(&error);
+        assert_eq!(outcome, FallbackOutcome::AuthRequired);
+        let policy = provenant_routing::FallbackPolicy {
+            outcome,
+            handoff: provenant_routing::FallbackHandoff::Local,
+            custody_released: true,
+            read_only: false,
+            budget_remaining: true,
+            pinned: false,
+        };
+        assert!(policy.allows_switch());
+        assert!(
+            !provenant_routing::FallbackPolicy {
+                pinned: true,
+                ..policy
+            }
+            .allows_switch()
+        );
+        assert!(
+            !provenant_routing::FallbackPolicy {
+                budget_remaining: false,
+                ..policy
+            }
+            .allows_switch()
+        );
+        assert!(
+            !provenant_routing::FallbackPolicy {
+                custody_released: false,
+                ..policy
+            }
+            .allows_switch()
+        );
+        assert!(
+            !provenant_routing::FallbackPolicy {
+                handoff: provenant_routing::FallbackHandoff::UncertainOrLaunched,
+                ..policy
+            }
+            .allows_switch()
         );
     }
     for error in [
