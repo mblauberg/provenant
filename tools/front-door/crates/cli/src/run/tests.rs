@@ -6276,6 +6276,78 @@ fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
 }
 
 #[test]
+fn streamed_deltas_stay_joined_without_a_message_boundary() {
+    let route = run::RouteRecord {
+        provider: Some("agy".into()),
+        ..Default::default()
+    };
+    let delta = |text: &str| {
+        json!({"event":"step_update","step_update":{"conversation_id":"s","step_type":"agent_response","text_delta":text}})
+            .to_string()
+    };
+    let stream = [
+        json!({"event":"init","conversation_id":"s","init":{"model":"m"}}).to_string(),
+        delta("VERDICT"),
+        delta(": PA"),
+        delta("SS"),
+    ]
+    .join("\n");
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/unused"),
+        )
+        .unwrap();
+    assert_eq!(decoded.result, "VERDICT: PASS");
+}
+
+#[test]
+fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/gpt-6.1-terra".into()),
+        ..Default::default()
+    };
+    let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"n\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+    let message = |text: &str| {
+        serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":text}})
+            .to_string()
+    };
+    let stream = [
+        r#"{"type":"thread.started","thread_id":"t"}"#.to_owned(),
+        message("Checking the commit."),
+        message("VERDICT: PASS"),
+        message(handoff),
+        r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#.to_owned(),
+    ]
+    .join("\n");
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/unused"),
+        )
+        .unwrap();
+    let mut capture = provenant_records::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
+    capture.push(decoded.result.as_bytes());
+    let captured = capture.finish();
+    let declared = captured
+        .handoff
+        .expect("handoff parses")
+        .expect("handoff found");
+    assert_eq!(declared.note, "n");
+    assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"));
+    assert!(
+        decoded
+            .result
+            .starts_with("Checking the commit.\nVERDICT: PASS\n")
+    );
+}
+
+#[test]
 fn codex_usage_records_cache_read_apart_from_uncached_input() {
     let route = run::RouteRecord {
         provider: Some("codex".into()),

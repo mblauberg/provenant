@@ -10,6 +10,19 @@ pub struct PullRequestInfo {
     pub author: String,
     pub state: PullRequestState,
     pub merged_commit: Option<String>,
+    pub stack: Option<StackMembership>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackMembership {
+    pub number: u64,
+    pub size: u64,
+    pub position: u64,
+    pub base_branch: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackMember {
+    pub number: u64,
+    pub state: PullRequestState,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PullRequestState {
@@ -25,10 +38,18 @@ pub struct Approval {
 pub trait Forge {
     fn set_project_path(&mut self, _path: &std::path::Path) {}
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;
+    /// The stack's pull requests in bottom-to-top order.
+    fn stack_members(&mut self, number: u64) -> Result<Vec<StackMember>, LandingError>;
     fn repository_identity(&mut self) -> Result<String, LandingError>;
     fn target_branch(&mut self) -> Result<String, LandingError>;
     fn head(&mut self, number: u64) -> Result<String, LandingError>;
     fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError>;
+    /// Latest decisive review for shadow reporting, if one is available.
+    fn latest_review(
+        &mut self,
+        number: u64,
+        author: &str,
+    ) -> Result<Option<super::head_move::ReviewedHead>, LandingError>;
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
     fn checks_with_timeout(
         &mut self,
@@ -38,6 +59,13 @@ pub trait Forge {
         self.checks(commit)
     }
     fn merge(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError>;
+    /// Merge a stack member through the forge's asynchronous operation.
+    fn merge_stack(
         &mut self,
         number: u64,
         head: &str,
@@ -73,6 +101,20 @@ pub trait Forge {
 pub enum MergeTree {
     Tree(String),
     Conflict,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeltaFile {
+    pub path: String,
+    pub added: u64,
+    pub deleted: u64,
+    /// True only for a regular text file with no protected, dependency,
+    /// configuration, rename, mode, symlink or submodule change.
+    pub eligible: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeltaStats {
+    pub complete: bool,
+    pub files: Vec<DeltaFile>,
 }
 pub trait Repo {
     fn project_path(&self) -> Option<&std::path::Path> {
@@ -111,6 +153,8 @@ pub trait Repo {
     fn delete_ref(&mut self, name: &str, expected_old: &str) -> Result<(), LandingError>;
     fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError>;
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError>;
+    fn parents(&mut self, commit: &str) -> Result<Vec<String>, LandingError>;
+    fn review_delta(&mut self, old: &str, new: &str) -> Result<DeltaStats, LandingError>;
 }
 pub trait GateRunner {
     fn set_project_path(&mut self, _path: &std::path::Path) {}

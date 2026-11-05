@@ -4451,6 +4451,7 @@ impl BoundGraphOwner<'_> {
                 measured_size: measure.measured.size.unwrap_or("unknown").to_owned(),
                 shape: panel.shape.clone(),
                 source,
+                substitutions: Vec::new(),
             }),
             extra: Default::default(),
             source: node.id.clone(),
@@ -6131,7 +6132,16 @@ impl Factory {
                     .ok_or(FacadeError::InvalidInput { detail: None })?;
                 Some(
                     provenant_run::resolve_git_base(&git, &self.cwd, reference)
-                        .map_err(run_error)?
+                        .map_err(|error| match error {
+                            provenant_run::RunError::InvalidBase(_) => {
+                                FacadeError::DispatchRefused {
+                                    fact: None,
+                                    disk: None,
+                                    reason: error.to_string(),
+                                }
+                            }
+                            error => run_error(error),
+                        })?
                         .parse()
                         .map_err(|_| FacadeError::StateCorrupt)?,
                 )

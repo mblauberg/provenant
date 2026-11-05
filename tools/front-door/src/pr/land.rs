@@ -1286,6 +1286,7 @@ pub(crate) fn execute(
             failure_code = "HEAD_MOVED";
             return Err(format!("pull request head moved to {current}").into());
         }
+        let stacked = rest.stack.is_some();
         let view = from_rest(rest);
         let attribution = std::cell::OnceCell::new();
         if !view.cross_repository {
@@ -1332,8 +1333,42 @@ pub(crate) fn execute(
             failure_code = "MERGE_FAILED";
             // A merge that errors or times out may still have taken effect, so
             // the PR's own state decides the outcome, never the command's.
-            let merge_error = merge(&reader, &text, current).err();
-            match read_pull(&reader, &text) {
+            let merge_error = if stacked {
+                let mut forge = super::landing::adapters::GhForge::new(&project);
+                super::landing::publish::merge_member(
+                    &mut forge,
+                    number,
+                    &current.to_string(),
+                    provenant_cli::domains::MergeMethod::Merge,
+                )
+                .map(|_| ())
+                .map_err(|error| -> Box<dyn std::error::Error> {
+                    match error {
+                        super::landing::LandingError::PublicationUnknown => super::wait::failure(
+                            "MERGE_STATE_UNKNOWN",
+                            "asynchronous merge may still be in progress; rerun land to reconcile",
+                        ),
+                        other => Box::new(other),
+                    }
+                })
+                .err()
+            } else {
+                merge(&reader, &text, current).err()
+            };
+            let observed = if stacked {
+                super::rest_pull(&|argv| reader.read(argv), &text).and_then(|pull| {
+                    if pull.merged_at.is_some() && pull.head.sha != current {
+                        return Err(super::wait::failure(
+                            "HEAD_MOVED",
+                            "the merged pull request does not match the verified head",
+                        ));
+                    }
+                    Ok(from_rest(pull))
+                })
+            } else {
+                read_pull(&reader, &text)
+            };
+            match observed {
                 Ok(view) if view.state == "MERGED" => {
                     merge_note = merge_error.map(|error| error.to_string());
                     view
@@ -1852,6 +1887,81 @@ mod graph_land_tests {
             repair: Some("provenant land 7".into()),
         });
         report
+    }
+
+    #[test]
+    fn graph_land_resolves_its_pull_request_via_rest() {
+        use std::os::unix::fs::PermissionsExt;
+        const MARKER: &str = "PROVENANT_GRAPH_LAND_REST_CHILD";
+        const HEAD: &str = "1111111111111111111111111111111111111111";
+        mod rest_calls {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/rest_calls.rs"
+            ));
+        }
+        if let Some(path) = std::env::var_os(MARKER) {
+            let project = std::path::PathBuf::from(path);
+            let observed = graph_land(
+                &project,
+                &project,
+                "feature",
+                HEAD,
+                false,
+                &provenant_confinement::worktrees::SystemWorkerObserver,
+            );
+            assert!(
+                matches!(observed, LandObservation::Pending { reason } if reason.contains("#7 awaits"))
+            );
+            let calls = std::fs::read_to_string(project.join("calls")).unwrap();
+            assert!(rest_calls::rest_only(&calls), "{calls}");
+            assert!(!rest_calls::rest_only(&format!(
+                "{calls}pr list --head feature\n"
+            )));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(&gh, r##"#!/bin/sh
+echo "$*" >> calls
+case "$*" in
+  *"/pulls"*) echo '[[{"number":7,"state":"open","merged_at":null,"head":{"sha":"1111111111111111111111111111111111111111","ref":"feature","repo":{"full_name":"owner/repo"}},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main","repo":{"full_name":"owner/repo"}}}]]' ;;
+  *) echo '{"owner":{"login":"owner"}}' ;;
+esac
+"##).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let argv = [
+            std::env::current_exe().unwrap().into_os_string(),
+            "--exact".into(),
+            "pr::land::graph_land_tests::graph_land_resolves_its_pull_request_via_rest".into(),
+            "--nocapture".into(),
+        ];
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| key != MARKER && key != "PATH")
+            .collect();
+        env.push((MARKER.into(), dir.path().into()));
+        env.push(("PATH".into(), path.into()));
+        let output = provenant_os::sys::fixture_command(
+            &argv,
+            &env,
+            &std::env::current_dir().unwrap(),
+            false,
+        )
+        .unwrap()
+        .output()
+        .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

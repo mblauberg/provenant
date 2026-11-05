@@ -442,13 +442,21 @@ most 32 entries and one-line summaries; a lens with no
 findings emits an empty array. A required
 findings block missing from a lens result makes that lens unavailable.
 
-The `review-council` lens group accepts partial success. A lens that fails or
+The `review-council` lens group accepts partial success. A settled task failure
+in a lens or verifier, or a verified local preparation refusal, may be retried
+on its next route as a fresh attempt on the same node.
+`domains.fabric.graph.limits.review_substitutions` bounds these
+retries per member (default 1; 0 disables them). Graph status and a deferred
+review's resolved panel record the substitute. An unresolved launch stays on
+its original attempt. A replacement prefers a different family, while a fresh
+attempt in the same family remains available when no other family is ready.
+
+A lens that fails or
 returns no valid findings block is recorded as unavailable with its cause, and
 only successful lenses flow to verification and synthesis, after an
 "Unavailable lenses" list that is never truncated. The group still fails with
 `coverage_below_minimum: N of M lenses succeeded, minimum K; unavailable: ...`
-when fewer than `min_reviews` lenses succeed, which stops the council for the
-chair to substitute a lens through a different lens or decide. `min_reviews`
+when fewer than `min_reviews` lenses succeed. `min_reviews`
 currently defaults by `risk_tier` (`substantial` 1,
 `crucial` and `terminal` 2) and is at least 1; it is capped at the lens count.
 A lens that ran and found blocking issues still blocks through its verdict.

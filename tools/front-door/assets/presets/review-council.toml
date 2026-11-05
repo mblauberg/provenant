@@ -49,7 +49,7 @@ review_shape = { type = "string", default = "", doc = "Review depth override fro
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 kind = { type = "string", default = "", doc = "Change kind, for example refactor, integration, or docs." }
 size = { type = "string", default = "", doc = "Review size override: small, medium, or large." }
-min_reviews = { type = "integer", default = 0, min = 0, max = 32, doc = "Lenses that must succeed. Fewer fails the lens group, which stops the council for the chair to substitute a lens or decide. 0 takes the review ladder minimum for risk_tier, at least 1." }
+min_reviews = { type = "integer", default = 0, min = 0, max = 32, doc = "Lenses that must succeed. Failed lenses can be retried within the substitution limit; a short panel stops with the missing lenses. 0 takes the review ladder minimum for risk_tier, at least 1." }
 verifiers = { type = "integer", default = 1, min = 0, max = 1, doc = "Verifier stages between the lenses and the synthesis, preferably from another model family; 0 skips verification." }
 verifier_tier = { type = "string", default = "verifier", doc = "Route for the verifier. Define a route named verifier in another model family; without one the senior route is used and the substitution is recorded." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses: security, concurrency, terminal." }
