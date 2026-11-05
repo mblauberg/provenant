@@ -132,19 +132,18 @@ fn apply_to(
         "PROVENANT_PRIMARY_CHECKOUT".into(),
         primary.as_os_str().to_owned(),
     ));
-    if let Some(gitdir) = context.worktree_gitdir {
+    if let Some(gitdir) = context
+        .worktree_gitdir
+        .filter(|gitdir| context.writer || Some(*gitdir) != context.common_git)
+    {
         env.push((
             "PROVENANT_WORKTREE_GITDIR".into(),
             gitdir.as_os_str().to_owned(),
         ));
-        // A read-only plan already grants the common Git directory. Avoid
-        // adding a duplicate grant when its worktree is the primary checkout.
-        if context.writer || Some(gitdir) != context.common_git {
-            profile.spec.runtime_reads.push(PathGrant {
-                path: gitdir.to_owned(),
-                scope: PathScope::Subtree,
-            });
-        }
+        profile.spec.runtime_reads.push(PathGrant {
+            path: gitdir.to_owned(),
+            scope: PathScope::Subtree,
+        });
     }
     let mut shared = Vec::new();
     let mut exec = Vec::new();
@@ -435,10 +434,10 @@ mod tests {
                 project: "example",
             },
         );
-        assert!(env.contains(&(
-            "PROVENANT_WORKTREE_GITDIR".into(),
-            common.as_os_str().to_owned()
-        )));
+        assert!(
+            !env.iter()
+                .any(|(key, _)| key == "PROVENANT_WORKTREE_GITDIR")
+        );
         assert!(!profile.spec.runtime_reads.contains(&grant(common.clone())));
         Ok(())
     }
