@@ -198,6 +198,8 @@ pub(crate) struct Reservation {
     pub descendants: Vec<ProcessIdentity>,
     pub census_incomplete: bool,
     pub omitted_descendants: u64,
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 impl Reservation {
     pub(crate) fn validate(&self) -> Result<()> {
@@ -409,16 +411,8 @@ pub(crate) fn acquire_writer_with_observer(
             other => other.into(),
         })?;
     let lock_directory = directory;
-    // Old guardians kept their evidence in the slot itself. Do not admit a
-    // successor over that fence before recovery has retained its writer head.
-    // The slot lock alone does not prove exclusion: a legacy provider can close
-    // its inherited descriptor and keep writing while its guardian dies, so a
-    // valid record for any attempt keeps refusing admission.
-    match lock_directory.metadata_at(OsStr::new("reservation.json"), false) {
-        Ok(_) => return Err(CustodyError::Fenced),
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error.into()),
-    }
+    carry_forward_slot_reservation(&lock_directory)?;
+    ensure_no_exclusive_reservation(&lock_directory)?;
     let directory = create_attempt_evidence(&lock_directory, scope)?;
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
         Ok(_) => {
@@ -484,6 +478,7 @@ pub(crate) fn acquire_writer_with_observer(
         descendants: Vec::new(),
         census_incomplete: true,
         omitted_descendants: 0,
+        extra: Default::default(),
     };
     reservation.validate()?;
     // Publish the fence first: owner death cannot leave an invisible ownership gap.
@@ -519,61 +514,101 @@ pub fn attempt_evidence(
 ) -> provenant_os::fs::Result<Directory> {
     directory.open_verified_directory(OsStr::new(&scope.attempt.to_string()))
 }
-/// Whether the legacy slot-root record fences this attempt.
-///
-/// A record that cannot be read, decoded or validated fences every attempt:
-/// its scope cannot be trusted, so it fails safe. A valid record fences only
-/// the attempt it names. Another attempt's record does not fence through the
-/// legacy record; that attempt's own evidence decides.
-fn legacy_record_fences(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<bool> {
+/// Carry retained slot evidence forward while holding the writer lock.
+/// Publish the attempt record durably before removing the slot fence. A crash
+/// between those writes is replayed only when the two records agree exactly.
+fn carry_forward_slot_reservation(directory: &Directory) -> Result<()> {
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
         Ok(_) => {}
-        Err(error) if error.is_not_found() => return Ok(false),
-        Err(error) => return Err(error),
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
     }
-    let fenced = match read_record::<Reservation>(directory, "reservation.json", RECORD_LIMIT) {
-        Ok(record) => {
-            // Validation plus the anchor rule reboot recovery applies: the slot
-            // inode must match, and a device renumbering across a reboot still
-            // anchors the record while its recorded slot and attempt shared a
-            // device and the current slot and attempt still share one. Requiring
-            // an exact device would turn another attempt's renumbered record
-            // into an every-attempt fence ahead of this attempt's own evidence.
-            let anchored = directory.metadata().is_ok_and(|slot| {
-                if record.reservation_inode != slot.inode {
-                    return false;
-                }
-                if record.reservation_device == slot.device {
-                    return true;
-                }
-                let current_attempt = directory
-                    .open_verified_directory(OsStr::new(&scope.attempt.to_string()))
-                    .ok()
-                    .and_then(|attempt| attempt.metadata().ok())
-                    .map_or(slot.device, |attempt| attempt.device);
-                record.attempt_device.is_some_and(|recorded| {
-                    same_device_rebinding(
-                        record.reservation_device,
-                        recorded,
-                        slot.device,
-                        current_attempt,
-                    )
-                })
-            });
-            !anchored || record.validate().is_err() || record.scope.attempt == scope.attempt
+    let mut value: serde_json::Value = read_record(directory, "reservation.json", RECORD_LIMIT)
+        .map_err(|_| CustodyError::Fenced)?;
+    let record: Reservation =
+        serde_json::from_value(value.clone()).map_err(|_| CustodyError::Fenced)?;
+    record.validate().map_err(|_| CustodyError::Fenced)?;
+    let slot = directory.metadata()?;
+    let child = create_attempt_evidence(directory, record.scope)?;
+    let anchor = child.metadata()?;
+    let device_matches = record.reservation_device == slot.device
+        || record.attempt_device.is_some_and(|old_attempt| {
+            same_device_rebinding(
+                record.reservation_device,
+                old_attempt,
+                slot.device,
+                anchor.device,
+            )
+        });
+    if record.reservation_inode != slot.inode || !device_matches {
+        return Err(CustodyError::Fenced);
+    }
+    let object = value.as_object_mut().ok_or(CustodyError::Fenced)?;
+    // A carried reservation may still have a live provider that lost its lock.
+    // Keep excluding all writers until that reservation is settled.
+    object.insert("slot_exclusive".into(), true.into());
+    object.insert(
+        "slot_original_device".into(),
+        record.reservation_device.into(),
+    );
+    object.insert("reservation_device".into(), anchor.device.into());
+    object.insert("reservation_inode".into(), anchor.inode.into());
+    match child.metadata_at(OsStr::new("reservation.json"), false) {
+        Ok(_) => {
+            let existing: serde_json::Value = read_record(&child, "reservation.json", RECORD_LIMIT)
+                .map_err(|_| CustodyError::Fenced)?;
+            if existing != value {
+                return Err(CustodyError::Fenced);
+            }
         }
-        Err(_) => true,
-    };
-    Ok(fenced)
+        Err(error) if error.is_not_found() => {
+            Publication::require_durable(write_record(
+                &child,
+                "reservation.json",
+                &value,
+                PublishMode::NoReplace,
+            )?)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    directory.unlink(OsStr::new("reservation.json"))?;
+    directory.sync()?;
+    Ok(())
 }
-/// Test for this attempt's retained reservation without interpreting shared-slot records.
+
+/// A carried fence remains exclusive until its owner settles and clears it.
+fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
+    for (index, name) in directory.entries()?.enumerate() {
+        if index >= 10_000 {
+            return Err(CustodyError::Fenced);
+        }
+        let name = name?;
+        if directory.metadata_at(&name, false)?.kind != provenant_os::fs::FileKind::Directory {
+            continue;
+        }
+        let child = directory.open_verified_directory(&name)?;
+        let value: serde_json::Value = match read_record(&child, "reservation.json", RECORD_LIMIT) {
+            Ok(value) => value,
+            Err(CustodyError::Filesystem(error)) if error.is_not_found() => continue,
+            Err(_) => return Err(CustodyError::Fenced),
+        };
+        if value
+            .get("slot_exclusive")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            return Err(CustodyError::Fenced);
+        }
+    }
+    Ok(())
+}
+
+/// An uncarried slot-root record is a fence for all attempts until the slot is opened.
 pub fn reservation_present(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<bool> {
-    // Legacy writers kept one reservation at the slot root; it fences only
-    // the attempt it names. An unreadable, undecodable or invalid record fails
-    // safe as retained. Another attempt's record leaves this attempt's own
-    // evidence to decide.
-    if legacy_record_fences(directory, scope)? {
-        return Ok(true);
+    match directory.metadata_at(OsStr::new("reservation.json"), false) {
+        Ok(_) => return Ok(true),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error),
     }
     let evidence = match attempt_evidence(directory, scope) {
         Ok(directory) => directory,
@@ -586,16 +621,7 @@ pub fn reservation_present(directory: &Directory, scope: Scope) -> provenant_os:
         Err(error) => Err(error),
     }
 }
-/// Legacy evidence stays in place so its recorded slot inode remains valid.
-/// Callers must hold the slot's writer lock and validate the returned record.
 fn recovery_evidence(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<Directory> {
-    // Only this attempt's legacy record, or one that cannot be trusted, keeps
-    // the shared slot as its evidence. Another attempt's record is that
-    // attempt's to recover, so this attempt's own evidence decides instead.
-    if legacy_record_fences(directory, scope)? {
-        directory.metadata_at(OsStr::new("reservation.json"), false)?;
-        return directory.try_clone();
-    }
     let child = attempt_evidence(directory, scope)?;
     child.metadata_at(OsStr::new("reservation.json"), false)?;
     Ok(child)
@@ -1510,8 +1536,7 @@ pub fn acquire_recovery(
         clock,
     )?;
     let lock_directory = directory;
-    // recovery_evidence applies legacy_record_fences, so another attempt's
-    // legacy slot-root record is never read as this attempt's reservation.
+    carry_forward_slot_reservation(&lock_directory)?;
     let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     validate_anchor(&directory, &reservation)?;
@@ -1577,6 +1602,7 @@ pub(crate) fn acquire_reboot_recovery_with(
         clock,
     )?;
     let lock_directory = directory;
+    carry_forward_slot_reservation(&lock_directory)?;
     let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     reservation.validate()?;
@@ -1592,7 +1618,11 @@ pub(crate) fn acquire_reboot_recovery_with(
         || reservation.attempt_inode != Some(target.inode)
         || !reservation.attempt_device.is_some_and(|device| {
             same_device_rebinding(
-                reservation.reservation_device,
+                reservation
+                    .extra
+                    .get("slot_original_device")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(reservation.reservation_device),
                 device,
                 slot.device,
                 target.device,
@@ -1632,6 +1662,7 @@ pub fn prove_unreserved(
         cancel,
         clock,
     )?;
+    carry_forward_slot_reservation(directory)?;
     for name in ["launch.json", "process-exit.json"] {
         match directory.metadata_at(OsStr::new(name), false) {
             Ok(_) => return Ok(None),
@@ -1702,22 +1733,10 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
                 let attempt = attempt?;
                 if attempt == OsStr::new("reservation.json") {
                     let path = PathBuf::from(&name).join(&attempt);
-                    let legacy = || -> Result<WriterReservation> {
-                        let reservation: Reservation =
-                            read_record(&slot, "reservation.json", RECORD_LIMIT)?;
-                        validate_anchor(&slot, &reservation)?;
-                        Ok(WriterReservation {
-                            scope: reservation.scope,
-                            reservation: path.clone(),
-                        })
-                    };
-                    match legacy() {
-                        Ok(reservation) => listing.reservations.push(reservation),
-                        Err(error) => listing.issues.push(ReservationIssue {
-                            reservation: path,
-                            reason: format!("legacy slot-root writer reservation: {error}"),
-                        }),
-                    }
+                    listing.issues.push(ReservationIssue {
+                        reservation: path,
+                        reason: "slot-root writer reservation requires reconciliation".into(),
+                    });
                     continue;
                 }
                 let path = PathBuf::from(&name).join(&attempt).join("reservation.json");
