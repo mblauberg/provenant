@@ -287,6 +287,7 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Compare fixture mtimes to the filesystem clock.
 fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Error>> {
     for scenario in [
         "preview", "idle", "aged", "unowned", "recent", "index", "live", "unknown",
