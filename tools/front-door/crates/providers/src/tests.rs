@@ -431,6 +431,54 @@ fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), 
 }
 
 #[test]
+fn read_only_git_path_does_not_split_scratch_at_separator() -> Result<(), ProviderError> {
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let base = read_only_plan("/fixture", Some("keychain"));
+    let mut permissions = base.permissions().clone();
+    permissions.scratch.path = "/fixture/scratch:unexpected".into();
+    let plan = ConfinedPlan::new(PlanRequest {
+        scope: base.scope(),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .expect("fixture plan");
+    let mut route = route("agy", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let launch = agy::Agy.prepare(fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    ))?;
+    let path = &launch
+        .env
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .expect("PATH")
+        .1;
+    let entries: Vec<_> = std::env::split_paths(path).collect();
+    assert_eq!(
+        entries,
+        [
+            std::path::PathBuf::from("/usr/bin"),
+            std::path::PathBuf::from("/bin")
+        ]
+    );
+    assert!(
+        launch
+            .profile
+            .spec
+            .process_executables
+            .contains(&crate::launch::exact("/fixture/git/bin/git"))
+    );
+    Ok(())
+}
+
+#[test]
 fn prepared_git_accepts_non_utf8_scratch() -> Result<(), ProviderError> {
     use provenant_confinement::plan::ReadOnlyGrants;
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};

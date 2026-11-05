@@ -525,10 +525,16 @@ pub(crate) fn private_git_objects(
             target: git.to_owned(),
         });
         if let Some((_, path)) = spec.env.iter_mut().find(|(key, _)| key == "PATH") {
-            let mut value = bin.into_os_string();
-            value.push(":");
-            value.push(&*path);
-            *path = value;
+            match std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&*path))) {
+                Ok(value) => *path = value,
+                Err(_) => {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: the read-only Git launcher cannot be included in PATH; continuing without it"
+                    );
+                }
+            }
         }
         spec.profile.spec.process_executables.push(exact(git));
         return Ok(());

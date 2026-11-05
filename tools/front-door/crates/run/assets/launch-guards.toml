@@ -419,6 +419,11 @@ reason = "A shared package prefix is omitted and the executable receives an exac
 
 [[guard]]
 site = "providers/src/launch.rs#private_git_objects"
+boundary = "warning"
+reason = "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning; the selected Git executable remains explicitly granted."
+
+[[guard]]
+site = "providers/src/launch.rs#private_git_objects"
 boundary = "lane_git"
 reason = "A writer's Git wrapper must bind commands to the private Git and object directories."
 
