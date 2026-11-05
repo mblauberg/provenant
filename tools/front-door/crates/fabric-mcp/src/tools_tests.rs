@@ -116,6 +116,31 @@ fn memory_pressure_projects_configured_source_and_action() {
             .contains("host configuration")
     );
     assert!(value["next"].as_str().unwrap().contains("memory"));
+
+    let error = FacadeError::DispatchRefused {
+        reason: "TOKEN_SENTINEL /private/host".into(),
+        disk: None,
+        fact: Some(
+            provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource(
+                ResourceFact::MemoryPressure {
+                    level: PressureLevel::Critical,
+                    threshold: PressureThreshold::Warning,
+                    origin: SettingSource::Configuration,
+                },
+            ),
+        ),
+    };
+    let value = ServiceError::Facade(error).structured_error();
+    assert_eq!(value["code"], "dispatch_refused");
+    assert!(
+        value["detail"]
+            .as_str()
+            .unwrap()
+            .contains("host configuration")
+    );
+    assert!(value["next"].as_str().unwrap().contains("memory"));
+    assert!(!value.to_string().contains("TOKEN_SENTINEL"));
+    assert!(!value.to_string().contains("/private/host"));
 }
 
 use super::*;
