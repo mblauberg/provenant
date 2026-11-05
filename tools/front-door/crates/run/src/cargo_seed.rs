@@ -246,6 +246,8 @@ fn seed_target_with(
             .open_verified_directory(&stage)
             .map_err(|_| "staging_unavailable")?;
         clone(&source, &staging)?;
+        // As for the registry: durable before the rename can be.
+        staging.sync().map_err(|_| "staging_sync_failed")?;
         cache_dir
             .rename_noreplace(&stage, &cache_dir, OsStr::new("target"))
             .map_err(|_| "publish_failed")?;
@@ -254,7 +256,11 @@ fn seed_target_with(
     match result {
         Ok(()) => Outcome {
             status: "seeded",
-            reason: "cloned",
+            reason: if cache_dir.sync().is_ok() {
+                "cloned"
+            } else {
+                "durability_unconfirmed"
+            },
             detail: None,
         },
         Err(reason) => {
