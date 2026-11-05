@@ -1284,6 +1284,8 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
                 && line_text.contains("conflicts_with_all"))
                 || (path.ends_with("fabric.rs") && line_text.contains("InvalidField("))
                 || (path.ends_with("run/provider/command.rs") && line_text.contains(".join("))
+                || (path.ends_with("run/status.rs")
+                    && source[found.end()..].starts_with(": cursor"))
                 || (path.ends_with("run/provider/preparation.rs")
                     && source[found.end()..].starts_with(':'));
             if non_adapter_literal {
