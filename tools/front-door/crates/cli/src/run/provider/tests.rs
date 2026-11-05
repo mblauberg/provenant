@@ -2692,14 +2692,14 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     Ok(())
 }
 
-// Exercise the owner-to-preparation path so the dirty brief regression also
+// Exercise the owner-to-preparation path so the dirty refusal regression also
 // fails when launch forgets to mark an unchanged predecessor HEAD.
 fn prepare_policy_writer_successor(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
     prompt: &str,
     executable: &Path,
-) -> Result<(run::PreparedLaunch, PathBuf), Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn std::error::Error>> {
     use provenant_core::{ActorId, CancelToken, Clock};
     use provenant_supervisor::custody::{
         ExitObservation, PublicationState, Scope, SettlementEvidence,
@@ -2820,7 +2820,6 @@ fn prepare_policy_writer_successor(
     struct Capture<'a, 'b> {
         registry: &'a Registry<'b>,
         executable: &'a Path,
-        launch: std::cell::RefCell<Option<(run::PreparedLaunch, PathBuf)>>,
     }
     impl run::Providers for Capture<'_, '_> {
         fn prepare(
@@ -2830,7 +2829,7 @@ fn prepare_policy_writer_successor(
             paths: &run::LaunchPaths,
             _: Option<&run::AttemptRecord>,
         ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
-            let launch = prepare_with(
+            prepare_with(
                 self.registry,
                 task,
                 prompt,
@@ -2839,16 +2838,7 @@ fn prepare_policy_writer_successor(
                 |_| Ok(self.executable.into()),
                 None,
             )
-            .map_err(|e| e.to_string())?;
-            self.launch.replace(Some((
-                launch,
-                paths
-                    .provider_state
-                    .parent()
-                    .ok_or("attempt")?
-                    .join("prompt.md"),
-            )));
-            Err("captured prepared successor".into())
+            .map_err(|e| e.to_string().into())
         }
         fn decode(
             &self,
@@ -2863,7 +2853,6 @@ fn prepare_policy_writer_successor(
     let capture = Capture {
         registry,
         executable,
-        launch: Default::default(),
     };
     let custody = directory.try_lock(
         std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
@@ -2871,18 +2860,14 @@ fn prepare_policy_writer_successor(
     )?;
     drop(custody);
     let started = store.start(input.run_id, &capture, &|_, _| unreachable!(), &call)?;
-    assert!(
-        matches!(started.as_slice(), [run::Started::Refused { reason, .. }] if reason == "captured prepared successor"),
-        "{started:?}"
-    );
-    capture
-        .launch
-        .into_inner()
-        .ok_or_else(|| "successor was not prepared".into())
+    match started.as_slice() {
+        [run::Started::Refused { reason, .. }] => Ok(reason.clone()),
+        _ => Err(format!("expected refusal: {started:?}").into()),
+    }
 }
 
 #[test]
-fn writer_continuation_preserves_uncommitted_edits_and_reports_them_in_brief()
+fn writer_continuation_refuses_and_preserves_uncommitted_edits()
 -> Result<(), Box<dyn std::error::Error>> {
     writer_continuation_dirty_brief(true)
 }
@@ -3071,25 +3056,16 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         host: None,
     };
 
-    let (launch, spilled) = prepare_policy_writer_successor(&registry, &task, prompt, &executable)?;
-
-    // A dirty worktree continues without being reset
-    assert!(worktree.join("uncommitted_leftover.txt").exists());
+    let reason = prepare_policy_writer_successor(&registry, &task, prompt, &executable)?;
+    assert!(
+        reason.contains("uncommitted predecessor edits: uncommitted_leftover.txt"),
+        "{reason}"
+    );
+    assert!(reason.contains(&source_head), "{reason}");
+    assert!(reason.contains(&predecessor_head), "{reason}");
     assert_eq!(
         std::fs::read_to_string(worktree.join("uncommitted_leftover.txt"))?,
         "uncommitted dirty edit"
-    );
-
-    // Spilled prompt contains uncommitted predecessor edits
-    let prompt_content = if spilled.exists() {
-        std::fs::read_to_string(&spilled)?
-    } else {
-        launch.argv.last().unwrap().to_str().unwrap().to_string()
-    };
-    assert!(
-        prompt_content
-            .contains("Uncommitted predecessor edits in worktree:\n- uncommitted_leftover.txt"),
-        "brief must report uncommitted predecessor edits: {prompt_content}"
     );
 
     // If continuation check refuses, uncommitted edits are named in the refusal message

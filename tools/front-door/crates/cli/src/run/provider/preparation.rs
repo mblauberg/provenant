@@ -546,37 +546,25 @@ pub(super) fn prepare_candidates(
             let source = source_head
                 .parse()
                 .map_err(|_| "invalid pinned writer source")?;
-            if let Err(error) = writer.require_continuation_source(&git, source, predecessor) {
-                if uncommitted.is_empty() {
-                    return Err(error.to_string().into());
-                } else {
-                    return Err(format!(
-                        "{error}; uncommitted predecessor edits: {}",
-                        uncommitted.join(", ")
-                    )
-                    .into());
-                }
+            let lineage = writer.require_continuation_source(&git, source, predecessor);
+            if !uncommitted.is_empty() {
+                let detail = lineage.err().map_or_else(
+                    || format!("writer continuation from {source} to {predecessor}"),
+                    |error| error.to_string(),
+                );
+                return Err(format!(
+                    "{detail}; uncommitted predecessor edits: {}",
+                    uncommitted.join(", ")
+                )
+                .into());
             }
+            lineage.map_err(|error| error.to_string())?;
         } else if let Some(head) = task.head.as_deref() {
             writer
                 .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
                 .map_err(|error| error.to_string())?;
         }
     }
-    let prompt_text_buf;
-    let prompt_text = if !uncommitted.is_empty() {
-        prompt_text_buf = format!(
-            "{prompt_text}\n\nUncommitted predecessor edits in worktree:\n{}",
-            uncommitted
-                .iter()
-                .map(|p| format!("- {p}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        &prompt_text_buf
-    } else {
-        prompt_text
-    };
     // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
     // credential. Missing gh tools or configuration leave the
     // writer able to do local work without publishing credential access.

@@ -113,6 +113,28 @@ impl RunStore {
                 .map_err(|error| HandOff::Uncertain(error.to_string()))?;
             return Err(local("writer lineage", &error));
         }
+        if task.source_head.is_some()
+            && let Some(writer) = plan
+                .confinement
+                .as_ref()
+                .and_then(|plan| plan.writer.as_ref())
+        {
+            let git = local_or_withdraw!(
+                provenant_os::git::git_executable()
+                    .ok_or_else(|| local("Git", &RunError::GitUnavailable))
+            );
+            let paths = local_or_withdraw!(
+                writer
+                    .uncommitted_paths(&git)
+                    .map_err(|error| local("writer status", &error))
+            );
+            if !paths.is_empty() {
+                local_or_withdraw!(Err::<(), _>(local(
+                    "writer continuation",
+                    &format!("uncommitted predecessor edits: {}", paths.join(", ")),
+                )));
+            }
+        }
         // Reconcile may have withdrawn this attempt before the lease existed.
         match self.record(id, call) {
             Ok(now)
