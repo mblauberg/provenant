@@ -511,10 +511,15 @@ shared upstream configuration remains read-only.
 
 ## Native lane probes
 
-The macOS dispatch confinement test runs the Node/pnpm compatibility probe
-independently of its shell, Git and Cargo probe, and reports both failures when
-both fail. The remaining shell probe still groups several capabilities, so it
-does not yet isolate every missing grant.
+The macOS native writer capability invocation runs named socket, credential,
+Git, Cargo, Python, shell and Node/pnpm probes independently and reports their failures
+together. It currently exercises the Claude writer profile; it is not yet a
+complete adapter and access-mode matrix.
+
+When a failed lane's captured stderr contains a path-bearing permission error,
+the result includes a bounded excerpt and suggests checking the lane grants and
+filesystem permissions. The error alone does not establish which rule denied the
+operation, and errors captured only inside a provider are not visible there.
 
 ## General guidance
 

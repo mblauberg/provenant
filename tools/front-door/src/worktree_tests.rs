@@ -3604,7 +3604,7 @@ pub(crate) fn lane_provider() -> Result {
 
 // Share the lane-side discovery decision with its injected PATH fixture.
 const LANE_NODE_PNPM_PROBE: &str = concat!(
-    "if command -v node >/dev/null && command -v pnpm >/dev/null; then ",
+    "set -eu; if command -v node >/dev/null && command -v pnpm >/dev/null; then ",
     "node --version; pnpm --version; ",
     "node \"$TMPDIR/cargo-probe/child-process.cjs\"; ",
     "pnpm --dir \"$TMPDIR/cargo-probe\" run compat; ",
@@ -3872,33 +3872,64 @@ if (process.argv[2] === 'child') {
 }
 "#,
         )?;
-        let script = concat!(
-            "set -eu; ",
-            // The lane's TMPDIR is the short alias: it must resolve inside the
-            // sandbox, take files, and hold a Unix-domain socket (#2661).
-            "case \"$TMPDIR\" in /private/tmp/pv-*) ;; *) exit 16;; esac; ",
-            ": > \"$TMPDIR/alias-file\"; test -f \"$TMPDIR/alias-file\"; ",
-            "\"$LANE_FIXTURE\" --bind-socket \"$TMPDIR/alias.sock\"; ",
-            "if /usr/bin/security help >/dev/null 2>&1; then exit 11; fi; ",
-            "if /bin/cat \"$HOME/Library/Keychains/login.keychain-db\" >/dev/null 2>&1; then exit 12; fi; ",
-            "for f in credentials.toml credentials; do ",
-            "if /bin/cat \"$HOME/.cargo/$f\" >/dev/null 2>&1; then exit 13; fi; done; ",
-            "if GIT_CONFIG_GLOBAL=/nonexistent/gitconfig git config --global --list >/dev/null 2>&1; then :; else exit 14; fi; ",
-            "lane_root=$PWD; lane_head=$(git rev-parse HEAD); ",
-            "cp \"$TMPDIR/git-common/index\" \"$TMPDIR/index-before-fixture\"; ",
-            "printf 'unstaged lane content\\n' > \"$lane_root/.fixture-git-probe\"; ",
-            "mkdir \"$TMPDIR/fixture-git-probe\"; cd \"$TMPDIR/fixture-git-probe\"; ",
-            "git init -q; printf 'fixture content\\n' > fixture; git add -A; ",
-            "git -c user.name=Fixture -c user.email=fixture@example.test commit -qm base; ",
-            "test -d .git; test \"$(git log -1 --format=%an)\" = Fixture; ",
-            "cd \"$lane_root\"; test \"$(git rev-parse HEAD)\" = \"$lane_head\"; ",
-            "cmp \"$TMPDIR/index-before-fixture\" \"$TMPDIR/git-common/index\"; ",
-            "unlink \"$lane_root/.fixture-git-probe\"; ",
-            "git -c user.name=lane -c user.email=lane@example.test commit -q --allow-empty -m probe && ",
-            "test \"$(command -v git)\" = \"$(cd \"$TMPDIR\" && pwd -P)/bin/git\" && ",
-            "git --version && git status --porcelain && ",
-            "cargo test -j2 --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\"; ",
-        );
+        // Independent processes let later cells report after a denial.
+        let cells = [
+            (
+                "unix socket",
+                concat!(
+                    "set -eu; case \"$TMPDIR\" in /private/tmp/pv-*) ;; *) exit 16;; esac; ",
+                    ": > \"$TMPDIR/alias-file\"; test -f \"$TMPDIR/alias-file\"; ",
+                    "\"$LANE_FIXTURE\" --bind-socket \"$TMPDIR/alias.sock\""
+                ),
+            ),
+            (
+                "credential guards",
+                concat!(
+                    "set -eu; if /usr/bin/security help >/dev/null 2>&1; then exit 11; fi; ",
+                    "if /bin/cat \"$HOME/Library/Keychains/login.keychain-db\" >/dev/null 2>&1; then exit 12; fi; ",
+                    "for f in credentials.toml credentials; do ",
+                    "if /bin/cat \"$HOME/.cargo/$f\" >/dev/null 2>&1; then exit 13; fi; done"
+                ),
+            ),
+            (
+                "git temporary repository",
+                concat!(
+                    "set -eu; if GIT_CONFIG_GLOBAL=/nonexistent/gitconfig git config --global --list >/dev/null 2>&1; then :; else exit 14; fi; ",
+                    "lane_root=$PWD; lane_head=$(git rev-parse HEAD); ",
+                    "cp \"$TMPDIR/git-common/index\" \"$TMPDIR/index-before-fixture\"; ",
+                    "printf 'unstaged lane content\\n' > \"$lane_root/.fixture-git-probe\"; ",
+                    "mkdir \"$TMPDIR/fixture-git-probe\"; cd \"$TMPDIR/fixture-git-probe\"; ",
+                    "git init -q; printf 'fixture content\\n' > fixture; git add -A; ",
+                    "git -c user.name=Fixture -c user.email=fixture@example.test commit -qm base; ",
+                    "test -d .git; test \"$(git log -1 --format=%an)\" = Fixture; ",
+                    "cd \"$lane_root\"; test \"$(git rev-parse HEAD)\" = \"$lane_head\"; ",
+                    "cmp \"$TMPDIR/index-before-fixture\" \"$TMPDIR/git-common/index\"; ",
+                    "unlink \"$lane_root/.fixture-git-probe\""
+                ),
+            ),
+            (
+                "git commit",
+                concat!(
+                    "set -eu; git -c user.name=lane -c user.email=lane@example.test commit -q --allow-empty -m probe; ",
+                    "test \"$(command -v git)\" = \"$(cd \"$TMPDIR\" && pwd -P)/bin/git\"; ",
+                    "git --version; git status --porcelain"
+                ),
+            ),
+            (
+                "cargo",
+                "set -eu; cargo test -j2 --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\"",
+            ),
+            ("python3", "set -eu; python3 -c 'assert 2 + 2 == 4'"),
+            (
+                "here-document",
+                "set -eu; cat > \"$TMPDIR/here-doc\" <<'END'\nfixture\nEND\ntest \"$(cat \"$TMPDIR/here-doc\")\" = fixture",
+            ),
+            (
+                "temporary script",
+                "set -eu; printf '#!/bin/sh\\nprintf fixture\\n' > \"$TMPDIR/probe-script\"; chmod +x \"$TMPDIR/probe-script\"; test \"$(\"$TMPDIR/probe-script\")\" = fixture",
+            ),
+            ("node/pnpm", LANE_NODE_PNPM_PROBE),
+        ];
         let mut tool_env = launch.environment.clone();
         let tools_required = std::env::var("PROVENANT_LANE_TOOLS_REQUIRED").as_deref() == Ok("1");
         tool_env.push((
@@ -3907,24 +3938,33 @@ if (process.argv[2] === 'child') {
         ));
         tool_env.push(("LANE_FIXTURE".into(), launch.argv[0].clone()));
         let mut failures = Vec::new();
-        for (name, cell) in [
-            ("shell/git/cargo", script),
-            ("node/pnpm", LANE_NODE_PNPM_PROBE),
-        ] {
+        for (name, cell) in cells {
             let argv = [OsString::from("/bin/sh"), OsString::from("-c"), cell.into()];
             let command =
-                compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
+                match compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16])) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        failures.push(format!("{name}: command preparation failed: {error}"));
+                        continue;
+                    }
+                };
             let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
             options.process_group = true;
             options.cleanup_process_group = true;
             options.env = Some(&tool_env);
-            let output = executor.execute(options)?;
+            let output = match executor.execute(options) {
+                Ok(output) => output,
+                Err(error) => {
+                    failures.push(format!("{name}: execution failed: {error}"));
+                    continue;
+                }
+            };
             let stdout = String::from_utf8_lossy(&output.stdout.bytes);
             let stderr = String::from_utf8_lossy(&output.stderr.bytes);
             if code(&output) != 0 {
                 failures.push(format!("{name}: {stderr}\n{stdout}"));
-            } else if name == "shell/git/cargo"
-                && (!stdout.contains("lane-socket: PASS") || !stdout.contains("1 passed"))
+            } else if (name == "unix socket" && !stdout.contains("lane-socket: PASS"))
+                || (name == "cargo" && !stdout.contains("1 passed"))
             {
                 failures.push(format!(
                     "{name}: missing success marker: {stderr}\n{stdout}"

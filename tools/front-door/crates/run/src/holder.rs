@@ -1130,6 +1130,22 @@ impl RunStore {
                 None => note,
             });
         }
+        // A provider may leave a tool's denial only in stderr. Preserve the
+        // reported path without claiming that an OS permission error proves
+        // which sandbox rule (or filesystem permission) caused it.
+        if decoded.outcome == Outcome::Failed {
+            let stderr = read_sealed(attempt, "stderr.log", CAPTURE_LIMIT)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if let Some(note) = path_denial_hint(&stderr) {
+                if !decoded.result.is_empty() {
+                    decoded.result.push_str("\n\n");
+                }
+                decoded.result.push_str(&note);
+                decoded.result.push('\n');
+            }
+        }
         // Valid natural completion wins over a late stop request.
         if decoded.outcome != Outcome::Succeeded {
             match exit.stop_reason {
@@ -1889,6 +1905,20 @@ fn reports_verdict(result: &str) -> bool {
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
 const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";
 
+/// Preserve a path-bearing OS denial as evidence, not a definitive diagnosis:
+/// filesystem permissions and other sandboxes can produce the same errors.
+fn path_denial_hint(stderr: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stderr);
+    let line = text.lines().find(|line| {
+        line.contains('/')
+            && (line.contains("Permission denied") || line.contains("Operation not permitted"))
+    })?;
+    Some(format!(
+        "Path access was denied; check the lane's grants and filesystem permissions: {}",
+        provenant_confinement::redact::bounded_line(line, 240)
+    ))
+}
+
 /// A lane's own words in a one-line reason: bounded and on one line.
 fn bounded_note(note: &str) -> String {
     provenant_confinement::redact::bounded_line(note, 240)
@@ -1897,6 +1927,18 @@ fn bounded_note(note: &str) -> String {
 #[cfg(test)]
 mod host_clock_tests {
     use super::*;
+
+    #[test]
+    fn path_denial_hints_require_a_path_and_redact_known_tokens() {
+        assert!(path_denial_hint(b"Permission denied").is_none());
+        assert!(path_denial_hint(b"/fixture/path: unrelated error").is_none());
+        let hint = path_denial_hint(
+            b"/fixture/path: Operation not permitted ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        )
+        .expect("path denial");
+        assert!(hint.contains("/fixture/path"));
+        assert!(!hint.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    }
 
     #[test]
     fn only_a_reportable_verdict_counts_as_a_lane_reporting() {
