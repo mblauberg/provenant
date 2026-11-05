@@ -106,6 +106,7 @@ pub(super) fn account_observation_error(
     if matches!(
         error,
         ProviderError::LoginRequired
+            | ProviderError::CredentialUnavailable
             | ProviderError::CredentialNotFound
             | ProviderError::CredentialExpired
     ) {

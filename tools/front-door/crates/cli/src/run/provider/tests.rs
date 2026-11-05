@@ -4549,6 +4549,17 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
     ));
     assert!(matches!(
         account_observation_error(&entries[0], &ProviderError::CredentialUnavailable),
+        AccountObservationError::AuthRequired(_)
+    ));
+    assert!(matches!(
+        account_observation_error(&entries[0], &ProviderError::UnknownIdentity),
+        AccountObservationError::Other(_)
+    ));
+    assert!(matches!(
+        account_observation_error(
+            &entries[0],
+            &ProviderError::ProbeDirectory("fixture".into())
+        ),
         AccountObservationError::Other(_)
     ));
     Ok(())
