@@ -98,24 +98,23 @@ fn collect_impl(
                 && lane.owner == OwnerStatus::Unowned
                 && lane.writer == WriterState::Free))
             && !policy.regenerable.is_empty()
+            && let Some(entry) = entries.iter().find(|entry| entry.path == lane.path)
         {
-            if let Some(entry) = entries.iter().find(|entry| entry.path == lane.path) {
-                let result = prune_unknown_output(
-                    context,
-                    &entries,
-                    entry,
-                    lane,
-                    policy,
-                    cancel,
-                    &mut report.idle_output,
-                );
-                if let Err(error) = result {
-                    report.idle_output.push(OutputEntry {
-                        path: lane.path.clone(),
-                        removed: false,
-                        reason: error.to_string(),
-                    });
-                }
+            let result = prune_unknown_output(
+                context,
+                &entries,
+                entry,
+                lane,
+                policy,
+                cancel,
+                &mut report.idle_output,
+            );
+            if let Err(error) = result {
+                report.idle_output.push(OutputEntry {
+                    path: lane.path.clone(),
+                    removed: false,
+                    reason: error.to_string(),
+                });
             }
         }
         if !lane.path.starts_with(&managed) && !policy.foreign_merged_clean {
@@ -382,6 +381,7 @@ fn collect_impl(
     Ok(report)
 }
 
+#[allow(clippy::disallowed_methods)] // Bound this filesystem walk in real time.
 fn prune_unknown_output(
     context: &WorktreeContext<'_>,
     preview_entries: &[GitWorktree],
