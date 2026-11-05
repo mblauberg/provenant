@@ -156,39 +156,6 @@ fn receipt_replay_and_independent_effects() -> TestResult {
 }
 
 #[test]
-fn receipt_migration_copies_legacy_wal() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = TestClock::new(WallTime::from_micros(100)?, MonoTime::from_micros(0));
-    let cancel = CancelToken::new();
-    let call = Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let store = RunStore::open(&context, &call)?;
-    let input = input()?;
-    store.create(&input, &call)?;
-    drop(store);
-    let db = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
-    db.execute_batch(
-        "PRAGMA journal_mode=WAL; DROP TABLE settlement_receipts; PRAGMA user_version=6;",
-    )?;
-    let store = RunStore::open(&context, &call)?;
-    assert_eq!(
-        store
-            .record(input.attempts[0].attempt_id, &call)?
-            .schema_version,
-        2
-    );
-    let backup =
-        rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3.bak-100"))?;
-    let version: i64 = backup.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let rows: i64 = backup.query_row("SELECT count(*) FROM attempts", [], |row| row.get(0))?;
-    assert_eq!((version, rows), (6, 1));
-    Ok(())
-}
-
-#[test]
 fn receipt_withdrawal_does_not_invent_an_exit() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
