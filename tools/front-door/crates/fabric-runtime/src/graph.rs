@@ -251,6 +251,8 @@ pub trait AttemptOwner {
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         None
     }
+    /// Reconcile any earlier delivery before creating a PR. A retry after a
+    /// checkpoint write failure must return the existing identity.
     fn deliver_graph(
         &mut self,
         _document: &GraphDocument,
@@ -2741,10 +2743,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             && !checkpoint.delivered
             && checkpoint.successful()
         {
-            checkpoint.pull_request = owner
+            let url = owner
                 .deliver_graph(&expanded, &checkpoint)
                 .map_err(GraphError::Run)?
-                .map(|url| bounded(&url, OUTPUT_FIELD_BYTES));
+                .ok_or_else(|| {
+                    GraphError::Refused(
+                        "PR delivery returned no identity; reconcile delivery before retrying"
+                            .into(),
+                    )
+                })?;
+            if url.trim().is_empty()
+                || url.chars().any(char::is_control)
+                || encoded_len(&url) > OUTPUT_FIELD_BYTES
+            {
+                return Err(GraphError::Refused("PR delivery identity is invalid or exceeds its bound; reconcile delivery before retrying".into()));
+            }
+            checkpoint.pull_request = Some(url);
             checkpoint.delivered = true;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }

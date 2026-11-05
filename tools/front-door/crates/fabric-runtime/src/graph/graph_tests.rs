@@ -39,6 +39,9 @@ struct FakeOwner {
     retry_used: u64,
     retry_budgets: Vec<Option<u8>>,
     deliveries: usize,
+    delivery_effects: usize,
+    delivery_created: bool,
+    delivery_identity: Option<Option<String>>,
     cancelled_attempt_settled: bool,
     cancellation_stops: usize,
     delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
@@ -214,7 +217,14 @@ impl AttemptOwner for FakeOwner {
         _checkpoint: &GraphCheckpoint,
     ) -> Result<Option<String>, Self::Error> {
         self.deliveries += 1;
-        Ok(Some("https://example.invalid/pr/1".into()))
+        if !self.delivery_created {
+            self.delivery_created = true;
+            self.delivery_effects += 1;
+        }
+        Ok(self
+            .delivery_identity
+            .clone()
+            .unwrap_or_else(|| Some("https://example.invalid/pr/1".into())))
     }
 
     fn equal_review_range(&mut self, _: &str) -> Result<bool, Self::Error> {
@@ -5284,6 +5294,94 @@ fn graph_delivers_nodes_and_opens_one_final_pr_only_after_success() {
     document.nodes[0].access = AccessMode::ReadOnly;
     document.nodes[0].worktree = None;
     assert!(validate_plan(&document).is_err());
+}
+
+#[test]
+fn graph_pr_identity_save_failure_reconciles_without_a_second_creation() {
+    use provenant_records::run::DeliveryMode;
+    #[derive(Default)]
+    struct FailingJournal {
+        checkpoint: Option<GraphCheckpoint>,
+        before_failure: Option<Vec<u8>>,
+        failed: bool,
+    }
+    impl GraphJournal for FailingJournal {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.checkpoint.clone())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if checkpoint.delivered && !self.failed {
+                self.failed = true;
+                self.before_failure = Some(serde_json::to_vec(&self.checkpoint).unwrap());
+                return Err(std::io::Error::other("injected PR identity save failure"));
+            }
+            self.checkpoint = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let mut writer = node("writer", route("fixture"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/writer".into());
+    writer.delivery = Some(DeliveryMode::Integrate("integration".into()));
+    let mut document = graph(vec![writer]);
+    document.integration_branch = Some("integration".into());
+    document.delivery = Some(DeliveryMode::Pr);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = FailingJournal::default();
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Journal(_))
+    ));
+    assert_eq!(
+        serde_json::to_vec(&journal.checkpoint).unwrap(),
+        journal.before_failure.clone().unwrap()
+    );
+    let saved = journal.checkpoint.as_ref().unwrap();
+    assert!(!saved.delivered && saved.pull_request.is_none());
+    assert_eq!(owner.delivery_effects, 1);
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(replay.checkpoint.delivered);
+    assert_eq!(
+        replay.checkpoint.pull_request.as_deref(),
+        Some("https://example.invalid/pr/1")
+    );
+    assert_eq!(owner.delivery_effects, 1);
+    assert_eq!(owner.deliveries, 2);
+}
+
+#[test]
+fn graph_pr_delivery_never_saves_missing_or_clipped_identity() {
+    use provenant_records::run::DeliveryMode;
+    for identity in [
+        None,
+        Some("x".repeat(OUTPUT_FIELD_BYTES + 1)),
+        Some("bad\nurl".into()),
+    ] {
+        let mut writer = node("writer", route("fixture"));
+        writer.access = AccessMode::WorktreeWrite;
+        writer.worktree = Some(".worktrees/writer".into());
+        writer.delivery = Some(DeliveryMode::Integrate("integration".into()));
+        let mut document = graph(vec![writer]);
+        document.integration_branch = Some("integration".into());
+        document.delivery = Some(DeliveryMode::Pr);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+            delivery_identity: Some(identity),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        assert!(matches!(
+            advance(&document, &mut owner, &mut journal),
+            Err(GraphError::Refused(_))
+        ));
+        let saved = journal.0.as_ref().unwrap();
+        assert!(!saved.delivered && saved.pull_request.is_none());
+        assert_eq!(saved.nodes[0].state, NodeState::Succeeded);
+    }
 }
 
 #[test]

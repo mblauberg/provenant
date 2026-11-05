@@ -1434,6 +1434,11 @@ The `settlement_retries` allowance (default 2), overridden by preset then node
 value and origin on first admission; replay does not replenish it. Verified
 pre-launch preparation fallbacks and same-key observation spend no settlement
 retries.
+
+A graph PR delivery records its intact bounded PR identity in the checkpoint
+before reporting delivery. A missing or invalid identity leaves delivery
+unsettled. If the checkpoint write fails, retry reconciles the existing PR
+before any creation rather than assuming the first result was not published.
 - Why: route switches must not duplicate an attempt that may have started.
 - Test: `crates/fabric-runtime/src/graph/graph_tests.rs::preparation_fallback_does_not_consume_settlement_allowance`;
   `tests/dispatch_provider.rs::graph_read_only_alias_does_not_redraw_after_launch_quota`
