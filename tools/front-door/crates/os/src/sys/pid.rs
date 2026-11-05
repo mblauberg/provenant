@@ -1771,14 +1771,13 @@ mod tests {
             "settled process",
             std::time::Duration::from_secs(5),
             || {
-                let asleep = std::fs::read_to_string(format!("/proc/{}/stat", child.0.id()))
+                std::fs::read_to_string(format!("/proc/{}/stat", child.0.id()))
                     .ok()
                     .and_then(|stat| {
                         stat.rsplit_once(')')
                             .map(|(_, tail)| tail.trim_start().starts_with('S'))
                     })
-                    == Some(true);
-                asleep
+                    == Some(true)
             },
             |asleep| *asleep,
         )

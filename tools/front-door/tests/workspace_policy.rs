@@ -417,7 +417,7 @@ fn is_test_source(name: &str) -> bool {
 }
 
 // Test waits use the shared bounded helper, an injected clock, or an explicit
-// synchronization primitive. Tokenise first so examples and comments do not
+// synchronisation primitive. Tokenise first so examples and comments do not
 // count; also catch imported and renamed sleep functions.
 fn fixture_sleep_violation(source: &str, test_file: bool) -> bool {
     selected_test_scopes(source, test_file, true)
