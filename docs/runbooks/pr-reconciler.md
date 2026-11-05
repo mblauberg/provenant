@@ -1,6 +1,9 @@
 # Pull request work records
 
-Owner: workflow crate. The reconciler store is a building block; event intake,
+Owner: Workflow maintainers
+Anchor: tools/front-door/crates/workflow/src/reconciler.rs
+
+The reconciler store is a building block; event intake,
 dispatch, forge adapters and landing policy are separate. It does not start a
 background service or grant publication or landing authority.
 
