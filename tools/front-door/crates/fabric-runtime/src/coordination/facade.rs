@@ -30,6 +30,12 @@ pub struct SubmittedTask {
     pub account: Option<String>,
     #[serde(default)]
     pub access: crate::graph::AccessMode,
+    /// Explicit capability set; absent inherits the project default for writers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
+    /// Provenance for explicitly supplied capabilities.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub capability_sources: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub worktree: Option<String>,
     pub prompt: String,

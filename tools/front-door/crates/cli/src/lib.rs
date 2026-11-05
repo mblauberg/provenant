@@ -473,7 +473,6 @@ const PRESET_INCOMPATIBLE: &[&str] = &[
     "host",
     "deliver",
     "write_root",
-    "capability",
     "knobs",
     "delivery_id",
     "head",
@@ -575,7 +574,6 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                         "deliver",
                         "read_root",
                         "write_root",
-                        "capability",
                     ])
                 });
         }
@@ -781,6 +779,7 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             if access.read_root.len() > 32
                 || access.write_root.len() > 32
                 || access.capability.len() > 16
+                || access.no_capability.len() > 16
             {
                 return invalid(
                     "at most 32 read roots, 32 write roots and 16 capabilities are allowed",
@@ -1963,7 +1962,6 @@ mod tests {
             vec!["--host", "host"],
             vec!["--deliver", "none"],
             vec!["--write-root", "dir"],
-            vec!["--capability", "postgres"],
             vec!["--knob", "x=y"],
             vec!["--delivery-id", "0123456789abcdef0123456789abcdef"],
             vec!["--head", "abc"],

@@ -72,6 +72,7 @@ lane_row! {
         provider_seconds: f64 => nullable(number());
         handoff: Value => any();
         provider_error: String => string();
+        capabilities: Value => array(object(&[("name", string()), ("source", string())], &[]));
     }
 }
 
@@ -285,6 +286,7 @@ impl LaneRow {
             provider_seconds: facts.provider_seconds,
             handoff: None,
             provider_error: None,
+            capabilities: None,
         }
     }
 }

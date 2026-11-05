@@ -912,7 +912,7 @@ pub(crate) mod peer_tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let mut graph_owner = BoundGraphOwner { factory: &factory, integration_base: None,
-            integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel,
+            integration_branch: None, network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel,
             prices: None, tick: false };
         let actor = graph_owner.actor();
         let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
@@ -926,7 +926,7 @@ pub(crate) mod peer_tests {
             ("default-no-origin-head", None, &head),
         ] {
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"review-pins", "node_id":name, "route_index":0}))?;
-            let observation = graph_owner.observe_or_start(&key, graph::NodeInput { settlement_retries: Some(1), prior_attempts: &[], family_peers: &[],
+            let observation = graph_owner.observe_or_start(&key, graph::NodeInput { capabilities: None, capability_sources: None, settlement_retries: Some(1), prior_attempts: &[], family_peers: &[],
                 context: Default::default(), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
                 source_commit: Some(&head), review_base, title: name, prompt: "review",
                 required_verdict: None, deadline_seconds: None, inputs_dir: None,
@@ -995,7 +995,7 @@ pub(crate) mod peer_tests {
             factory: &factory,
             integration_base: None,
             integration_branch: None,
-            network: None,
+            network: None, capability_overrides: Default::default(),
             exclude: Vec::new(),
             budget,
             cancel: &cancel,
@@ -1010,7 +1010,7 @@ pub(crate) mod peer_tests {
         {
             let observation = graph_owner.observe_or_start(
                 &key,
-                graph::NodeInput {
+                graph::NodeInput { capabilities: None, capability_sources: None,
                     settlement_retries: None,
                     prior_attempts: &[],
                     family_peers: &[],
@@ -1707,7 +1707,7 @@ pub(crate) mod peer_tests {
                 factory: &factory,
                 integration_base: None,
                 integration_branch: None,
-                network: None,
+                network: None, capability_overrides: Default::default(),
                 exclude: Vec::new(),
                 budget,
                 cancel: &cancel,
@@ -1818,7 +1818,7 @@ pub(crate) mod peer_tests {
             factory: &factory,
             integration_base: None,
             integration_branch: None,
-            network: None,
+            network: None, capability_overrides: Default::default(),
             exclude: Vec::new(),
             budget,
             cancel: &cancel,
@@ -2019,7 +2019,7 @@ pub(crate) mod peer_tests {
             factory: &factory,
             integration_base: None,
             integration_branch: None,
-            network: None,
+            network: None, capability_overrides: Default::default(),
             exclude: Vec::new(),
             budget,
             cancel: &cancel,
@@ -2156,7 +2156,7 @@ pub(crate) mod peer_tests {
         journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(),
             integration_base: None, directory: fixture.rig.project.clone(), document: document.clone() })?;
         let mut owner = BoundGraphOwner { factory: &factory, integration_base: None, integration_branch: None,
-            network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
+            network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         let catalogue = Catalogue::bundled()?;
         let models = ["codex/gpt-6-luna", "claude/claude-haiku-5-5", "agy/gemini-3.8-flash", "opencode/opencode-go/glm-5.3-flash"];
         let now = factory.clock.wall_now()?.unix_seconds();
@@ -2273,7 +2273,7 @@ pub(crate) mod peer_tests {
             factory: &factory,
             integration_base: None,
             integration_branch: None,
-            network: None,
+            network: None, capability_overrides: Default::default(),
             exclude: Vec::new(),
             budget,
             cancel: &cancel,
@@ -2312,7 +2312,7 @@ pub(crate) mod peer_tests {
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
                 "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
             }))?;
-            bound.observe_or_start(&key, graph::NodeInput { settlement_retries: None, review_base: None,
+            bound.observe_or_start(&key, graph::NodeInput { capabilities: None, capability_sources: None, settlement_retries: None, review_base: None,
                 prior_attempts: prior, family_peers: peers, context: Default::default(), read_roots: &[],
                 distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
                 title: "lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -2852,10 +2852,10 @@ pub(crate) mod peer_tests {
         let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
         let mut bound = BoundGraphOwner {
             factory: &factory, integration_base: None, integration_branch: None,
-            network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
+            network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
         };
         let actor = bound.actor();
-        bound.observe_or_start(&key, graph::NodeInput { settlement_retries: None, review_base: None,
+        bound.observe_or_start(&key, graph::NodeInput { capabilities: None, capability_sources: None, settlement_retries: None, review_base: None,
             prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "later lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -2878,7 +2878,7 @@ pub(crate) mod peer_tests {
             "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0
         }))?;
         let actor = bound.actor();
-        bound.observe_or_start(&second, graph::NodeInput { settlement_retries: None, review_base: None,
+        bound.observe_or_start(&second, graph::NodeInput { capabilities: None, capability_sources: None, settlement_retries: None, review_base: None,
             prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "second lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -2963,7 +2963,7 @@ pub(crate) mod peer_tests {
         let exact_key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
             "graph_id":"pinned-base", "node_id":exact.nodes[1].id, "route_index":0
         }))?;
-        bound.observe_or_start(&exact_key, graph::NodeInput { settlement_retries: None, review_base: None,
+        bound.observe_or_start(&exact_key, graph::NodeInput { capabilities: None, capability_sources: None, settlement_retries: None, review_base: None,
             prior_attempts: &[], family_peers: &["openai".to_owned()], context: Default::default(), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "exact lens", prompt: "review", required_verdict: None, deadline_seconds: None,
@@ -3765,27 +3765,27 @@ pub(crate) mod peer_tests {
     }
     #[test]
     fn submit_lane_refusal_maps_to_dispatch_refused() -> Result<(), Box<dyn std::error::Error>> {
-        // Access resolution refuses before any state tree is touched, so an
-        // unknown capability is refused without reaching a spawn.
+        // A nonexistent read root is refused before any state tree is touched.
         let fail = provenant_cli::run::lane_access(
             &provenant_cli::Access {
                 mode: None,
                 worktree: None,
-                read_root: Vec::new(),
+                read_root: vec!["/fixture/missing-root".into()],
                 write_root: Vec::new(),
                 network: None,
-                capability: vec!["bogus".to_owned()],
+                capability: Vec::new(),
+                no_capability: Vec::new(),
             },
             Path::new("never-opened-state"),
             Path::new("/fixture/host-home"),
         )
         .err()
-        .ok_or("unknown capability refuses")?;
+        .ok_or("missing root refuses")?;
         let kind = fail.kind;
         match super::dispatch_refused(fail) {
             FacadeError::DispatchRefused { reason, .. } => {
                 assert!(reason.contains("inspect"));
-                assert!(!reason.contains("bogus"));
+                assert!(!reason.contains("missing-root"));
             }
             error => panic!("a refused submit kept no reason: {error:?}"),
         }
@@ -4103,7 +4103,7 @@ pub(crate) mod peer_tests {
             factory: &factory,
             integration_base: Some(BoundGraphBases { integration: Some(node_source), review: None }),
             integration_branch: None,
-            network: None,
+            network: None, capability_overrides: Default::default(),
             exclude: Vec::new(),
             budget,
             cancel: &cancel,

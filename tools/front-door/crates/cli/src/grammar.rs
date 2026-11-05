@@ -616,6 +616,9 @@ pub struct Access {
     /// Grant a named capability: postgres (repeatable)
     #[arg(long, catalog_bounds = (0, 16))]
     pub capability: Vec<String>,
+    /// Remove a project-default capability (repeatable)
+    #[arg(long, catalog_bounds = (0, 16))]
+    pub no_capability: Vec<String>,
 }
 impl Access {
     /// The effective mode. An omitted `--mode` is read-only.

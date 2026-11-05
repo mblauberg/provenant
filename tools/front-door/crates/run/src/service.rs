@@ -96,13 +96,19 @@ impl<'a> Service<'a> {
                 provenant_core::validate_task_title(title)
                     .map_err(|message| RunError::InvalidTaskTitle(message.into()))?;
             }
-            // A lane's child launches outside the lane's sandbox, so it may not
-            // name access its parent never had.
-            if input.parent_attempt.is_some() && !task.access.is_default() {
-                return Err(input_error(
-                    ErrorKind::Unsupported,
-                    "a nested dispatch cannot set network, capability, read-root or write-root access",
-                ));
+            // The host validates a requested database capability against the
+            // sealed parent. Other nested access additions keep their existing
+            // preflight restriction.
+            if input.parent_attempt.is_some() {
+                let mut other_access = task.access.clone();
+                other_access.database_ipc = false;
+                other_access.extra.remove("capability_sources");
+                if !other_access.is_default() {
+                    return Err(input_error(
+                        ErrorKind::Unsupported,
+                        "a nested dispatch cannot set network, read-root or write-root access",
+                    ));
+                }
             }
             if task.deliver.is_some() && task.worktree.is_none() {
                 return Err(input_error(

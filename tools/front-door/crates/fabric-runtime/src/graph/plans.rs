@@ -892,6 +892,26 @@ fn prepare(
                 child.id
             ));
         }
+        if let Some(capability) = child
+            .capabilities
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|capability| {
+                !node
+                    .capabilities
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(capability)
+            })
+        {
+            return Err(format!(
+                "fragment node {} capability {capability} exceeds the planner's capabilities",
+                child.id
+            ));
+        }
+        // Origin evidence is host-authored; a planner cannot assert it.
+        child.extra.remove("capability_sources");
         if let Some(root) = child
             .read_roots
             .iter()

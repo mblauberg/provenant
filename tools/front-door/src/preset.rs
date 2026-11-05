@@ -1538,6 +1538,7 @@ fn lower_leaf(
             "depends_on",
             "routes",
             "read_roots",
+            "capabilities",
             "source",
             "prompt_file",
             "distinct_from",
@@ -2899,6 +2900,7 @@ pub(crate) fn bind_run_context(
     request: &provenant_cli::Dispatch,
     directory: &Path,
     policy: &ReadRoots,
+    default_capabilities: &[String],
     selection_source: &str,
     experiment: Option<&crate::experiment::Assignment>,
 ) -> Result<(), String> {
@@ -2915,11 +2917,18 @@ pub(crate) fn bind_run_context(
             provenant_cli::Switch::Off => "off",
         });
     }
+    if !request.access.capability.is_empty() {
+        expansion.document["capability"] = json!(request.access.capability);
+    }
+    if !request.access.no_capability.is_empty() {
+        expansion.document["no_capability"] = json!(request.access.no_capability);
+    }
     // `--exclude` binds every node the graph launches; an unknown selector
     // was refused before this point.
     if !request.route.exclude.is_empty() {
         expansion.document["exclude"] = json!(request.route.exclude);
     }
+    let mut capability_warnings = Vec::new();
     let nodes = expansion.document["nodes"]
         .as_array_mut()
         .ok_or("missing graph nodes")?;
@@ -2928,6 +2937,79 @@ pub(crate) fn bind_run_context(
         let container = node.get("composite").is_some() || node.get("loop").is_some();
         if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {
             let writer = node["access"] == "worktree_write";
+            if writer || node.get("capabilities").is_some() {
+                let invalid_capabilities = node
+                    .get("capabilities")
+                    .is_some_and(|value| !value.is_array());
+                if invalid_capabilities {
+                    capability_warnings.push("ignored malformed node capabilities".to_owned());
+                }
+                let supplied = node.get("capabilities").and_then(Value::as_array);
+                let mut sources: Vec<(String, &str)> = supplied.map_or_else(
+                    || {
+                        if invalid_capabilities {
+                            return Vec::new();
+                        }
+                        default_capabilities
+                            .iter()
+                            .cloned()
+                            .map(|name| (name, "project default"))
+                            .collect()
+                    },
+                    |values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(|name| (name.to_owned(), "node"))
+                            .collect()
+                    },
+                );
+                sources.retain(|(name, origin)| {
+                    if name == "postgres" {
+                        true
+                    } else {
+                        capability_warnings.push(format!(
+                            "ignored unknown {origin} capability {}",
+                            provenant_fabric_runtime::hosts::plain_text(name, 128)
+                        ));
+                        false
+                    }
+                });
+                if writer {
+                    for capability in &request.access.capability {
+                        if capability != "postgres" {
+                            capability_warnings.push(format!(
+                                "ignored unknown flag capability {}",
+                                provenant_fabric_runtime::hosts::plain_text(capability, 128)
+                            ));
+                            continue;
+                        }
+                        sources.retain(|(name, _)| name != capability);
+                        sources.push((capability.clone(), "flag"));
+                    }
+                }
+                let mut seen = BTreeSet::new();
+                sources.retain(|(name, _)| {
+                    !request.access.no_capability.contains(name) && seen.insert(name.clone())
+                });
+                if supplied.is_some()
+                    || invalid_capabilities
+                    || !default_capabilities.is_empty()
+                    || !request.access.capability.is_empty()
+                {
+                    node["capabilities"] =
+                        json!(sources.iter().map(|(name, _)| name).collect::<Vec<_>>());
+                }
+                if !sources.is_empty() {
+                    node["capability_sources"] = json!(
+                        sources
+                            .iter()
+                            .map(|(name, source)| json!({"name": name, "source": source}))
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+
             // A deferred review measures in the bound worktree unless it names one.
             if let Some(worktree) = &request.access.worktree
                 && node.get("review").is_some_and(Value::is_object)
@@ -3013,6 +3095,7 @@ pub(crate) fn bind_run_context(
         }
         Ok(())
     })?;
+    expansion.warnings.extend(capability_warnings);
     // The graph context is the single carrier of run labels; the scheduler
     // adds graph and node identity to each submitted task.
     expansion.document["context"]["preset"] = expansion.document["provenance"]["preset"].clone();
@@ -3328,7 +3411,7 @@ pub(super) fn pending_checks(document: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
+pub(super) fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
     for node in nodes {
         let field = |name: &str| node.get(name).and_then(Value::as_str).unwrap_or("-");
         let tier = node
@@ -3365,6 +3448,7 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
         for key in [
             "write_scope",
             "read_roots",
+            "capability_sources",
             "source",
             "inputs",
             "acceptance_checks",
@@ -3937,11 +4021,18 @@ pub fn run(
             &policy_roots,
         );
         provenant_cli::route::validate_exclusions(&request.route.exclude, &roots.roots)?;
+        let project_id = provenant_cli::run::preview_project_id(&roots.roots, &directory);
+        let defaults = project_id
+            .as_ref()
+            .and_then(|id| config.domains.lanes.projects.get(&id.to_string()))
+            .map(|settings| settings.capabilities.as_slice())
+            .unwrap_or_default();
         bind_run_context(
             &mut expansion,
             &request,
             &directory,
             &policy,
+            defaults,
             selection.source.as_str(),
             placement.assignment.as_ref(),
         )?;

@@ -627,6 +627,55 @@ pub(super) fn dispatch_inner(
     created: &mut Option<(PathBuf, String)>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<(Value, String, bool), Fail> {
+    // Resolve the project default before admission, so child authority checks
+    // see the same effective capabilities as the provider.
+    let explicit = command.access.capability.clone();
+    let settings = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+    let project = if settings.domains.lanes.projects.is_empty() {
+        None
+    } else {
+        preview_project_id(edge.roots, edge.cwd)
+    };
+    let defaults = project
+        .as_ref()
+        .and_then(|id| settings.domains.lanes.projects.get(&id.to_string()))
+        .map(|settings| settings.capabilities.as_slice())
+        .unwrap_or_default();
+    let mut capability_warnings = Vec::new();
+    command.access.capability.retain(|name| {
+        if name == "postgres" {
+            true
+        } else {
+            capability_warnings.push(format!("--capability: ignored unknown capability {name}"));
+            false
+        }
+    });
+    for name in &command.access.no_capability {
+        if name != "postgres" {
+            capability_warnings.push(format!(
+                "--no-capability: ignored unknown capability {name}"
+            ));
+        }
+    }
+    if command.access.mode() == Mode::WorktreeWrite {
+        for capability in defaults {
+            if capability != "postgres" {
+                capability_warnings.push(format!("domains.lanes.projects.{}.capabilities: ignored unknown capability {capability}", project.as_ref().map(ToString::to_string).unwrap_or_default()));
+                continue;
+            }
+            if !command.access.capability.contains(capability) {
+                command.access.capability.push(capability.clone());
+            }
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    command.access.capability.retain(|capability| {
+        !command.access.no_capability.contains(capability) && seen.insert(capability.clone())
+    });
+    let capability_sources: Vec<_> = command.access.capability.iter().map(|name| json!({
+        "name": name, "source": if explicit.contains(name) { "flag" } else { "project default" },
+    })).collect();
     // Explain is a preview-only operation. Return before worktree preflight,
     // operation replay, or any preparation that could lead to submission.
     if command.explain {
@@ -649,7 +698,7 @@ pub(super) fn dispatch_inner(
             run::AdmissionPolicy::resolve_timeout(command.admission_timeout, configured_admission);
         // The brief scan only reads the prompt file and resolves the roots; it
         // never prepares anything that could lead to a submission.
-        let warnings = match command.input.prompt_file.as_deref() {
+        let mut warnings = match command.input.prompt_file.as_deref() {
             Some(path) => {
                 let prompt = read_bounded(path)?;
                 let access = lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
@@ -667,8 +716,17 @@ pub(super) fn dispatch_inner(
             }
             None => Vec::new(),
         };
+        warnings.extend(capability_warnings.clone());
         return crate::route::explain_dispatch(&command.route, edge.roots)
             .map(|(mut data, mut text)| {
+                data["capabilities"] = json!(capability_sources);
+                for capability in &capability_sources {
+                    text.push_str(&format!(
+                        "capability: {} ({})\n",
+                        capability["name"].as_str().unwrap_or_default(),
+                        capability["source"].as_str().unwrap_or_default()
+                    ));
+                }
                 data["admission_timeout"] = json!({
                     "seconds": effective_admission.seconds,
                     "origin": effective_admission.origin.as_str(),
@@ -713,6 +771,11 @@ pub(super) fn dispatch_inner(
     }
     // Validate roots before checking the capabilities they request.
     let mut lane_access = lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
+    if !capability_sources.is_empty() {
+        lane_access
+            .extra
+            .insert("capability_sources".into(), json!(capability_sources));
+    }
     let has_writes = run::Service::has_writes(
         matches!(command.access.mode(), Mode::WorktreeWrite),
         &lane_access.write_roots,
@@ -741,7 +804,14 @@ pub(super) fn dispatch_inner(
         // Initialise the state before entering the shared confinement context.
         let call = request(&clock, &cancel)?;
         let session = open(edge, &call)?;
-        if let Some(replayed) = replay_owned_dispatch(&command, edge, &session, &call, workers)? {
+        if let Some(replayed) = replay_owned_dispatch(
+            &command,
+            edge,
+            &session,
+            &call,
+            workers,
+            &capability_sources,
+        )? {
             return Ok(replayed);
         }
         if let Some(mode) = &command.deliver
@@ -981,7 +1051,11 @@ pub(super) fn dispatch_inner(
             if !fallback.is_empty() {
                 return unsupported("route fallback with --host");
             }
-            if !lane_access.is_default() || network.is_some() {
+            if lane_access.network.is_some()
+                || !lane_access.read_roots.is_empty()
+                || !lane_access.write_roots.is_empty()
+                || network.is_some()
+            {
                 return unsupported(
                     "network, capability, read-root or write-root access with --host",
                 );
@@ -999,7 +1073,7 @@ pub(super) fn dispatch_inner(
                 deliver,
             });
         }
-        return remote::dispatch(
+        let (mut data, mut human, timed_out) = remote::dispatch(
             edge,
             host,
             remote::Batch {
@@ -1009,9 +1083,28 @@ pub(super) fn dispatch_inner(
                 knobs: command.knobs,
                 provider_timeout: command.provider_timeout,
                 new_worktree,
+                capabilities: if !command.access.capability.is_empty()
+                    || !command.access.no_capability.is_empty()
+                {
+                    Some(command.access.capability.clone())
+                } else {
+                    None
+                },
+                capability_sources: capability_sources
+                    .iter()
+                    .filter_map(|value| {
+                        Some((
+                            value["name"].as_str()?.to_owned(),
+                            value["source"].as_str()?.to_owned(),
+                        ))
+                    })
+                    .collect(),
             },
             command.wait,
-        );
+        )?;
+        record_warnings(&mut data, capability_warnings);
+        human.push_str(&warnings_text(&data));
+        return Ok((data, human, timed_out));
     }
     let mut session = open(edge, &call)?;
     // Protection governs new admission. Service::dispatch still compares the
@@ -1350,7 +1443,7 @@ pub(super) fn dispatch_inner(
             },
         )
         .collect();
-    let brief_warnings = if command.input.manifest.is_none()
+    let mut brief_warnings = if command.input.manifest.is_none()
         && config
             .domains
             .run
@@ -1371,6 +1464,7 @@ pub(super) fn dispatch_inner(
     } else {
         Vec::new()
     };
+    brief_warnings.extend(capability_warnings);
     let (record, started) = submit_with_host_and_wait(
         &session,
         edge,
@@ -1417,6 +1511,10 @@ pub fn warnings_text(data: &Value) -> String {
 
 /// Resolve an existing project binding without creating state during previews.
 pub fn preview_project_id(roots: &Roots, cwd: &Path) -> Option<provenant_core::ProjectId> {
+    if crate::fabric::in_lane() {
+        let gitdir = std::env::var_os("PROVENANT_WORKTREE_GITDIR").map(PathBuf::from)?;
+        return project_id_for_lane_gitdir(roots, &gitdir);
+    }
     let git = provenant_os::git::git_executable()?;
     let runtime = provenant_confinement::UtilityRuntime::read_only(git).ok()?;
     let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
@@ -1428,6 +1526,28 @@ pub fn preview_project_id(roots: &Roots, cwd: &Path) -> Option<provenant_core::P
     provenant_config::lookup_project(roots, &location)
         .ok()?
         .map(|binding| binding.project_id())
+}
+
+pub(super) fn project_id_for_lane_gitdir(
+    roots: &Roots,
+    gitdir: &Path,
+) -> Option<provenant_core::ProjectId> {
+    let mut matches = provenant_config::registered_projects(roots)
+        .ok()?
+        .into_iter()
+        .filter(|binding| {
+            let common = binding.common_dir();
+            gitdir == common
+                || gitdir
+                    .strip_prefix(common.join("worktrees"))
+                    .is_ok_and(|rest| {
+                        let mut components = rest.components();
+                        matches!(components.next(), Some(std::path::Component::Normal(_)))
+                            && components.next().is_none()
+                    })
+        });
+    let project = matches.next()?.project_id();
+    matches.next().is_none().then_some(project)
 }
 
 /// Resolve an existing project binding without creating state during previews.
@@ -1565,6 +1685,7 @@ pub(super) fn replay_owned_dispatch(
     session: &Session,
     call: &run::Request<'_>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    capability_sources: &[Value],
 ) -> Result<Option<(Value, String, bool)>, Fail> {
     let Some(operation) = session.store.operation(&command.operation_id, call)? else {
         return Ok(None);
@@ -1601,6 +1722,12 @@ pub(super) fn replay_owned_dispatch(
     let profile = config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    let mut expected_access = lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
+    if !capability_sources.is_empty() {
+        expected_access
+            .extra
+            .insert("capability_sources".into(), json!(capability_sources));
+    }
     if task.title != command.title
         || task.build_heavy != command.build_heavy
         || task.prompt_digest != CanonicalV1::file_digest(prompt.as_bytes())
@@ -1609,7 +1736,7 @@ pub(super) fn replay_owned_dispatch(
         || task.head != command.head
         || task.base_ref != command.base
         || task.deliver != delivery
-        || task.access != lane_access(&command.access, edge.roots.state.as_path(), edge.home)?
+        || task.access != expected_access
         || task.profile != profile
         || task.provider_timeout_seconds != command.provider_timeout
         || task.delivery_id != command.delivery_id

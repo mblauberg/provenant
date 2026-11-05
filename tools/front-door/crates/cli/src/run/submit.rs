@@ -197,12 +197,18 @@ pub fn lane_access(
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
 }
 
+/// Emit an advisory for an unsupported capability without granting it.
+pub fn warn_ignored_capability(origin: &str, name: &str) {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: ignored unknown {origin}capability {}",
+        plain_text(name, 128)
+    );
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum AccessError {
-    #[error(
-        "unknown capability {0}; known: postgres (Rust and Node toolchains are granted to every lane)"
-    )]
-    UnknownCapability(String),
     #[error("{flag} {} is not an existing directory", path.display())]
     MissingDirectory { flag: &'static str, path: PathBuf },
     #[error("{flag} {} overlaps the Provenant state root", path.display())]
@@ -238,9 +244,7 @@ pub(super) fn lane_access_checked(
     for name in &access.capability {
         match name.as_str() {
             "postgres" => postgres = true,
-            other => {
-                return Err(AccessError::UnknownCapability(other.into()));
-            }
+            other => warn_ignored_capability("", other),
         }
     }
     let network = network_access(access.network, postgres);

@@ -198,6 +198,36 @@ fn adapter_child_leaves_network_unset_so_the_parent_bound_applies() -> TestResul
 }
 
 #[test]
+fn child_dispatch_accepts_database_proposal_but_keeps_other_access_restricted() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    for case in ["database", "network", "read", "write"] {
+        let mut input = submission(case);
+        input.operation_id = OperationId::parse(&format!("child-{case}"))?;
+        input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
+        input.lane_depth = 2;
+        match case {
+            "database" => input.tasks[0].access.database_ipc = true,
+            "network" => input.tasks[0].access.network = Some(NetworkAccess::Provider),
+            "read" => input.tasks[0]
+                .access
+                .read_roots
+                .push(temp.path().join("read")),
+            "write" => input.tasks[0]
+                .access
+                .write_roots
+                .push(temp.path().join("write")),
+            _ => unreachable!(),
+        }
+        let result = Service::new(&store).dispatch(input, temp.path(), &call);
+        assert_eq!(result.is_ok(), case == "database", "{case}: {result:?}");
+    }
+    Ok(())
+}
+
+#[test]
 fn child_dispatch_replays_original_id_scheme() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

@@ -63,6 +63,8 @@ pub(super) struct Batch {
     pub(super) provider_timeout: u64,
     /// A writer's worktree, created by the peer in its own clone.
     pub(super) new_worktree: Option<NewWorktree>,
+    pub(super) capabilities: Option<Vec<String>>,
+    pub(super) capability_sources: std::collections::BTreeMap<String, String>,
 }
 
 /// Where a run lives. The peer owns everything else about it.
@@ -864,6 +866,8 @@ fn submitted_task(
     task: Task,
     new_worktree: Option<NewWorktree>,
     timeout_seconds: u64,
+    capabilities: Option<Vec<String>>,
+    capability_sources: std::collections::BTreeMap<String, String>,
 ) -> SubmittedTask {
     SubmittedTask {
         context: task.context,
@@ -884,6 +888,8 @@ fn submitted_task(
             AccessMode::ReadOnly
         },
         worktree: None,
+        capabilities,
+        capability_sources,
         new_worktree,
         prompt: task.prompt,
         route: task.route,
@@ -914,7 +920,15 @@ pub(super) fn dispatch(
     let tasks = batch
         .tasks
         .into_iter()
-        .map(|task| submitted_task(task, batch.new_worktree.clone(), timeout_seconds))
+        .map(|task| {
+            submitted_task(
+                task,
+                batch.new_worktree.clone(),
+                timeout_seconds,
+                batch.capabilities.clone(),
+                batch.capability_sources.clone(),
+            )
+        })
         .collect();
     let concurrency = batch
         .concurrency
@@ -2102,6 +2116,8 @@ mod tests {
                 branch: "writer/change".into(),
             }),
             600,
+            None,
+            Default::default(),
         );
         let actual = serde_json::to_value(SubmitInput::Submit {
             extra: Default::default(),
@@ -2158,6 +2174,8 @@ mod tests {
             },
             None,
             600,
+            None,
+            Default::default(),
         );
         assert_eq!(task.base.as_deref(), Some("main"));
         assert_eq!(task.prompt, "review");

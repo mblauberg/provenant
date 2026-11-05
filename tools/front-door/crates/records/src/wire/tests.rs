@@ -51,6 +51,7 @@ fn row() -> LaneRow {
         provider_seconds: None,
         handoff: None,
         provider_error: None,
+        capabilities: None,
     }
 }
 
