@@ -281,6 +281,15 @@ pub(super) fn ensure_source_roots(
                     },
                 )
             })
+        || access.attachments.iter().any(|path| {
+            overlaps_source(
+                source,
+                &PathGrant {
+                    path: path.clone(),
+                    scope: PathScope::Exact,
+                },
+            )
+        })
         || (cfg!(target_os = "macos")
             && ["/usr/share", "/private/var/db/timezone"]
                 .iter()

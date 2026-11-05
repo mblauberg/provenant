@@ -1060,7 +1060,8 @@ pub(super) fn validate_review_addition(
             .nodes
             .iter()
             .any(|node| node.access != AccessMode::ReadOnly || node.review.is_some()
-                || node.read_roots.iter().any(|root| !source.read_roots.contains(root)))
+                || node.read_roots.iter().any(|root| !source.read_roots.contains(root))
+                || node.attachments.iter().any(|path| !source.attachments.contains(path)))
         || (planned && !addition.nodes.iter().any(|node| {
             node.id == format!("{}--plan", lens_root.id)
                 && node.plan.as_ref().is_some_and(|plan| {
@@ -1368,6 +1369,16 @@ fn prepare_nested(
         {
             return Err(format!(
                 "fragment node {} capability {capability} exceeds the planner's capabilities",
+                child.id
+            ));
+        }
+        if child
+            .attachments
+            .iter()
+            .any(|path| !node.attachments.contains(path))
+        {
+            return Err(format!(
+                "fragment node {} attachment exceeds the planner's attachments",
                 child.id
             ));
         }

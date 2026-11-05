@@ -33,7 +33,7 @@ not credential contents or provider output; `provenant quota` supplies recovery.
 
 One declared table per adapter (`AdapterSpec::launch` in
 `tools/front-door/crates/records/src/adapters.rs`) is the source for dispatch,
-`run`, resume and graph validation. A request outside it is refused with the
+`run`, resume and graph validation. Unsupported enforced controls are refused with the
 adapter and field named (`cursor does not support effort`) before admission,
 worktree preparation, reservation or receipt creation. A named route is checked
 once routing resolves its adapter; a model's recorded effort controls in the
@@ -41,8 +41,8 @@ catalogue still apply on top.
 
 | Adapter  | Effort | Resume | Steering | Network modes          | Image input | Write |
 | -------- | ------ | ------ | -------- | ---------------------- | ----------- | ----- |
-| claude   | yes    | yes    | no       | provider, local, open  | no          | yes   |
-| codex    | yes    | yes    | no       | provider, local, open  | no          | yes   |
+| claude   | yes    | yes    | no       | provider, local, open  | yes         | yes   |
+| codex    | yes    | yes    | no       | provider, local, open  | yes         | yes   |
 | cursor   | no     | yes    | no       | provider, local, open  | no          | yes   |
 | agy      | yes    | yes    | no       | provider, local, open  | no          | yes   |
 | opencode | yes    | yes    | no       | provider, local, open  | no          | yes   |
@@ -50,8 +50,12 @@ catalogue still apply on top.
 | host-native | configured | no | no | provider, local, open | no | yes |
 
 Command routes have no model and refuse model, effort, resume and write
-requests. Steering (input into a live session) and image input have no request
-surface yet. Cursor has no effort control on its command line, so its
+requests. Steering (input into a live session) has no request surface yet.
+Repeat `run --attach PATH` to grant a lane read access to image files. Claude
+receives their paths in the prompt; Codex receives image arguments. Other
+adapters warn that `image_input` is unavailable while retaining the read grant.
+Remote dispatch cannot transfer these files and warns when attachments are omitted.
+Cursor has no effort control on its command line, so its
 catalogue models record none.
 
 ## Host-native

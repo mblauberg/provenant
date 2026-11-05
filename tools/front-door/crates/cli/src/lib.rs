@@ -573,6 +573,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                         "worktree",
                         "deliver",
                         "read_root",
+                        "attach",
                         "write_root",
                     ])
                 });
@@ -780,7 +781,8 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             {
                 return invalid("--concurrency requires --manifest or --preset");
             }
-            if access.read_root.len() > 32
+            if access.attach.len() > 32
+                || access.read_root.len() > 32
                 || access.write_root.len() > 32
                 || access.capability.len() > 16
                 || access.no_capability.len() > 16
@@ -1135,6 +1137,7 @@ mod tests {
         for (path, name, bounds) in [
             ("provenant run", "fallback", (0, 2)),
             ("provenant run", "read_root", (0, 32)),
+            ("provenant run", "attach", (0, 32)),
             ("provenant run", "write_root", (0, 32)),
             ("provenant run", "capability", (0, 16)),
             ("provenant cancel", "reason", (0, 256)),
@@ -2022,6 +2025,10 @@ mod tests {
             "/fixture/source",
             "--read-root",
             "/fixture/other",
+            "--attach",
+            "/fixture/first.png",
+            "--attach",
+            "/fixture/second.png",
             "--wait",
             "30m",
             "--concurrency",
@@ -2038,6 +2045,13 @@ mod tests {
             Some(std::path::PathBuf::from("/fixture/writer"))
         );
         assert_eq!(request.access.read_root.len(), 2);
+        assert_eq!(
+            request.access.attach,
+            [
+                std::path::PathBuf::from("/fixture/first.png"),
+                std::path::PathBuf::from("/fixture/second.png")
+            ]
+        );
         for concurrency in ["0", "17"] {
             invalid(&[
                 "run",

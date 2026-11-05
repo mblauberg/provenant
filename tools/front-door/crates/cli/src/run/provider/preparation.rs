@@ -3,6 +3,16 @@ use super::*;
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const DEPENDENCY_STDERR_TAIL: usize = 4096;
 
+pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
+    (!attachments.is_empty()
+        && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
+    .then(|| {
+        format!(
+            "warning: adapter {adapter} does not support image_input; attachments remain readable"
+        )
+    })
+}
+
 pub(super) fn violates_account_pin(
     selected_key: Option<&str>,
     selected_adapter: Option<&str>,
@@ -1374,6 +1384,20 @@ pub(super) fn prepare_candidates(
             }
             None => prompt_text.to_owned(),
         };
+        let text = if !task.access.attachments.is_empty()
+            && !AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.launch.image_input)
+        {
+            let paths = task
+                .access
+                .attachments
+                .iter()
+                .map(|path| format!("- {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{text}\n\nAttached images (open these files if supported):\n{paths}")
+        } else {
+            text
+        };
         let text = format!(
             "{}\n{text}",
             run::lane_preamble(
@@ -1537,6 +1561,7 @@ pub(super) fn prepare_candidates(
         let grant_digest = task.authority_digest.to_string();
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
+                images: &task.access.attachments,
                 command: None,
                 route: provider_route,
                 confined: &plan,
@@ -1745,6 +1770,9 @@ pub(super) fn prepare_candidates(
                 std::io::stderr().lock(),
                 "warning: OpenCode login status is unverified; the selected launch will check authentication"
             );
+        }
+        if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
+            let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
@@ -2141,5 +2169,18 @@ mod user_skills_tests {
         assert_eq!(record["exposed"], false);
         assert_eq!(record["staged_file_count"], 0);
         assert_eq!(record["source"], origin);
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    #[test]
+    fn unsupported_image_input_warns_without_refusing() {
+        let images = vec![PathBuf::from("/outside/image.png")];
+        let warning = image_input_warning("cursor", &images).unwrap();
+        assert!(warning.contains("cursor") && warning.contains("image_input"));
+        assert!(image_input_warning("claude", &images).is_none());
+        assert!(image_input_warning("cursor", &[]).is_none());
     }
 }

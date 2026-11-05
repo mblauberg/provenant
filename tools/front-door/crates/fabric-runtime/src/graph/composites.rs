@@ -34,6 +34,7 @@ pub(super) fn expand(
         &[],
         None,
         &[],
+        &[],
         false,
         0,
         &depth_bound,
@@ -85,6 +86,7 @@ fn children(
     inputs: &[GraphInput],
     source: Option<&SourceBinding>,
     read_roots: &[String],
+    attachments: &[String],
     require_skill_location: bool,
     depth: usize,
     depth_bound: &crate::config::GraphBound<'_>,
@@ -216,6 +218,11 @@ fn children(
                 node.read_roots.push(root.clone());
             }
         }
+        for path in attachments {
+            if !node.attachments.contains(path) {
+                node.attachments.push(path.clone());
+            }
+        }
         if let Some(spec) = &mut node.loop_body {
             for child in &spec.body {
                 if child.id.starts_with("previous.") {
@@ -239,6 +246,7 @@ fn children(
                 &[],
                 None,
                 &[],
+                &node.attachments,
                 node.require_skill_location,
                 depth,
                 depth_bound,
@@ -305,6 +313,7 @@ fn children(
                 &node.inputs,
                 node.source.as_ref(),
                 &node.read_roots,
+                &node.attachments,
                 node.require_skill_location,
                 depth + 1,
                 depth_bound,
@@ -319,6 +328,7 @@ fn children(
             node.inputs.clear();
             node.source = None;
             node.read_roots.clear();
+            node.attachments.clear();
             node.composite = Some(CompositeSpec {
                 min_successful: spec.min_successful,
                 reduce_verdict: spec.reduce_verdict,

@@ -307,11 +307,37 @@ pub(super) fn lane_access_checked(
             return Err(AccessError::WorktreeOverlap(root.clone()));
         }
     }
+    let mut attachments = Vec::new();
+    for path in &access.attach {
+        let canonical = match provenant_os::fs::canonicalize(path) {
+            Ok(path) if path.is_file() => path,
+            _ => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: cannot attach {}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        if let Some(error) = refused_root("--read-root", path, &canonical, home) {
+            return Err(error);
+        }
+        if !run::access_root_allowed(&canonical, &state, true) {
+            return Err(AccessError::StateOverlap {
+                flag: "--attach",
+                path: path.clone(),
+            });
+        }
+        attachments.push(canonical);
+    }
     Ok(run::LaneAccess {
         extra: Default::default(),
         network,
         database_ipc: postgres,
         read_roots: resolve(&access.read_root, "--read-root")?,
+        attachments,
         write_roots,
         inputs_root: None,
         source_root: None,

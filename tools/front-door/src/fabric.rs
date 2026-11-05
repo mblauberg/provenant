@@ -4594,6 +4594,9 @@ impl BoundGraphOwner<'_> {
             if !node.read_roots.is_empty() {
                 map.insert("read_roots".into(), serde_json::json!(node.read_roots));
             }
+            if !node.attachments.is_empty() {
+                map.insert("attachments".into(), serde_json::json!(node.attachments));
+            }
             if node.require_skill_location {
                 map.insert("require_skill_location".into(), serde_json::json!(true));
             }
@@ -4826,7 +4829,13 @@ impl BoundGraphOwner<'_> {
             map.insert("id".into(), serde_json::Value::String(id.into()));
             // These fields are supplied by the pinned execution, so template
             // values must not affect decoding or survive the binding.
-            for field in ["source", "read_roots", "depends_on", "inputs"] {
+            for field in [
+                "source",
+                "read_roots",
+                "attachments",
+                "depends_on",
+                "inputs",
+            ] {
                 map.remove(field);
             }
             let mut result: GraphNode = serde_json::from_value(value)
@@ -4835,6 +4844,7 @@ impl BoundGraphOwner<'_> {
                 commit: subject.clone(),
             });
             result.read_roots = node.read_roots.clone();
+            result.attachments = node.attachments.clone();
             result.depends_on = deps;
             result.inputs = inputs;
             Ok(result)
@@ -6214,6 +6224,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 capabilities.retain(|name| seen.insert(name.clone()));
                 let mut grants = provenant_cli::run::lane_access(
                     &provenant_cli::Access {
+                        attach: node
+                            .attachments
+                            .iter()
+                            .map(|path| {
+                                let path = Path::new(path);
+                                if path.is_absolute() {
+                                    path.to_owned()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
                         mode: Some(provenant_cli::Mode::ReadOnly),
                         worktree: None,
                         read_root: node

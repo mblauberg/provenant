@@ -83,6 +83,9 @@ fn prepare(
             format!("model_reasoning_effort=\"{effort}\"").into(),
         ]);
     }
+    for image in input.images {
+        argv.extend(["--image".into(), image.as_os_str().to_owned()]);
+    }
     input.provenant.codex(&mut argv)?;
     argv.push("-".into());
 

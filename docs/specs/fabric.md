@@ -608,6 +608,12 @@ the host's `[domains.fabric.graph] allowed_read_roots` list. A planner
 fragment may not add `read_roots`, change `source` or change `role` relative
 to its planner node.
 
+Agent nodes may also declare `attachments`, a list of image file paths. Paths
+are canonicalised and granted read-only as individual files. Claude receives
+paths in its prompt and Codex receives image arguments. Other adapters warn
+about `image_input` and retain the read grant. A planner fragment cannot add
+attachments beyond its planner node's list.
+
 A graph document may set a top-level `network` of `"on"` or `"off"`. Every
 node lane the graph launches receives that network reach; without it, lanes
 default to open network. `run --network` binds it into a preset graph, with an
