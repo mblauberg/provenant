@@ -1529,17 +1529,6 @@ pub(super) fn prepare_candidates(
                 ..
             }
         ) {
-            let diagnostic = run::ErrorKind::StaleReadiness.diagnostic();
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning [{}]: {}; next: {}",
-                diagnostic.code,
-                diagnostic
-                    .detail
-                    .as_deref()
-                    .unwrap_or("account readiness is stale"),
-                diagnostic.next.as_deref().unwrap_or("re-probe the account")
-            );
             if let Some(key) = route.account_key.clone() {
                 let mut exact = request.clone();
                 exact.choice = provenant_routing::RouteChoice::Model(
@@ -1619,6 +1608,25 @@ pub(super) fn prepare_candidates(
                     // refreshed observation without running a second probe.
                     route = rechecked;
                 }
+            }
+            if matches!(
+                route.readiness,
+                provenant_records::RouteReadiness::Unavailable {
+                    reason: provenant_records::RouteExclusionReason::StaleAvailability,
+                    ..
+                }
+            ) {
+                let diagnostic = run::ErrorKind::StaleReadiness.diagnostic();
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning [{}]: {}; next: {}",
+                    diagnostic.code,
+                    diagnostic
+                        .detail
+                        .as_deref()
+                        .unwrap_or("account readiness is stale"),
+                    diagnostic.next.as_deref().unwrap_or("re-probe the account")
+                );
             }
         }
         if let provenant_records::RouteReadiness::Unavailable { reason, .. } = &route.readiness {
