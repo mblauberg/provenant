@@ -53,6 +53,14 @@ pub enum LoginObservation {
     ExecutableOnly,
 }
 
+/// Additional host root required by the adapter's setup directory creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupRoot {
+    None,
+    Home,
+    XdgDataHome,
+}
+
 /// Location of a provider's user skill tree relative to the host home or an
 /// absolute environment override. The fallback is relative to the home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +90,9 @@ pub struct AdapterSpec {
     pub shared_account_settings: bool,
     /// Registered accounts use an isolated login keychain rooted in their home.
     pub isolated_login_keychain: bool,
+    /// Setup may mirror a transcript into the registered account directory.
+    pub transcript_account_root: bool,
+    pub setup_root: SetupRoot,
     pub local_login: bool,
     pub login_reprobe: LoginReprobe,
     pub login_observation: LoginObservation,
@@ -287,6 +298,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         account_directory_prefix: Some(".claude-"),
         shared_account_settings: true,
         isolated_login_keychain: false,
+        transcript_account_root: true,
+        setup_root: SetupRoot::None,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::AccountAvailability,
@@ -349,6 +362,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         account_directory_prefix: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::None,
         local_login: false,
         login_reprobe: LoginReprobe::Codex,
         login_observation: LoginObservation::Reprobe,
@@ -415,6 +430,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         account_directory_prefix: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::Home,
         local_login: true,
         login_reprobe: LoginReprobe::Cursor,
         login_observation: LoginObservation::Reprobe,
@@ -480,6 +497,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         account_directory_prefix: None,
         shared_account_settings: false,
         isolated_login_keychain: true,
+        transcript_account_root: false,
+        setup_root: SetupRoot::None,
         local_login: true,
         login_reprobe: LoginReprobe::AccountIdentity,
         login_observation: LoginObservation::Reprobe,
@@ -549,6 +568,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         account_directory_prefix: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::XdgDataHome,
         local_login: true,
         login_reprobe: LoginReprobe::ExecutableOnly,
         login_observation: LoginObservation::ExecutableOnly,
@@ -612,6 +633,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         account_directory_prefix: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::None,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
@@ -672,6 +695,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         account_directory_prefix: None,
         shared_account_settings: false,
         isolated_login_keychain: false,
+        transcript_account_root: false,
+        setup_root: SetupRoot::None,
         local_login: false,
         login_reprobe: LoginReprobe::None,
         login_observation: LoginObservation::None,
@@ -728,6 +753,22 @@ mod tests {
     #[test]
     fn account_and_session_policies_preserve_adapter_behavior() {
         for spec in ADAPTER_SPECS {
+            assert_eq!(
+                spec.transcript_account_root,
+                spec.id == Harness::Claude,
+                "{}",
+                spec.name
+            );
+            assert_eq!(
+                spec.setup_root,
+                match spec.id {
+                    Harness::Cursor => SetupRoot::Home,
+                    Harness::Opencode => SetupRoot::XdgDataHome,
+                    _ => SetupRoot::None,
+                },
+                "{}",
+                spec.name
+            );
             assert_eq!(
                 spec.isolated_login_keychain,
                 spec.id == Harness::Agy,

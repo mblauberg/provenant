@@ -1389,6 +1389,7 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
+        let adapter_spec = AdapterSpec::get(adapter.id()).ok_or("adapter is not registered")?;
         let refreshed = if adapter.id() == provenant_records::Harness::Claude.spec().name
             && fixture_token.is_none()
         {
@@ -1593,7 +1594,6 @@ pub(super) fn prepare_candidates(
                 .and_then(|host| host.cargo_build_jobs.as_deref()),
             build_settings.jobs(),
         );
-        let adapter_spec = AdapterSpec::get(adapter.id()).ok_or("adapter is not registered")?;
         spec.configure_shell(scratch, adapter_spec)
             .map_err(|error| error.to_string())?;
         if let Some(gh) = publishing_gh.as_ref() {
@@ -1618,26 +1618,28 @@ pub(super) fn prepare_candidates(
         spec.complete_tool_requirements(&plan, &home, &cwd);
         let transcript_account = account
             .as_ref()
-            .filter(|_| adapter.id() == provenant_records::Harness::Claude.spec().name)
+            .filter(|_| adapter_spec.transcript_account_root)
             .map(|account| account.directory());
         let mut setup_roots = vec![scratch, private_state, roots.state.as_path()];
         // Only directory creation uses these additional provider state roots;
         // generated files and links remain confined to attempt-owned roots.
-        let opencode_data = spec
+        let xdg_data_home = spec
             .env
             .iter()
             .find(|(key, _)| key == "XDG_DATA_HOME")
             .map(|(_, value)| Path::new(value));
-        if adapter.id() == provenant_records::Harness::Opencode.spec().name {
-            if let Some(data) = opencode_data {
-                let existing = data
-                    .ancestors()
-                    .find(|path| path.is_dir())
-                    .ok_or("OpenCode data directory has no existing ancestor")?;
-                setup_roots.push(existing);
+        match adapter_spec.setup_root {
+            provenant_records::SetupRoot::XdgDataHome => {
+                if let Some(data) = xdg_data_home {
+                    let existing = data
+                        .ancestors()
+                        .find(|path| path.is_dir())
+                        .ok_or("provider data directory has no existing ancestor")?;
+                    setup_roots.push(existing);
+                }
             }
-        } else if adapter.id() == "cursor" {
-            setup_roots.push(&home);
+            provenant_records::SetupRoot::Home => setup_roots.push(&home),
+            provenant_records::SetupRoot::None => {}
         }
         if let Err(error) = apply_setup(&spec.setup, &setup_roots, transcript_account) {
             reasons.push(skip(
