@@ -148,6 +148,9 @@ pub struct OmittedLens {
 pub struct PanelResolution {
     pub shape: String,
     pub source: String,
+    pub frame: bool,
+    pub verifiers: usize,
+    pub synthesis: ReviewSynthesis,
     pub slots: Vec<ResolvedSlot>,
     pub omitted: Vec<OmittedLens>,
 }
@@ -835,6 +838,9 @@ impl ReviewConfig {
         Ok(PanelResolution {
             shape: selected.name.to_owned(),
             source: selected.source.to_owned(),
+            frame: selected.shape.frame,
+            verifiers: selected.shape.verifiers,
+            synthesis: selected.shape.synthesis,
             slots,
             omitted,
         })
@@ -1811,6 +1817,9 @@ mod tests {
             kind: Some("docs".into()),
             ..Default::default()
         });
+        assert!(!docs.frame);
+        assert_eq!(docs.verifiers, 0);
+        assert_eq!(docs.synthesis, ReviewSynthesis::Reduce);
         assert_eq!(docs.slots.len(), 1);
         assert_eq!(docs.slots[0].lens, "conventions-readability");
         assert!(
@@ -1826,6 +1835,9 @@ mod tests {
         assert!(refactor.slots.iter().any(|s| s.lens == "refactor-cleanup"));
 
         let standard = resolve(&ReviewRequest::default());
+        assert!(standard.frame);
+        assert_eq!(standard.verifiers, 1);
+        assert_eq!(standard.synthesis, ReviewSynthesis::Model);
         assert!(
             standard
                 .omitted
