@@ -23,6 +23,11 @@ Never assert "no duplicate" without it. Outcomes: duplicate (close the new one
 `duplicate-of`, add detail to the canonical issue), same outcome (extend in place and
 note what changed), or new.
 
+Before retrying a failed, timed-out or slow create, look up issues with the exact
+title, including closed issues, and compare returned titles literally. If the
+create succeeded, use that issue. If the lookup cannot establish the result,
+reconcile it before retrying; do not blindly repeat the create.
+
 ## Placement
 
 An epic is an outcome, not a folder. Nest an issue only when it serves that epic's

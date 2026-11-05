@@ -915,19 +915,7 @@ mod tests {
         std::fs::write(dep.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
         run_git(&dep, &["init", "-q"]).unwrap();
         run_git(&dep, &["add", "."]).unwrap();
-        run_git(
-            &dep,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "commit",
-                "-qm",
-                "fixture",
-            ],
-        )
-        .unwrap();
+        run_git(&dep, &["commit", "-qm", "fixture"]).unwrap();
         std::fs::write(app.join("Cargo.toml"), format!("[package]\nname = \"seed_app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nseed_fixture = {{ git = \"file://{}\" }}\n", dep.display())).unwrap();
         std::fs::write(
             app.join("src/lib.rs"),

@@ -1202,26 +1202,16 @@ fn init_fixture_repository(
         .canonicalize()?;
     for args in [
         vec!["init", "-q", "-b", "main"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "Initial",
-        ],
+        vec!["commit", "-q", "--allow-empty", "-m", "Initial"],
     ] {
         let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
             .chain(args.into_iter().map(Into::into))
             .collect();
-        let env = [
+        let mut env = vec![
             ("HOME".into(), git_home.as_os_str().to_owned()),
             ("PATH".into(), "/usr/bin:/bin".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ];
+        env.extend(provenant_os::fixture::fixture_git_settings());
         let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
         options.env = Some(&env);
         let output = executor.execute(options)?;
@@ -2956,11 +2946,11 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
             .chain(args.iter().map(Into::into))
             .collect();
-        let env = [
+        let mut env = vec![
             ("HOME".into(), git_home.as_os_str().to_owned()),
             ("PATH".into(), "/usr/bin:/bin".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ];
+        env.extend(provenant_os::fixture::fixture_git_settings());
         let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
         options.env = Some(&env);
         executor.execute(options)
@@ -2968,18 +2958,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
     if committed {
         std::fs::write(worktree.join("committed.txt"), "predecessor work")?;
         run_git(&["add", "committed.txt"], &worktree)?;
-        let commit_res = run_git(
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "commit",
-                "-m",
-                "predecessor commit",
-            ],
-            &worktree,
-        )?;
+        let commit_res = run_git(&["commit", "-m", "predecessor commit"], &worktree)?;
         assert_eq!(commit_res.termination, Termination::Exit(0));
     }
     let predecessor_head = run::resolve_git_base(&git, &worktree, "HEAD")?;

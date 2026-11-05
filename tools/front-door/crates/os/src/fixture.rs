@@ -80,19 +80,7 @@ mod tests {
         }
         fn initialise(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             run(dir, &["init", "-q"])?;
-            run(
-                dir,
-                &[
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.invalid",
-                    "commit",
-                    "--allow-empty",
-                    "-qm",
-                    "fixture",
-                ],
-            )?;
+            run(dir, &["commit", "--allow-empty", "-qm", "fixture"])?;
             Ok(())
         }
 

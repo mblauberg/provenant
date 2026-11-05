@@ -308,6 +308,15 @@ fn try_progress_lock(
 
 pub(crate) struct Guard;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClaimRefusal {
+    DriverLease,
+    JournalLock,
+    Complete,
+    LiveOwner,
+    RetryDeadline(u64),
+}
+
 /// Refusal observations use the same locks and deadline as a claim, without
 /// changing its retry budget. A free lifetime lease proves a same-process owner
 /// has abandoned its driver, even if Drop could not clear the journal.
@@ -355,25 +364,36 @@ impl Guard {
         scope: Scope,
         clock: &'a dyn Clock,
     ) -> Result<Option<Driver<'a>>> {
+        Ok(Self::claim_observed(attempt, scope, clock)?.0)
+    }
+
+    /// Return the refusal observed under the claim's locks, without a second
+    /// probe that can race a lock release.
+    pub(crate) fn claim_observed<'a>(
+        attempt: &Directory,
+        scope: Scope,
+        clock: &'a dyn Clock,
+    ) -> Result<(Option<Driver<'a>>, Option<ClaimRefusal>)> {
         let now_ms = now_ms(clock)?;
         let lease = match try_progress_lock(attempt, "settlement-driver.lock") {
             Ok(lease) => lease,
-            Err(FsError::LockTimeout { .. }) => return Ok(None),
+            Err(FsError::LockTimeout { .. }) => return Ok((None, Some(ClaimRefusal::DriverLease))),
             Err(error) => return Err(error.into()),
         };
         let _lock = match try_progress_lock(attempt, "settlement.lock") {
             Ok(lock) => lock,
-            Err(FsError::LockTimeout { .. }) => return Ok(None),
+            Err(FsError::LockTimeout { .. }) => return Ok((None, Some(ClaimRefusal::JournalLock))),
             Err(error) => return Err(error.into()),
         };
         let mut journal = read(attempt, scope)?;
-        if journal.phase == Phase::Complete
-            || journal.owner.as_ref().is_some_and(|owner| {
-                owner.pid != i64::from(std::process::id())
-                    && alive(owner, journal.owner_since_ms, now_ms)
-            })
-        {
-            return Ok(None);
+        if journal.phase == Phase::Complete {
+            return Ok((None, Some(ClaimRefusal::Complete)));
+        }
+        if journal.owner.as_ref().is_some_and(|owner| {
+            owner.pid != i64::from(std::process::id())
+                && alive(owner, journal.owner_since_ms, now_ms)
+        }) {
+            return Ok((None, Some(ClaimRefusal::LiveOwner)));
         }
         if journal.attempts == LIMIT && journal.phase == Phase::Import {
             return Err(RunError::ObjectImportLimit(
@@ -381,7 +401,10 @@ impl Guard {
             ));
         }
         if now_ms < journal.retry_after_ms {
-            return Ok(None);
+            return Ok((
+                None,
+                Some(ClaimRefusal::RetryDeadline(journal.retry_after_ms)),
+            ));
         }
         let owner = match SystemProcessObserver.observe(i64::from(std::process::id())) {
             ProcessObservation::Present(fact) if !fact.zombie => fact.identity,
@@ -391,15 +414,18 @@ impl Guard {
         journal.owner_since_ms = now_ms;
         journal.retry_after_ms = now_ms.saturating_add(backoff_ms(journal.attempts));
         write(attempt, &journal)?;
-        Ok(Some(Driver {
-            _lease: lease,
-            attempt: attempt.try_clone()?,
-            journal,
-            owner,
-            cancel: CancelToken::new(),
-            import_started: false,
-            clock,
-        }))
+        Ok((
+            Some(Driver {
+                _lease: lease,
+                attempt: attempt.try_clone()?,
+                journal,
+                owner,
+                cancel: CancelToken::new(),
+                import_started: false,
+                clock,
+            }),
+            None,
+        ))
     }
 }
 
@@ -1742,6 +1768,23 @@ mod tests {
                 .contains("deadline")
         );
         clock.wait_until(MonoTime::from_micros(10_000_000))?;
+        assert!(Guard::claim(&attempt, scope(), &clock)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn claim_reports_the_lock_that_refused_reclaim() -> TestResult {
+        let clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let driver = Guard::claim(&attempt, scope(), &clock)?.ok_or("initial claim")?;
+        drop(driver);
+        clock.wait_until(MonoTime::from_micros(120_000_000))?;
+        let lock = try_progress_lock(&attempt, "settlement.lock")?;
+        let (claim, reason) = Guard::claim_observed(&attempt, scope(), &clock)?;
+        assert!(claim.is_none());
+        assert_eq!(reason, Some(ClaimRefusal::JournalLock));
+        drop(lock);
         assert!(Guard::claim(&attempt, scope(), &clock)?.is_some());
         Ok(())
     }
