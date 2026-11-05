@@ -1,7 +1,7 @@
 use super::*;
 use provenant_config::{DomainConfig, DomainSections};
 use provenant_providers::{AvailabilityRecord, REGISTRY};
-use provenant_records::{RouteEligibility, RouteExclusionReason, RouteReadiness};
+use provenant_records::{ResolvedRoute, RouteEligibility, RouteExclusionReason, RouteReadiness};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -5465,4 +5465,154 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         );
     }
     Ok(())
+}
+
+/// A snapshot can only be built by resolving against current, validated inputs;
+/// deserialized ResolvedRoute projections cannot assert fresh availability.
+struct RoutingSnapshot<'a> {
+    catalogue_revision: String,
+    now_unix_seconds: i64,
+    routes: Vec<ResolvedRoute>,
+    families: &'a [FamilyFact],
+}
+impl<'a> RoutingSnapshot<'a> {
+    pub fn new(
+        requests: &[crate::RouteRequest],
+        context: &crate::RoutingContext<'_>,
+        families: &'a [FamilyFact],
+    ) -> Result<Self, RoutingError> {
+        if requests.len() > 256 || families.len() > 256 {
+            return Err(RoutingError::ReviewDemand);
+        }
+        let routes = requests
+            .iter()
+            .map(|r| crate::resolve(r, context))
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            catalogue_revision: context.catalogue.revision.clone(),
+            now_unix_seconds: context.now.as_timestamp().as_second(),
+            routes,
+            families,
+        })
+    }
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewDemand {
+    pub family_slots: BTreeMap<String, u64>,
+}
+#[derive(Debug, Serialize)]
+struct ReviewAvailability {
+    catalogue_revision: String,
+    expires_unix_seconds: Option<i64>,
+    families: BTreeMap<String, u64>,
+    blockers: Vec<ReviewBlocker>,
+    satisfied: bool,
+}
+impl ReviewAvailability {
+    pub fn satisfied(&self) -> bool {
+        self.satisfied
+    }
+}
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ReviewBlocker {
+    Route {
+        adapter: String,
+        model: String,
+        reason: RouteExclusionReason,
+    },
+    UnknownFamily {
+        model: String,
+    },
+    FamilySlots {
+        family: String,
+        required: u64,
+        available: u64,
+    },
+}
+fn review_availability(
+    snapshot: &RoutingSnapshot<'_>,
+    demand: &ReviewDemand,
+) -> Result<ReviewAvailability, RoutingError> {
+    if demand.family_slots.is_empty()
+        || demand.family_slots.len() > 16
+        || demand
+            .family_slots
+            .iter()
+            .any(|(f, n)| !crate::request::identifier(f) || !(1..=64).contains(n))
+        || snapshot.routes.len() > 256
+        || snapshot.families.len() > 256
+    {
+        return Err(RoutingError::ReviewDemand);
+    }
+    let mut families = BTreeMap::<String, u64>::new();
+    let mut blockers = Vec::new();
+    let mut expiry = None::<i64>;
+    let mut seen = std::collections::BTreeSet::new();
+    for route in &snapshot.routes {
+        if !seen.insert((&route.adapter, &route.model)) {
+            continue;
+        }
+        let ready_until = match &route.readiness {
+            RouteReadiness::Ready {
+                expires_unix_seconds,
+                ..
+            } if route.catalogue_revision == snapshot.catalogue_revision
+                && *expires_unix_seconds > snapshot.now_unix_seconds =>
+            {
+                *expires_unix_seconds
+            }
+            _ => {
+                let reason = match &route.readiness {
+                    RouteReadiness::Unavailable { reason, .. } => reason.clone(),
+                    _ => RouteExclusionReason::StaleAvailability,
+                };
+                blockers.push(ReviewBlocker::Route {
+                    adapter: route.adapter.clone(),
+                    model: route.model.clone(),
+                    reason,
+                });
+                continue;
+            }
+        };
+        let fact = snapshot.families.iter().map(|f| f.record()).find(|f| {
+            f.model.adapter() == route.adapter
+                && f.model.model() == route.model
+                && f.catalogue_revision == snapshot.catalogue_revision
+                && f.observed_unix_seconds <= snapshot.now_unix_seconds
+                && f.expires_unix_seconds > snapshot.now_unix_seconds
+                && f.family.is_some()
+        });
+        if let Some(fact) = fact {
+            if let Some(family) = &fact.family {
+                *families.entry(family.clone()).or_default() += 1;
+                let until = ready_until.min(fact.expires_unix_seconds);
+                expiry = Some(expiry.map_or(until, |current| current.min(until)));
+            }
+        } else {
+            blockers.push(ReviewBlocker::UnknownFamily {
+                model: format!("{}/{}", route.adapter, route.model),
+            });
+        }
+    }
+    let mut satisfied = true;
+    for (family, required) in &demand.family_slots {
+        let available = families.get(family).copied().unwrap_or(0);
+        if available < *required {
+            satisfied = false;
+            blockers.push(ReviewBlocker::FamilySlots {
+                family: family.clone(),
+                required: *required,
+                available,
+            });
+        }
+    }
+    Ok(ReviewAvailability {
+        catalogue_revision: snapshot.catalogue_revision.clone(),
+        expires_unix_seconds: expiry,
+        families,
+        blockers,
+        satisfied,
+    })
 }
