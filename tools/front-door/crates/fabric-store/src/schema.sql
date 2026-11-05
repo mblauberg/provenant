@@ -36,7 +36,3 @@ CREATE TABLE event_cursors (
  project TEXT NOT NULL, consumer TEXT NOT NULL, seq INTEGER NOT NULL CHECK(seq >= 0),
  PRIMARY KEY(project, consumer)
 ) STRICT;
-CREATE TABLE imports (
- source TEXT PRIMARY KEY, project TEXT NOT NULL, legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL,
- tasks INTEGER NOT NULL, messages INTEGER NOT NULL
-) STRICT;
