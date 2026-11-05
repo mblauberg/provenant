@@ -191,10 +191,15 @@ pub struct SessionState {
     /// command exists. The count shown is then partial.
     pub active_more: Option<String>,
     pub settled_more: Option<String>,
+    /// Records in the selected page not inspected before the deadline.
+    pub active_skipped: usize,
+    pub settled_skipped: usize,
     pub prs: Vec<PrLine>,
     /// PR numbers the chair named whose status could not be read.
     pub prs_unread: Vec<PrUnread>,
     pub worktrees: Vec<WorktreeLine>,
+    /// Linked worktrees the inventory could not inspect before its deadline.
+    pub worktrees_skipped: usize,
     pub unavailable: Vec<Unavailable>,
     /// How commands the output shows reach the store the collector used.
     pub commands: CommandPrefix,
@@ -210,7 +215,7 @@ struct Section {
 impl SessionState {
     fn sections(&self, worktrees: bool) -> Vec<Section> {
         let mut sections = Vec::new();
-        let lanes = |title: &str, lanes: &[LaneLine], next: &Option<String>| {
+        let lanes = |title: &str, lanes: &[LaneLine], next: &Option<String>, skipped: usize| {
             Section {
             title: format!("{title} ({}{})", lanes.len(), plus(next.is_some())),
             lines: lanes
@@ -237,19 +242,29 @@ impl SessionState {
                         "the paging command is too long or unsafe to show; run provenant lanes with this hook's --state-dir and --cursor {cursor}"
                     )
                 };
-                format!("more lanes exist beyond the page read, so this count is partial; {how}")
+                if skipped > 0 {
+                    format!("{skipped} lane record{} not inspected in this page; {how}", if skipped == 1 { " was" } else { "s were" })
+                } else {
+                    format!("more lanes exist beyond the page read, so this count is partial; {how}")
+                }
             }),
         }
         };
         // A lane section with no lanes and no partial note is omitted: an empty
         // count says nothing the agent can act on.
         if !self.active.is_empty() || self.active_more.is_some() {
-            sections.push(lanes("Lanes in flight", &self.active, &self.active_more));
+            sections.push(lanes(
+                "Lanes in flight",
+                &self.active,
+                &self.active_more,
+                self.active_skipped,
+            ));
         }
         let mut settled = lanes(
             "Lanes settled since the last chair save",
             &self.settled,
             &self.settled_more,
+            self.settled_skipped,
         );
         let mut counts = std::collections::BTreeMap::new();
         for lane in &self.settled {
@@ -340,7 +355,11 @@ impl SessionState {
                 .any(|unavailable| unavailable.source == "worktrees")
         {
             sections.push(Section {
-                title: format!("Worktrees ({})", self.worktrees.len()),
+                title: format!(
+                    "Worktrees ({}{})",
+                    self.worktrees.len(),
+                    plus(self.worktrees_skipped > 0)
+                ),
                 lines: self
                     .worktrees
                     .iter()
@@ -356,7 +375,13 @@ impl SessionState {
                     })
                     .collect(),
                 more: self.worktrees.len().saturating_sub(SECTION_LINES),
-                partial: None,
+                partial: (self.worktrees_skipped > 0).then(|| {
+                    format!(
+                        "{} worktree{} skipped during inventory",
+                        self.worktrees_skipped,
+                        if self.worktrees_skipped == 1 { "" } else { "s" }
+                    )
+                }),
             });
         }
         for name in &self.unavailable {
@@ -376,17 +401,23 @@ impl SessionState {
 
     /// Bounded text for a SessionStart hook. Read-only; nothing is saved.
     pub fn digest(&self, limit: usize) -> String {
-        let sections = self.sections(false);
+        let sections = self.sections(!self.worktrees.is_empty() || self.worktrees_skipped > 0);
         if sections.is_empty() {
             return String::new();
         }
-        let how = match (
+        let mut how = match (
             self.commands.runnable("lanes"),
             self.commands.runnable("pr status"),
         ) {
             (Some(lanes), Some(pr)) => format!("`{lanes}` and `{pr}`"),
             _ => "provenant lanes and provenant pr status with this hook's --state-dir".into(),
         };
+        if !self.worktrees.is_empty() || self.worktrees_skipped > 0 {
+            match self.commands.runnable("worktree list") {
+                Some(command) => how.push_str(&format!(", and `{command}`")),
+                None => how.push_str(", and provenant worktree list with this hook's --state-dir"),
+            }
+        }
         render(
             &format!("Provenant state for this project (read-only; re-derive with {how})"),
             &sections,
@@ -739,6 +770,23 @@ mod tests {
             assert!(text.contains("--cursor 7"), "{text}");
             assert!(text.contains("too long or unsafe"), "{text}");
         }
+    }
+
+    #[test]
+    fn session_digest_includes_collected_worktrees() {
+        let state = SessionState {
+            worktrees: vec![WorktreeLine {
+                path: "/work/tree".into(),
+                branch: "topic".into(),
+                dirty: "clean".into(),
+                writer: "free".into(),
+            }],
+            ..Default::default()
+        };
+        let digest = state.digest(DIGEST_LIMIT);
+        assert!(digest.contains("Worktrees (1)"), "{digest}");
+        assert!(digest.contains("/work/tree"), "{digest}");
+        assert!(digest.contains("provenant worktree list"), "{digest}");
     }
 
     #[test]

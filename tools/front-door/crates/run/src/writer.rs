@@ -23,6 +23,115 @@ use std::{
     time::Duration,
 };
 
+pub(crate) const SETUP_WAIT_LOCK: &str = "setup-wait.lock";
+
+// Serialise queue changes separately from the long-lived setup lock. Each
+// ticket is itself locked, so a killed waiter can be discarded by its peers.
+fn queued_setup_lock(
+    common: &Directory,
+    wait_seconds: u64,
+    cancel: &CancelToken,
+    clock: &dyn provenant_core::Clock,
+    limit: Option<provenant_core::WaitBudget>,
+) -> Result<provenant_os::fs::LockGuard> {
+    use provenant_core::{DurationMicros, Pause, ThreadPause, WaitBudget};
+    use provenant_os::fs::LockMode;
+
+    let now = clock.mono_now();
+    let configured = WaitBudget::cli(now, wait_seconds)
+        .map_err(error("set writer setup lock budget", None))?;
+    let budget = WaitBudget::up_to(now, limit.map_or(configured.remaining(now), |limit| limit.remaining(now).min(configured.remaining(now))));
+    let timeout = || RunError::SetupLockTimeout {
+        seconds: wait_seconds,
+    };
+    let map_lock = |failure| match failure {
+        FsError::LockTimeout { .. } => timeout(),
+        failure => failure.into(),
+    };
+    let queue_name = OsStr::new("provenant-lane-setup-queue");
+    match common.mkdir(queue_name, 0o700) {
+        Ok(()) => {}
+        Err(failure) if failure.is_exists() => {}
+        Err(failure) => return Err(failure.into()),
+    }
+    let queue = common.open_directory(queue_name)?;
+    let manager = OsStr::new("queue.lock");
+    let guard = queue
+        .lock(manager, LockMode::Exclusive, budget, cancel, clock)
+        .map_err(map_lock)?;
+    // Lock files are stable inodes. Disposable markers name a sequence and a
+    // reusable slot; the queue mutex protects marker creation and removal.
+    let scan = |own_slot: Option<u64>| -> Result<Vec<(u64, u64)>> {
+        let mut active = Vec::new();
+        for item in queue.entries()? {
+            let item = item?;
+            let Some((sequence, slot)) = item
+                .to_str()
+                .and_then(|name| name.strip_prefix("ticket-"))
+                .and_then(|name| name.split_once('-'))
+                .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)))
+            else {
+                continue;
+            };
+            if Some(slot) == own_slot {
+                active.push((sequence, slot));
+                continue;
+            }
+            let slot_name = format!("slot-{slot}.lock");
+            match queue.try_lock_existing(OsStr::new(&slot_name), LockMode::Exclusive) {
+                Ok(_stale) => queue.unlink(&item)?,
+                Err(FsError::LockTimeout { .. }) => active.push((sequence, slot)),
+                Err(failure) => return Err(failure.into()),
+            }
+        }
+        Ok(active)
+    };
+    let active = scan(None)?;
+    let sequence = active
+        .iter()
+        .map(|(sequence, _)| *sequence)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(RunError::Validation("setup queue exhausted"))?;
+    let slot = (0..)
+        .find(|slot| !active.iter().any(|(_, used)| used == slot))
+        .ok_or(RunError::Validation("setup queue exhausted"))?;
+    let slot_name = format!("slot-{slot}.lock");
+    let held = queue.try_lock(OsStr::new(&slot_name), LockMode::Exclusive)?;
+    let ticket = format!("ticket-{sequence}-{slot}");
+    let ticket_name = OsStr::new(&ticket);
+    queue.create_new(ticket_name)?;
+    drop(guard);
+    loop {
+        let guard = queue
+            .lock(manager, LockMode::Exclusive, budget, cancel, clock)
+            .map_err(map_lock)?;
+        if budget.remaining(clock.mono_now()).as_micros() == 0 {
+            queue.unlink(ticket_name)?;
+            return Err(timeout());
+        }
+        let first = scan(Some(slot))?
+            .iter()
+            .all(|(other, _)| *other >= sequence);
+        if first {
+            match common
+                .try_lock_existing(OsStr::new("provenant-lane-setup.lock"), LockMode::Exclusive)
+            {
+                Ok(setup) => {
+                    queue.unlink(ticket_name)?;
+                    drop(held);
+                    return Ok(setup);
+                }
+                Err(FsError::LockTimeout { .. }) => {}
+                Err(failure) => return Err(failure.into()),
+            }
+        }
+        drop(guard);
+        ThreadPause.wait(DurationMicros::from_micros(20_000), cancel);
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     pub(crate) static FAIL_IMPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -247,6 +356,13 @@ struct ImportFence {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct MergeRestored {
+    pub schema_version: u64,
+    pub scope: provenant_supervisor::custody::Scope,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GitPins {
     schema_version: u64,
     scope: provenant_supervisor::custody::Scope,
@@ -419,6 +535,7 @@ impl LaunchConfinement {
     /// bound to the common config before Git changed it.
     pub(crate) fn prepare_git(
         &mut self,
+        attempt: &Directory,
         cancel: &CancelToken,
         setup_budget: provenant_core::WaitBudget,
     ) -> Result<Option<provenant_os::fs::LockGuard>> {
@@ -442,8 +559,9 @@ impl LaunchConfinement {
             &self.state_root,
             &self.home,
             Some(authority),
+            Some(attempt),
             cancel,
-            setup_budget,
+            Some(setup_budget),
         )
         .map(Some)
     }
@@ -582,9 +700,11 @@ fn prepare_writer_git(
     state: &Path,
     home: &Path,
     authority: Option<&provenant_confinement::permissions::WorktreeWriteAuthority>,
+    attempt: Option<&Directory>,
     cancel: &CancelToken,
-    setup_budget: provenant_core::WaitBudget,
+    limit: Option<provenant_core::WaitBudget>,
 ) -> Result<provenant_os::fs::LockGuard> {
+    use provenant_core::{Clock, WaitBudget};
     use provenant_os::{clock::SystemClock, fs::LockMode};
     let utility = runtime(state)?;
     let root_identity = writer.worktree.identity();
@@ -592,10 +712,14 @@ fn prepare_writer_git(
     let common_identity = writer.worktree.repo().common_identity();
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
+    let cancel = CancelToken::new();
     // Independent worktrees share config. Keep both writes and all subsequent
     // verification under one project-wide lock; a later launch repairs either
     // key if a process stopped between the two writes.
     let clock = SystemClock::new();
+    let wait_seconds = provenant_config::LaneBuildSettings::read(state)
+        .map_err(error("read Git setup lock settings", None))?
+        .setup_lock_wait_seconds();
     let setup_dir = writer.worktree.repo().common_dir();
     let setup_name = OsStr::new("provenant-lane-setup.lock");
     match setup_dir.create_new(setup_name) {
@@ -611,21 +735,24 @@ fn prepare_writer_git(
             ));
         }
     }
-    let config_lock = writer
-        .worktree
-        .repo()
-        .common_dir()
-        .lock(
-            setup_name,
-            LockMode::Exclusive,
-            setup_budget,
-            cancel,
-            &clock,
-        )
-        .map_err(|failure| match failure {
-            FsError::LockTimeout { .. } => RunError::LaneSetupLockTimeout,
-            other => anchored_error(other, writer.worktree.repo().common_git_dir()),
-        })?;
+    // The marker is a lock, not a persistent assertion: if the launcher dies,
+    // observers immediately stop reporting a wait even if the file remains.
+    let waiting = attempt.and_then(|directory| {
+        directory
+            .lock(
+                OsStr::new(SETUP_WAIT_LOCK),
+                LockMode::Exclusive,
+                WaitBudget::up_to(
+                    clock.mono_now(),
+                    provenant_core::DurationMicros::from_micros(1_000_000),
+                ),
+                &cancel,
+                &clock,
+            )
+            .ok()
+    });
+    let config_lock = queued_setup_lock(setup_dir, wait_seconds, cancel, &clock, limit).map_err(|error| match error { RunError::SetupLockTimeout { .. } if limit.is_some() => RunError::LaneSetupLockTimeout, other => other })?;
+    drop(waiting);
     let old_repo = writer.worktree.repo();
     let project = old_repo
         .common_git_dir()
@@ -636,7 +763,7 @@ fn prepare_writer_git(
         .to_path_buf();
     let path = writer.worktree.path().to_path_buf();
     let repo = utility
-        .open_repo(&executor, &project, budget()?, cancel)
+        .open_repo(&executor, &project, budget()?, &cancel)
         .map_err(error("reopen writer repository", Some(&project)))?;
     let refreshed = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
@@ -712,7 +839,7 @@ fn prepare_writer_git(
             repo,
             &utility,
             budget()?,
-            cancel,
+            &cancel,
         )
         .map_err(error("resolve writer branch under lock", Some(&parent)))?;
         if resolved.termination != provenant_os::exec::Termination::Exit(0)
@@ -736,7 +863,7 @@ fn prepare_writer_git(
     result?;
     for merge in [false, true] {
         let repo = utility
-            .open_repo(&executor, &project, budget()?, cancel)
+            .open_repo(&executor, &project, budget()?, &cancel)
             .map_err(error("reopen writer repository", Some(&project)))?;
         let worktree = provenant_confinement::verify_worktree(&repo, &path)
             .map_err(worktrees::WorktreeError::from)?;
@@ -755,12 +882,12 @@ fn prepare_writer_git(
             &writer.branch,
             merge,
             budget()?,
-            cancel,
+            &cancel,
         )
         .map_err(error("set writer upstream", Some(&path)))?;
     }
     let repo = utility
-        .open_repo(&executor, &project, budget()?, cancel)
+        .open_repo(&executor, &project, budget()?, &cancel)
         .map_err(error("reopen writer repository", Some(&project)))?;
     let refreshed = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
@@ -1032,10 +1159,144 @@ fn record_cargo_setup_file(
 #[cfg(test)]
 mod cargo_setup_tests {
     use super::*;
+    use provenant_os::fs::LockMode;
 
-    fn setup_budget() -> provenant_core::WaitBudget {
-        let clock = provenant_os::clock::SystemClock::new();
-        provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&clock), 120).unwrap()
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Exercise real concurrent waiters.
+    fn setup_lock_serves_ten_slow_waiters_in_order()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let common = Directory::open_anchor(temp.path())?;
+        let initial =
+            common.try_lock(OsStr::new("provenant-lane-setup.lock"), LockMode::Exclusive)?;
+        let (send, receive) = std::sync::mpsc::channel();
+        let mut threads = Vec::new();
+        for index in 0..10 {
+            let path = temp.path().to_owned();
+            let send = send.clone();
+            threads.push(std::thread::spawn(move || {
+                let common = Directory::open_anchor(&path).unwrap();
+                let _lock = queued_setup_lock(
+                    &common,
+                    30,
+                    &CancelToken::new(),
+                    &provenant_os::clock::SystemClock::new(),
+                    None,
+                )
+                .unwrap();
+                send.send(index).unwrap();
+                let start = std::time::Instant::now();
+                provenant_test_support::wait_for(
+                    "slow holder",
+                    Duration::from_secs(5),
+                    || start.elapsed(),
+                    |elapsed| *elapsed >= Duration::from_millis(125),
+                )
+                .unwrap();
+            }));
+            provenant_test_support::wait_for(
+                "waiter to queue",
+                Duration::from_secs(5),
+                || {
+                    std::fs::read_dir(temp.path().join("provenant-lane-setup-queue"))
+                        .map(|entries| {
+                            entries
+                                .filter_map(std::result::Result::ok)
+                                .filter(|entry| {
+                                    entry.file_name().to_string_lossy().starts_with("ticket-")
+                                })
+                                .count()
+                        })
+                        .unwrap_or(0)
+                },
+                |count| *count == index + 1,
+            )?;
+        }
+        let released = std::time::Instant::now();
+        drop(initial);
+        let order: Vec<_> = (0..10)
+            .map(|_| receive.recv_timeout(Duration::from_secs(30)).unwrap())
+            .collect();
+        // One second is a scaled old bound: the last waiter remains queued
+        // beyond it rather than losing its place or being rejected.
+        assert!(released.elapsed() >= Duration::from_secs(1));
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(order, (0..10).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Exercise a real process and wall-clock deadline.
+    fn setup_lock_recovers_after_holder_dies() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        const CHILD_DIR: &str = "PROVENANT_TEST_SETUP_LOCK_CHILD_DIR";
+        let name = OsStr::new("provenant-lane-setup.lock");
+        if let Some(path) = std::env::var_os(CHILD_DIR) {
+            let directory = Directory::open_anchor(Path::new(&path))?;
+            let _held = directory.try_lock(name, LockMode::Exclusive)?;
+            std::fs::write(Path::new(&path).join("ready"), b"ready")?;
+            loop {
+                std::thread::park();
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg("writer::cargo_setup_tests::setup_lock_recovers_after_holder_dies")
+            .env(CHILD_DIR, temp.path())
+            .spawn()?;
+        let ready = provenant_test_support::wait_for(
+            "holder to acquire setup lock",
+            Duration::from_secs(10),
+            || (temp.path().join("ready").exists(), child.try_wait()),
+            |(ready, exited)| *ready || !matches!(exited, Ok(None)),
+        );
+        if !matches!(ready, Ok((true, Ok(None)))) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("holder did not acquire the setup lock".into());
+        }
+        let directory = Directory::open_anchor(temp.path())?;
+        let held = directory.try_lock_existing(name, LockMode::Exclusive);
+        let path = temp.path().to_owned();
+        let waiter = std::thread::spawn(move || {
+            let directory = Directory::open_anchor(&path).map_err(|error| error.to_string())?;
+            queued_setup_lock(
+                &directory,
+                30,
+                &CancelToken::new(),
+                &provenant_os::clock::SystemClock::new(),
+                None,
+            )
+            .map(drop)
+            .map_err(|error| error.to_string())
+        });
+        let queued = provenant_test_support::wait_for(
+            "waiter to queue",
+            Duration::from_secs(5),
+            || {
+                (
+                    std::fs::read_dir(temp.path().join("provenant-lane-setup-queue"))
+                        .map(|entries| {
+                            entries.filter_map(std::result::Result::ok).any(|entry| {
+                                entry.file_name().to_string_lossy().starts_with("ticket-")
+                            })
+                        })
+                        .unwrap_or(false),
+                    waiter.is_finished(),
+                )
+            },
+            |(queued, finished)| *queued || *finished,
+        )
+        .is_ok_and(|(queued, _)| queued);
+        child.kill()?;
+        child.wait()?;
+        assert!(queued, "waiter did not enter the queue");
+        assert!(matches!(held, Err(FsError::LockTimeout { .. })));
+        waiter.join().map_err(|_| "waiter panicked")??;
+        Ok(())
     }
 
     #[test]
@@ -1191,28 +1452,14 @@ mod cargo_setup_tests {
         };
         std::thread::scope(|scope| {
             let first = scope.spawn(|| {
-                prepare_writer_git(
-                    &mut writer,
-                    &state,
-                    &root,
-                    None,
-                    &CancelToken::new(),
-                    setup_budget(),
-                )
-                .map(drop)
-                .map_err(|e| e.to_string())
+                prepare_writer_git(&mut writer, &state, &root, None, None, &CancelToken::new(), None)
+                    .map(drop)
+                    .map_err(|e| e.to_string())
             });
             let second = scope.spawn(|| {
-                prepare_writer_git(
-                    &mut second,
-                    &state,
-                    &root,
-                    None,
-                    &CancelToken::new(),
-                    setup_budget(),
-                )
-                .map(drop)
-                .map_err(|e| e.to_string())
+                prepare_writer_git(&mut second, &state, &root, None, None, &CancelToken::new(), None)
+                    .map(drop)
+                    .map_err(|e| e.to_string())
             });
             first
                 .join()
@@ -1222,37 +1469,51 @@ mod cargo_setup_tests {
                 .map_err(|_| "second preparation panicked".to_owned())??;
             Ok::<(), String>(())
         })?;
-        // Hold the shared lock while a second preparation starts, then cancel it.
-        let clock = provenant_os::clock::SystemClock::new();
-        let lock = writer.worktree.repo().common_dir().lock(
+        // A busy repository lock honours the configured bound and identifies
+        // the setting that controls it, without changing the lock's inode.
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version = 1\n[domains.fabric.lanes]\nsetup_lock_wait_seconds = 1\n",
+        )?;
+        let common = provenant_os::fs::Directory::open_anchor(&git_dir)?;
+        let held = common.try_lock_existing(
             OsStr::new("provenant-lane-setup.lock"),
             provenant_os::fs::LockMode::Exclusive,
-            provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&clock), 120)?,
-            &cancel,
-            &clock,
         )?;
-        let waiting_cancel = CancelToken::new();
-        std::thread::scope(
-            |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
-                let (started, observed) = std::sync::mpsc::channel();
-                let writer = &mut writer;
-                let state = &state;
-                let root = &root;
-                let token = &waiting_cancel;
-                let task = scope.spawn(move || {
-                    started.send(()).unwrap();
-                    prepare_writer_git(writer, state, root, None, token, setup_budget()).map(drop)
-                });
-                observed.recv()?;
-                waiting_cancel.cancel();
-                assert!(matches!(
-                    task.join().unwrap(),
-                    Err(RunError::Filesystem(FsError::Cancelled { .. }))
-                ));
-                Ok(())
-            },
-        )?;
-        drop(lock);
+        let attempt_path = root.join("attempt");
+        std::fs::create_dir(&attempt_path)?;
+        let attempt = Directory::open_anchor(&attempt_path)?;
+        let refused = std::thread::scope(|scope| {
+            let launch = scope
+                .spawn(|| prepare_writer_git(&mut writer, &state, &root, None, Some(&attempt), &CancelToken::new(), None));
+            loop {
+                if matches!(
+                    attempt.try_lock_existing(OsStr::new(SETUP_WAIT_LOCK), LockMode::Exclusive),
+                    Err(FsError::LockTimeout { .. })
+                ) {
+                    break;
+                }
+                assert!(!launch.is_finished(), "launcher must publish its lock wait");
+                std::thread::yield_now();
+            }
+            match launch.join().expect("launcher panicked") {
+                Err(error) => error,
+                Ok(_) => panic!("held Git setup lock must block preparation"),
+            }
+        });
+        assert!(
+            attempt
+                .try_lock_existing(OsStr::new(SETUP_WAIT_LOCK), LockMode::Exclusive)
+                .is_ok()
+        );
+        assert!(matches!(refused, RunError::SetupLockTimeout { seconds: 1 }));
+        assert!(
+            refused
+                .to_string()
+                .contains("domains.fabric.lanes.setup_lock_wait_seconds")
+        );
+        drop(held);
+        std::fs::remove_file(state.join("config.toml"))?;
         let repo = utility.open_repo(&executor, &project, budget()?, &cancel)?;
         provenant_confinement::verify_worktree(&repo, &lane)?
             .repo()
@@ -1300,32 +1561,18 @@ mod cargo_setup_tests {
         let reflog = git_dir.join("logs/refs/remotes/origin/feature/nested");
         std::fs::create_dir_all(reflog.parent().ok_or("reflog parent")?)?;
         std::os::unix::fs::symlink(&target, &reflog)?;
-        let failure = prepare_writer_git(
-            &mut writer,
-            &state,
-            &root,
-            None,
-            &CancelToken::new(),
-            setup_budget(),
-        )
-        .err()
-        .ok_or("symlinked tracking reflog must refuse")?;
+        let failure = prepare_writer_git(&mut writer, &state, &root, None, None, &CancelToken::new(), None)
+            .err()
+            .ok_or("symlinked tracking reflog must refuse")?;
         assert!(failure.to_string().contains(&reflog.display().to_string()));
         assert_eq!(std::fs::read(&target)?, b"untouched");
         std::fs::remove_file(&reflog)?;
         let parent = reflog.parent().ok_or("reflog parent")?;
         std::fs::remove_dir(parent)?;
         std::os::unix::fs::symlink(&root, parent)?;
-        let failure = prepare_writer_git(
-            &mut writer,
-            &state,
-            &root,
-            None,
-            &CancelToken::new(),
-            setup_budget(),
-        )
-        .err()
-        .ok_or("symlinked tracking reflog parent must refuse")?;
+        let failure = prepare_writer_git(&mut writer, &state, &root, None, None, &CancelToken::new(), None)
+            .err()
+            .ok_or("symlinked tracking reflog parent must refuse")?;
         assert!(failure.to_string().contains(&parent.display().to_string()));
         assert_eq!(std::fs::read(&target)?, b"untouched");
         std::fs::remove_file(parent)?;
@@ -1333,16 +1580,9 @@ mod cargo_setup_tests {
         let tracking_lock = git_dir.join("refs/remotes/origin/feature/nested.lock");
         std::fs::create_dir_all(tracking_lock.parent().ok_or("tracking lock parent")?)?;
         std::fs::write(&tracking_lock, b"held")?;
-        let failure = prepare_writer_git(
-            &mut writer,
-            &state,
-            &root,
-            None,
-            &CancelToken::new(),
-            setup_budget(),
-        )
-        .err()
-        .ok_or("stale tracking lock must refuse")?;
+        let failure = prepare_writer_git(&mut writer, &state, &root, None, None, &CancelToken::new(), None)
+            .err()
+            .ok_or("stale tracking lock must refuse")?;
         assert!(
             matches!(&failure, RunError::WriterRefLocked(path) if *path == tracking_lock),
             "{failure:?}"
@@ -1353,16 +1593,9 @@ mod cargo_setup_tests {
         run(&["remote", "remove", "origin"])?;
         let stale = git_dir.join("refs/heads/feature/nested.lock");
         std::fs::write(&stale, b"held")?;
-        let failure = prepare_writer_git(
-            &mut writer,
-            &state,
-            &root,
-            None,
-            &CancelToken::new(),
-            setup_budget(),
-        )
-        .err()
-        .ok_or("stale lock must refuse")?;
+        let failure = prepare_writer_git(&mut writer, &state, &root, None, None, &CancelToken::new(), None)
+            .err()
+            .ok_or("stale lock must refuse")?;
         assert_eq!(failure.code(), "WRITER_REF_LOCKED", "{failure}");
         assert_eq!(std::fs::read(&stale)?, b"held");
         Ok(())
@@ -1677,6 +1910,7 @@ impl crate::RunStore {
     ) -> provenant_supervisor::custody::Result<provenant_supervisor::custody::CustodyLease> {
         let slot = directory.try_clone()?;
         let lease = acquire(directory, scope, binding)?;
+        let mut retained_scope = None;
         let checked = (|| -> Result<()> {
             call.check()?;
             let metadata = slot.metadata()?;
@@ -1718,9 +1952,8 @@ impl crate::RunStore {
                     if retained.schema_version != 1 || retained.scope != fence.scope {
                         return Err(RunError::Conflict);
                     }
-                    return Err(RunError::Validation(
-                        "predecessor writer import remains unresolved",
-                    ));
+                    retained_scope = Some(fence.scope);
+                    return Ok(());
                 }
             }
             Ok(())
@@ -1730,6 +1963,15 @@ impl crate::RunStore {
             return Err(provenant_supervisor::custody::CustodyError::Io(
                 std::io::Error::other(error.to_string()),
             ));
+        }
+        if let Some(retained) = retained_scope {
+            lease.withdraw_unlaunched()?;
+            return Err(
+                provenant_supervisor::custody::CustodyError::ImportRetained {
+                    run: retained.run,
+                    attempt: retained.attempt,
+                },
+            );
         }
         Ok(lease)
     }
@@ -1815,20 +2057,7 @@ impl WriterLaunch {
         attempt: &Directory,
         scope: provenant_supervisor::custody::Scope,
     ) -> Result<()> {
-        let owner = worktrees::load_owner(&self.worktree)?;
-        let owned = owner
-            .as_ref()
-            .is_some_and(|owner| owner.origin == worktrees::WorktreeOrigin::Lane);
-        crate::artifacts::seal(
-            attempt,
-            "writer-owned.json",
-            &crate::db::bytes(&WriterOwnership {
-                schema_version: 1,
-                lane_owned: owned,
-                owner,
-            })?,
-            crate::RECORD_LIMIT,
-        )?;
+        seal_writer_ownership(attempt, &self.worktree)?;
         let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), true)?;
         let utility = runtime(state)?;
         let executor =
@@ -1951,6 +2180,11 @@ impl WriterLaunch {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
         let import_cancel = settlement.cancellation();
+        let merge_objects = source
+            .as_ref()
+            .map(|source| crate::objects::merge_objects(source, self.worktree.repo()))
+            .transpose()?
+            .unwrap_or_default();
         if settlement.phase() == crate::settlement::Phase::Import {
             settlement.begin_import()?;
             #[cfg(test)]
@@ -1959,11 +2193,12 @@ impl WriterLaunch {
                     "injected Git import failure",
                 )));
             }
-            crate::objects::settle_cancel(
+            crate::objects::settle_many(
                 &git_executable,
                 self.worktree.repo(),
                 source.as_ref().map(|source| &source.objects),
                 verified_tip,
+                &merge_objects,
                 Some(&import_cancel),
                 Some(custody),
             )?;
@@ -1982,6 +2217,17 @@ impl WriterLaunch {
             )?;
             // The private index may contain staged edits which the host's
             // quarantine must observe. Restore it only after receive succeeds.
+            if !merge_objects.is_empty()
+                && crate::objects::resolve_ref(
+                    &git_executable,
+                    self.worktree.repo(),
+                    self.branch.as_str(),
+                )? != verified_tip
+            {
+                return Err(RunError::Validation(
+                    "writer branch advanced before stopped merge could be restored",
+                ));
+            }
             if let Some(source) = &source
                 && crate::objects::resolve_ref(
                     &git_executable,
@@ -1990,6 +2236,23 @@ impl WriterLaunch {
                 )? == verified_tip
             {
                 crate::objects::restore_index(source, self.worktree.repo())?;
+                if !merge_objects.is_empty() {
+                    crate::artifacts::seal(
+                        attempt,
+                        "merge-restored.json",
+                        &crate::db::bytes(&MergeRestored {
+                            schema_version: 1,
+                            scope: custody.scope(),
+                        })?,
+                        crate::RECORD_LIMIT,
+                    )?;
+                }
+                crate::objects::clear_import_refs(
+                    &git_executable,
+                    self.worktree.repo(),
+                    custody.scope().attempt,
+                    &merge_objects,
+                )?;
             }
             settlement.advance(crate::settlement::Phase::Record)?;
         }
@@ -2153,7 +2416,17 @@ impl WriterLaunch {
         {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
-        worktrees::check_writer_terminal(self.worktree.repo())?;
+        if !merge_objects.is_empty() {
+            let source = source
+                .as_ref()
+                .ok_or(RunError::Validation("merge source missing"))?;
+            worktrees::check_writer_terminal_with_merge(
+                self.worktree.repo(),
+                &crate::objects::merge_head(source)?,
+            )?;
+        } else {
+            worktrees::check_writer_terminal(self.worktree.repo())?;
+        }
         crate::artifacts::seal(
             attempt,
             "writer-terminal.json",
@@ -2288,11 +2561,50 @@ pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
     Ok(())
 }
 
+/// Preserve pre-upgrade launch evidence on replay without weakening its check.
+pub(crate) fn seal_writer_ownership(
+    attempt: &Directory,
+    tree: &provenant_confinement::VerifiedWorktree,
+) -> Result<()> {
+    let owner = worktrees::load_owner(tree)?;
+    let owned = owner
+        .as_ref()
+        .is_some_and(|owner| owner.origin == worktrees::WorktreeOrigin::Lane);
+    let ownership = WriterOwnership {
+        schema_version: 1,
+        lane_owned: owned,
+        owner,
+    };
+    if let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "writer-owned.json", crate::RECORD_LIMIT)?
+    {
+        let prior: WriterOwnership = crate::db::decode(&raw)?;
+        let fields: serde_json::Value = crate::db::decode(&raw)?;
+        let has_owner = fields
+            .as_object()
+            .is_some_and(|object| object.contains_key("owner"));
+        if prior.schema_version != 1
+            || prior.lane_owned != ownership.lane_owned
+            || (has_owner && prior.owner != ownership.owner)
+        {
+            return Err(RunError::Conflict);
+        }
+        Ok(())
+    } else {
+        crate::artifacts::seal(
+            attempt,
+            "writer-owned.json",
+            &crate::db::bytes(&ownership)?,
+            crate::RECORD_LIMIT,
+        )
+    }
+}
+
 /// Launch-time lifecycle evidence, sealed while writer custody is held.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct WriterOwnership {
     pub schema_version: u64,
     pub lane_owned: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub owner: Option<worktrees::WorktreeOwner>,
 }

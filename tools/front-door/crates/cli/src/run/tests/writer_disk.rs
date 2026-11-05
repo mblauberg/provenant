@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn retained_import_refusal_names_worktree_attempt_and_recovery() {
+    let run_id = provenant_core::RunId::from_bytes([3; 16]);
+    let attempt = AttemptId::from_bytes([4; 16]);
+    let failure = check_launch_policy(&[run::Started::Refused {
+        attempt: AttemptId::from_bytes([1; 16]),
+        kind: run::RefusalKind::RetainedImport {
+            run: run_id,
+            attempt,
+            worktree: "/tmp/writer".into(),
+        },
+        reason: "retained".into(),
+    }])
+    .expect_err("retained import must refuse");
+    assert_eq!(failure.kind.code(), "WRITER_IMPORT_RETAINED");
+    assert!(failure.message.contains("/tmp/writer"));
+    assert!(failure.message.contains(&attempt.to_string()));
+    let diagnostic = failure.projection.expect("diagnostic");
+    assert!(
+        diagnostic
+            .next
+            .iter()
+            .any(|next| next.contains(&format!("reconcile --abandon {run_id}/{attempt}")))
+    );
+}
+
+#[test]
+fn setup_timeout_is_promoted_only_without_a_progressing_sibling() {
+    let refused = || run::Started::Refused {
+        attempt: AttemptId::from_bytes([1; 16]),
+        kind: run::RefusalKind::SetupLockTimeout { seconds: 42 },
+        reason: "setup timed out".into(),
+    };
+    let failure = check_launch_policy(&[refused()]).expect_err("timeout must be reported");
+    assert_eq!(failure.kind.code(), "SETUP_LOCK_TIMEOUT");
+    assert!(failure.message.contains("42s"));
+    assert!(
+        check_launch_policy(&[
+            refused(),
+            run::Started::Launched(AttemptId::from_bytes([2; 16]))
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
 fn dispatch_policy_refusal_preserves_launched_sibling() -> Result<(), String> {
     check_launch_policy(&[
         run::Started::Refused {
