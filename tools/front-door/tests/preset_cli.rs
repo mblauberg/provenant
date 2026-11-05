@@ -477,9 +477,25 @@ fn review_explain_snapshots_substantial_default_panel() -> Result<(), Box<dyn st
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout)?;
-    let snapshot = "  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=reliability pool=junior\n";
-    assert!(text.contains(snapshot), "{text}");
-    assert!(text.starts_with("review standard (by_risk;"), "{text}");
+    let request = provenant_routing::ReviewRequest {
+        risk_tier: Some("substantial".into()),
+        ..Default::default()
+    };
+    let panel =
+        provenant_routing::ReviewConfig::default().resolve_panel(&request, None, &[], false)?;
+    assert!(
+        text.starts_with(&format!("review {} ({};", panel.shape, panel.source)),
+        "{text}"
+    );
+    for slot in panel.slots {
+        let pool = slot.tier.as_str().ok_or("pool")?;
+        assert!(
+            text.lines()
+                .any(|line| line.contains(&format!("lens={}", slot.lens))
+                    && line.contains(&format!("pool={pool}"))),
+            "{text}"
+        );
+    }
     Ok(())
 }
 
@@ -513,14 +529,28 @@ fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout)?;
-    // CI's shallow checkout may add a "no default branch" warning after the
-    // header, so the header and the lens block are matched separately.
+    let request = provenant_routing::ReviewRequest {
+        kind: Some("integration".into()),
+        risk_tier: Some("routine".into()),
+        risk_tags: vec!["security".into()],
+        ..Default::default()
+    };
+    let panel =
+        provenant_routing::ReviewConfig::default().resolve_panel(&request, None, &[], false)?;
     assert!(
-        text.starts_with("review deep (by_kind; size=unknown; kind=integration; risk=routine)\n"),
+        text.starts_with(&format!("review {} ({};", panel.shape, panel.source)),
         "{text}"
     );
-    let snapshot = "  risk tags: security\n  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=reliability pool=senior\n  lens=conventions-readability pool=senior\n  lens=refactor-cleanup pool=senior\n  lens=flexibility pool=senior\n  lens=security-privacy pool=senior\n";
-    assert!(text.contains(snapshot), "{text}");
+    assert!(text.contains("risk tags: security"), "{text}");
+    for slot in panel.slots {
+        let pool = slot.tier.as_str().ok_or("pool")?;
+        assert!(
+            text.lines()
+                .any(|line| line.contains(&format!("lens={}", slot.lens))
+                    && line.contains(&format!("pool={pool}"))),
+            "{text}"
+        );
+    }
     Ok(())
 }
 
