@@ -2130,6 +2130,136 @@ fn existing_pr_requires_positive_absence_and_reconciles_identity()
     Ok(())
 }
 
+fn existing_pr_callers_create_only_after_positive_absence(
+    graph: bool,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let base = fixture.prepare()?.head(&fixture.writer)?;
+    fixture.commit(&fixture.writer.worktree, "Delivery work")?;
+    fixture.git(&["branch", "integration", "lane"])?;
+    fixture.git(&[
+        "config",
+        &format!(
+            "url.{}.insteadOf",
+            fixture.root.join("remote.git").display()
+        ),
+        "https://github.com/fixture/repo.git",
+    ])?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(&wrapper, &format!("#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n", git.display()))?;
+    let gh = fixture.root.join("gh");
+    fixture.executable(&gh, "#!/bin/sh\ncd \"$(dirname \"$0\")\" || exit 1\nif [ \"$1\" = repo ]; then printf '{\"defaultBranchRef\":{\"name\":\"main\"}}'; elif [ \"$2\" = list ]; then cat pulls; else echo create >> creates; cat >/dev/null; printf 'https://github.com/fixture/repo/pull/1\\n'; fi\n")?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture.environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+    fixture.request.open_pr = true;
+    let host = fixture.prepare()?;
+    let head = host.head(&fixture.writer)?;
+    let url = "https://github.com/fixture/repo/pull/1";
+    let cases = [
+        ("failure", None, 0),
+        ("absent", Some(serde_json::json!([])), 1),
+        (
+            "open",
+            Some(
+                serde_json::json!([{ "number":1, "url":url, "state":"OPEN", "baseRefName":"main", "headRefOid":head.to_string() }]),
+            ),
+            0,
+        ),
+        (
+            "wrong_base",
+            Some(
+                serde_json::json!([{ "number":1, "url":url, "state":"OPEN", "baseRefName":"other", "headRefOid":head.to_string() }]),
+            ),
+            0,
+        ),
+        (
+            "merged",
+            Some(
+                serde_json::json!([{ "number":1, "url":url, "state":"MERGED", "baseRefName":"main", "headRefOid":head.to_string() }]),
+            ),
+            0,
+        ),
+        (
+            "closed",
+            Some(
+                serde_json::json!([{ "number":1, "url":url, "state":"CLOSED", "baseRefName":"main", "headRefOid":head.to_string() }]),
+            ),
+            0,
+        ),
+        (
+            "moved",
+            Some(
+                serde_json::json!([{ "number":1, "url":url, "state":"OPEN", "baseRefName":"main", "headRefOid":"0000000000000000000000000000000000000000" }]),
+            ),
+            0,
+        ),
+    ];
+    for (case, pulls, expected_creates) in cases {
+        let pulls_path = fixture.root.join("pulls");
+        if let Some(pulls) = pulls {
+            std::fs::write(&pulls_path, serde_json::to_vec(&pulls)?)?;
+        } else if pulls_path.exists() {
+            std::fs::remove_file(&pulls_path)?;
+        }
+        let creates = fixture.root.join("creates");
+        if creates.exists() {
+            std::fs::remove_file(&creates)?;
+        }
+        let result = if graph {
+            HostDeliveryContext::new(fixture.environment.clone())
+                .deliver_graph_pr(&fixture.writer.project, "integration", base, "Graph work")
+                .map(Some)
+        } else {
+            host.push(&fixture.writer, &fixture.request, head, "Lane work")
+        };
+        let count = std::fs::read_to_string(creates)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(count, expected_creates, "{case}");
+        match case {
+            "absent" | "open" | "merged" => assert_eq!(result?, Some(url.to_owned()), "{case}"),
+            "moved" => assert!(
+                matches!(result, Err(RunError::Delivery(WriterDeliveryStage::Verify))),
+                "{case}: {result:?}"
+            ),
+            _ => {
+                let error = result.expect_err("reconciliation must block");
+                assert!(
+                    matches!(error, RunError::PullRequestReconciliation { .. }),
+                    "{case}: {error:?}"
+                );
+                let diagnostic =
+                    error.diagnostic(provenant_records::diagnostic::Destination::Local);
+                let next = diagnostic.next.as_deref().expect("actionable next step");
+                if case == "closed" || case == "wrong_base" {
+                    assert!(next.contains("#1"), "{case}: {next}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn existing_pr_graph_delivery_counts_create_calls()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    existing_pr_callers_create_only_after_positive_absence(true)
+}
+
+#[test]
+fn existing_pr_push_delivery_counts_create_calls()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    existing_pr_callers_create_only_after_positive_absence(false)
+}
+
 #[test]
 fn graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes()
 -> std::result::Result<(), Box<dyn std::error::Error>> {

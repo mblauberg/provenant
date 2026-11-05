@@ -1813,7 +1813,7 @@ impl HostDeliveryContext {
         Ok(Some(url.to_owned()))
     }
 
-    fn push(
+    pub(super) fn push(
         &self,
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
