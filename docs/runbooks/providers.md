@@ -512,9 +512,12 @@ shared upstream configuration remains read-only.
 ## Native lane probes
 
 The macOS native writer capability invocation runs named socket, credential,
-Git (including stash and rebase), ripgrep, Cargo, Python, shell and Node/pnpm probes independently and reports their failures
-together. It currently exercises the Claude writer profile; it is not yet a
-complete adapter and access-mode matrix.
+Git (including stash and rebase), ripgrep, Cargo, nextest, Swift, Python, shell and
+Node/pnpm probes independently and reports their failures together. It also
+removes the compiled scratch execution grant and checks that the temporary
+script fails while Python and the here-document still pass. It currently
+exercises the Claude writer profile; it is not yet a complete adapter and
+access-mode matrix.
 
 When a lane's decoded answer or captured stdout or stderr contains a path-bearing
 permission error, the result includes a bounded excerpt identifying the path whose

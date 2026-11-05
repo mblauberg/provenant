@@ -2863,6 +2863,15 @@ fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result {
             home.join(".cargo/bin").join(tool),
         )?;
     }
+    // Cargo finds subcommands on PATH. Install only the selected executable
+    // into the isolated fixture home, leaving host Cargo state untouched.
+    if let Some(nextest) = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("cargo-nextest"))
+            .find(|path| path.is_file())
+    }) {
+        rig.copy_executable(&nextest, &home.join(".cargo/bin/cargo-nextest"))?;
+    }
     Ok(())
 }
 
@@ -3614,6 +3623,15 @@ const LANE_NODE_PNPM_PROBE: &str = concat!(
     "else echo 'SKIP #1: node/pnpm unavailable' >&2; fi"
 );
 
+const LANE_NEXTEST_PROBE: &str = concat!(
+    "set -eu; if cargo nextest --version >/dev/null 2>&1; then ",
+    "CARGO_BUILD_JOBS=2 cargo nextest run --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\"; ",
+    "printf 'lane-nextest: PASS\\n'; ",
+    "elif [ \"${PROVENANT_LANE_TOOLS_REQUIRED:-0}\" = 1 ]; then ",
+    "echo 'required cargo-nextest unavailable' >&2; exit 15; ",
+    "else echo 'SKIP: cargo-nextest unavailable' >&2; fi"
+);
+
 /// Only the narrowest Claude profile that actually grants a shell can run the
 /// native cargo probe: read-only Claude has neither a worktree write nor cargo
 /// on PATH, so its probe would test a profile that cannot build. A successful
@@ -3948,6 +3966,16 @@ if (process.argv[2] === 'child') {
                 "cargo",
                 "set -eu; cargo test -j2 --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\"",
             ),
+            ("nextest", LANE_NEXTEST_PROBE),
+            (
+                "swift",
+                concat!(
+                    "set -eu; if command -v swift >/dev/null; then swift --version; ",
+                    "elif [ \"${PROVENANT_LANE_TOOLS_REQUIRED:-0}\" = 1 ]; then ",
+                    "echo 'required swift unavailable' >&2; exit 15; ",
+                    "else echo 'SKIP: swift unavailable' >&2; fi"
+                ),
+            ),
             ("python3", "set -eu; python3 -c 'assert 2 + 2 == 4'"),
             (
                 "here-document",
@@ -3967,7 +3995,7 @@ if (process.argv[2] === 'child') {
         ));
         tool_env.push(("LANE_FIXTURE".into(), launch.argv[0].clone()));
         let mut failures = Vec::new();
-        for (name, cell) in cells {
+        for (name, cell) in cells.iter().copied() {
             let argv = [OsString::from("/bin/sh"), OsString::from("-c"), cell.into()];
             let command =
                 match compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16])) {
@@ -4015,6 +4043,50 @@ if (process.argv[2] === 'child') {
             failures.is_empty(),
             "native probe failures: {}",
             failures.join("; ")
+        );
+        // Remove the writer's scratch-execution grant from the actual
+        // compiled profile. The same table cells must still run independently:
+        // only the temporary-script cell needs this grant.
+        let path = scratch
+            .to_str()
+            .ok_or("scratch path is not UTF-8")?
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let grant = format!("(allow process-exec (subpath \"{path}\"))\n");
+        let selected = ["python3", "here-document", "temporary script"];
+        let mut baseline = Vec::new();
+        let mut removed = Vec::new();
+        for (name, cell) in cells
+            .iter()
+            .copied()
+            .filter(|(name, _)| selected.contains(name))
+        {
+            for (remove, failures) in [(false, &mut baseline), (true, &mut removed)] {
+                let argv = [OsString::from("/bin/sh"), OsString::from("-c"), cell.into()];
+                let mut command =
+                    compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
+                if remove {
+                    let source = command[2].to_str().ok_or("sandbox profile")?;
+                    if source.matches(grant.as_str()).count() != 1 {
+                        return Err("scratch execution grant was not unique".into());
+                    }
+                    command[2] = source.replacen(grant.as_str(), "", 1).into();
+                }
+                let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
+                options.process_group = true;
+                options.cleanup_process_group = true;
+                options.env = Some(&tool_env);
+                let output = executor.execute(options)?;
+                if code(&output) != 0 {
+                    failures.push(name);
+                }
+            }
+        }
+        assert!(baseline.is_empty(), "baseline cells failed: {baseline:?}");
+        assert_eq!(
+            removed,
+            ["temporary script"],
+            "grant removal affected unexpected cells"
         );
     }
     // Start the configured MCP inside the compiled profile too: an
@@ -5224,6 +5296,52 @@ fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
 
 #[cfg(test)]
 mod predicate_tests {
+    #[test]
+    fn nextest_missing_tool_is_reported_when_required() -> super::Result {
+        use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let cargo = root.join("cargo");
+        std::fs::write(&cargo, "#!/bin/sh\n[ \"$FIXTURE_NEXTEST\" = 1 ]\n")?;
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o700))?;
+        let executor = SystemExecutor::new(1)?;
+        for (available, required, expected) in
+            [(false, false, 0), (false, true, 15), (true, true, 0)]
+        {
+            let env = [
+                ("PATH".into(), root.as_os_str().to_owned()),
+                ("TMPDIR".into(), root.as_os_str().to_owned()),
+                (
+                    "FIXTURE_NEXTEST".into(),
+                    if available { "1" } else { "0" }.into(),
+                ),
+                (
+                    "PROVENANT_LANE_TOOLS_REQUIRED".into(),
+                    if required { "1" } else { "0" }.into(),
+                ),
+            ];
+            let argv = [
+                "/bin/sh".into(),
+                "-c".into(),
+                super::LANE_NEXTEST_PROBE.into(),
+            ];
+            let mut options = ExecOptions::new(&argv, &root, super::Duration::from_secs(3));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 4096 };
+            options.stderr = StreamPolicy::Capture { limit: 4096 };
+            let output = executor.execute(options)?;
+            assert_eq!(super::code(&output), expected);
+            let stdout = String::from_utf8_lossy(&output.stdout.bytes);
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+            assert_eq!(stdout.contains("lane-nextest: PASS"), available);
+            if !available {
+                assert!(stderr.contains("cargo-nextest unavailable"), "{stderr}");
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn lane_tool_prerequisite_uses_injected_path_and_required_control() -> super::Result {
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor};
