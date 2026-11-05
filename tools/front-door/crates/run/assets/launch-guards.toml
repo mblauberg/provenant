@@ -168,6 +168,11 @@ reason = "The backend cannot claim a requested nested confinement policy that it
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "authority"
+reason = "Held grant anchors are verified before and after rendering so replaced paths cannot change the authority that was approved."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#compile_sbpl"
 boundary = "unclassified"
 reason = "Remaining missing anchors and path failures need classification or a tolerant fallback."
 
