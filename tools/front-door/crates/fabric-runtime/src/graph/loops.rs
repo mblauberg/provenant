@@ -100,7 +100,18 @@ fn allowance(node: &GraphNode, extensions: &[String]) -> usize {
 pub(super) fn expanded_node_count(
     document: &GraphDocument,
     extensions: &[String],
-) -> Result<usize, &'static str> {
+) -> Result<usize, String> {
+    for node in document
+        .nodes
+        .iter()
+        .filter(|node| node.loop_body.is_some())
+    {
+        if let Some(reason) = crate::config::GraphLimits::loop_expansion_rounds_bound()
+            .refusal(allowance(node, extensions))
+        {
+            return Err(reason);
+        }
+    }
     let count = document.nodes.iter().try_fold(0usize, |total, node| {
         let count = match &node.loop_body {
             Some(spec) => spec
@@ -112,14 +123,14 @@ pub(super) fn expanded_node_count(
         };
         total.checked_add(count)
     });
-    match count {
-        Some(count)
-            if count <= 16384 || !document.nodes.iter().any(|node| node.loop_body.is_some()) =>
-        {
-            Ok(count)
-        }
-        _ => Err("loop expansion exceeds safety bound"),
+    let count = count.unwrap_or(usize::MAX);
+    if document.nodes.iter().any(|node| node.loop_body.is_some())
+        && let Some(reason) =
+            crate::config::GraphLimits::loop_expansion_nodes_bound().refusal(count)
+    {
+        return Err(reason);
     }
+    Ok(count)
 }
 
 pub(super) fn validate_extension(
@@ -220,7 +231,7 @@ pub(super) fn expand(
 ) -> Result<GraphDocument, String> {
     let flattened = composites::expand(document, limits)?;
     check_expanded_ids(&flattened, extensions)?;
-    Ok(expand_loops(&flattened, extensions)?)
+    expand_loops(&flattened, extensions)
 }
 
 /// Check the longest round ID before lowering, using the same spelling and
@@ -246,17 +257,14 @@ pub(super) fn check_expanded_ids(
     Ok(())
 }
 
-fn expand_loops(
-    document: &GraphDocument,
-    extensions: &[String],
-) -> Result<GraphDocument, &'static str> {
+fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<GraphDocument, String> {
     let declared: std::collections::BTreeSet<_> = document.nodes.iter().map(|n| &n.id).collect();
     if document
         .nodes
         .iter()
         .any(|n| n.depends_on.iter().any(|parent| !declared.contains(parent)))
     {
-        return Err("dependency");
+        return Err("dependency".into());
     }
     expanded_node_count(document, extensions)?;
     let mut expanded = document.clone();
@@ -264,7 +272,7 @@ fn expand_loops(
     for node in &document.nodes {
         let Some(spec) = &node.loop_body else {
             if node.kind == Some(NodeKind::Loop) {
-                return Err("loop requires a body");
+                return Err("loop requires a body".into());
             }
             expanded.nodes.push(node.clone());
             continue;
@@ -289,39 +297,30 @@ fn expand_loops(
                 .as_ref()
                 .is_some_and(|s| crate::inbox::session_id(s).is_err())
         {
-            return Err("invalid loop configuration");
+            return Err("invalid loop configuration".into());
         }
         let rounds = allowance(node, extensions);
-        if rounds > 1024
-            || spec
-                .body
-                .len()
-                .saturating_mul(rounds)
-                .saturating_add(expanded.nodes.len())
-                > 16384
-        {
-            return Err("loop expansion exceeds safety bound");
-        }
         let mut body = spec.body.clone();
         let mut writer = None;
         for child in &mut body {
             if child.id.starts_with("previous.") {
-                return Err("previous. is reserved for prior round inputs");
+                return Err("previous. is reserved for prior round inputs".into());
             }
             let mut selected = std::collections::BTreeSet::new();
             for input in &child.inputs {
                 if input.node.starts_with("previous.") && !input.required_outputs.is_empty() {
                     return Err(
-                        "required previous-round outputs cannot be enforced in the first round",
+                        "required previous-round outputs cannot be enforced in the first round"
+                            .into(),
                     );
                 }
                 let mut kinds = Vec::new();
                 if !selected.insert(&input.node) || input.outputs.is_empty() {
-                    return Err("duplicate or empty loop input");
+                    return Err("duplicate or empty loop input".into());
                 }
                 for kind in &input.outputs {
                     if kinds.contains(kind) {
-                        return Err("duplicate input output");
+                        return Err("duplicate input output".into());
                     }
                     kinds.push(*kind);
                 }
@@ -333,19 +332,15 @@ fn expand_loops(
                     !matches!(mode, provenant_records::run::DeliveryMode::Integrate(_))
                 })
             {
-                return Err(
-                    "loop body cannot nest loops or route on_fail, and may only deliver by integrate:",
-                );
+                return Err("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into());
             }
             if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &child.delivery
                 && document.integration_branch.as_deref() != Some(target.as_str())
             {
-                return Err(
-                    "loop body integrate: requires graph integration_branch equal to the node target",
-                );
+                return Err("loop body integrate: requires graph integration_branch equal to the node target".into());
             }
             if child.land.is_some() {
-                return Err("loop body cannot land");
+                return Err("loop body cannot land".into());
             }
             // A continued writer is outside the body; the expanded plan checks it.
             child.continues = None;
@@ -354,7 +349,7 @@ fn expand_loops(
                     .as_ref()
                     .is_some_and(|path| Some(path) != child.worktree.as_ref())
                 {
-                    return Err("loop writers must share one worktree");
+                    return Err("loop writers must share one worktree".into());
                 }
                 writer = child.worktree.clone();
             }
@@ -362,7 +357,7 @@ fn expand_loops(
                 if let Some(previous) = input.node.strip_prefix("previous.")
                     && !spec.body.iter().any(|n| n.id == previous)
                 {
-                    return Err("unknown previous round input");
+                    return Err("unknown previous round input".into());
                 }
             }
             // Prior-round and outer inputs are checked against the expanded
@@ -394,7 +389,7 @@ fn expand_loops(
             ..document.clone()
         };
         let generous = crate::config::GraphLimits {
-            nodes: 16384,
+            nodes: crate::config::GraphLimits::loop_expansion_nodes_bound().maximum,
             edges: usize::MAX,
             graph_prompt_bytes: usize::MAX,
             node_prompt_bytes: usize::MAX,
@@ -403,10 +398,10 @@ fn expand_loops(
         };
         let (plan, positions) = validate_flat_plan(&body_document, &generous)?;
         let Some(gate) = positions.get(&spec.until).map(|i| &plan.nodes[*i]) else {
-            return Err("loop until must name a body gate");
+            return Err("loop until must name a body gate".into());
         };
         if gate.kind != Some(NodeKind::Gate) {
-            return Err("loop until must name a body gate");
+            return Err("loop until must name a body gate".into());
         }
         let mut ancestors = std::collections::BTreeSet::new();
         let mut pending = vec![spec.until.clone()];
@@ -416,7 +411,7 @@ fn expand_loops(
             }
         }
         if ancestors.len() != spec.body.len() {
-            return Err("loop gate must follow the entire body");
+            return Err("loop gate must follow the entire body".into());
         }
         for round in 1..=rounds {
             for child in &spec.body {
@@ -454,7 +449,7 @@ fn expand_loops(
                 if let Some(SourceBinding::Node { node: source }) = &mut child.source {
                     *source = if let Some(previous) = source.strip_prefix("previous.") {
                         if round == 1 {
-                            return Err("previous source requires an initial commit binding");
+                            return Err("previous source requires an initial commit binding".into());
                         }
                         id(&node.id, round - 1, previous)
                     } else {
@@ -476,7 +471,9 @@ fn expand_loops(
                 {
                     *target = if let Some(previous) = target.strip_prefix("previous.") {
                         if round == 1 {
-                            return Err("previous CI target requires an initial node binding");
+                            return Err(
+                                "previous CI target requires an initial node binding".into()
+                            );
                         }
                         id(&node.id, round - 1, previous)
                     } else if spec.body.iter().any(|node| &node.id == target) {

@@ -2902,6 +2902,47 @@ fn composite_exports_are_checked_when_a_preset_is_compiled() {
 }
 
 #[test]
+fn loop_safety_bound_is_shared_by_preset_compile_and_admission() {
+    let stages = (0..17)
+        .map(|index| {
+            format!("{{ id = 'gate-{index}', kind = 'gate', condition = {{ type = 'budget' }} }}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let preset = |rounds| {
+        format!(
+            "stages = [{{ id = 'repair', loop = {{ max_rounds = {rounds}, until = 'gate-16', stages = [{stages}] }} }}]\n"
+        )
+    };
+    let mut layers = Layers::empty();
+    layers.graph_limits.nodes = 20_000;
+    layers.insert("test", "large-loop", &preset(1024)).unwrap();
+    layers
+        .insert("test", "too-many-rounds", &preset(1025))
+        .unwrap();
+    layers.insert("test", "small-loop", &preset(1)).unwrap();
+    let error = expand(&layers, "large-loop", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("limits.loop_expansion_nodes=16384"),
+        "{error}"
+    );
+    assert!(error.contains("internal loop expansion safety"), "{error}");
+    let mut document = expand(&layers, "small-loop", "brief", &[])
+        .unwrap()
+        .document;
+    document["nodes"][0]["loop"]["max_rounds"] = json!(1024);
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document).unwrap();
+    assert_eq!(document.admit(&layers.graph_limits).unwrap_err(), error);
+    let error = expand(&layers, "too-many-rounds", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("limits.loop_expansion_rounds=1024"),
+        "{error}"
+    );
+    assert!(error.contains("internal loop expansion safety"), "{error}");
+}
+
+#[test]
 fn preset_node_limit_uses_the_host_admission_bound() {
     let mut layers = Layers::empty();
     layers.graph_limits.nodes = 1;

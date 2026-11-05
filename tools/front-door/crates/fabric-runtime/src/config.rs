@@ -324,6 +324,24 @@ impl GraphLimits {
         self.bound("expansion_depth", self.expansion_depth)
     }
 
+    /// Independent safety ceiling for materialising all loop rounds.
+    pub fn loop_expansion_nodes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "loop_expansion_nodes",
+            maximum: 16_384,
+            owner: "internal loop expansion safety",
+        }
+    }
+
+    /// Maximum round allowance accepted by loop expansion.
+    pub fn loop_expansion_rounds_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "loop_expansion_rounds",
+            maximum: 1024,
+            owner: "internal loop expansion safety",
+        }
+    }
+
     /// Bound for transient construction using an internal safety minimum.
     fn composite_bound(name: &'static str, maximum: usize) -> GraphBound<'static> {
         GraphBound {

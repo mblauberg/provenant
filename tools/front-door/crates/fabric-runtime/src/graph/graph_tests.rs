@@ -4038,6 +4038,69 @@ fn composite_expansion_reports_the_bound_and_owner() {
 }
 
 #[test]
+fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
+    let body: Vec<_> = (0..17)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("member-{index}"), "access": "read_only",
+                "prompt": "work", "route": {"alias": "fixture"}
+            })
+        })
+        .collect();
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "large-loop", "nodes": [{
+            "id": "repair", "kind": "loop", "access": "read_only",
+            "loop": {"body": body, "until": "member-0", "max_rounds": 1024}
+        }]
+    }))
+    .unwrap();
+    let limits = crate::config::GraphLimits::default();
+    let bound = crate::config::GraphLimits::loop_expansion_nodes_bound();
+    assert!(bound.refusal(bound.maximum).is_none());
+    let reason = bound.refusal(17 * 1024 + 1).unwrap();
+    assert!(
+        reason.contains("loop_expansion_nodes")
+            && reason.contains("internal loop expansion safety")
+    );
+    assert_eq!(document.check_composites(&limits).unwrap_err(), reason);
+    assert_eq!(document.admit(&limits).unwrap_err(), reason);
+    let mut owner = FakeOwner::default();
+    let result = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    );
+    assert!(matches!(result, Err(GraphError::Invalid(ref actual)) if actual == &reason));
+    assert!(owner.calls.is_empty());
+
+    let mut too_many_rounds = document.clone();
+    too_many_rounds.nodes[0]
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .max_rounds = 1025;
+    let reason = crate::config::GraphLimits::loop_expansion_rounds_bound()
+        .refusal(1025)
+        .unwrap();
+    assert_eq!(
+        too_many_rounds.check_composites(&limits).unwrap_err(),
+        reason
+    );
+    assert_eq!(too_many_rounds.admit(&limits).unwrap_err(), reason);
+    let result = advance_with_budget(
+        &too_many_rounds,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    );
+    assert!(matches!(result, Err(GraphError::Invalid(ref actual)) if actual == &reason));
+    assert!(owner.calls.is_empty());
+}
+
+#[test]
 fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "composite-depth", "nodes": [{
