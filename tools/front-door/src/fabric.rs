@@ -2420,7 +2420,39 @@ impl BinaryRunOwner<'_> {
             .service()
             .status(target.attempt, &call)
             .map_err(run_error)?;
-        let (state, reason) = provenant_cli::run::state_and_reason(&record.state);
+        let tail = session
+            .store
+            .policy_tail(record.attempt_id, &call)
+            .map_err(run_error)?;
+        let successors = (tail.attempt_id != record.attempt_id)
+            .then_some((record.attempt_id, tail.attempt_id))
+            .into_iter()
+            .collect();
+        let mut row = provenant_cli::run::project_lane(
+            &record,
+            &[],
+            session.context.state_root.as_path(),
+            &successors,
+            self.factory.clock.wall_now().ok(),
+            false,
+        );
+        row.host = target.host.map(|host| host.to_string());
+        row.provider_seconds = provenant_records::wire::provider_seconds(record.provider_ms);
+        let state = row.state.clone();
+        let reason = row.reason.clone();
+        let mut fields: provenant_records::ExtraFields = serde_json::from_value(
+            serde_json::to_value(row).map_err(|_| FacadeError::StateCorrupt)?,
+        )
+        .map_err(|_| FacadeError::StateCorrupt)?;
+        fields.insert(
+            "provider_seconds".into(),
+            serde_json::json!(provenant_records::wire::provider_seconds(
+                record.provider_ms
+            )),
+        );
+        let mut chunk_fields = fields.clone();
+        chunk_fields.remove("state");
+        chunk_fields.remove("reason");
         let digest = |chunk: &provenant_run::OutputChunk| {
             provenant_core::Digest::from_bytes(*chunk.digest.bytes())
         };
@@ -2451,7 +2483,7 @@ impl BinaryRunOwner<'_> {
                         return Err(FacadeError::OutputTooLarge);
                     }
                     return Ok(OutputResult::Chunk {
-                        extra: Default::default(),
+                        extra: chunk_fields,
                         target,
                         part,
                         state,
@@ -2483,7 +2515,7 @@ impl BinaryRunOwner<'_> {
                 provenant_cli::run::align_utf8_tail(&mut chunk);
                 // The serving side reads its own graph, so `output --host` can
                 // name the planner fallback it recorded.
-                let mut extra = provenant_records::ExtraFields::new();
+                let mut extra = chunk_fields;
                 extra.insert("length".into(), serde_json::Value::from(chunk.len));
                 if matches!(part, OutputPart::Result)
                     && let Some(reason) = provenant_cli::run::planner_fallback_reason(
@@ -2543,7 +2575,7 @@ impl BinaryRunOwner<'_> {
                     bytes.extend_from_slice(&chunk.bytes);
                     if chunk.eof {
                         return Ok(OutputResult::Artifact {
-                            extra: Default::default(),
+                            extra: fields,
                             target,
                             artifact,
                             digest: digest(&chunk),
@@ -6492,12 +6524,79 @@ fn graph_display(
     }
 }
 
+fn graph_waiting_human(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    globals: &provenant_cli::Globals,
+) -> String {
+    use provenant_fabric_runtime::graph::NodeState;
+    let in_flight = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.state, NodeState::Running | NodeState::Pending))
+        .count();
+    let mut status = String::from("provenant");
+    if let Some(state_dir) = &globals.state_dir {
+        status.push_str(&format!(
+            " --state-dir {}",
+            preset_graph::shell_path(state_dir)
+        ));
+    }
+    if let Some(project) = &globals.project {
+        status.push_str(&format!(" --project {}", preset_graph::shell_path(project)));
+    }
+    status.push_str(&format!(" fabric graph status {}", run.checkpoint.graph_id));
+    format!(
+        "Graph {}: waiting ({in_flight} nodes in flight); status: {status}\n{}",
+        run.checkpoint.graph_id,
+        graph_human(run)
+    )
+}
+
+fn graph_command_result(
+    command: &str,
+    run: provenant_fabric_runtime::graph::GraphRun,
+) -> provenant_records::CommandResult<provenant_fabric_runtime::graph::GraphRun> {
+    let outcome = if command == "fabric graph wait"
+        && run.status == provenant_fabric_runtime::graph::GraphStatus::Pending
+    {
+        provenant_records::Outcome::Waiting
+    } else {
+        provenant_records::Outcome::Ok
+    };
+    provenant_records::CommandResult::new(command, outcome, run)
+}
+
+fn wait_graph(
+    clock: &dyn Clock,
+    pause: &dyn provenant_core::Pause,
+    seconds: u64,
+    cancel: &CancelToken,
+    mut observe: impl FnMut() -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+) -> Result<provenant_fabric_runtime::graph::GraphRun, Box<dyn std::error::Error>> {
+    let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
+    loop {
+        let run = observe()?;
+        let remaining = budget.remaining(clock.mono_now());
+        if run.status != provenant_fabric_runtime::graph::GraphStatus::Pending
+            || remaining.as_micros() == 0
+        {
+            return Ok(run);
+        }
+        pause.wait(
+            provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
+            cancel,
+        );
+    }
+}
+
 pub fn graph(
     input: provenant_cli::fabric::Graph,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
     use provenant_cli::fabric::Graph;
+    let mut wait_seconds = None;
     let (command, input) = match input {
         Graph::Run { document } => (
             "fabric graph run",
@@ -6513,6 +6612,16 @@ pub fn graph(
                 id,
             },
         ),
+        Graph::Wait { id, wait } => {
+            wait_seconds = Some(wait);
+            (
+                "fabric graph wait",
+                GraphInput::Status {
+                    extra: Default::default(),
+                    id,
+                },
+            )
+        }
         Graph::Cancel { id, reason } => (
             "fabric graph cancel",
             GraphInput::Cancel {
@@ -6537,7 +6646,13 @@ pub fn graph(
         }
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-        Ok(factory.graph(input, budget, &cancel)?)
+        if let Some(seconds) = wait_seconds {
+            wait_graph(&factory.clock, &factory.backoff, seconds, &cancel, || {
+                factory.graph(input.clone(), budget, &cancel)
+            })
+        } else {
+            Ok(factory.graph(input, budget, &cancel)?)
+        }
     })();
     match result {
         Ok(data) => {
@@ -6558,17 +6673,13 @@ pub fn graph(
                     globals,
                 );
             }
-            let human = graph_display(&data, command, globals);
-            crate::emit(
-                &provenant_records::CommandResult::new(
-                    command,
-                    provenant_records::Outcome::Ok,
-                    data,
-                ),
-                globals,
-                &human,
-                false,
-            )
+            let mut human = graph_display(&data, command, globals);
+            let waiting = command == "fabric graph wait"
+                && data.status == provenant_fabric_runtime::graph::GraphStatus::Pending;
+            if waiting {
+                human = graph_waiting_human(&data, globals);
+            }
+            crate::emit(&graph_command_result(command, data), globals, &human, false)
         }
         Err(error) => {
             let mut message = error.to_string();

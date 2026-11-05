@@ -294,6 +294,78 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
+    fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_wait_observes_settlement_and_budget")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal, GraphStatus, NodeState};
+        use provenant_core::{DurationMicros, MonoTime, TestClock, WallTime};
+        struct Advance<'a> { clock: &'a TestClock, settle: std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>> }
+        impl provenant_core::Pause for Advance<'_> {
+            fn wait(&self, delay: DurationMicros, _: &CancelToken) {
+                self.clock.wait_until(self.clock.mono_now().checked_add(delay).unwrap()).unwrap();
+                if self.clock.mono_now().as_micros() >= 2_000_000 && let Some(settle) = self.settle.borrow_mut().take() { settle(); }
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let project = factory.context.identity.project;
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"wait-test", "nodes":[{"id":"one", "prompt":"work", "access":"read_only", "route":{"alias":"senior"}}]
+        }))?;
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"wait-test", "plan_digest":"digest", "nodes":[{"id":"one", "state":"running", "worktree":null, "attempts":[]}]
+        }))?;
+        let mut journal = FileJournal::open(&roots.state, project, "wait-test", budget, &cancel, &factory.clock)?;
+        journal.bind(GraphExecution { extra: Default::default(), integration_base: None, review_base: None, directory: rig.project.clone(), document })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let clock = TestClock::new(WallTime::from_unix_seconds(0)?, MonoTime::from_micros(0));
+        let observe = || factory.graph(GraphInput::Status { extra: Default::default(), id: "wait-test".into() }, budget, &cancel);
+        let pause = Advance { clock: &clock, settle: std::cell::RefCell::new(None) };
+        let pending = super::wait_graph(&clock, &pause, 1, &cancel, observe)?;
+        assert_eq!(pending.status, GraphStatus::Pending);
+        let waited = serde_json::to_value(super::graph_command_result("fabric graph wait", pending.clone()))?;
+        let status = serde_json::to_value(super::graph_command_result("fabric graph status", pending.clone()))?;
+        assert_eq!(waited["status"], "waiting");
+        assert_eq!(waited["data"]["checkpoint"]["graph_id"], "wait-test");
+        assert_eq!(waited["data"], status["data"]);
+        let human = super::graph_waiting_human(&pending, &provenant_cli::Globals::default());
+        assert!(human.contains("fabric graph status wait-test"));
+        assert!(!human.contains("graph resume"));
+        assert_eq!(clock.mono_now().as_micros(), 1_000_000);
+        checkpoint.nodes[0].state = NodeState::Succeeded;
+        let settle = || {
+            let mut journal = FileJournal::open(&roots.state, project, "wait-test", budget, &cancel, &factory.clock).unwrap();
+            journal.save(&checkpoint).unwrap();
+        };
+        let pause = Advance { clock: &clock, settle: std::cell::RefCell::new(Some(Box::new(settle))) };
+        let settled = super::wait_graph(&clock, &pause, 1, &cancel, observe)?;
+        assert_eq!(settled.status, GraphStatus::Complete);
+        assert_eq!(settled.checkpoint.graph_id, "wait-test");
+        assert_eq!(clock.mono_now().as_micros(), 2_000_000);
+        drop(pause);
+        checkpoint.nodes[0].state = NodeState::Running;
+        checkpoint.pause_reason = Some("decision required".into());
+        let mut journal = FileJournal::open(&roots.state, project, "wait-test", budget, &cancel, &factory.clock)?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let pause = Advance { clock: &clock, settle: std::cell::RefCell::new(None) };
+        let paused = super::wait_graph(&clock, &pause, 1, &cancel, observe)?;
+        assert_eq!(paused.status, GraphStatus::Paused);
+        assert_eq!(clock.mono_now().as_micros(), 2_000_000);
+        Ok(())
+    }
+
+    #[test]
     fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::graph_cancel_persists_reason_and_skips_pending_node")? {
             return Ok(());
@@ -1056,9 +1128,9 @@ pub(crate) mod peer_tests {
         assert!(page.next_after.is_none());
         let second = serde_json::to_value(&page.items[0])?;
         assert_ne!(second["attempt_id"], row["attempt_id"]);
-        assert_eq!(second["state"]["outcome"], "cancelled");
-        assert_eq!(second["state"]["reason"], "fixture");
-        assert!(second["state"]["finished_at"].is_string());
+        assert_eq!(second["state"], "cancelled");
+        assert_eq!(second["reason"], "fixture");
+        assert!(second["finished_at"].is_string());
         let status = owner.run(
             RunInput::Status {
                 extra: Default::default(),

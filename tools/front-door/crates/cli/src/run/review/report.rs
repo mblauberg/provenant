@@ -79,7 +79,9 @@ pub(super) fn review_text(data: &Value) -> String {
                 effort,
                 row["state"].as_str().unwrap_or("pending"),
                 row["verdict"].as_str().unwrap_or("unknown"),
-                row["result_path"].as_str().unwrap_or("none"),
+                structured_path_text(&row["result_path"])
+                    .as_deref()
+                    .unwrap_or("none"),
                 if row["substitution"].as_bool() == Some(true) {
                     " (family substitution)"
                 } else {

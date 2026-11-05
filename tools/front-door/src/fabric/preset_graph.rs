@@ -267,27 +267,32 @@ pub(crate) fn run_preset_graph(
                 GraphStatus::Complete => Outcome::Failed,
                 GraphStatus::Cancelled => Outcome::Cancelled,
                 GraphStatus::Paused => Outcome::Refused,
-                GraphStatus::Pending => Outcome::Timeout,
+                GraphStatus::Pending => Outcome::Waiting,
             };
             let continuation = format!(
                 "provenant fabric graph resume --document {}",
                 document.display()
             );
-            let mut human = graph_human(&run);
+            let mut human = if run.status == GraphStatus::Pending {
+                graph_waiting_human(&run, globals)
+            } else {
+                graph_human(&run)
+            };
             human.push_str(&format!("Graph ID: {graph_id}\nStatus: {status_command}\n"));
-            if matches!(run.status, GraphStatus::Pending | GraphStatus::Paused) {
+            if run.status == GraphStatus::Paused {
                 human.push_str(&format!("Continue: {continuation}\n"));
-            } else if let Some(result) = run
-                .checkpoint
-                .nodes
-                .iter()
-                .rev()
-                .filter_map(|node| {
-                    node.outputs
-                        .as_ref()
-                        .and_then(|outputs| outputs.result.as_ref())
-                })
-                .next()
+            } else if run.status != GraphStatus::Pending
+                && let Some(result) = run
+                    .checkpoint
+                    .nodes
+                    .iter()
+                    .rev()
+                    .filter_map(|node| {
+                        node.outputs
+                            .as_ref()
+                            .and_then(|outputs| outputs.result.as_ref())
+                    })
+                    .next()
             {
                 human.push_str(&result.excerpt);
                 human.push('\n');
@@ -351,7 +356,7 @@ pub(crate) fn scratch_prepare_error_message(
     }
 }
 
-fn shell_path(path: &std::path::Path) -> String {
+pub(super) fn shell_path(path: &std::path::Path) -> String {
     let value = path.to_string_lossy();
     if value
         .chars()

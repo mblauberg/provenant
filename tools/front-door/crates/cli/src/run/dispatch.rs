@@ -202,12 +202,12 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         if let Some(reason) = row["reason"].as_str() {
             human.push_str(&format!("{}\n", plain_text(reason, usize::MAX)));
         }
-        if (row["result_path"].is_string()
+        if (!row["result_path"].is_null()
             || (row["host"].is_string()
                 && !matches!(state, "queued" | "starting" | "running" | "settling")))
             && let Ok(attempt) = id.parse()
         {
-            let target = if row["result_path"].is_string() {
+            let target = if !row["result_path"].is_null() {
                 lane_target(&row)
             } else {
                 None

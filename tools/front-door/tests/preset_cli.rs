@@ -2567,8 +2567,14 @@ fn explicit_preset_and_no_task_id_never_read_experiments() -> Result<(), Box<dyn
         document["context"].get("experiment_arm").is_none(),
         "{document}"
     );
-    let output = fixture.run(&["--preset", "gate-only", "--task-id", WORK_ITEM])?;
-    assert!(!output.status.success());
+    let default_nodes = document["nodes"].clone();
+    let (document, stderr) = fixture.document(&["--preset", "gate-alt", "--task-id", WORK_ITEM])?;
+    assert!(!stderr.contains("broken"), "{stderr}");
+    assert!(
+        document["context"].get("experiment_arm").is_none(),
+        "{document}"
+    );
+    assert_ne!(document["nodes"], default_nodes, "{document}");
     Ok(())
 }
 
