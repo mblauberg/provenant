@@ -279,11 +279,11 @@ fn launches() -> TestResult {
         let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
             .chain(args.iter().map(Into::into))
             .collect();
-        let env = [
+        let mut env = provenant_os::fixture::fixture_git_settings().to_vec();
+        env.extend([
             ("HOME".into(), base.join("home").into_os_string()),
             ("PATH".into(), "/usr/bin:/bin".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ];
+        ]);
         let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
         options.env = Some(&env);
         let output = executor.execute(options)?;
@@ -296,19 +296,7 @@ fn launches() -> TestResult {
         Ok(String::from_utf8(output.stdout.bytes)?.trim().into())
     };
     run_git(&["init", "-q"], &project)?;
-    run_git(
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "source",
-        ],
-        &project,
-    )?;
+    run_git(&["commit", "--allow-empty", "-qm", "source"], &project)?;
     let source = run_git(&["rev-parse", "HEAD"], &project)?;
     run_git(
         &[
@@ -321,16 +309,7 @@ fn launches() -> TestResult {
         &project,
     )?;
     run_git(
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "predecessor",
-        ],
+        &["commit", "--allow-empty", "-qm", "predecessor"],
         &worktree,
     )?;
     let head: GitOid = run_git(&["rev-parse", "HEAD"], &worktree)?.parse()?;

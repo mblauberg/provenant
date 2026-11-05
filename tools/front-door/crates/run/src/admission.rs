@@ -371,6 +371,49 @@ impl RunStore {
     pub fn lane_waits(&self, lanes: &[AttemptRecord], call: &Request<'_>) -> Vec<LaneWait> {
         self.lane_waits_with_resources(lanes, call, &SystemResources)
     }
+
+    /// Sample the admission inputs for a fixture timeout. These are current
+    /// observations, not a record of which condition held an earlier probe.
+    #[cfg(any(test, feature = "fixture"))]
+    pub fn admission_observations(
+        &self,
+        lane: &AttemptRecord,
+        call: &Request<'_>,
+        resources: &dyn Resources,
+    ) -> Result<String> {
+        let ticket = self.ticket(&self.db, lane.attempt_id)?;
+        let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false)?;
+        let memory = resources.memory();
+        let disk = resources.disk(&attempt);
+        let floor = provenant_config::GcSettings::read(&self.writer_registry)
+            .and_then(|settings| settings.free_floor_bytes(&self.writer_registry));
+        let pressure = resources.pressure();
+        let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry);
+        let budget = resources.process_budget();
+        let spacing = crate::ledger::spacing_left(
+            &self.writer_registry,
+            ticket.lane_class,
+            ticket.startup_spacing_ms,
+            call.clock,
+        );
+        let cap = self.writer_cap_hit(&ticket, call);
+        let caps = self.lane_caps();
+        let active: rusqlite::Result<i64> = self.db.query_row(
+            "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
+            [lane.run_id.to_string()],
+            |row| row.get(0),
+        );
+        Ok(format!(
+            "memory={memory:?}, floor={} basis points; disk={disk:?}, floor={floor:?} bytes; pressure={pressure:?}, threshold={:?}; process budget={budget:?}, reserved headroom={:?}; startup spacing remaining={spacing:?} ms (window={} ms); run active={active:?}, limit={}; writer cap={cap:?}, host limit={}, project limit={}",
+            ticket.memory_floor_basis_points,
+            settings.map(|settings| settings.memory_pressure_threshold),
+            budget.as_ref().ok().map(|budget| budget.headroom()),
+            ticket.startup_spacing_ms,
+            ticket.run_concurrency,
+            caps.host_writers,
+            caps.project_writers,
+        ))
+    }
     pub fn lane_waits_with_resources(
         &self,
         lanes: &[AttemptRecord],
@@ -1163,6 +1206,42 @@ pub(crate) fn update_attempt(
 #[cfg(test)]
 mod process_wait_tests {
     use super::*;
+
+    struct LowMemory;
+    impl Resources for LowMemory {
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            crate::tests::HostFacts::new(100).observe_process(pid)
+        }
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Ok(MemorySample {
+                available_bytes: 1,
+                total_bytes: 100,
+            })
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+    }
+
+    #[test]
+    fn admission_observations_name_memory_sample_and_floor()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let lane = store.record(run.attempts[0].attempt_id, &call)?;
+        let message = store.admission_observations(&lane, &call, &LowMemory)?;
+        assert!(
+            message.contains("memory=Ok(MemorySample { available_bytes: 1, total_bytes: 100 })"),
+            "{message}"
+        );
+        assert!(message.contains("floor=500 basis points"), "{message}");
+        Ok(())
+    }
 
     struct Full;
     impl Resources for Full {
