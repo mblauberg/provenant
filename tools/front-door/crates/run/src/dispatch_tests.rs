@@ -2582,8 +2582,30 @@ fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
                 }
             );
         } else {
-            assert!(
-                matches!(result, Err(RunError::Admission(AdmissionError::MemoryPressure { level: actual })) if actual == format!("{level:?}"))
+            let Err(RunError::Admission(AdmissionError::MemoryPressure {
+                level: actual,
+                threshold: selected,
+                origin,
+            })) = result
+            else {
+                return Err("memory pressure was not refused".into());
+            };
+            assert_eq!(format!("{actual:?}"), format!("{level:?}"));
+            assert_eq!(
+                origin,
+                if threshold.is_some() {
+                    provenant_records::diagnostic::SettingSource::Configuration
+                } else {
+                    provenant_records::diagnostic::SettingSource::ShippedDefault
+                }
+            );
+            assert_eq!(
+                selected,
+                if threshold == Some("warning") {
+                    provenant_records::diagnostic::PressureThreshold::Warning
+                } else {
+                    provenant_records::diagnostic::PressureThreshold::Critical
+                }
             );
         }
     }

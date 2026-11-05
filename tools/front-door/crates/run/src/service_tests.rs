@@ -691,7 +691,9 @@ fn each_refusal_has_its_own_stable_code() {
         ),
         (
             RunError::Admission(AdmissionError::MemoryPressure {
-                level: "critical".into(),
+                level: provenant_records::diagnostic::PressureLevel::Critical,
+                threshold: provenant_records::diagnostic::PressureThreshold::Critical,
+                origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
             }),
             "MEMORY_PRESSURE",
         ),

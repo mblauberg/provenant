@@ -1648,6 +1648,11 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                     FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::FieldTooLarge { field, limit })
                 });
             }
+            Some(DiagnosticFact::Resource(fact)) => {
+                return FacadeError::ConfinementRefused {
+                    resource: Some(fact.clone()),
+                };
+            }
             None => {}
         }
     }
@@ -1711,7 +1716,7 @@ fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
         | E::MemoryPressure
         | E::LaneCap
         | E::BuildSettings
-        | E::GuardianIdentity => FacadeError::ConfinementRefused,
+        | E::GuardianIdentity => FacadeError::ConfinementRefused { resource: None },
         E::WriterBusy => FacadeError::WriterBusy,
         E::WriterUnknown => FacadeError::WriterUnknown,
         E::CredentialRoot => FacadeError::CredentialRoot {
@@ -1846,7 +1851,7 @@ impl BinaryRunOwner<'_> {
         match target.host {
             Some(host) if host != self.factory.context.identity.host => {
                 if !self.allow_remote {
-                    return Err(FacadeError::ConfinementRefused);
+                    return Err(FacadeError::ConfinementRefused { resource: None });
                 }
                 self.peer(host, action, budget, cancel).map(Some)
             }
@@ -1862,7 +1867,7 @@ impl BinaryRunOwner<'_> {
         let identity = &self.factory.context.identity;
         if target.host.is_some_and(|h| h != identity.host) {
             if !self.allow_remote {
-                return Err(FacadeError::ConfinementRefused);
+                return Err(FacadeError::ConfinementRefused { resource: None });
             }
             let host = target
                 .host
@@ -1909,7 +1914,7 @@ impl BinaryRunOwner<'_> {
         let host = target.host.unwrap_or(self.factory.context.identity.host);
         if host != self.factory.context.identity.host {
             if !self.allow_remote {
-                return Err(FacadeError::ConfinementRefused);
+                return Err(FacadeError::ConfinementRefused { resource: None });
             }
             return self.graph_policy_tail_remote(target, budget, cancel);
         }
@@ -2198,10 +2203,10 @@ impl BinaryRunOwner<'_> {
         // Explicit placement forwards the whole batch; the peer confines it.
         if let Some(host) = host.filter(|h| *h != self.factory.context.identity.host) {
             if !access.is_default() {
-                return Err(FacadeError::ConfinementRefused);
+                return Err(FacadeError::ConfinementRefused { resource: None });
             }
             if !self.allow_remote {
-                return Err(FacadeError::ConfinementRefused);
+                return Err(FacadeError::ConfinementRefused { resource: None });
             }
             // MCP forwards read-only work only; a peer writer comes from `dispatch`.
             if tasks
@@ -2686,7 +2691,7 @@ impl BinaryRunOwner<'_> {
                     }
                 }
                 if !self.allow_remote && !remote_batches.is_empty() {
-                    return Err(FacadeError::ConfinementRefused);
+                    return Err(FacadeError::ConfinementRefused { resource: None });
                 }
                 let local_session = if local_indices.is_empty() {
                     None
@@ -5859,7 +5864,7 @@ impl Factory {
         let path = provenant_os::fs::canonicalize(path)
             .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
         if !path.starts_with(&self.cwd) {
-            return Err(FacadeError::ConfinementRefused);
+            return Err(FacadeError::ConfinementRefused { resource: None });
         }
         let bytes = provenant_os::fs::FileHandle::open_source(&path)
             .and_then(|mut file| file.read_bounded(8_388_608))
@@ -6106,7 +6111,7 @@ impl Factory {
                             &self.cwd,
                             writer.branch.as_str().trim_start_matches("refs/heads/"),
                         )
-                        .map_err(|_| FacadeError::ConfinementRefused)?;
+                        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
                     }
                     // A local target checked out in the writer's own worktree
                     // cannot be advanced by compare-and-swap, so refuse the

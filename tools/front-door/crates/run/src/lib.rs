@@ -690,10 +690,19 @@ impl RunError {
                     ))
                     .next("free disk space above gc.free_floor before retrying");
             }
-            Self::Admission(AdmissionError::MemoryPressure { .. }) => {
-                diagnostic = diagnostic
-                    .detail("host memory pressure reached domains.fabric.lanes.memory_pressure_threshold")
-                    .next("reduce host memory pressure before retrying");
+            Self::Admission(AdmissionError::MemoryPressure {
+                level,
+                threshold,
+                origin,
+            }) => {
+                let fact = provenant_records::diagnostic::ResourceFact::MemoryPressure {
+                    level: *level,
+                    threshold: *threshold,
+                    origin: *origin,
+                };
+                diagnostic = fact
+                    .project(diagnostic)
+                    .fact(DiagnosticFact::Resource(fact));
             }
             Self::Admission(AdmissionError::Processes { used, limit }) => {
                 diagnostic = diagnostic
@@ -826,7 +835,9 @@ mod diagnostic_projection_tests {
             ),
             (
                 AdmissionError::MemoryPressure {
-                    level: "TOKEN_SENTINEL".into(),
+                    level: provenant_records::diagnostic::PressureLevel::Critical,
+                    threshold: provenant_records::diagnostic::PressureThreshold::Warning,
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
                 },
                 "memory_pressure_threshold",
                 "memory",

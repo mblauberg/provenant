@@ -273,7 +273,10 @@ pub enum FacadeError {
     #[error("coordination mutations are not allowed inside a lane")]
     LaneCoordinationRefused,
     #[error("request violates confinement")]
-    ConfinementRefused,
+    ConfinementRefused {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<provenant_records::diagnostic::ResourceFact>,
+    },
     #[error("writer lock or writer is busy")]
     WriterBusy,
     #[error("writer custody is unknown")]
@@ -572,7 +575,8 @@ impl FacadeError {
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
             Self::WriterBusy => projected = projected.next("wait for the current writer or lock holder to finish"),
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
-            Self::ConfinementRefused => projected = projected.next("inspect the requested access and confinement policy"),
+            Self::ConfinementRefused { resource: Some(fact) } => projected = fact.project(projected),
+            Self::ConfinementRefused { resource: None } => projected = projected.next("inspect the requested access and confinement policy"),
             Self::CredentialRoot { access } => {
                 let access = match access.as_str() { "read" => "read", "write" => "write", _ => "requested" };
                 projected = projected.detail(format!("credential root refused for {access} grant"))
@@ -604,7 +608,7 @@ impl FacadeError {
             Self::ProviderStateExpired => "provider_state_expired",
             Self::LaneDepth => "lane_depth",
             Self::LaneCoordinationRefused => "lane_coordination_refused",
-            Self::ConfinementRefused => "confinement_refused",
+            Self::ConfinementRefused { .. } => "confinement_refused",
             Self::WriterBusy => "writer_busy",
             Self::WriterUnknown => "writer_unknown",
             Self::CredentialRoot { .. } => "credential_root",
@@ -1192,6 +1196,31 @@ mod diagnostic_tests {
                 .contains("gc.free_floor from host configuration")
         );
         assert!(projection.next.unwrap().contains("100B"));
+    }
+
+    #[test]
+    fn memory_pressure_refusal_preserves_typed_source_over_transport() {
+        use provenant_records::diagnostic::{
+            PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+        };
+        let error = FacadeError::ConfinementRefused {
+            resource: Some(ResourceFact::MemoryPressure {
+                level: PressureLevel::Critical,
+                threshold: PressureThreshold::Warning,
+                origin: SettingSource::Configuration,
+            }),
+        };
+        let received: FacadeError =
+            serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
+        let diagnostic = received.diagnostic();
+        assert_eq!(diagnostic.code, "confinement_refused");
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains("critical"));
+        assert!(detail.contains("warning"));
+        assert!(detail.contains("host configuration"));
+        assert!(diagnostic.next.unwrap().contains("memory"));
+        let generic = FacadeError::ConfinementRefused { resource: None }.diagnostic();
+        assert!(generic.detail.is_none());
     }
 
     #[test]

@@ -8436,7 +8436,7 @@ fn a_saved_attempt_reference_never_gains_a_launch_retry_or_a_second_row() {
         now: Some(at(0)),
         errors: [(
             2,
-            crate::coordination::facade::FacadeError::ConfinementRefused,
+            crate::coordination::facade::FacadeError::ConfinementRefused { resource: None },
         )]
         .into(),
         observations: VecDeque::from([
@@ -8500,7 +8500,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     }
     for permanent in [
         FacadeError::InvalidInput { detail: None },
-        FacadeError::ConfinementRefused,
+        FacadeError::ConfinementRefused { resource: None },
         FacadeError::DispatchRefused {
             fact: None,
             disk: None,
@@ -9425,6 +9425,37 @@ fn admitted_launch_projects_typed_prompt_field_and_limit() {
     assert!(reason.contains("retry"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+}
+
+#[test]
+fn memory_pressure_launch_refusal_names_source_and_action() {
+    use crate::coordination::facade::FacadeError;
+    use provenant_records::diagnostic::{
+        PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+    };
+    let error = FacadeError::ConfinementRefused {
+        resource: Some(ResourceFact::MemoryPressure {
+            level: PressureLevel::Critical,
+            threshold: PressureThreshold::Critical,
+            origin: SettingSource::ShippedDefault,
+        }),
+    };
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, error)].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(
+        &graph(vec![node("one", route("first"))]),
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("memory_pressure_threshold"));
+    assert!(reason.contains("shipped default"));
+    assert!(reason.contains("reduce host memory pressure"));
 }
 
 #[test]

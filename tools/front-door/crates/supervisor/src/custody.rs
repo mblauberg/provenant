@@ -73,8 +73,12 @@ pub enum AdmissionError {
         floor: u64,
         origin: provenant_records::diagnostic::SettingSource,
     },
-    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
-    MemoryPressure { level: String },
+    #[error("memory pressure is {level:?}; domains.fabric.lanes.memory_pressure_threshold is {threshold_label} (source: {source_label}); wait for host memory pressure to fall", threshold_label = .threshold.name(), source_label = .origin.description())]
+    MemoryPressure {
+        level: provenant_records::diagnostic::PressureLevel,
+        threshold: provenant_records::diagnostic::PressureThreshold,
+        origin: provenant_records::diagnostic::SettingSource,
+    },
     #[error(
         "user process count {used} of {limit}; wait for processes to exit or raise the per-user process limit"
     )]

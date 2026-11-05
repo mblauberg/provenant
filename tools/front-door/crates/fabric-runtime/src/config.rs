@@ -390,7 +390,7 @@ impl Default for Settlement {
 impl Lanes {
     pub fn build_settings(&self) -> provenant_config::LaneBuildSettings {
         provenant_config::LaneBuildSettings {
-            memory_pressure_threshold: self.memory_pressure_threshold,
+            memory_pressure_threshold: Some(self.memory_pressure_threshold),
             max_concurrent_builds: self.max_concurrent_builds,
             cargo_build_jobs: self.cargo_build_jobs,
             cargo_incremental: self.cargo_incremental,

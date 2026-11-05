@@ -89,6 +89,35 @@ fn oversized_input_projects_field_reason_and_action() {
     assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
 }
 
+#[test]
+fn memory_pressure_projects_configured_source_and_action() {
+    use provenant_records::diagnostic::{
+        PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+    };
+    let error = FacadeError::ConfinementRefused {
+        resource: Some(ResourceFact::MemoryPressure {
+            level: PressureLevel::Critical,
+            threshold: PressureThreshold::Warning,
+            origin: SettingSource::Configuration,
+        }),
+    };
+    let value = ServiceError::Facade(error).structured_error();
+    assert_eq!(value["code"], "confinement_refused");
+    assert!(
+        value["detail"]
+            .as_str()
+            .unwrap()
+            .contains("memory_pressure_threshold")
+    );
+    assert!(
+        value["detail"]
+            .as_str()
+            .unwrap()
+            .contains("host configuration")
+    );
+    assert!(value["next"].as_str().unwrap().contains("memory"));
+}
+
 use super::*;
 use provenant_core::OperationId;
 use serde_json::json;

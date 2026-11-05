@@ -32,6 +32,22 @@ fn prompt_limit_refusal_keeps_safe_field_and_existing_code() {
 }
 
 #[test]
+fn memory_pressure_refusal_keeps_source_and_resource_action() {
+    use provenant_records::diagnostic::{PressureLevel, PressureThreshold, SettingSource};
+    let error = run_error(provenant_run::RunError::Admission(
+        provenant_run::AdmissionError::MemoryPressure {
+            level: PressureLevel::Critical,
+            threshold: PressureThreshold::Warning,
+            origin: SettingSource::Configuration,
+        },
+    ));
+    let projection = error.diagnostic();
+    assert_eq!(projection.code, "confinement_refused");
+    assert!(projection.detail.unwrap().contains("host configuration"));
+    assert!(projection.next.unwrap().contains("memory"));
+}
+
+#[test]
 fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
@@ -2460,7 +2476,7 @@ pub(crate) mod peer_tests {
             "protected push was admitted: {result:?}"
         );
         assert!(
-            matches!(result, Err(FacadeError::ConfinementRefused)),
+            matches!(result, Err(FacadeError::ConfinementRefused { .. })),
             "{result:?}"
         );
         Ok(())

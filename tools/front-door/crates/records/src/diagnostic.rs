@@ -33,6 +33,61 @@ impl SettingSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PressureLevel {
+    Normal,
+    Warning,
+    Critical,
+}
+impl PressureLevel {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PressureThreshold {
+    Warning,
+    Critical,
+    Never,
+}
+impl PressureThreshold {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+            Self::Never => "never",
+        }
+    }
+}
+
+/// Closed resource facts safe to project across host boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResourceFact {
+    MemoryPressure {
+        level: PressureLevel,
+        threshold: PressureThreshold,
+        origin: SettingSource,
+    },
+}
+
+impl ResourceFact {
+    pub fn project(&self, diagnostic: Diagnostic) -> Diagnostic {
+        match self {
+            Self::MemoryPressure { level, threshold, origin } => diagnostic
+                .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
+                .next("reduce host memory pressure before retrying"),
+        }
+    }
+}
+
 /// An explicitly recognised delivery command and its enforced output limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -78,6 +133,7 @@ pub enum DiagnosticFact {
         task_index: Option<usize>,
         limit: u64,
     },
+    Resource(ResourceFact),
 }
 impl DeliveryLimit {
     pub fn new(

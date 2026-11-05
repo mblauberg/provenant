@@ -406,7 +406,7 @@ impl RunStore {
         Ok(format!(
             "memory={memory:?}, floor={} basis points; disk={disk:?}, floor={floor:?} bytes; pressure={pressure:?}, threshold={:?}; process budget={budget:?}, reserved headroom={:?}; startup spacing remaining={spacing:?} ms (window={} ms); run active={active:?}, limit={}; writer cap={cap:?}, host limit={}, project limit={}",
             ticket.memory_floor_basis_points,
-            settings.map(|settings| settings.memory_pressure_threshold),
+            settings.map(|settings| settings.memory_pressure_threshold()),
             budget.as_ref().ok().map(|budget| budget.headroom()),
             ticket.startup_spacing_ms,
             ticket.run_concurrency,
@@ -421,7 +421,7 @@ impl RunStore {
         resources: &dyn Resources,
     ) -> Vec<LaneWait> {
         let pressure_threshold = provenant_config::LaneBuildSettings::read(&self.writer_registry)
-            .map(|settings| settings.memory_pressure_threshold)
+            .map(|settings| settings.memory_pressure_threshold())
             .unwrap_or_default();
         let mut stalled_cache = std::collections::HashMap::new();
         let slot_queue = self.slot_queue(lanes, call);
@@ -930,8 +930,8 @@ impl RunStore {
                 settings,
             ) {
                 (pressure, Ok(disk), Ok((floor, origin)), Ok(settings)) => {
-                    let pressure =
-                        pressure.filter(|level| settings.memory_pressure_threshold.defers(*level));
+                    let threshold = settings.memory_pressure_threshold();
+                    let pressure = pressure.filter(|level| threshold.defers(*level));
                     let mut disk = disk;
                     if disk < floor {
                         if below_floor.is_multiple_of(RECLAIM_EVERY)
@@ -949,7 +949,19 @@ impl RunStore {
                         }))
                     } else if let Some(level) = pressure {
                         Some(RunError::Admission(AdmissionError::MemoryPressure {
-                            level: format!("{level:?}"),
+                            level: match level {
+                                resources::MemoryPressure::Normal => {
+                                    provenant_records::diagnostic::PressureLevel::Normal
+                                }
+                                resources::MemoryPressure::Warning => {
+                                    provenant_records::diagnostic::PressureLevel::Warning
+                                }
+                                resources::MemoryPressure::Critical => {
+                                    provenant_records::diagnostic::PressureLevel::Critical
+                                }
+                            },
+                            threshold: threshold.diagnostic_value(),
+                            origin: settings.memory_pressure_source(),
                         }))
                     } else {
                         processes.map(|budget| {

@@ -15,6 +15,14 @@ pub enum MemoryPressureThreshold {
     Never,
 }
 impl MemoryPressureThreshold {
+    pub fn diagnostic_value(self) -> provenant_records::diagnostic::PressureThreshold {
+        match self {
+            Self::Warning => provenant_records::diagnostic::PressureThreshold::Warning,
+            Self::Critical => provenant_records::diagnostic::PressureThreshold::Critical,
+            Self::Never => provenant_records::diagnostic::PressureThreshold::Never,
+        }
+    }
+
     pub fn defers(self, pressure: provenant_os::sys::resources::MemoryPressure) -> bool {
         use provenant_os::sys::resources::MemoryPressure;
         matches!(
@@ -32,7 +40,7 @@ impl MemoryPressureThreshold {
 #[serde(default)]
 pub struct LaneBuildSettings {
     /// Kernel pressure threshold for admission; Critical unless set.
-    pub memory_pressure_threshold: MemoryPressureThreshold,
+    pub memory_pressure_threshold: Option<MemoryPressureThreshold>,
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_auto")]
@@ -124,6 +132,17 @@ pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
     }
 }
 impl LaneBuildSettings {
+    pub fn memory_pressure_threshold(&self) -> MemoryPressureThreshold {
+        self.memory_pressure_threshold.unwrap_or_default()
+    }
+
+    pub fn memory_pressure_source(&self) -> provenant_records::diagnostic::SettingSource {
+        if self.memory_pressure_threshold.is_some() {
+            provenant_records::diagnostic::SettingSource::Configuration
+        } else {
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        }
+    }
     pub fn read(state: &Path) -> std::io::Result<Self> {
         crate::loader::read_settings(state, "domains.fabric.lanes", |settings: &Self| {
             if settings.invalid_keys().is_empty() {
@@ -478,7 +497,7 @@ mod tests {
         assert_eq!(lanes.cargo_build_jobs, None);
         assert_eq!(lanes.max_concurrent_builds, Some(3));
         assert_eq!(
-            lanes.memory_pressure_threshold,
+            lanes.memory_pressure_threshold(),
             super::MemoryPressureThreshold::Critical
         );
         assert!(lanes.invalid_keys().is_empty());
@@ -683,35 +702,44 @@ mod build_tests {
     #[test]
     fn memory_pressure_defaults_to_critical_and_accepts_host_policy() {
         use provenant_os::sys::resources::MemoryPressure;
+        use provenant_records::diagnostic::SettingSource;
+        assert_eq!(
+            LaneBuildSettings::default().memory_pressure_source(),
+            SettingSource::ShippedDefault
+        );
         let defaults: LaneBuildSettings =
             toml_edit::de::from_str("memory_pressure_threshold = 'critical'").unwrap();
+        assert_eq!(
+            defaults.memory_pressure_source(),
+            SettingSource::Configuration
+        );
         assert!(
             !defaults
-                .memory_pressure_threshold
+                .memory_pressure_threshold()
                 .defers(MemoryPressure::Warning)
         );
         assert!(
             defaults
-                .memory_pressure_threshold
+                .memory_pressure_threshold()
                 .defers(MemoryPressure::Critical)
         );
         let warning: LaneBuildSettings =
             toml_edit::de::from_str("memory_pressure_threshold = 'warning'").unwrap();
         assert!(
             warning
-                .memory_pressure_threshold
+                .memory_pressure_threshold()
                 .defers(MemoryPressure::Warning)
         );
         assert!(
             !warning
-                .memory_pressure_threshold
+                .memory_pressure_threshold()
                 .defers(MemoryPressure::Normal)
         );
         let never: LaneBuildSettings =
             toml_edit::de::from_str("memory_pressure_threshold = 'never'").unwrap();
         assert!(
             !never
-                .memory_pressure_threshold
+                .memory_pressure_threshold()
                 .defers(MemoryPressure::Critical)
         );
         assert!(
