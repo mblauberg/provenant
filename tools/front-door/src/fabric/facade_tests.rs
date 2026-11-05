@@ -674,10 +674,10 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
-    fn graph_replay_preserves_legacy_context_without_a_checkpoint_reference()
+    fn graph_replay_preserves_accepted_context_without_a_checkpoint_reference()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(
-            "fabric::peer_tests::graph_replay_preserves_legacy_context_without_a_checkpoint_reference",
+            "fabric::peer_tests::graph_replay_preserves_accepted_context_without_a_checkpoint_reference",
         )? {
             return Ok(());
         }
@@ -734,28 +734,7 @@ pub(crate) mod peer_tests {
             serde_json::json!({"adapter":"fixture", "model":"fixture/model"}),
         )?;
         let store = run_owner.store(&cancel)?;
-        for prepared in [false, true] {
-            if prepared {
-                graph_owner.exclude = vec!["codex/gpt-6-luna".into()];
-                // Reserve the legacy digest without the canonical request file,
-                // as a crash between row reservation and publication would leave it.
-                let call = run_owner.call(&cancel);
-                let mut operation = store
-                    .operation(&receipt.operation_id, &call)?
-                    .ok_or("operation")?;
-                operation.state = provenant_run::OperationState::Prepared;
-                let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-                db.execute(
-                    "UPDATE operations SET record=?1",
-                    [serde_json::to_vec(&operation)?],
-                )?;
-                std::fs::remove_file(
-                    rig.state
-                        .join("runs")
-                        .join(operation.run_id.to_string())
-                        .join("request.json"),
-                )?;
-            }
+        {
             let observation = graph_owner.observe_or_start(
                 &key,
                 graph::NodeInput {

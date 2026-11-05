@@ -13,20 +13,20 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
         } else {
             edge.cwd.join(path)
         };
+        if !absolute.exists() && (path.is_absolute() || path.starts_with(".worktrees")) {
+            return reply(
+                "run",
+                Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    format!(
+                        "worktree {} does not exist; use --branch BRANCH to create an owned worktree",
+                        path.display()
+                    ),
+                )),
+            );
+        }
         if !absolute.exists() {
-            if path.is_absolute() || path.starts_with(".worktrees") {
-                return reply(
-                    "run",
-                    Err(Fail::new(
-                        Status::Invalid,
-                        ErrorKind::Invalid,
-                        format!(
-                            "worktree {} does not exist; use --branch BRANCH to create an owned worktree",
-                            path.display()
-                        ),
-                    )),
-                );
-            }
             command.worktree_branch = Some(path.to_string_lossy().into_owned());
             command.access.worktree = None;
         }
