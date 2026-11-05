@@ -902,11 +902,9 @@ pub fn attach(nodes: &mut [Value], plan: Value) -> Result<(), String> {
 
 #[cfg(test)]
 mod declaration_tests {
-    use super::*;
-
     #[test]
     fn initial_custom_parameter_is_not_an_explicit_override() {
-        let mut layers = Layers::empty();
+        let mut layers = super::Layers::empty();
         layers
             .insert(
                 "custom.toml",
@@ -915,11 +913,11 @@ mod declaration_tests {
             )
             .unwrap();
         let (_, origins) = layers.resolve("custom").unwrap();
-        assert!(!explicit(&layers, "custom", &origins, "width"));
+        assert!(!super::explicit(&layers, "custom", &origins, "width"));
         layers
             .insert("override.toml", "custom", "[parameters]\nwidth=3\n")
             .unwrap();
         let (_, origins) = layers.resolve("custom").unwrap();
-        assert!(explicit(&layers, "custom", &origins, "width"));
+        assert!(super::explicit(&layers, "custom", &origins, "width"));
     }
 }

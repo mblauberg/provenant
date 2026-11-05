@@ -2926,9 +2926,19 @@ fn unbound_request_values_warn_in_explain() -> Result<(), Box<dyn std::error::Er
         .current_dir(&root)
         .env("PROVENANT_ROOT", &root)
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
         .args(["--json", "run", "--preset", "single", "--prompt-file"])
         .arg(&prompt)
-        .args(["--risk-tier", "routine", "--task-kind", "docs", "--explain"])
+        .args([
+            "--risk-tier",
+            "routine",
+            "--task-kind",
+            "docs",
+            "--plan",
+            "off",
+            "--explain",
+        ])
         .output()?;
     assert!(
         output.status.success(),
@@ -2968,9 +2978,19 @@ fn copied_review_preset_binds_request_values_under_any_name()
             .current_dir(&root)
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .arg("--state-dir")
+            .arg(temp.path().join("state"))
             .args(["--json", "run", "--preset", preset, "--prompt-file"])
             .arg(&prompt)
-            .args(["--risk-tier", "crucial", "--task-kind", "docs", "--explain"])
+            .args([
+                "--risk-tier",
+                "crucial",
+                "--task-kind",
+                "docs",
+                "--plan",
+                "off",
+                "--explain",
+            ])
             .output()?;
         assert!(
             output.status.success(),
