@@ -265,8 +265,8 @@ mod tests {
                 assert_eq!(request.job.repository, "owner/repo");
                 Ok("remote-1".into())
             }
-            fn observe(&mut self, id: &str) -> Result<RemoteState, ()> {
-                assert_eq!(id, "remote-1");
+            fn observe(&mut self, job: &RemoteJob) -> Result<RemoteState, ()> {
+                assert_eq!(job.remote_id, "remote-1");
                 Ok(RemoteState::Finished {
                     result: CloudResult {
                         commit: "a".repeat(40),
@@ -279,7 +279,7 @@ mod tests {
                     },
                 })
             }
-            fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+            fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
                 Ok(false)
             }
         }

@@ -243,9 +243,10 @@ pub trait CloudProvider {
     /// Check the target before a model turn when the provider supports it.
     fn check_environment(&mut self, request: CloudSubmission<'_>) -> Result<(), Self::Error>;
     fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, Self::Error>;
-    fn observe(&mut self, remote_id: &str) -> Result<RemoteState, Self::Error>;
+    /// Observe using the durable job context, including its repository and commit.
+    fn observe(&mut self, job: &RemoteJob) -> Result<RemoteState, Self::Error>;
     /// True means the provider confirmed the job stopped.
-    fn cancel(&mut self, remote_id: &str) -> Result<bool, Self::Error>;
+    fn cancel(&mut self, job: &RemoteJob) -> Result<bool, Self::Error>;
 }
 
 /// The run owner supplies an attempt-scoped store whose save is durable.
@@ -327,9 +328,7 @@ pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
     if job.state == RemoteState::Submitting {
         return Err(CloudJobError::SubmissionUnknown);
     }
-    let mut state = provider
-        .observe(&job.remote_id)
-        .map_err(CloudJobError::Provider)?;
+    let mut state = provider.observe(job).map_err(CloudJobError::Provider)?;
     // Seeing a running job does not prove whether an earlier cancellation
     // request was delivered or will take effect later.
     if job.state == RemoteState::CancellationUnconfirmed && state == RemoteState::Running {
@@ -366,9 +365,7 @@ pub fn cancel<P: CloudProvider, S: CloudJobStore>(
     updated.state = RemoteState::CancellationUnconfirmed;
     store.save(&updated).map_err(CloudJobError::Store)?;
     *job = updated;
-    let confirmed = provider
-        .cancel(&job.remote_id)
-        .map_err(CloudJobError::Provider)?;
+    let confirmed = provider.cancel(job).map_err(CloudJobError::Provider)?;
     if confirmed {
         let mut updated = job.clone();
         updated.state = RemoteState::Cancelled;
@@ -401,12 +398,14 @@ mod lifecycle_tests {
             self.submitted += 1;
             Ok("remote-1".into())
         }
-        fn observe(&mut self, id: &str) -> Result<RemoteState, ()> {
-            assert_eq!(id, "remote-1");
+        fn observe(&mut self, job: &RemoteJob) -> Result<RemoteState, ()> {
+            assert_eq!(job.remote_id, "remote-1");
+            assert_eq!(job.repository, "owner/repo");
+            assert_eq!(job.commit, "a".repeat(40));
             Ok(self.observed.clone())
         }
-        fn cancel(&mut self, id: &str) -> Result<bool, ()> {
-            assert_eq!(id, "remote-1");
+        fn cancel(&mut self, job: &RemoteJob) -> Result<bool, ()> {
+            assert_eq!(job.remote_id, "remote-1");
             Ok(self.confirmed)
         }
     }
@@ -513,10 +512,10 @@ mod lifecycle_tests {
             fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
                 Ok("remote-1".into())
             }
-            fn observe(&mut self, _: &str) -> Result<RemoteState, ()> {
+            fn observe(&mut self, _: &RemoteJob) -> Result<RemoteState, ()> {
                 Ok(RemoteState::Running)
             }
-            fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+            fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
                 Err(())
             }
         }
@@ -564,10 +563,10 @@ mod lifecycle_tests {
             fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
                 Ok("remote-1".into())
             }
-            fn observe(&mut self, _: &str) -> Result<RemoteState, ()> {
+            fn observe(&mut self, _: &RemoteJob) -> Result<RemoteState, ()> {
                 Ok(RemoteState::Running)
             }
-            fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+            fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
                 self.0 += 1;
                 Ok(true)
             }
@@ -594,10 +593,10 @@ mod lifecycle_tests {
             fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
                 panic!("must not submit")
             }
-            fn observe(&mut self, _: &str) -> Result<RemoteState, ()> {
+            fn observe(&mut self, _: &RemoteJob) -> Result<RemoteState, ()> {
                 panic!("must not observe")
             }
-            fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+            fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
                 panic!("must not cancel")
             }
         }
@@ -645,10 +644,10 @@ mod lifecycle_tests {
             fn submit(&mut self, _: CloudSubmission<'_>) -> Result<String, ()> {
                 Err(())
             }
-            fn observe(&mut self, _: &str) -> Result<RemoteState, ()> {
+            fn observe(&mut self, _: &RemoteJob) -> Result<RemoteState, ()> {
                 panic!("no remote id")
             }
-            fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+            fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
                 panic!("no remote id")
             }
         }

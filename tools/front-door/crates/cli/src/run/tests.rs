@@ -3374,8 +3374,10 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
             assert_eq!(request.job.commit, "a".repeat(40));
             Ok("remote-id".into())
         }
-        fn observe(&mut self, id: &str) -> Result<RemoteState, ()> {
-            assert_eq!(id, "remote-id");
+        fn observe(&mut self, job: &RemoteJob) -> Result<RemoteState, ()> {
+            assert_eq!(job.remote_id, "remote-id");
+            assert_eq!(job.repository, "repository");
+            assert_eq!(job.commit, "a".repeat(40));
             Ok(RemoteState::Finished {
                 result: CloudResult {
                     commit: "a".repeat(40),
@@ -3388,7 +3390,7 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
                 },
             })
         }
-        fn cancel(&mut self, _: &str) -> Result<bool, ()> {
+        fn cancel(&mut self, _: &RemoteJob) -> Result<bool, ()> {
             Ok(false)
         }
     }
