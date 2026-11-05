@@ -300,6 +300,26 @@ impl ReviewSize {
 #[serde(deny_unknown_fields)]
 pub struct ReviewShape {
     pub reviewers: Vec<ReviewReviewer>,
+    #[serde(default = "default_frame")]
+    pub frame: bool,
+    #[serde(default = "default_verifiers")]
+    pub verifiers: usize,
+    #[serde(default)]
+    pub synthesis: ReviewSynthesis,
+}
+fn default_frame() -> bool {
+    true
+}
+fn default_verifiers() -> usize {
+    1
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewSynthesis {
+    #[default]
+    Model,
+    Reduce,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -564,7 +584,10 @@ impl ReviewConfig {
                 distinct_families: false,
             });
         }
-        ReviewShape { reviewers }
+        ReviewShape {
+            reviewers,
+            ..shape.clone()
+        }
     }
 
     pub fn select_shape<'a>(
@@ -833,6 +856,9 @@ impl ReviewConfig {
             }
             if shape.reviewers.is_empty() || shape.reviewers.len() > 32 {
                 error(format!("{prefix}.reviewers"), "limit");
+            }
+            if shape.verifiers > 32 {
+                error(format!("{prefix}.verifiers"), "range");
             }
             if shape
                 .reviewers
@@ -1437,6 +1463,9 @@ mod tests {
                     distinct_families: false,
                 },
             ],
+            frame: true,
+            verifiers: 1,
+            synthesis: ReviewSynthesis::Model,
         };
         assert_eq!(
             lens_names(&review.panel(&shape, None, &[], false, &[])),
@@ -1690,6 +1719,14 @@ mod tests {
     fn parsing_defaults_and_validation() {
         let config: RoutingConfig =
             toml_edit::de::from_str(include_str!("../assets/review-defaults.toml")).unwrap();
+        let quick = &config.review.shapes["quick"];
+        assert!(!quick.frame);
+        assert_eq!(quick.verifiers, 0);
+        assert_eq!(quick.synthesis, ReviewSynthesis::Reduce);
+        let standard = &config.review.shapes["standard"];
+        assert!(standard.frame);
+        assert_eq!(standard.verifiers, 1);
+        assert_eq!(standard.synthesis, ReviewSynthesis::Model);
         assert!(config.review.shapes["deep"].reviewers[0].lenses.is_empty());
         assert!(config.validate().is_empty());
         let mut invalid = config;

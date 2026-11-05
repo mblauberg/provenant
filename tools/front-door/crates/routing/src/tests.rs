@@ -1766,6 +1766,12 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         layered.domains.routing.review.shapes["quick"].reviewers[0].pool,
         "senior"
     );
+    assert!(!layered.domains.routing.review.shapes["quick"].frame);
+    assert_eq!(layered.domains.routing.review.shapes["quick"].verifiers, 0);
+    assert_eq!(
+        layered.domains.routing.review.shapes["quick"].synthesis,
+        crate::ReviewSynthesis::Reduce
+    );
     assert_eq!(
         layered.domains.routing.review.shapes["standard"].reviewers[0].count,
         5
@@ -1778,12 +1784,36 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         layered.domains.routing.review.select.by_risk["medium"],
         "deep"
     );
+    let customized = provenant_config::load_with_domains(
+        &roots,
+        Some(
+            "schema_version=1\n[domains.routing.review.shapes.quick]\nsynthesis='model'\n"
+                .as_bytes(),
+        ),
+        &sections,
+    )?;
+    let schema = provenant_config::schema(&customized, &sections, String::new())?;
+    let synthesis = schema
+        .fields
+        .iter()
+        .find(|field| field.path == "domains.routing.review.shapes.quick.synthesis")
+        .unwrap();
+    assert_eq!(synthesis.default, "reduce");
+    assert_eq!(synthesis.value, "model");
+    assert_eq!(synthesis.source, provenant_config::Layer::User);
+    assert_eq!(synthesis.values, ["model", "reduce"]);
     let layered = provenant_config::load_with_domains(
         &roots,
         Some("schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='senior',count=1}]\n[domains.routing.review.select]\nby_risk={medium='custom'}\n".as_bytes()),
         &sections,
     )?;
     assert!(layered.domains.routing.review.shapes.contains_key("custom"));
+    assert!(layered.domains.routing.review.shapes["custom"].frame);
+    assert_eq!(layered.domains.routing.review.shapes["custom"].verifiers, 1);
+    assert_eq!(
+        layered.domains.routing.review.shapes["custom"].synthesis,
+        crate::ReviewSynthesis::Model
+    );
     assert!(layered.domains.routing.review.shapes.contains_key("quick"));
     assert_eq!(
         layered.domains.routing.review.select.by_risk["routine"],

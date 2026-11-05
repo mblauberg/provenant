@@ -20,13 +20,22 @@ min_monthly_allowance_usd = 60
 [pacing_reserve]
 [review.shapes.quick]
 reviewers = [{ pool = "junior", count = 1 }]
+frame = false
+verifiers = 0
+synthesis = "reduce"
 [review.shapes.standard]
 reviewers = [{ pool = "junior", count = 5, distinct_families = true }]
+frame = true
+verifiers = 1
+synthesis = "model"
 [review.shapes.deep]
 reviewers = [
   { pool = "junior", count = 4, distinct_families = true },
   { pool = "senior", count = 4, distinct_families = true },
 ]
+frame = true
+verifiers = 1
+synthesis = "model"
 [review.select]
 default = "standard"
 [review.select.by_risk]
