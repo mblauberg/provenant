@@ -1469,6 +1469,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                 tasks: tasks
                     .iter()
                     .map(|task_id| TaskRequest {
+                        cloud: None,
                         context: None,
                         extra: Default::default(),
                         build_heavy: false,
@@ -5114,6 +5115,7 @@ fn seed_attempt(
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![TaskRequest {
+                    cloud: None,
                     context: None,
                     extra: Default::default(),
                     build_heavy: false,

@@ -657,6 +657,30 @@ pub struct DispatchInput {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
+    /// Placement: local or named cloud target in cloud:NAME form.
+    #[arg(long, conflicts_with = "preset")]
+    pub placement: Option<String>,
+    /// Override the cloud provider.
+    #[arg(long)]
+    pub cloud_provider: Option<String>,
+    /// Override the provider environment ID.
+    #[arg(long)]
+    pub cloud_environment: Option<String>,
+    /// Override the requested cloud model.
+    #[arg(long)]
+    pub cloud_model: Option<String>,
+    /// Override the requested cloud effort.
+    #[arg(long)]
+    pub cloud_effort: Option<String>,
+    /// Override the cloud repository source.
+    #[arg(long)]
+    pub cloud_repository: Option<String>,
+    /// Override the repository branch made available to the cloud job.
+    #[arg(long)]
+    pub cloud_branch: Option<String>,
+    /// Override the cloud job deadline in seconds.
+    #[arg(long)]
+    pub cloud_deadline: Option<u64>,
     /// Expand and run a named pipeline preset
     #[arg(long, catalog_requires = "prompt_file")]
     pub preset: Option<String>,
@@ -860,6 +884,14 @@ pub enum Condition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "snake_case")]
 pub enum LaneState {
+    CloudSubmitting,
+    CloudRunning,
+    CloudPassed,
+    CloudFailed,
+    CloudSetupFailed,
+    CloudCancelled,
+    CloudCancellationUnconfirmed,
+    CloudUnknown,
     Queued,
     Starting,
     Running,
@@ -883,6 +915,14 @@ pub enum LaneState {
 impl LaneState {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::CloudSubmitting => "cloud_submitting",
+            Self::CloudRunning => "cloud_running",
+            Self::CloudPassed => "cloud_passed",
+            Self::CloudFailed => "cloud_failed",
+            Self::CloudSetupFailed => "cloud_setup_failed",
+            Self::CloudCancelled => "cloud_cancelled",
+            Self::CloudCancellationUnconfirmed => "cloud_cancellation_unconfirmed",
+            Self::CloudUnknown => "cloud_unknown",
             Self::Queued => "queued",
             Self::Starting => "starting",
             Self::Running => "running",

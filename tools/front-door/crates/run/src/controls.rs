@@ -1820,6 +1820,17 @@ impl RunStore {
                 Err(reason) => CancelReceipt::Unobservable { reason },
             });
         }
+        let record = self.record(id, call)?;
+        if self
+            .request(record.run_id, call)?
+            .tasks
+            .iter()
+            .any(|task| task.task_id == record.task_id && task.cloud.is_some())
+        {
+            return Ok(CancelReceipt::Unobservable {
+                reason: "cloud cancellation must be requested through the cloud owner; cancellation is unconfirmed".into(),
+            });
+        }
         loop {
             let record = self.record(id, call)?;
             match record.state {
@@ -2113,6 +2124,7 @@ impl RunStore {
                 fresh_continuation: fresh.map(str::to_owned),
                 schema_version: 1,
                 tasks: vec![TaskRequest {
+                    cloud: None,
                     context: None,
                     extra: Default::default(),
                     build_heavy: task.build_heavy,

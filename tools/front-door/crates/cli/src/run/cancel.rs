@@ -64,7 +64,44 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
             let mut receipts = Vec::new();
             let mut human = String::new();
             let mut requested = false;
+            let mut cloud_seen = false;
+            let mut local_wait_targets = Vec::new();
             for id in selected {
+                let record = session.store.record(id, &call)?;
+                if cloud_owner::placement(&session.store, &record, &call)
+                    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?
+                    .is_some()
+                {
+                    cloud_seen = true;
+                    let cloud = cloud_owner::load(&session.store, id, &call)
+                        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+                    let observed = match cloud {
+                        Some(job) => cloud_owner::observe_installed(&session.store, id, &job, &call, edge.cwd, true),
+                        None => Err("cloud submission identity is not recorded; cancellation is unconfirmed".into()),
+                    };
+                    match observed {
+                        Ok(job) => {
+                            let view = cloud_owner::view(&job);
+                            human.push_str(&format!("{id} cloud {}\n", state_tag(&job.state)));
+                            receipts.push(json!({"attempt_id": id, "cloud": view}));
+                        }
+                        Err(error) => {
+                            status = Status::Failed;
+                            human.push_str(&format!(
+                                "{id} cloud cancellation unconfirmed: {}\n",
+                                plain_text(&error, usize::MAX)
+                            ));
+                            receipts.push(json!({"attempt_id": id, "error": {"message": error}, "cancellation_unconfirmed": true}));
+                        }
+                    }
+                    continue;
+                }
+                local_wait_targets.push(Target {
+                    selection: None,
+                    run: None,
+                    task: None,
+                    attempt: Some(id),
+                });
                 // One failure must not hide the receipts already earned.
                 let receipt = request(&clock, &cancel)
                     .and_then(|call| Ok(session.service().cancel(id, reason, &call)?));
@@ -136,10 +173,18 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     }
                 }
             }
-            if let Some(seconds) = command.wait {
+            if let Some(seconds) = command
+                .wait
+                .filter(|_| !cloud_seen || !local_wait_targets.is_empty())
+            {
+                let wait_targets: &[Target] = if cloud_seen {
+                    &local_wait_targets
+                } else {
+                    &targets
+                };
                 let (lanes, rendered, timed_out) = wait_lanes(
                     &session,
-                    &targets,
+                    wait_targets,
                     Condition::All,
                     Duration::from_secs(seconds),
                     edge,

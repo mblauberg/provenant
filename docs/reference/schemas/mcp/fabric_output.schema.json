@@ -99,6 +99,12 @@
             }
           ]
         },
+        "cloud": {
+          "type": "object"
+        },
+        "cloud_state": {
+          "type": "string"
+        },
         "continuation": {},
         "delivery": {},
         "delivery_id": {
@@ -1103,6 +1109,12 @@
               "type": "null"
             }
           ]
+        },
+        "cloud": {
+          "type": "object"
+        },
+        "cloud_state": {
+          "type": "string"
         },
         "continuation": {},
         "delivery": {},

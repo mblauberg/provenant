@@ -95,15 +95,25 @@ impl Snapshot {
                 if rows.is_empty() {
                     return Err("named lane selection is empty".into());
                 }
-                let terminal = rows
-                    .iter()
-                    .all(|r| matches!(r.state, provenant_run::AttemptState::Terminal { .. }));
+                let terminal = rows.iter().all(|row| {
+                    row.cloud_observation.0.map_or_else(
+                        || matches!(row.state, provenant_run::AttemptState::Terminal { .. }),
+                        |cloud| cloud.is_terminal(),
+                    )
+                });
                 let notable = terminal;
                 let mut lanes: Vec<_> = rows
                     .iter()
                     .map(|row| {
                         let lane = provenant_cli::run::project_lane(row, &[], edge.roots.state.as_path(), &Default::default(), None, false);
-                        json!({"run_id": lane.run_id, "task_id": lane.task_id, "attempt_id": lane.attempt_id, "state": lane.state, "reason": lane.reason, "cause": lane.cause, "retry_of": lane.retry_of, "superseded_by": lane.superseded_by})
+                        let mut value = json!({"run_id": lane.run_id, "task_id": lane.task_id, "attempt_id": lane.attempt_id, "state": lane.state, "reason": lane.reason, "cause": lane.cause, "retry_of": lane.retry_of, "superseded_by": lane.superseded_by});
+                        if let Some(cloud) = lane.cloud {
+                            value["cloud"] = cloud;
+                        }
+                        if let Some(state) = lane.cloud_state {
+                            value["cloud_state"] = json!(state);
+                        }
+                        value
                     })
                     .collect();
                 lanes.sort_by_key(|v| v["attempt_id"].to_string());
