@@ -80,7 +80,27 @@ fn warn_fetch(error: &Error) {
     eprintln!("warning: {error}; using the current integration resolution");
 }
 
+fn local_worktree_message(error: &WorktreeError) -> String {
+    use provenant_records::diagnostic::{Destination, safe_path, safe_text};
+    match error {
+        WorktreeError::CensusUnknown { path, detail }
+        | WorktreeError::UnknownOccupancy { path, detail } => {
+            let scope = safe_path(path, Destination::Local)
+                .unwrap_or_else(|| "the requested worktree".into());
+            format!("{error}: {scope}: {}", safe_text(detail))
+        }
+        _ => error.to_string(),
+    }
+}
+
 impl Error {
+    fn local_message(&self) -> String {
+        match self {
+            Self::Worktree(error) => local_worktree_message(error),
+            _ => self.to_string(),
+        }
+    }
+
     fn repair(&self) -> Option<&'static str> {
         match self {
             Self::Worktree(error) => error.repair(),
@@ -167,7 +187,7 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
             } else {
                 "WORKTREE"
             },
-            &error.to_string(),
+            &error.local_message(),
             error.repair(),
             globals,
         ),
@@ -399,7 +419,7 @@ pub(crate) fn scheduled_gc(
         apply: true,
         idle_days,
     };
-    let data = gc(&command, globals, workers).map_err(|error| error.to_string())?;
+    let data = gc(&command, globals, workers).map_err(|error| error.local_message())?;
     if !data.provider_state.errors.is_empty() || !data.chair_logs.errors.is_empty() {
         return Err("retention incomplete; next: provenant gc --apply".into());
     }
@@ -462,7 +482,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             let result = gc_failure(&data, &failure, globals.json);
             emit(&result, globals, "", command.dry_run)
         }
-        Err(error) => fail("gc", error.outcome(), "GC", &error.to_string(), globals),
+        Err(error) => fail("gc", error.outcome(), "GC", &error.local_message(), globals),
     }
 }
 
@@ -927,7 +947,14 @@ pub(crate) fn land_cleanup(
                         format!("branch {} kept: {:?}{detail}", kept.branch, kept.reason)
                     });
                 }
-                Err(error) => landed.kept = Some(error.with_repair()),
+                Err(error) => {
+                    let mut message = local_worktree_message(&error);
+                    if let Some(repair) = error.repair() {
+                        message.push_str("; ");
+                        message.push_str(repair);
+                    }
+                    landed.kept = Some(message);
+                }
             }
             Ok(landed)
         },
@@ -1468,6 +1495,27 @@ fn child(
 mod human_tests {
     #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
+
+    #[test]
+    fn local_unknown_occupancy_refusal_preserves_scope_and_evidence() {
+        for error in [
+            WorktreeError::UnknownOccupancy {
+                path: PathBuf::from("/project/lane"),
+                detail: "owner unreadable\nretry".into(),
+            },
+            WorktreeError::CensusUnknown {
+                path: PathBuf::from("/project/lane"),
+                detail: "census incomplete\nretry".into(),
+            },
+        ] {
+            let message = local_worktree_message(&error);
+            assert!(message.contains("/project/lane"));
+            assert!(message.contains("\\nretry"));
+            assert!(!message.contains('\n'));
+            assert!(!error.to_string().contains("/project/lane"));
+            assert_eq!(Error::Worktree(error).local_message(), message);
+        }
+    }
 
     #[allow(dead_code)] // The harness=false driver compiles only the helpers.
     fn info(path: &str) -> Result<worktrees::WorktreeInfo, Box<dyn std::error::Error>> {

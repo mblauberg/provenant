@@ -95,7 +95,9 @@ rechecks the owner and HEAD under repository
 and writer custody, and still refuses dirty trees, Git operations and retained
 writer fences. Peer worktree adoption also rechecks writer custody, branch,
 HEAD and Git-operation state before accepting an existing checkout;
-process-only observations travel as warnings.
+process-only observations travel as warnings. Local worktree, GC and landing
+refusals include the affected scope and escaped occupancy evidence; remote
+diagnostics retain their existing disclosure boundary.
 
 Session handoff holds writer custody through WIP Git operations. It rechecks
 registration, branch, HEAD, Git operation markers and untracked files before
