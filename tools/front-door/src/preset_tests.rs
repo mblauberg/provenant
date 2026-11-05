@@ -2857,6 +2857,28 @@ fn embedded_graph_nodes_reject_unknown_fields() {
 }
 
 #[test]
+fn graph_wire_preserves_empty_leaf_fields_and_absent_composite_prompt() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "wire-presence",
+            r#"stages = [
+  { id = "task", prompt = "work", inputs = [], read_roots = [] },
+  { id = "group", parallel = [{ id = "member", prompt = "review" }] }
+]
+"#,
+        )
+        .unwrap();
+    let expansion = expand(&layers, "wire-presence", "brief", &[]).unwrap();
+    let task = node(&expansion.document, "task");
+    assert_eq!(task.get("inputs"), Some(&json!([])));
+    assert_eq!(task.get("read_roots"), Some(&json!([])));
+    let group = node(&expansion.document, "group");
+    assert!(group.get("prompt").is_none());
+}
+
+#[test]
 fn graph_settings_and_provenance_survive_typed_assembly() {
     let mut layers = Layers::empty();
     layers

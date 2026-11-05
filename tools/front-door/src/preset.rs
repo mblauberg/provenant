@@ -1,5 +1,6 @@
 use crate::preset_roles::{RoleLibrary, prompt_file_reference};
 use provenant_fabric_runtime::read_roots::ReadRoots;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -98,7 +99,7 @@ pub struct Expansion {
 fn decode_lowered_node(
     value: &Value,
 ) -> Result<provenant_fabric_runtime::graph::GraphNode, String> {
-    serde_json::from_value(value.clone()).map_err(|error| {
+    provenant_fabric_runtime::graph::GraphNode::deserialize(value).map_err(|error| {
         for children in [
             value.get("composite").and_then(|group| group.get("nodes")),
             value.get("loop").and_then(|body| body.get("body")),
@@ -173,9 +174,7 @@ fn unknown_embedded_node_in_invalid_value(value: &Value) -> Option<String> {
                 .get("id")
                 .and_then(Value::as_str)
                 .unwrap_or("<unknown>");
-            if let Ok(node) =
-                serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(child.clone())
-            {
+            if let Ok(node) = provenant_fabric_runtime::graph::GraphNode::deserialize(child) {
                 if let Some(field) = node.extra.keys().next() {
                     return Some(format!("node {id}: unknown leaf field: {field}"));
                 }
