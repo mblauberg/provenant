@@ -532,6 +532,58 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn live_add_journal_lock_wait_spike() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, StateRoot, WaitBudget};
+        use provenant_fabric_runtime::graph::FileJournal;
+        use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
+        use std::{
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+
+        let temp = tempfile::tempdir()?;
+        let base = std::fs::canonicalize(temp.path())?;
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base);
+        let root = StateRoot::resolve(&inputs, &SystemPathResolver)?;
+        let project = ProjectId::from_bytes([1; 16]);
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+        let held = FileJournal::open(&root, project, "live-add-spike", budget, &cancel, &clock)?;
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let clock = SystemClock::new();
+                let cancel = CancelToken::new();
+                let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+                started_tx.send(()).unwrap();
+                let start = Instant::now();
+                let journal =
+                    FileJournal::open(&root, project, "live-add-spike", budget, &cancel, &clock);
+                finished_tx
+                    .send((start.elapsed(), journal.is_ok()))
+                    .unwrap();
+            });
+            started_rx.recv().unwrap();
+            assert!(
+                finished_rx
+                    .recv_timeout(Duration::from_millis(150))
+                    .is_err()
+            );
+            drop(held);
+            let (elapsed, opened) = finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(opened);
+            eprintln!(
+                "contended graph journal open waited {} ms",
+                elapsed.as_millis()
+            );
+        });
+        Ok(())
+    }
+
+    #[test]
     fn review_row_marks_unavailable_family_as_substitution() {
         let mut node: provenant_fabric_runtime::graph::NodeProgress = serde_json::from_value(serde_json::json!({
             "id":"lenses--lens-tests", "state":"succeeded", "worktree":null, "attempts":[],
