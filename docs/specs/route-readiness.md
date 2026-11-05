@@ -30,8 +30,12 @@ most 64, and is written under the quota lock with the same private atomic
 replacement as the account JSON. Readers take no lock. No existing reader
 rejects an unknown top-level state directory: the disk report counts it as
 other state and the other state walkers visit only the directories they name.
-An absent file reads as unknown; quota tick schedules a probe. Login-failure readiness
-expires at the quota probe interval; authentication backoff does not extend it.
+An absent file reads as unknown; quota tick schedules a probe immediately for
+an unprobed account, or after a short interval from its last probe. That
+interval starts at 30 seconds and follows power policy; backoff and an existing
+claim still apply. A normally due probe can run sooner.
+Login-failure readiness expires at the quota probe interval; authentication
+backoff does not extend it.
 A changed agy fingerprint makes the old account unavailable and registers the
 new identity.
 

@@ -11,6 +11,8 @@ pub enum Trigger {
     Manual,
     Wake,
     Power,
+    /// An absent readiness record needs a fresh probe, subject to backoff and custody.
+    Readiness,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,7 +50,7 @@ pub fn interval(
         return None;
     }
     let base = match trigger {
-        Trigger::Manual => 30,
+        Trigger::Manual | Trigger::Readiness => 30,
         Trigger::Panel => policy.panel_seconds,
         _ => policy.timer_seconds,
     };
@@ -90,6 +92,26 @@ pub fn next_due(
         due = due.max(claim.deadline_unix_seconds);
     }
     Ok(Some(due))
+}
+
+/// An absent readiness file can shorten the normal interval without bypassing
+/// provider backoff, power policy or an outstanding claim.
+pub fn trigger_for_readiness(
+    policies: &[QuotaPolicy],
+    record: Option<&AccountRecord>,
+    trigger: Trigger,
+    power: Power,
+    missing: bool,
+) -> Result<Trigger, QuotaError> {
+    let Some(record) = record.filter(|_| missing) else {
+        return Ok(trigger);
+    };
+    let normal = next_due(policies, record, trigger, power)?;
+    let readiness = next_due(policies, record, Trigger::Readiness, power)?;
+    Ok(match (normal, readiness) {
+        (Some(normal), Some(readiness)) if readiness < normal => Trigger::Readiness,
+        _ => trigger,
+    })
 }
 pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option<u64>) -> u64 {
     let base = match failure {
@@ -260,6 +282,7 @@ pub fn plan_tick(
         tick,
         now,
         &Settings::default(),
+        &[],
     )
 }
 pub fn plan_tick_with_settings(
@@ -269,6 +292,7 @@ pub fn plan_tick_with_settings(
     tick: &QuotaTick,
     now: i64,
     settings: &Settings,
+    missing_readiness: &[(String, String)],
 ) -> Result<TickPlan, QuotaError> {
     use provenant_config::DomainConfig;
     if !settings.validate().is_empty() {
@@ -330,11 +354,13 @@ pub fn plan_tick_with_settings(
         let current = records.iter().find(|r| {
             r.account.adapter == account.adapter && r.account.account_key == account.account_key
         });
+        let missing = missing_readiness
+            .iter()
+            .any(|(adapter, key)| adapter == &account.adapter && key == &account.account_key);
+        let trigger = trigger_for_readiness(policies, current, tick.trigger, tick.power, missing)?;
         let due = match current {
-            Some(record) => next_due(policies, record, tick.trigger, tick.power)?,
-            None => {
-                interval(policies, &account.adapter, tick.trigger, tick.power).map(|_| i64::MIN)
-            }
+            Some(record) => next_due(policies, record, trigger, tick.power)?,
+            None => interval(policies, &account.adapter, trigger, tick.power).map(|_| i64::MIN),
         };
         if due.is_some_and(|due| due <= now) {
             if policies
@@ -584,6 +610,52 @@ pub fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_readiness_shortens_interval_without_bypassing_backoff_or_claim() {
+        let mut record = AccountRecord::empty(account());
+        record.last_attempt_unix_seconds = Some(100);
+        let trigger = trigger_for_readiness(
+            crate::source::TEST_POLICIES,
+            Some(&record),
+            Trigger::Timer,
+            Power::Ac,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            next_due(crate::source::TEST_POLICIES, &record, trigger, Power::Ac).unwrap(),
+            Some(130)
+        );
+        record.backoff_until_unix_seconds = Some(250);
+        record.claim = Some(RefreshClaim {
+            token: "fixture".into(),
+            deadline_unix_seconds: 280,
+        });
+        let trigger = trigger_for_readiness(
+            crate::source::TEST_POLICIES,
+            Some(&record),
+            Trigger::Timer,
+            Power::Ac,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            next_due(crate::source::TEST_POLICIES, &record, trigger, Power::Ac).unwrap(),
+            Some(280)
+        );
+        assert_eq!(
+            trigger_for_readiness(
+                crate::source::TEST_POLICIES,
+                Some(&record),
+                Trigger::Timer,
+                Power::Ac,
+                false,
+            )
+            .unwrap(),
+            Trigger::Timer
+        );
+    }
 
     #[test]
     fn probe_deadline_respects_tick_wall_budget_and_claim_expiry() {

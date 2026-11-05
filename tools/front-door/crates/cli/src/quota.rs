@@ -1405,8 +1405,28 @@ pub(crate) fn execute(
             &tick,
             home.as_deref(),
         )?;
+        let missing_readiness: Vec<_> = detected
+            .iter()
+            .filter_map(|detection| detection.accounts.as_ref())
+            .flatten()
+            .filter(|account| {
+                recorded_readiness_file(
+                    roots.state.as_path(),
+                    &account.adapter,
+                    &account.account_key,
+                )
+                .is_ok_and(|file| file.is_none())
+            })
+            .map(|account| (account.adapter.clone(), account.account_key.clone()))
+            .collect();
         let plan = schedule::plan_tick_with_settings(
-            &policies, &records, &detected, &tick, now, &settings,
+            &policies,
+            &records,
+            &detected,
+            &tick,
+            now,
+            &settings,
+            &missing_readiness,
         )?;
         for drop in &plan.drops {
             write_intent(&dir, roots.state.as_path(), drop, &mut records)?;
@@ -1434,13 +1454,26 @@ pub(crate) fn execute(
                         && r.account.account_key == account.account_key
                 })
                 .cloned();
+            let missing_readiness = recorded_readiness_file(
+                roots.state.as_path(),
+                &account.adapter,
+                &account.account_key,
+            )
+            .is_ok_and(|file| file.is_none());
+            let trigger = schedule::trigger_for_readiness(
+                &policies,
+                current.as_ref(),
+                tick.trigger,
+                tick.power,
+                missing_readiness,
+            )?;
             let intent = match schedule::reserve(
                 &policies,
                 current.as_ref(),
                 account,
                 at,
                 &token,
-                tick.trigger,
+                trigger,
                 tick.power,
             ) {
                 Ok(intent) => intent,
@@ -4461,6 +4494,64 @@ mod tests {
             .ok_or("fixture quota row")?;
         assert_eq!(row.status, QuotaStatus::Available);
         assert!(row.snapshot.is_some());
+
+        // A fresh quota snapshot does not replace missing readiness evidence.
+        // Once the short probe interval has elapsed, a timer tick refreshes it.
+        let root = private(roots.state.as_path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let mut records = read_cache(&roots)?;
+        let previous = records.first().ok_or("fixture quota record")?.clone();
+        let mut replacement = previous.clone();
+        replacement.revision += 1;
+        replacement.last_attempt_unix_seconds = Some(SystemClock::new().unix_seconds() - 60);
+        write_intent(
+            &dir,
+            roots.state.as_path(),
+            &UpdateIntent {
+                account: previous.account.clone(),
+                expected: Some(previous),
+                replacement: Some(replacement),
+                readiness_probe_result: None,
+                login_probe_expiry: None,
+            },
+            &mut records,
+        )?;
+        std::fs::remove_file(
+            roots
+                .state
+                .as_path()
+                .join("readiness/work/fixture-provider.json"),
+        )?;
+        let report = execute(
+            &Quota::Tick {
+                adapter: Filter {
+                    adapter: Some("fixture-provider".into()),
+                },
+                trigger: Trigger::Timer,
+                power: Power::Ac,
+            },
+            &roots,
+            &registry,
+            &effects,
+        )?;
+        assert_eq!(effects.0.get(), 2);
+        assert_eq!(report.accounts[0].status, QuotaStatus::Available);
+        assert!(
+            recorded_readiness_file(roots.state.as_path(), "fixture-provider", "work")?.is_some()
+        );
+        execute(
+            &Quota::Tick {
+                adapter: Filter {
+                    adapter: Some("fixture-provider".into()),
+                },
+                trigger: Trigger::Timer,
+                power: Power::Ac,
+            },
+            &roots,
+            &registry,
+            &effects,
+        )?;
+        assert_eq!(effects.0.get(), 2);
         Ok(())
     }
 }
