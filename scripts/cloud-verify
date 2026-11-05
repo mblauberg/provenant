@@ -5,6 +5,7 @@ The caller must deliver the result over a channel authorised for the job.
 The log and result location should be outside the checkout.
 """
 import argparse
+import errno
 import json
 from pathlib import Path
 import subprocess
@@ -35,10 +36,14 @@ def main():
         parser.error("checkout does not match the full requested commit")
     changed_before = tracked_changed()
     with args.log.open("wb") as log:
-        completed = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, check=False)
+        try:
+            completed = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, check=False)
+            status = completed.returncode if completed.returncode >= 0 else 128 - completed.returncode
+        except OSError as error:
+            log.write(f"Unable to start verification command: {error}\n".encode())
+            status = 127 if error.errno == errno.ENOENT else 126
     after = git("rev-parse", "--verify", "HEAD^{commit}")
     changed = changed_before or tracked_changed() or before != after
-    status = completed.returncode if completed.returncode >= 0 else 128 - completed.returncode
     result = {
         "commit": after,
         "exit_status": status,
