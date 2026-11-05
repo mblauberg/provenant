@@ -74,6 +74,27 @@ setting = "domains.fabric.lanes.priority"
 reason = "Unavailable lane priority warns and falls back to the compiled priority for the lane mode."
 
 [[guard]]
+site = "cli/src/run/provider/confinement.rs#host_indexes_protected"
+boundary = "object_integrity"
+reason = "Applied write grants cannot overlap host indexes that carry durable authority and run state."
+
+[[guard]]
+site = "cli/src/run/provider/confinement.rs#target_seeds_protected"
+boundary = "object_integrity"
+reason = "Applied write grants cannot overlap the host-owned target seed store."
+
+[[guard]]
+site = "cli/src/run/provider/preparation.rs#prepare_with"
+boundary = "credentials"
+reason = "Publishing policy must be read and its selected GitHub credential restrictions applied before publishing is enabled."
+
+[[guard]]
+site = "cli/src/run/provider/preparation.rs#prepare_writer_dependencies"
+boundary = "configurable_default"
+setting = "lanes.prepare_deps"
+reason = "Automatic writer dependency preparation defaults on; a refusal reports the sealed profile or compiled default and can be disabled with this setting."
+
+[[guard]]
 site = "run/src/launch.rs#Providers::check_policy"
 boundary = "configurable_default"
 setting = "gc.free_floor"

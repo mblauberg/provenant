@@ -119,6 +119,21 @@ pub(super) fn login_dependency_path(
     ))
 }
 
+pub(super) fn dependency_preparation_refusal(
+    error: String,
+    enabled: bool,
+    profile: &provenant_records::run::HarnessProfile,
+) -> String {
+    let origin = if profile.knobs.contains_key("lanes.prepare_deps") {
+        format!("sealed profile {}", profile.name)
+    } else {
+        "compiled default".to_owned()
+    };
+    format!(
+        "{error}; lanes.prepare_deps={enabled} ({origin}); set lanes.prepare_deps=false to skip dependency preparation"
+    )
+}
+
 pub(super) fn prepare_writer_dependencies(
     worktree: &Path,
     enabled: bool,
@@ -1796,12 +1811,17 @@ pub(super) fn prepare_candidates(
                     .get("lanes.prepare_deps")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true);
-                Some(prepare_writer_dependencies(
-                    writer.worktree.path(),
-                    enabled,
-                    &|| host_dependency_path(cancel),
-                    cancel,
-                )?)
+                Some(
+                    prepare_writer_dependencies(
+                        writer.worktree.path(),
+                        enabled,
+                        &|| host_dependency_path(cancel),
+                        cancel,
+                    )
+                    .map_err(|error| {
+                        dependency_preparation_refusal(error, enabled, &task.profile)
+                    })?,
+                )
             }
             None => None,
         };
