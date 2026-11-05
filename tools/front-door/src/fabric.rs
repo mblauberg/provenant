@@ -2302,6 +2302,7 @@ impl BinaryRunOwner<'_> {
         for (index, task) in tasks.into_iter().enumerate() {
             worktree_access(
                 task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
+                false,
                 task.worktree.as_deref().map(Path::new),
             )
             .map_err(fail_error)?;

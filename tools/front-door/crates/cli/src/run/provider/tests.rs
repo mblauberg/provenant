@@ -3624,6 +3624,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         &git,
         request,
         false,
+        false,
     );
     assert!(result.is_err());
 
