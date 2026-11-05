@@ -667,6 +667,10 @@ pub fn project_lane(
         lane.provider_silent_for_ms
             .0
             .map(run::provider_silence_reason)
+            .or_else(|| {
+                matches!(lane.state, run::AttemptState::Starting { .. })
+                    .then(|| "launch preparation".to_owned())
+            })
     });
     let transcript = lane
         .applied_route
