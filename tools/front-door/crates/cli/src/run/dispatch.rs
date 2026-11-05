@@ -744,10 +744,10 @@ pub(super) fn dispatch_inner(
         if let Some(replayed) = replay_owned_dispatch(&command, edge, &session, &call, workers)? {
             return Ok(replayed);
         }
-        if let Some(mode) = &command.deliver {
-            if let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), &branch)? {
-                check_delivery_branch(edge.cwd, &delivery.branch)?;
-            }
+        if let Some(mode) = &command.deliver
+            && let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), &branch)?
+        {
+            check_delivery_branch(edge.cwd, &delivery.branch)?;
         }
         let host = provenant_config::bind_host(edge.roots)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
