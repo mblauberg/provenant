@@ -1264,6 +1264,8 @@ pub(super) fn lanes_inner(
         |lane: &run::AttemptRecord| command.session.is_none() || lane.verified_owner == Some(owner);
     let filtered = !command.states.is_empty() || command.since.is_some();
     query.newest_first = filtered || command.all;
+    // A filtered view hydrates row by row across pages, and then again as a whole.
+    let budget_end = cloud_owner::view_observation_budget();
     let (mut lanes, next) = if filtered {
         query.limit = 100;
         let mut matches = Vec::new();
@@ -1271,8 +1273,13 @@ pub(super) fn lanes_inner(
         loop {
             let page = session.service().lanes(&query, &call)?;
             for mut lane in page.lanes {
-                cloud_owner::hydrate(&session.store, std::slice::from_mut(&mut lane), &call)
-                    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+                cloud_owner::hydrate_within(
+                    &session.store,
+                    std::slice::from_mut(&mut lane),
+                    &call,
+                    budget_end,
+                )
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
                 let state_matches = command.states.is_empty()
                     || command
                         .states
@@ -1305,7 +1312,7 @@ pub(super) fn lanes_inner(
         let lanes: Vec<_> = page.lanes.into_iter().filter(by_session).collect();
         (lanes, page.next)
     };
-    cloud_owner::hydrate(&session.store, &mut lanes, &call)
+    cloud_owner::hydrate_within(&session.store, &mut lanes, &call, budget_end)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());

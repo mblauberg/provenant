@@ -455,7 +455,7 @@ pub(super) fn view(job: &RemoteJob) -> serde_json::Value {
 // One status or lanes view spends a fixed total on provider calls, however many
 // jobs are unfinished. A job past the budget shows its saved state, marked stale.
 #[allow(clippy::disallowed_methods)] // This is the real-time provider boundary.
-fn view_observation_budget() -> std::time::Instant {
+pub(super) fn view_observation_budget() -> std::time::Instant {
     std::time::Instant::now() + std::time::Duration::from_secs(5)
 }
 
@@ -464,8 +464,17 @@ pub(super) fn hydrate(
     lanes: &mut [provenant_run::AttemptRecord],
     call: &provenant_run::Request<'_>,
 ) -> Result<(), String> {
+    hydrate_within(store, lanes, call, view_observation_budget())
+}
+
+/// Hydrate under a budget the caller shares across a view that hydrates in parts.
+pub(super) fn hydrate_within(
+    store: &provenant_run::RunStore,
+    lanes: &mut [provenant_run::AttemptRecord],
+    call: &provenant_run::Request<'_>,
+    budget_end: std::time::Instant,
+) -> Result<(), String> {
     use provenant_records::run::CloudObservation as State;
-    let budget_end = view_observation_budget();
     for lane in lanes {
         let Some(placement) = placement(store, lane, call)? else {
             continue;
