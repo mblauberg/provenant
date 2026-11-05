@@ -396,9 +396,10 @@ impl FileJournal {
         budget: WaitBudget,
         cancel: &CancelToken,
         clock: &dyn Clock,
-    ) -> Result<bool, JournalError> {
+        cleanup: impl FnOnce(Option<&GraphCheckpoint>) -> Result<(), Box<dyn Error>>,
+    ) -> Result<bool, Box<dyn Error>> {
         if !valid_identifier(graph_id) {
-            return Err(JournalError::InvalidGraphId);
+            return Err(JournalError::InvalidGraphId.into());
         }
         let directory = match graph_directory(root, project) {
             Ok(directory) => directory,
@@ -415,6 +416,11 @@ impl FileJournal {
         )?;
         match load_checkpoint(&directory, graph_id) {
             Err(error) if error.is_unreadable() => {
+                let bytes = read_checkpoint_bytes(&directory, graph_id)?;
+                let recovered = bytes
+                    .as_deref()
+                    .and_then(|bytes| decode_verified_checkpoint(bytes, graph_id).ok());
+                cleanup(recovered.as_ref().map(|stored| &stored.checkpoint))?;
                 directory.unlink(OsStr::new(&format!("graph-{graph_id}.json")))?;
                 directory
                     .sync()
@@ -422,7 +428,7 @@ impl FileJournal {
                 let _ = directory.unlink(&unreadable_marker_name(graph_id));
                 Ok(true)
             }
-            Err(error) => Err(error),
+            Err(error) => Err(error.into()),
             Ok(_) => Ok(false),
         }
     }
@@ -578,6 +584,59 @@ pub(super) fn decode_checkpoint(
     bytes: &[u8],
     graph_id: &str,
 ) -> Result<StoredCheckpoint, JournalError> {
+    let stored = decode_verified_checkpoint(bytes, graph_id)?;
+    if stored.checkpoint.nodes.iter().any(|node| {
+        ["loop_asks", "loop_inbox_error", "loop_decision_actor"]
+            .iter()
+            .any(|field| node.extra.contains_key(*field))
+    }) {
+        return Err(JournalError::RetiredLoopCheckpoint);
+    }
+    if stored.checkpoint.nodes.iter().any(|node| {
+        node.attempts
+            .iter()
+            .take(node.attempts.len().saturating_sub(1))
+            .any(|attempt| attempt.launched)
+            || (node.state == NodeState::Running
+                && node.attempts.last().is_some_and(|attempt| {
+                    attempt.state == AttemptState::Terminal
+                        && attempt.launched
+                        && attempt.outcome.is_some_and(|outcome| {
+                            matches!(
+                                outcome,
+                                AttemptOutcome::AuthRequired
+                                    | AttemptOutcome::UsageLimited
+                                    | AttemptOutcome::AdapterUnavailable
+                            )
+                        })
+                }))
+    }) {
+        return Err(JournalError::RetiredFallbackCheckpoint);
+    }
+    let limits = crate::config::GraphLimits {
+        nodes: usize::MAX,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
+        ..Default::default()
+    };
+    plans::validate_persisted_topology(
+        &stored.execution.document,
+        &stored.checkpoint.extensions,
+        &stored.checkpoint.expansions,
+        &limits,
+    )
+    .map_err(|_| JournalError::InvalidTopology)?;
+    Ok(stored)
+}
+
+fn decode_verified_checkpoint(
+    bytes: &[u8],
+    graph_id: &str,
+) -> Result<StoredCheckpoint, JournalError> {
     let stored: StoredCheckpoint = decode_v1(
         bytes,
         Limits {
@@ -631,51 +690,7 @@ pub(super) fn decode_checkpoint(
     {
         return Err(JournalError::GraphMismatch);
     }
-    if stored.checkpoint.nodes.iter().any(|node| {
-        ["loop_asks", "loop_inbox_error", "loop_decision_actor"]
-            .iter()
-            .any(|field| node.extra.contains_key(*field))
-    }) {
-        return Err(JournalError::RetiredLoopCheckpoint);
-    }
-    if stored.checkpoint.nodes.iter().any(|node| {
-        node.attempts
-            .iter()
-            .take(node.attempts.len().saturating_sub(1))
-            .any(|attempt| attempt.launched)
-            || (node.state == NodeState::Running
-                && node.attempts.last().is_some_and(|attempt| {
-                    attempt.state == AttemptState::Terminal
-                        && attempt.launched
-                        && attempt.outcome.is_some_and(|outcome| {
-                            matches!(
-                                outcome,
-                                AttemptOutcome::AuthRequired
-                                    | AttemptOutcome::UsageLimited
-                                    | AttemptOutcome::AdapterUnavailable
-                            )
-                        })
-                }))
-    }) {
-        return Err(JournalError::RetiredFallbackCheckpoint);
-    }
-    let limits = crate::config::GraphLimits {
-        nodes: usize::MAX,
-        edges: usize::MAX,
-        routes_per_node: u16::MAX as usize,
-        node_prompt_bytes: usize::MAX,
-        graph_prompt_bytes: usize::MAX,
-        fan_out_width: usize::MAX,
-        expansion_depth: usize::MAX,
-        ..Default::default()
-    };
-    plans::validate_persisted_topology(
-        &stored.execution.document,
-        &stored.checkpoint.extensions,
-        &stored.checkpoint.expansions,
-        &limits,
-    )
-    .map_err(|_| JournalError::InvalidTopology)?;
+
     Ok(stored)
 }
 

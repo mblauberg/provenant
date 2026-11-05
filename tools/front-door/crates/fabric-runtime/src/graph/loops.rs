@@ -926,3 +926,46 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
         });
     }
 }
+
+/// An inbox request a loop raised before node asks, not yet closed. Cancel
+/// closes it under its original operation identity; it is never migrated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacyLoopAsk {
+    pub node_id: String,
+    pub rounds: u64,
+    pub session: String,
+    /// The actor the request was raised under.
+    pub actor: String,
+}
+
+/// Unclosed loop requests recorded in pre-ask node fields.
+pub fn legacy_loop_asks(checkpoint: &GraphCheckpoint) -> Vec<LegacyLoopAsk> {
+    let mut asks = Vec::new();
+    for node in &checkpoint.nodes {
+        let Some(actor) = node
+            .extra
+            .get("loop_decision_actor")
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        let stored = node.extra.get("loop_asks").and_then(|v| v.as_array());
+        for ask in stored.into_iter().flatten() {
+            if ask.get("closed").and_then(|v| v.as_bool()) == Some(true) {
+                continue;
+            }
+            if let (Some(rounds), Some(session)) = (
+                ask.get("rounds").and_then(|v| v.as_u64()),
+                ask.get("session").and_then(|v| v.as_str()),
+            ) {
+                asks.push(LegacyLoopAsk {
+                    node_id: node.id.clone(),
+                    rounds,
+                    session: session.to_owned(),
+                    actor: actor.to_owned(),
+                });
+            }
+        }
+    }
+    asks
+}

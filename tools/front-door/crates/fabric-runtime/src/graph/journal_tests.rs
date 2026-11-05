@@ -387,3 +387,65 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
         Err(JournalError::BadDigest)
     ));
 }
+
+#[test]
+fn retired_checkpoint_cleanup_is_verified_and_failure_keeps_record() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    drop(FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap());
+    let path = base
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+    let mut stored: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    stored.checkpoint.nodes[0]
+        .extra
+        .insert("loop_asks".into(), serde_json::json!([]));
+    stored.digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&stored.checkpoint, &stored.execution),
+    )
+    .unwrap()
+    .to_string();
+    std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let failed = FileJournal::retire_unreadable(
+        &root,
+        project,
+        "g-test",
+        budget,
+        &cancel,
+        &clock,
+        |checkpoint| {
+            assert_eq!(checkpoint.unwrap().graph_id, "g-test");
+            Err("cleanup failed".into())
+        },
+    );
+    assert!(failed.is_err());
+    assert!(path.exists());
+    assert!(
+        FileJournal::retire_unreadable(
+            &root,
+            project,
+            "g-test",
+            budget,
+            &cancel,
+            &clock,
+            |checkpoint| {
+                assert_eq!(checkpoint.unwrap().nodes[0].attempts.len(), 1);
+                Ok(())
+            }
+        )
+        .unwrap()
+    );
+    assert!(!path.exists());
+}

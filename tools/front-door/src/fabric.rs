@@ -3164,6 +3164,49 @@ fn graph_inbox_close(
     }
 }
 
+/// Close the loop requests a checkpoint from before node asks raised under
+/// `actor`, by their original inbox operation. Only cancel does this; such a
+/// checkpoint is never migrated.
+fn graph_legacy_loop_close(
+    service: &provenant_fabric_runtime::inbox::InboxService<'_>,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    actor: provenant_core::ActorId,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    let Some(instance_id) = checkpoint.instance_id.as_deref() else {
+        return Ok(());
+    };
+    let asks = provenant_fabric_runtime::graph::legacy_loop_asks(checkpoint);
+    for ask in asks.iter().filter(|ask| ask.actor == actor.to_string()) {
+        let digest = provenant_records::CanonicalV1::record_digest(
+            "graph-loop-inbox",
+            1,
+            &(
+                checkpoint.graph_id.as_str(),
+                instance_id,
+                ask.node_id.as_str(),
+                ask.rounds,
+                ask.session.as_str(),
+            ),
+        )
+        .map_err(|_| FacadeError::StateCorrupt)?;
+        let operation = provenant_core::OperationId::parse(&format!(
+            "loop-{}",
+            provenant_core::hex(digest.as_bytes())
+        ))
+        .map_err(|_| FacadeError::StateCorrupt)?;
+        graph_inbox_close(
+            service,
+            &ask.session,
+            &operation,
+            actor,
+            &format!("close legacy loop ask {}", ask.node_id),
+            cancel,
+        )?;
+    }
+    Ok(())
+}
+
 fn load_graph_prices(assets: &std::path::Path) -> Result<provenant_telemetry::PriceTable, String> {
     let path = assets.join("config/telemetry-prices.toml");
     let text =
@@ -5892,7 +5935,7 @@ impl Factory {
                 Ok(checkpoint) => checkpoint.ok_or(FacadeError::NotFound)?,
                 Err(error) if error.is_unreadable() => {
                     return Ok(unreadable_snapshot(format!(
-                        "Graph record is unreadable ({error}); cancel it to retire the record. Active attempts and writer fences are not released."
+                        "Graph {id} record is unreadable ({error}); cancel it to retire the record. Inspect active attempts and writer fences."
                     )));
                 }
                 Err(error) => return Err(graph_journal_error(error)),
@@ -5921,11 +5964,59 @@ impl Factory {
                 budget,
                 cancel,
                 &self.clock,
+                |checkpoint| {
+                    let Some(checkpoint) = checkpoint else {
+                        return Ok(());
+                    };
+                    let mut first_error = None;
+                    let mut owner = BinaryRunOwner {
+                        factory: self,
+                        allow_remote: true,
+                        actor: None,
+                        chair: None,
+                    };
+                    for attempt in checkpoint.nodes.iter().flat_map(|node| &node.attempts) {
+                        if attempt.state != provenant_fabric_runtime::graph::AttemptState::Terminal
+                            && let Err(error) =
+                                self.cancel_graph_attempt(&mut owner, attempt, budget, cancel)
+                        {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                    if let (Some(instance_id), Some(actor)) =
+                        (&checkpoint.instance_id, &checkpoint.ask_actor)
+                    {
+                        for ask in checkpoint.asks.iter().filter(|ask| !ask.closed) {
+                            let scope = provenant_fabric_runtime::graph::AskScope {
+                                graph_id: &checkpoint.graph_id,
+                                instance_id,
+                                actor,
+                                ask,
+                            };
+                            if let Err(error) = graph_ask_edge(self, cancel, scope, true) {
+                                first_error.get_or_insert(error);
+                            }
+                        }
+                    } else if checkpoint.asks.iter().any(|ask| !ask.closed) {
+                        first_error.get_or_insert(FacadeError::StateCorrupt);
+                    }
+                    if let Err(error) = self.close_legacy_loop_asks(checkpoint, cancel) {
+                        first_error.get_or_insert(error);
+                    }
+                    if let Some(error) = first_error {
+                        return Err(Box::new(error));
+                    }
+                    Ok(())
+                },
             )
-            .map_err(graph_journal_error)?
+            .map_err(|error| FacadeError::DispatchRefused {
+                reason: format!("cancel graph {id}: {error}"),
+                fact: None,
+                disk: None,
+            })?
         {
             return Ok(unreadable_snapshot(
-                "Unreadable graph record retired. Active attempts were not cancelled and writer fences were not released.".into(),
+                "Unreadable graph record retired. Identifiable attempts and inbox requests were cancelled; unidentifiable work and writer fences require inspection.".into(),
             ));
         }
         let mut journal = FileJournal::open(
@@ -6161,6 +6252,40 @@ fn graph_selector_forms() -> String {
 }
 
 impl Factory {
+    /// Close the inbox requests of a checkpoint from before node asks, one
+    /// inbox actor at a time.
+    fn close_legacy_loop_asks(
+        &self,
+        checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+        cancel: &CancelToken,
+    ) -> Result<(), FacadeError> {
+        if checkpoint.instance_id.is_none() {
+            return Ok(());
+        }
+        let actors: std::collections::BTreeSet<_> =
+            provenant_fabric_runtime::graph::legacy_loop_asks(checkpoint)
+                .into_iter()
+                .map(|ask| ask.actor)
+                .collect();
+        for actor in actors {
+            let mut identity = self.context.identity.clone();
+            identity.inbox.actor = actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
+            let service = provenant_fabric_runtime::inbox::InboxService::open(
+                &self.context.roots.state,
+                &identity,
+                &self.clock,
+                cancel,
+            )
+            .map_err(|error| FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: format!("close legacy loop asks: {error}"),
+            })?;
+            graph_legacy_loop_close(&service, checkpoint, identity.inbox.actor, cancel)?;
+        }
+        Ok(())
+    }
+
     /// Cancel one live graph attempt. A missing checkpoint reference (a crash
     /// between acceptance and the save) is recovered from the stable operation ID.
     fn cancel_graph_attempt(

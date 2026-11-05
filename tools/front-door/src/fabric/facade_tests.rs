@@ -166,6 +166,9 @@ pub(crate) mod peer_tests {
     #[test]
     fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std::error::Error>>
     {
+        if host_test("fabric::peer_tests::graph_status_and_cancel_retire_unreadable_record")? {
+            return Ok(());
+        }
         use provenant_fabric_runtime::graph::{FileJournal, GraphStatus};
         let rig = crate::worktree_tests::support::TestRig::new()?;
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
@@ -214,6 +217,7 @@ pub(crate) mod peer_tests {
             )?;
             assert_eq!(status.status, GraphStatus::Paused);
             let explanation = status.advance_error.unwrap();
+            assert!(explanation.contains(id), "{explanation}");
             assert!(explanation.contains("cancel it to retire"), "{explanation}");
             if id == "g-test" {
                 assert!(explanation.contains("predates node asks"), "{explanation}");
@@ -232,7 +236,7 @@ pub(crate) mod peer_tests {
                 retired
                     .advance_error
                     .unwrap()
-                    .contains("Active attempts were not cancelled")
+                    .contains("unidentifiable work")
             );
             assert!(!path.exists());
             assert!(matches!(
