@@ -107,6 +107,21 @@ impl Git {
         action(repo)
     }
 
+    /// Return paths from a revalidated checkout, without another Git discovery.
+    pub(super) fn repository_paths(
+        &self,
+        dir: &Path,
+    ) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
+        self.with_repo(dir, |repo| {
+            repo.revalidate()?;
+            Ok((
+                repo.root_path().to_path_buf(),
+                repo.private_git_dir().to_path_buf(),
+                repo.common_git_dir().to_path_buf(),
+            ))
+        })
+    }
+
     /// A command-controlled mutation can change repository configuration or
     /// remove a checkout, so later reads must bind and probe it again.
     pub(super) fn invalidate_repositories(&self) {

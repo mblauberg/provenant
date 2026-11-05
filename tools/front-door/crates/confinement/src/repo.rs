@@ -603,6 +603,11 @@ impl VerifiedRepo {
 /// resolution contract; this wrapper cannot be passed to any mutation service.
 pub struct ReadOnlyRepo(pub(crate) VerifiedRepo);
 impl ReadOnlyRepo {
+    /// Recheck the repository identity and configuration before using held paths.
+    pub fn revalidate(&self) -> Result<(), RepoError> {
+        self.0.revalidate()
+    }
+
     pub fn private_git_dir(&self) -> &Path {
         self.0.private_git_dir()
     }

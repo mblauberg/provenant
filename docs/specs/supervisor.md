@@ -41,7 +41,9 @@ or native object alternates. Landing inventory reads the common repository's
 local bare setting before listing worktrees, so Git's primary bare registration
 is preserved without accepting worktree-level configuration overrides. Batch
 landing passes its facts session into local follow-up and discards verified
-checkout handles around command-controlled mutations.
+checkout handles around command-controlled mutations. Landing revalidates those
+handles before reading their common or private Git paths instead of rediscovering
+the paths with separate Git commands.
 
 ### Worktree census sessions
 

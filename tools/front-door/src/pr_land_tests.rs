@@ -1879,6 +1879,8 @@ pub(crate) fn pr_land_out_of_tree_with_separate_git_directory() -> Result {
             assert_eq!(status(&value, "branch")?, "done", "{value}");
             assert!(!lane.exists());
             assert!(!branch_exists(&landing.rig, "feat")?);
+            let remaining = git(&landing.rig, &["worktree", "list", "--porcelain"])?;
+            assert!(!remaining.contains("branch refs/heads/feat"), "{remaining}");
         } else {
             assert_eq!(code(&output), 0, "{value}");
             assert_eq!(value["data"]["cleanup_pending"], true);

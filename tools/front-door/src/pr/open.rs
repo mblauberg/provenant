@@ -375,6 +375,10 @@ mod tests {
             base_commit(&git, &separate, "origin", "main")?,
             Some(separate_head.trim().to_owned())
         );
+        let (root, private, common) = git.repository_paths(&separate)?;
+        assert_eq!(root, std::fs::canonicalize(&separate)?);
+        assert_eq!(private, std::fs::canonicalize(&gitdir)?);
+        assert_eq!(common, private);
         let shared = temp.path().join("shared");
         provenant_os::fixture::run_git(
             temp.path(),
@@ -433,6 +437,9 @@ mod tests {
                 .windows(b"branch refs/heads/linked\0".len())
                 .any(|field| field == b"branch refs/heads/linked\0")
         );
+        std::fs::rename(&project, temp.path().join("moved-project"))?;
+        std::fs::create_dir(&project)?;
+        assert!(git.repository_paths(&project).is_err());
         Ok(())
     }
 }
