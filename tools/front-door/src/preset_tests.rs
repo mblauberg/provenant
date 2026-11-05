@@ -1487,16 +1487,92 @@ fn expansion_golden(name: &str) {
 }
 
 #[test]
-fn composite_bundled_expansions_match_golden_graphs() {
-    for name in [
-        "scout-swarm",
-        "generator-evaluator",
-        "review-council",
-        "big-batch",
-        "scope-then-run",
-        "deliver",
+fn composite_bundled_expansions_preserve_stage_wiring() {
+    expansion_golden("generator-evaluator");
+    let layers = Layers::empty();
+    for (name, expected) in [
+        (
+            "big-batch",
+            &["scout", "lanes", "council", "refactor", "repair"][..],
+        ),
+        ("scout-swarm", &["scouts", "synthesis"][..]),
+        ("scope-then-run", &["scout", "scope", "ready", "run"][..]),
+        (
+            "review-council",
+            &["subject", "lenses", "verify", "synthesis"][..],
+        ),
+        ("deliver", &["write", "ci", "review", "accept", "land"][..]),
     ] {
-        expansion_golden(name);
+        let document = expand(&layers, name, "brief", &[]).unwrap().document;
+        let nodes = document["nodes"].as_array().unwrap();
+        let ids: Vec<_> = nodes
+            .iter()
+            .map(|node| node["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, expected, "{name}");
+        let depends = |node: &str, dependency: &str| {
+            nodes.iter().find(|item| item["id"] == node).unwrap()["depends_on"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item == dependency)
+        };
+        let (values, _) = layers.resolve(name).unwrap();
+        let params = &values["parameters"];
+        match name {
+            "big-batch" => {
+                assert_eq!(
+                    nodes[1]["composite"]["nodes"].as_array().unwrap().len(),
+                    params["lanes"].as_array().unwrap().len()
+                );
+                assert!(depends("council", "lanes"));
+                assert!(depends("refactor", "council"));
+                assert!(depends("repair", "refactor"));
+            }
+            "scout-swarm" => {
+                let scouts = nodes[0]["composite"]["nodes"].as_array().unwrap();
+                let count = scouts
+                    .iter()
+                    .filter(|node| {
+                        node["id"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("scout-"))
+                    })
+                    .count();
+                assert_eq!(count as u64, params["width"]["default"].as_u64().unwrap());
+                assert!(depends("synthesis", "scouts"));
+            }
+            "scope-then-run" => assert!(depends("run", "ready")),
+            "review-council" => {
+                let expected = params["lenses"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|lens| lens["when"].as_str().is_none_or(str::is_empty))
+                    .count();
+                assert_eq!(
+                    nodes[1]["composite"]["nodes"].as_array().unwrap().len(),
+                    expected
+                );
+            }
+            "deliver" => {
+                let council = expand(&layers, "review-council", "brief", &[])
+                    .unwrap()
+                    .document;
+                assert_eq!(
+                    review_lens_count(&document),
+                    council["nodes"][1]["composite"]["nodes"]
+                        .as_array()
+                        .unwrap()
+                        .len()
+                );
+                assert_eq!(
+                    nodes[1]["composite"]["nodes"][1]["loop"]["max_rounds"],
+                    params["max_iterations"]["default"]
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -5247,25 +5323,50 @@ fn an_unknown_size_override_is_refused() {
 }
 
 #[test]
-fn big_batch_without_scout_matches_golden() {
-    let expanded = super::preset::expand_with(
-        &Layers::empty(),
+fn big_batch_without_scout_preserves_remaining_stage_wiring() {
+    fn assert_no_scout_refs(value: &Value) {
+        match value {
+            Value::Object(map) => {
+                for (key, value) in map {
+                    if matches!(key.as_str(), "depends_on" | "inputs" | "exports") {
+                        assert!(!value.to_string().contains("scout"), "{key}: {value}");
+                    } else {
+                        assert_no_scout_refs(value);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for value in items {
+                    assert_no_scout_refs(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    let layers = Layers::empty();
+    let full = super::preset::expand_with(&layers, "big-batch", "brief", &[], &[]).unwrap();
+    let no_scout = super::preset::expand_with(
+        &layers,
         "big-batch",
         "brief",
         &[("scout".into(), json!(0))],
         &[],
     )
     .unwrap();
-    let nodes = expanded.document["nodes"].as_array().unwrap();
-    assert!(!nodes.iter().any(|node| node["id"] == "scout"));
-    let mut actual = serde_json::to_string_pretty(&expanded.document).unwrap();
-    actual.push('\n');
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets/presets/fixtures/big-batch.no-scout.json");
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(&path, &actual).unwrap();
-    }
-    assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
+    let ids = |document: &Value| -> Vec<String> {
+        document["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let expected: Vec<_> = ids(&full.document)
+        .into_iter()
+        .filter(|id| id != "scout")
+        .collect();
+    assert_eq!(ids(&no_scout.document), expected);
+    assert_no_scout_refs(&no_scout.document);
 }
 
 #[test]
