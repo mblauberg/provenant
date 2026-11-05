@@ -355,6 +355,22 @@ impl std::fmt::Display for GraphStructuralLimit {
     }
 }
 
+/// Worst-case checkpoint size that exceeded the fixed graph envelope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphEnvelopeLimit {
+    pub bound: usize,
+}
+
+impl std::fmt::Display for GraphEnvelopeLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "graph checkpoint could reach {} bytes, over its {}-byte limit; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts",
+            self.bound, MAX_CHECKPOINT_BYTES
+        )
+    }
+}
+
 /// The static admission check that refused a graph. The contained text is the
 /// existing operator-facing reason; callers branch on the variant, not text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,7 +391,7 @@ pub enum AdmissionError {
     #[error("{0}")]
     StructuralLimit(GraphStructuralLimit),
     #[error("{0}")]
-    Envelope(String),
+    Envelope(GraphEnvelopeLimit),
     #[error("{reason}")]
     OutputKind {
         field: GraphOutputField,
@@ -419,9 +435,7 @@ impl GraphDocument {
         if let Some(reason) = structural_limit(&expanded, &plan, limits) {
             return Err(AdmissionError::StructuralLimit(reason));
         }
-        if let Some(reason) = graph_envelope_reason(self, &[], &[], &plan) {
-            return Err(AdmissionError::Envelope(reason));
-        }
+        envelope::admit(self, &[], &[], &plan)?;
         validate_output_kinds(&expanded)
     }
 

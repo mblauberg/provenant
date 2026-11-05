@@ -104,12 +104,23 @@ pub(super) fn reason(
     extensions: &[String],
     plan: &PlannedGraph,
 ) -> Option<String> {
+    admit(document, expansions, extensions, plan)
+        .err()
+        .map(|error| error.to_string())
+}
+
+pub(super) fn admit(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+) -> Result<(), AdmissionError> {
     let bound = checkpoint_bound(document, expansions, extensions, plan);
-    (bound > MAX_CHECKPOINT_BYTES as usize).then(|| {
-        format!(
-            "graph checkpoint could reach {bound} bytes, over its {MAX_CHECKPOINT_BYTES}-byte limit; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts"
-        )
-    })
+    if bound > MAX_CHECKPOINT_BYTES as usize {
+        Err(AdmissionError::Envelope(GraphEnvelopeLimit { bound }))
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn latest() -> provenant_core::WallTime {

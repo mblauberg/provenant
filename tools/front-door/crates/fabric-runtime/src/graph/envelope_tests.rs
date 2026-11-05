@@ -1029,10 +1029,14 @@ fn oversized_deferred_review_is_refused_before_admission() {
         ..Default::default()
     };
     let reason = document.admit(&limits).unwrap_err();
-    assert!(matches!(reason, AdmissionError::Envelope(_)));
-    let reason = reason.to_string();
-    assert!(reason.contains("graph checkpoint could reach"), "{reason}");
-    assert!(reason.contains("split the graph"), "{reason}");
+    let AdmissionError::Envelope(fact) = reason else {
+        panic!("expected typed envelope refusal");
+    };
+    assert!(fact.bound > MAX_CHECKPOINT_BYTES as usize);
+    assert_eq!(
+        fact.to_string(),
+        format!("graph checkpoint could reach {} bytes, over its {}-byte limit; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts", fact.bound, MAX_CHECKPOINT_BYTES)
+    );
 }
 
 #[test]
