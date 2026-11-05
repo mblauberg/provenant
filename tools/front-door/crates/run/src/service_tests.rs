@@ -682,7 +682,11 @@ fn each_refusal_has_its_own_stable_code() {
         (RunError::Refused, "REFUSED"),
         (RunError::GitUnavailable, "GIT"),
         (
-            RunError::Admission(AdmissionError::Disk { free: 1, floor: 2 }),
+            RunError::Admission(AdmissionError::Disk {
+                free: 1,
+                floor: 2,
+                origin: provenant_records::diagnostic::SettingSource::Configuration,
+            }),
             "DISK_FLOOR",
         ),
         (

@@ -16,6 +16,23 @@ pub enum BoundaryClass {
     Authority,
 }
 
+/// Where a configurable admission threshold came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingSource {
+    Configuration,
+    ShippedDefault,
+}
+
+impl SettingSource {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Configuration => "host configuration",
+            Self::ShippedDefault => "shipped default",
+        }
+    }
+}
+
 /// An explicitly recognised delivery command and its enforced output limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +71,7 @@ pub enum DiagnosticFact {
         available: u64,
         floor: u64,
         reclaimed: u64,
+        origin: SettingSource,
     },
     DiskUnobserved,
     PromptLimit {

@@ -1619,6 +1619,7 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                 available,
                 floor,
                 reclaimed,
+                origin,
             }) => {
                 return FacadeError::DispatchRefused {
                     fact: None,
@@ -1628,6 +1629,7 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                             available: *available,
                             floor: *floor,
                             reclaimed: *reclaimed,
+                            origin: *origin,
                         },
                     ),
                 };

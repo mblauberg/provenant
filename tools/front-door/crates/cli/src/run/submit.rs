@@ -424,6 +424,7 @@ pub(super) enum DiskCheck {
         available: u64,
         floor: u64,
         reclaimed: u64,
+        origin: provenant_records::diagnostic::SettingSource,
     },
 }
 
@@ -436,9 +437,11 @@ impl From<DiskCheck> for String {
                 available,
                 floor,
                 reclaimed,
+                origin,
             } => format!(
-                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
-                path.display()
+                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; gc.free_floor source: {}; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
+                path.display(),
+                origin.description()
             ),
         }
     }
@@ -562,6 +565,11 @@ pub(super) fn check_writer_disk_with_collection(
                 available: minimum,
                 floor,
                 reclaimed,
+                origin: if settings.free_floor.is_some() {
+                    provenant_records::diagnostic::SettingSource::Configuration
+                } else {
+                    provenant_records::diagnostic::SettingSource::ShippedDefault
+                },
             });
         }
     }
@@ -609,13 +617,13 @@ pub(super) fn submit_with_host_and_wait(
                         DiskCheck::Unobserved(_) => (ErrorKind::Io, Status::Error),
                     };
                     let projection = match &check {
-                        DiskCheck::Low { path, available, floor, reclaimed } => {
+                        DiskCheck::Low { path, available, floor, reclaimed, origin } => {
                             let path = provenant_records::diagnostic::safe_path(path, provenant_records::diagnostic::Destination::Local)
                                 .unwrap_or_else(|| "the limiting volume".into());
                             Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
-                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed"))
+                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; gc.free_floor from {}; bounded GC reported {reclaimed} bytes reclaimed", origin.description()))
                                 .next(format!("run `provenant gc --free-floor {floor}B` before dispatching a writer"))
-                                .fact(provenant_records::diagnostic::DiagnosticFact::DiskPressure { available: *available, floor: *floor, reclaimed: *reclaimed }))
+                                .fact(provenant_records::diagnostic::DiagnosticFact::DiskPressure { available: *available, floor: *floor, reclaimed: *reclaimed, origin: *origin }))
                         }
                         DiskCheck::Unobserved(_) => Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
                             .detail("disk observation failed").next("restore the host disk observation before retrying")

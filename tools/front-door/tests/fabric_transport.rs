@@ -3722,6 +3722,10 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
             message.contains("floor 18446744073709551615 bytes"),
             "{message}"
         );
+        assert!(
+            message.contains("gc.free_floor from host configuration"),
+            "{message}"
+        );
         Ok(())
     };
     let (status, graph) = json_command(

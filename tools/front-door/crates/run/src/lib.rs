@@ -679,10 +679,14 @@ impl RunError {
                 };
                 diagnostic = diagnostic.fact(DiagnosticFact::Filesystem { operation });
             }
-            Self::Admission(AdmissionError::Disk { free, floor }) => {
+            Self::Admission(AdmissionError::Disk {
+                free,
+                floor,
+                origin,
+            }) => {
                 diagnostic = diagnostic
                     .detail(format!(
-                        "disk space: {free} bytes available; gc.free_floor is {floor} bytes"
+                        "disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {})", origin.description()
                     ))
                     .next("free disk space above gc.free_floor before retrying");
             }
@@ -812,7 +816,11 @@ mod diagnostic_projection_tests {
     fn resource_refusals_name_limits_and_corrective_actions() {
         let cases = [
             (
-                AdmissionError::Disk { free: 1, floor: 2 },
+                AdmissionError::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
+                },
                 "gc.free_floor",
                 "disk",
             ),

@@ -2236,11 +2236,13 @@ mod disk_admission_tests {
         assert!(matches!(
             custody_error(RunError::Admission(AdmissionError::Disk {
                 free: 99,
-                floor: 100
+                floor: 100,
+                origin: provenant_records::diagnostic::SettingSource::Configuration,
             })),
             CustodyError::Admission(AdmissionError::Disk {
                 free: 99,
-                floor: 100
+                floor: 100,
+                origin: provenant_records::diagnostic::SettingSource::Configuration,
             })
         ));
     }

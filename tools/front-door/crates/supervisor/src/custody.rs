@@ -65,9 +65,14 @@ pub enum AdmissionError {
     GuardianIdentity,
     /// Numeric host observations are safe to publish as the lane's refusal.
     #[error(
-        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
+        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes (source: {source_label}); run `provenant gc --apply`",
+        source_label = .origin.description()
     )]
-    Disk { free: u64, floor: u64 },
+    Disk {
+        free: u64,
+        floor: u64,
+        origin: provenant_records::diagnostic::SettingSource,
+    },
     #[error("memory pressure is {level}; wait for host memory pressure to fall")]
     MemoryPressure { level: String },
     #[error(

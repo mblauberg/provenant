@@ -375,13 +375,18 @@ pub struct DiskPressure {
     pub available: u64,
     pub floor: u64,
     pub reclaimed: u64,
+    pub origin: provenant_records::diagnostic::SettingSource,
 }
 
 fn dispatch_message(reason: &str, disk: Option<&DiskPressure>) -> String {
     match disk {
         Some(disk) => format!(
-            "insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; bounded GC reported {} bytes reclaimed; run `provenant gc --free-floor {}B` before dispatching a writer",
-            disk.available, disk.floor, disk.reclaimed, disk.floor
+            "insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; gc.free_floor from {}; bounded GC reported {} bytes reclaimed; run `provenant gc --free-floor {}B` before dispatching a writer",
+            disk.available,
+            disk.floor,
+            disk.origin.description(),
+            disk.reclaimed,
+            disk.floor
         ),
         None => provenant_records::diagnostic::safe_text(reason),
     }
@@ -559,7 +564,7 @@ impl FacadeError {
                 projected = projected.detail(detail).next(action);
             }
             Self::DispatchRefused { disk: Some(disk), .. } => {
-                projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.reclaimed))
+                projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; gc.free_floor from {}; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.origin.description(), disk.reclaimed))
                     .next(format!("run `provenant gc --free-floor {}B` before dispatching a writer", disk.floor));
             }
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
@@ -1164,6 +1169,7 @@ mod diagnostic_tests {
                 available: 42,
                 floor: 100,
                 reclaimed: 3,
+                origin: provenant_records::diagnostic::SettingSource::Configuration,
             }),
         };
         let wire = serde_json::to_string(&error).unwrap();
@@ -1175,8 +1181,15 @@ mod diagnostic_tests {
         assert!(
             projection
                 .detail
+                .as_deref()
                 .unwrap()
                 .contains("42 bytes available, floor 100")
+        );
+        assert!(
+            projection
+                .detail
+                .unwrap()
+                .contains("gc.free_floor from host configuration")
         );
         assert!(projection.next.unwrap().contains("100B"));
     }

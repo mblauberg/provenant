@@ -867,7 +867,18 @@ impl RunStore {
             // settlement. An unreadable current floor queues rather than
             // admitting with the ticket's submission-time observation.
             let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)
-                .and_then(|settings| settings.free_floor_bytes(&self.writer_registry));
+                .and_then(|settings| {
+                    settings
+                        .free_floor_bytes(&self.writer_registry)
+                        .map(|floor| {
+                            let origin = if settings.free_floor.is_some() {
+                                provenant_records::diagnostic::SettingSource::Configuration
+                            } else {
+                                provenant_records::diagnostic::SettingSource::ShippedDefault
+                            };
+                            (floor, origin)
+                        })
+                });
             let pressure = resources.pressure().unwrap_or_else(|error| {
                 eprintln!(
                     "admission: memory pressure probe failed: {}",
@@ -918,7 +929,7 @@ impl RunStore {
                 disk_floor_bytes,
                 settings,
             ) {
-                (pressure, Ok(disk), Ok(floor), Ok(settings)) => {
+                (pressure, Ok(disk), Ok((floor, origin)), Ok(settings)) => {
                     let pressure =
                         pressure.filter(|level| settings.memory_pressure_threshold.defers(*level));
                     let mut disk = disk;
@@ -934,6 +945,7 @@ impl RunStore {
                         Some(RunError::Admission(AdmissionError::Disk {
                             free: disk,
                             floor,
+                            origin,
                         }))
                     } else if let Some(level) = pressure {
                         Some(RunError::Admission(AdmissionError::MemoryPressure {

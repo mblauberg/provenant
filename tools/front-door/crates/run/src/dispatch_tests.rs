@@ -8153,13 +8153,15 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
                 error,
                 RunError::Admission(AdmissionError::Disk {
                     free: 99,
-                    floor: 100
+                    floor: 100,
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
                 })
             ));
             assert_eq!(error.code(), "DISK_FLOOR");
             // The message names the floor's key and the repair command.
             let message = error.to_string();
             assert!(message.contains("gc.free_floor"), "{message}");
+            assert!(message.contains("source: host configuration"), "{message}");
             assert!(message.contains("provenant gc --apply"), "{message}");
         }
     }
@@ -8235,7 +8237,8 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
                 result,
                 Err(RunError::Admission(AdmissionError::Disk {
                     free: 40,
-                    floor: 100
+                    floor: 100,
+                    ..
                 }))
             ));
         }
@@ -8285,7 +8288,7 @@ fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
         let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
         if below {
             assert!(
-                matches!(result, Err(RunError::Admission(AdmissionError::Disk { free: f, floor: p })) if f == free && p == floor)
+                matches!(result, Err(RunError::Admission(AdmissionError::Disk { free: f, floor: p, origin: provenant_records::diagnostic::SettingSource::ShippedDefault })) if f == free && p == floor)
             );
         } else {
             assert_eq!(

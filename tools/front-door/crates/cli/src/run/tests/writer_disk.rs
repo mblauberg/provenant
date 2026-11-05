@@ -128,11 +128,34 @@ fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
             .err()
             .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
         assert!(
-            matches!(error, DiskCheck::Low { ref path, available: 99, floor: 100, .. } if path == low)
+            matches!(error, DiskCheck::Low { ref path, available: 99, floor: 100, origin: provenant_records::diagnostic::SettingSource::Configuration, .. } if path == low)
         );
         assert!(observed.contains(&low.to_path_buf()));
     }
     check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
+    Ok(())
+}
+
+#[test]
+fn writer_disk_default_floor_names_its_source() -> Result<(), String> {
+    let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let settings = provenant_config::GcSettings::default();
+    let error = check_writer_disk_with(
+        &settings,
+        directory.path(),
+        directory.path(),
+        directory.path(),
+        |_| Ok(0),
+    )
+    .err()
+    .ok_or("zero disk space was accepted")?;
+    assert!(matches!(
+        error,
+        DiskCheck::Low {
+            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            ..
+        }
+    ));
     Ok(())
 }
 
