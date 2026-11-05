@@ -12,6 +12,9 @@ unordered event as current without checking the forge. Observing a different hea
 cancels older records atomically. A cancelled record cannot issue or retry an
 intent, and its verdict never transfers to another key. Reclaim an expired lease
 on the existing attempt rather than creating a second attempt.
+Before starting a successor, reconcile every unresolved intent on older heads.
+An unknown outcome blocks the start; a receipt or a settled, authoritative
+absence resolves it. Cancelled work cannot use that absence to retry.
 
 | State | Entry and next step |
 | --- | --- |

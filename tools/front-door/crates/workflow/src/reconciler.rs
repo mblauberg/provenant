@@ -195,7 +195,36 @@ impl Store {
         Ok(result)
     }
     pub fn start(&mut self, key: &Key, attempt: Attempt, now: i64) -> Result<(), Error> {
-        self.update(key, |r| {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // An old head may have published just before cancellation. Resolve that
+        // outcome before dispatching work for its successor.
+        let mut stmt =
+            tx.prepare("SELECT body FROM pr_work WHERE repository=?1 AND pr=?2 AND head<>?3")?;
+        let bodies = stmt
+            .query_map(
+                params![key.repository, key.pr.to_string(), key.head],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for body in bodies {
+            let old: Record = serde_json::from_str(&body)?;
+            if old.schema_version != 1 {
+                return Err(Error::Version);
+            }
+            if old
+                .intents
+                .iter()
+                .any(|i| i.receipt.is_none() && !i.retryable)
+            {
+                return Err(Error::Uncertain);
+            }
+        }
+        let mut record = Self::get_from(&tx, key)?;
+        {
+            let r = &mut record;
             if r.cancelled || r.state != State::NeedsReview || r.attempt.is_some() {
                 return Err(Error::Invalid);
             }
@@ -205,8 +234,10 @@ impl Store {
             }
             r.attempt = Some(attempt);
             r.state = State::Reviewing;
-            Ok(())
-        })
+        }
+        Self::save(&tx, &record)?;
+        tx.commit()?;
+        Ok(())
     }
     /// Reclaim the existing attempt after expiry; never create another attempt for the key.
     pub fn renew(
@@ -491,6 +522,85 @@ mod tests {
         start(&mut s, &k2);
         s.transition(&k2, "a", "worker", 1, State::Failed).unwrap();
         assert_eq!(s.get(&k2).unwrap().state, State::Failed);
+    }
+    #[test]
+    fn generic_transitions_are_exhaustive() {
+        let states = [
+            State::NeedsReview,
+            State::Reviewing,
+            State::Verdict,
+            State::AwaitingChecks,
+            State::Landable,
+            State::Landing,
+            State::Landed,
+            State::Failed,
+        ];
+        for from in states {
+            for to in states {
+                let mut s = Store::open(Connection::open_in_memory().unwrap()).unwrap();
+                let k = key("head");
+                start(&mut s, &k);
+                let mut record = s.get(&k).unwrap();
+                record.state = from;
+                record.intents.push(Intent {
+                    id: "v".into(),
+                    effect: Effect::Verdict,
+                    receipt: Some("review".into()),
+                    retryable: false,
+                    generation: 0,
+                });
+                Store::save(&s.db, &record).unwrap();
+                let allowed = matches!(
+                    (from, to),
+                    (State::Verdict, State::AwaitingChecks)
+                        | (State::AwaitingChecks, State::Landable)
+                        | (
+                            State::Reviewing
+                                | State::Verdict
+                                | State::AwaitingChecks
+                                | State::Landable,
+                            State::Failed
+                        )
+                );
+                assert_eq!(
+                    s.transition(&k, "a", "worker", 1, to).is_ok(),
+                    allowed,
+                    "{from:?} -> {to:?}"
+                );
+                assert_eq!(s.get(&k).unwrap().state, if allowed { to } else { from });
+            }
+        }
+    }
+
+    #[test]
+    fn successor_waits_for_superseded_effect_reconciliation() {
+        for effect in [Effect::Verdict, Effect::Merge] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("db");
+            let open = || Store::open(Connection::open(&path).unwrap()).unwrap();
+            let old = key("old");
+            let new = key("new");
+            let mut s = open();
+            start(&mut s, &old);
+            verdict(&mut s, &old);
+            if effect == Effect::Merge {
+                landable(&mut s, &old);
+            }
+            s.intent(&old, "a", "worker", 1, "pending".into(), effect)
+                .unwrap();
+            s.observe_head(new.clone()).unwrap();
+            drop(s);
+            let mut s = open();
+            assert!(matches!(s.start(&new, attempt(), 0), Err(Error::Uncertain)));
+            s.reconcile(&old, "pending", 0, Observation::Unknown)
+                .unwrap();
+            assert!(matches!(s.start(&new, attempt(), 0), Err(Error::Uncertain)));
+            s.reconcile(&old, "pending", 0, Observation::Absent)
+                .unwrap();
+            s.start(&new, attempt(), 0).unwrap();
+            assert!(s.retry(&old, "a", "worker", 1, "pending").is_err());
+            assert_eq!(s.get(&new).unwrap().verdict, None);
+        }
     }
     #[test]
     fn superseded_head_cannot_publish_or_transfer_verdict() {
