@@ -84,9 +84,9 @@ fn uncertain_mutation_errors_include_operation_id_and_recovery() {
         return;
     };
     let error = ServiceError::Facade(FacadeError::LaunchUnknown { operation_id });
-    assert_eq!(error.code(), "LAUNCH_UNKNOWN");
+    assert_eq!(error.code(), "launch_unknown");
     let detail = error.structured_error();
-    assert_eq!(detail["code"], "LAUNCH_UNKNOWN");
+    assert_eq!(detail["code"], "launch_unknown");
     assert_eq!(detail["operation_id"], "dispatch-17");
     assert!(detail["message"].is_string() && detail["hint"].is_string());
 }
@@ -481,12 +481,12 @@ fn cli_error_detail_keeps_safe_revision_without_raw_data() {
     assert_eq!(detail["revision"], 4);
     assert!(detail.get("data").is_none());
     let error = ServiceError::Cli {
-        code: "CLI_FAILED".into(),
+        code: "cli_failed".into(),
         message: "failed".into(),
         data: json!("text"),
     };
     let detail = error.structured_error();
-    assert_eq!(detail["code"], "CLI_FAILED");
+    assert_eq!(detail["code"], "cli_failed");
     assert!(detail.get("data").is_none());
 }
 

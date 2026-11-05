@@ -39,7 +39,7 @@ pub(super) fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bo
         out.result.status = Status::Failed;
         out.result.error = Some(CommandError {
             diagnostic: None,
-            code: "RECONCILE_INCOMPLETE".into(),
+            code: "reconcile_incomplete".into(),
             message: out.human.trim().to_owned(),
             cause: None,
             repair: Some("Inspect the reported custody or settlement reason, then retry `provenant reconcile --id <run>`.".into()),

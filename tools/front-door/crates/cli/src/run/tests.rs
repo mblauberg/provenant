@@ -3672,7 +3672,7 @@ fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_contr
         .result
         .error
         .expect("failed reconcile must explain its blocker");
-    assert_eq!(error.code, "RECONCILE_INCOMPLETE");
+    assert_eq!(error.code, "reconcile_incomplete");
     assert!(error.message.contains("invalid anchor"));
 }
 

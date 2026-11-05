@@ -460,7 +460,7 @@ fn mcp_inbox_owner_routing() -> Result {
                 "--operation-id",
                 "close-parity",
             ],
-            "OWNER_LOCAL_ONLY",
+            "owner_local_only",
         ),
         (
             json!({"op":"acknowledge","host":"missing","id":id,"answer_id":answer_id,"session":"chair","operation_id":"ack-parity"}),
@@ -477,7 +477,7 @@ fn mcp_inbox_owner_routing() -> Result {
                 "--operation-id",
                 "ack-parity",
             ],
-            "OWNER_LOCAL_ONLY",
+            "owner_local_only",
         ),
     ];
     for (args, words, expected) in cases {

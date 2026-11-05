@@ -456,7 +456,7 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
             InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
         ) {
             return Err(error(
-                "OWNER_LOCAL_ONLY",
+                "owner_local_only",
                 format!(
                     "inbox owner {host}: run this operation on the owner host or from the owning chair session"
                 ),
@@ -487,14 +487,14 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                 ..
             }) => Err(error(&code, message)),
             Ok(_) => Err(error(
-                "UNSUPPORTED_OWNER",
+                "unsupported_owner",
                 "peer does not support inbox operations".into(),
             )),
             Err(failure) => {
                 let code = match failure.error {
                     FacadeError::LaunchUnknown { .. } => "ambiguous_outcome",
                     FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } => {
-                        "UNSUPPORTED_OWNER"
+                        "unsupported_owner"
                     }
                     _ => "owner_unavailable",
                 };
@@ -582,7 +582,7 @@ fn cli_failure(stdout: &[u8], stderr: &[u8]) -> ServiceError {
     }
     let stderr = String::from_utf8_lossy(stderr);
     ServiceError::Cli {
-        code: "CLI_FAILED".into(),
+        code: "cli_failed".into(),
         message: stderr
             .lines()
             .next()
@@ -1343,7 +1343,7 @@ pub fn landing(
             );
             result.error = Some(provenant_records::CommandError {
                 diagnostic: None,
-                code: "LAUNCH_UNKNOWN".into(),
+                code: "launch_unknown".into(),
                 message: "push outcome requires remote reconciliation".into(),
                 cause: None,
                 repair: Some(

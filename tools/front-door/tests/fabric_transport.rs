@@ -510,7 +510,7 @@ fn remote_landing_push_preserves_definitive_store_refusal() -> Result {
     assert_eq!(response["result"]["data"]["error"]["code"], "stale_fence");
     assert_ne!(
         response["result"]["data"]["error"]["code"],
-        "LAUNCH_UNKNOWN"
+        "launch_unknown"
     );
     rig.assert_legacy_unchanged()
 }
@@ -1913,7 +1913,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     );
 
     for (returned, expected) in [
-        ("local-stop", "LAUNCH_UNKNOWN"),
+        ("local-stop", "launch_unknown"),
         ("unrelated", "state_corrupt"),
     ] {
         response.result = provenant_fabric_runtime::hosts::PeerResult::Error {
@@ -2342,7 +2342,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                 },
                 extra: Default::default(),
             },
-            Some("LAUNCH_UNKNOWN"),
+            Some("launch_unknown"),
         ),
     ];
     for (reply, expected) in replies {
@@ -2369,7 +2369,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             if let Some(expected) = expected {
                 assert_ne!(status, 0, "{op}: {result}");
                 assert_eq!(result["error"]["code"], expected, "{op}: {result}");
-                if expected == "LAUNCH_UNKNOWN" {
+                if expected == "launch_unknown" {
                     assert_eq!(result["data"]["operation_id"], "landing-local");
                 }
                 if expected == "QUEUE_FULL" {
@@ -3259,7 +3259,7 @@ fn inbox_all_projects_reads_and_answers_through_peers() -> Result {
         ],
     )?;
     assert_ne!(status, 0);
-    assert_eq!(close["error"]["code"], "OWNER_LOCAL_ONLY");
+    assert_eq!(close["error"]["code"], "owner_local_only");
     Ok(())
 }
 
@@ -3629,11 +3629,11 @@ fn remote_inbox_owner() -> Result {
     for (input, expected) in [
         (
             json!({"op":"close","id":other,"state":"withdrawn","reason":"forged","expect_revision":1,"operation_id":"forged-close"}),
-            "OWNER_LOCAL_ONLY",
+            "owner_local_only",
         ),
         (
             json!({"op":"acknowledge","id":id,"answer_id":answer_id,"session":"chair-a","operation_id":"forged-ack"}),
-            "OWNER_LOCAL_ONLY",
+            "owner_local_only",
         ),
         (
             json!({"op":"ask","session":"chair-a","request":{"kind":"question","title":"Forged","body":"No","blocking":false,"options":[],"recommended_option_id":null,"proceeding_with":null},"operation_id":"forged-ask"}),
@@ -3690,7 +3690,7 @@ fn remote_inbox_owner() -> Result {
         ],
     )?;
     assert_ne!(status, 0);
-    assert_eq!(close["error"]["code"], "OWNER_LOCAL_ONLY");
+    assert_eq!(close["error"]["code"], "owner_local_only");
     let (status, ack) = json_command(
         &rig,
         &[
@@ -3707,7 +3707,7 @@ fn remote_inbox_owner() -> Result {
         ],
     )?;
     assert_ne!(status, 0);
-    assert_eq!(ack["error"]["code"], "OWNER_LOCAL_ONLY");
+    assert_eq!(ack["error"]["code"], "owner_local_only");
     let (status, shown) = json_command(&rig, &["inbox", &qualified, "--json"])?;
     assert_eq!(status, 0, "{shown}");
     assert_eq!(

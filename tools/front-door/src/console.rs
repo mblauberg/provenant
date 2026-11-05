@@ -333,7 +333,7 @@ fn unavailable(message: String) -> CommandResult<Option<serde_json::Value>> {
     let mut result = CommandResult::new("console open", Outcome::Error, None);
     result.error = Some(CommandError {
         diagnostic: None,
-        code: "CONSOLE_APP_UNAVAILABLE".into(),
+        code: "console_app_unavailable".into(),
         message,
         cause: None,
         repair: None,

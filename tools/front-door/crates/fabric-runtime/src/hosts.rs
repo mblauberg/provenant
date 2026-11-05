@@ -1239,7 +1239,7 @@ mod tests {
         ));
         for error in [
             serde_json::json!({"code": "unknown_error"}),
-            serde_json::json!({"code": "LAUNCH_UNKNOWN"}),
+            serde_json::json!({"code": "launch_unknown"}),
         ] {
             assert!(serde_json::from_value::<facade::FacadeError>(error).is_err());
         }

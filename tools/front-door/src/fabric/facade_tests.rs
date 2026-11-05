@@ -3,7 +3,7 @@
 fn cli_failure_uses_stderr_without_structured_json() {
     let error = cli_failure(b"not json", b"specific failure\nadditional detail\n");
     assert!(matches!(error, ServiceError::Cli { code, message, data }
-        if code == "CLI_FAILED" && message == "specific failure" && data.is_null()));
+        if code == "cli_failed" && message == "specific failure" && data.is_null()));
 }
 
 #[cfg(test)]

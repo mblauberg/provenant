@@ -78,7 +78,7 @@ impl GitTransportError {
     /// The existing landing refusal code, independent of its displayed explanation.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::PushUnknown { .. } | Self::PushUnresolved { .. } => "LAUNCH_UNKNOWN",
+            Self::PushUnknown { .. } | Self::PushUnresolved { .. } => "launch_unknown",
             Self::Store(error) => crate::coordination::facade::FacadeError::from(error).code(),
             Self::PushNotFound { .. } => "not_found",
             Self::Invalid(_) | Self::InvalidRemote => "invalid_input",

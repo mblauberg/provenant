@@ -511,7 +511,7 @@ impl InboxError {
             Self::Conflict => "conflict",
             Self::CursorExpired => "cursor_expired",
             Self::LaneMutation => "lane_coordination_refused",
-            Self::UnsupportedOwner => "UNSUPPORTED_OWNER",
+            Self::UnsupportedOwner => "unsupported_owner",
             Self::RequestLimit => "request_limit",
             Self::WorkLookup(_) => "work_lookup_failed",
             Self::WorkMismatch => "work_mismatch",

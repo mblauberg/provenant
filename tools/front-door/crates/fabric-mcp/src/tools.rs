@@ -1318,7 +1318,7 @@ impl ServiceError {
             {
                 code
             }
-            Self::InboxOwner { .. } | Self::Cli { .. } => "CLI_FAILED",
+            Self::InboxOwner { .. } | Self::Cli { .. } => "cli_failed",
             Self::Invalid(_) => "invalid_input",
             Self::Coordination(error) => error.code(),
             Self::Facade(error) => error.code(),
