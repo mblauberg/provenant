@@ -358,6 +358,31 @@ fn launches() -> TestResult {
         &call,
     )?;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
+    // The first writer was relaunched into a settled lane's existing tree.
+    // Its host-owned snapshot binds that owner while custody is held.
+    let writer = prepare_writer(
+        input.request.tasks[0].writer.as_ref().ok_or("writer")?,
+        &store.writer_registry,
+        context.project_id,
+    )?;
+    provenant_confinement::worktrees::save_owner(
+        &writer.worktree,
+        &provenant_confinement::worktrees::WorktreeOwner {
+            attempt_id: Some(provenant_core::AttemptId::from_bytes([101; 16])),
+            operation_id: Some("earlier-owner".parse()?),
+            branch: "writer".into(),
+            base: input.request.tasks[0].head.clone().ok_or("source")?,
+            host: provenant_core::HostId::from_bytes([3; 16]),
+            created_at: input.created_at,
+            origin: provenant_confinement::worktrees::WorktreeOrigin::Lane,
+            label: None,
+        },
+    )?;
+    writer.snapshot(
+        context.state_root.as_path(),
+        &attempt,
+        RunStore::scope(&old),
+    )?;
     // A launched predecessor's guardian leaves a custody lock after release.
     let custody = attempt.try_lock(
         std::ffi::OsStr::new("custody.lock"),
