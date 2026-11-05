@@ -3656,9 +3656,13 @@ mod route_tests {
             )
         };
         let before = resolve(&available)?;
+        // Current recorded sign-out evidence excludes until a healthy probe clears it.
         assert!(matches!(
             before.readiness,
-            provenant_records::RouteReadiness::Ready { ref extra, .. } if extra.contains_key("availability_warning")
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::AuthRequired,
+                ..
+            }
         ));
         available.fixture_ref = "installed/codex/login-status".into();
         let after = resolve(&available)?;
@@ -3751,9 +3755,13 @@ mod route_tests {
                 &[],
             )
         };
+        // Current recorded sign-out evidence excludes until a login probe clears it.
         assert!(matches!(
             resolve(&available)?.readiness,
-            provenant_records::RouteReadiness::Ready { ref extra, .. } if extra.contains_key("availability_warning")
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::AuthRequired,
+                ..
+            }
         ));
         available.fixture_ref = "installed/opencode/login-unverified".into();
         assert!(matches!(
@@ -3819,9 +3827,13 @@ mod route_tests {
             None,
             &[],
         )?;
+        // Another account's probe does not clear this account's current sign-out.
         assert!(matches!(
             zen_result.readiness,
-            provenant_records::RouteReadiness::Ready { ref extra, .. } if extra.contains_key("availability_warning")
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::AuthRequired,
+                ..
+            }
         ));
         Ok(())
     }
