@@ -14,6 +14,41 @@ use std::{
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn cloud_attempt_never_enters_local_supervisor() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = input();
+    input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
+        target: "target".into(),
+        provider: "fake".into(),
+        environment: "env".into(),
+        repository: "owner/repo".into(),
+        branch: "main".into(),
+        model: "model".into(),
+        effort: None,
+        deadline_seconds: 3600,
+    });
+    store.create(&input, &call)?;
+    let fake = Fake::default();
+    let started = store.start_checked(
+        input.run_id,
+        &input.request,
+        &fake,
+        &|_, _| unreachable!(),
+        &call,
+    )?;
+    assert!(started.is_empty());
+    assert_eq!(fake.prepared.get(), 0);
+    assert!(matches!(
+        store.record(input.attempts[0].attempt_id, &call)?.state,
+        AttemptState::Queued { .. }
+    ));
+    Ok(())
+}
+
+#[test]
 fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

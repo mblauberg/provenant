@@ -1955,6 +1955,7 @@ impl RunStore {
                 fresh_continuation: fresh.map(str::to_owned),
                 schema_version: 1,
                 tasks: vec![TaskRequest {
+                    cloud: None,
                     context: None,
                     extra: Default::default(),
                     build_heavy: task.build_heavy,

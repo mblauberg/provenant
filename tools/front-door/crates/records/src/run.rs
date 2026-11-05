@@ -180,6 +180,9 @@ impl WorkContext {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRequest {
+    /// Cloud custody is sealed with the request before an attempt can launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudPlacement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<WorkContext>,
     #[serde(flatten)]
@@ -223,6 +226,19 @@ pub struct TaskRequest {
     /// Dispatch-time access beyond the mode's defaults.
     #[serde(default, skip_serializing_if = "LaneAccess::is_default")]
     pub access: LaneAccess,
+}
+
+/// Provider-independent cloud target snapshot used for restart recovery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudPlacement {
+    pub target: String,
+    pub provider: String,
+    pub environment: String,
+    pub repository: String,
+    pub branch: String,
+    pub model: String,
+    pub effort: Option<String>,
+    pub deadline_seconds: u64,
 }
 
 /// Network reach for a lane's provider and the tools it runs.
@@ -1190,6 +1206,7 @@ mod tests {
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                cloud: None,
                 context: None,
                 extra: Default::default(),
                 build_heavy: false,

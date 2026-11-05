@@ -950,6 +950,7 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
     for entry in REGISTRY {
         let adapter = entry.adapter.id();
         let requested = run::TaskRequest {
+            cloud: None,
             context: None,
             extra: Default::default(),
             build_heavy: false,
@@ -1355,6 +1356,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     }
     let prompt = "fake OpenCode login recovery";
     let task = run::TaskRequest {
+        cloud: None,
         context: None,
         extra: Default::default(),
         build_heavy: false,
@@ -1523,6 +1525,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     let prompt = "é".repeat(75_000);
     let review_oid = run::resolve_git_base(&git, &project, "HEAD")?;
     let task = run::TaskRequest {
+        cloud: None,
         context: None,
         extra: Default::default(),
         build_heavy: false,
@@ -3006,6 +3009,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
 
     let prompt = "Fix remaining issues in continuation";
     let task = run::TaskRequest {
+        cloud: None,
         context: None,
         extra: Default::default(),
         build_heavy: false,

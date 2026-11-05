@@ -237,6 +237,7 @@ impl<'a> Service<'a> {
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
             requests.push(TaskRequest {
+                cloud: None,
                 context: task.context,
                 extra: Default::default(),
                 build_heavy: task.build_heavy,
