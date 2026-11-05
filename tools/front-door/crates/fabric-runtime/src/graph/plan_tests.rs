@@ -1445,6 +1445,19 @@ fn fragment_cannot_widen_read_roots_source_or_role() {
     assert_eq!(run.checkpoint.expansions.len(), 1);
 }
 
+#[test]
+fn planner_fragment_cannot_invent_capabilities() {
+    let mut requested = slice("requested", &["src"]);
+    requested["capabilities"] = json!(["postgres"]);
+    let mut doc = planner(1);
+    let run = advance(&doc, &mut fixture_owner(&[&result(vec![requested.clone()])]), &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    doc.nodes[0].capabilities = Some(vec!["postgres".into()]);
+    let run = advance(&doc, &mut fixture_owner(&[&result(vec![requested]), "done", "done"]), &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.expansions.len(), 1);
+}
+
 fn two_instances(first: Value, second: Value) -> String {
     format!(
         "```fragment\n{}\n```",

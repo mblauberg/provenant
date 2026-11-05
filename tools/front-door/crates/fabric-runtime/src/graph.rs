@@ -510,6 +510,8 @@ struct PlannedNode {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     read_roots: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<SourceBinding>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     after_expansion: Vec<String>,
@@ -2431,6 +2433,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         family_peers: &family_peers,
                         context: node_context(&plan, node),
                         read_roots: &node.read_roots,
+                        capabilities: node.capabilities.as_deref(),
+                        capability_sources: node.extra.get("capability_sources"),
                         distinct_from_attempts: &distinct_attempts,
                         require_distinct,
                         source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),

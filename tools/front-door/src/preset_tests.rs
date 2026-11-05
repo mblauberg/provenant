@@ -1984,6 +1984,72 @@ fn pin_fixture_sources(value: &mut serde_json::Value) {
 }
 
 #[test]
+fn preset_run_binds_skill_requirement_to_task_nodes() {
+    let args = [
+        "run",
+        "--preset",
+        "single",
+        "--prompt-file",
+        "brief.md",
+        "--require-skill-location",
+    ];
+    let provenant_cli::ParseOutcome::Invocation(invocation) =
+        provenant_cli::parse(args.into_iter().map(Into::into))
+    else {
+        panic!("run arguments")
+    };
+    let provenant_cli::Command::Run(request) = invocation.command else {
+        panic!("run command")
+    };
+    let mut expanded = expand(&Layers::empty(), "single", "brief", &[]).unwrap();
+    expanded.document["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"group", "access":"read_only", "composite":{"nodes":[
+                {"id":"child", "access":"read_only", "prompt":"work"},
+                {"id":"gate", "kind":"gate", "access":"read_only", "prompt":""}
+            ]}
+        }));
+    expanded.document["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"planner", "kind":"plan", "access":"read_only", "prompt":"plan",
+            "plan":{"fallback":{"nodes":[{"id":"fallback", "access":"read_only", "prompt":"work"}]}}
+        }));
+    let directory = tempfile::tempdir().unwrap();
+    let roots = ReadRoots::new(vec![directory.path().into()], &[]);
+    super::preset::bind_run_context(
+        &mut expanded,
+        &request,
+        directory.path(),
+        &roots,
+        &[],
+        "fixture",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        expanded.document["nodes"][0]["require_skill_location"],
+        true
+    );
+    assert_eq!(
+        expanded.document["nodes"][1]["composite"]["nodes"][0]["require_skill_location"],
+        true
+    );
+    assert!(
+        expanded.document["nodes"][1]["composite"]["nodes"][1]
+            .get("require_skill_location")
+            .is_none()
+    );
+    assert_eq!(
+        expanded.document["nodes"][2]["plan"]["fallback"]["nodes"][0]["require_skill_location"],
+        true
+    );
+}
+
+#[test]
 fn read_only_worktree_bindings_lower_to_read_roots() {
     let expanded = expand(
         &Layers::empty(),
@@ -3788,6 +3854,146 @@ fn the_verifier_route_falls_back_to_senior_when_undefined() {
     .unwrap();
     assert_eq!(route(node(&expanded.document, "verify"))["alias"], "senior");
     assert_eq!(expanded.substitutions[0]["node"], "verify");
+}
+
+#[test]
+fn generator_evaluator_writer_inherits_capability_and_explicit_empty_removes_it() {
+    let parsed = provenant_cli::parse(
+        [
+            "run",
+            "--preset",
+            "generator-evaluator",
+            "--prompt-file",
+            "brief",
+        ]
+        .map(std::ffi::OsString::from),
+    );
+    let provenant_cli::ParseOutcome::Invocation(invocation) = parsed else {
+        panic!("parse preset")
+    };
+    let provenant_cli::Command::Run(request) = invocation.command else {
+        panic!("run")
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let lane = root.join("lane");
+    std::fs::create_dir(&lane).unwrap();
+    for mode in ["default", "node", "empty"] {
+        let mut overrides = vec![
+            format!("parameters.worktree='{}'", lane.display()),
+            "parameters.subject.commit='0123456789012345678901234567890123456789'".into(),
+        ];
+        if mode == "node" {
+            overrides.push("implement.capabilities=['postgres']".into());
+        }
+        if mode == "empty" {
+            overrides.push("implement.capabilities=[]".into());
+        }
+        let mut expanded =
+            expand(&Layers::empty(), "generator-evaluator", "brief", &overrides).unwrap();
+        super::preset::bind_run_context(
+            &mut expanded,
+            &request,
+            &root,
+            &ReadRoots::new(vec![root.clone()], &[]),
+            &["postgres".into()],
+            "explicit",
+            None,
+        )
+        .unwrap();
+        let writer = node(&expanded.document, "implement");
+        assert_eq!(
+            writer["capabilities"],
+            if mode == "empty" {
+                json!([])
+            } else {
+                json!(["postgres"])
+            }
+        );
+        if mode != "empty" {
+            assert_eq!(
+                writer["capability_sources"][0]["source"],
+                if mode == "node" {
+                    "node"
+                } else {
+                    "project default"
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn preset_capability_origin_explain_matches_golden() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let lane = root.join("lane");
+    std::fs::create_dir(&lane).unwrap();
+    let mut lines = String::new();
+    for mode in ["project default", "node", "flag"] {
+        let mut args = vec![
+            "run",
+            "--preset",
+            "generator-evaluator",
+            "--prompt-file",
+            "brief",
+        ];
+        if mode == "flag" {
+            args.extend(["--capability", "postgres"]);
+        }
+        let provenant_cli::ParseOutcome::Invocation(invocation) =
+            provenant_cli::parse(args.into_iter().map(std::ffi::OsString::from))
+        else {
+            panic!("parse preset")
+        };
+        let provenant_cli::Command::Run(request) = invocation.command else {
+            panic!("run")
+        };
+        let mut expanded = expand(
+            &Layers::empty(),
+            "generator-evaluator",
+            "brief",
+            &[
+                format!("parameters.worktree='{}'", lane.display()),
+                "parameters.subject.commit='0123456789012345678901234567890123456789'".into(),
+            ],
+        )
+        .unwrap();
+        if mode == "node" {
+            expanded.document["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|n| n["id"] == "implement")
+                .unwrap()["capabilities"] = json!(["postgres"]);
+        }
+        super::preset::bind_run_context(
+            &mut expanded,
+            &request,
+            &root,
+            &ReadRoots::new(vec![root.clone()], &[]),
+            &["postgres".into()],
+            "explicit",
+            None,
+        )
+        .unwrap();
+        let mut rendered = String::new();
+        super::preset::explain_tree(
+            std::slice::from_ref(node(&expanded.document, "implement")),
+            0,
+            &mut rendered,
+        );
+        let line = rendered
+            .lines()
+            .find(|line| line.contains("capability_sources:"))
+            .unwrap();
+        lines.push_str(line.trim());
+        lines.push('\n');
+    }
+    assert_eq!(
+        lines,
+        include_str!("../tests/golden/capability-origins.txt")
+    );
 }
 
 #[test]

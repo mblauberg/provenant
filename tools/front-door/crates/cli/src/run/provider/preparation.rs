@@ -1570,7 +1570,7 @@ pub(super) fn prepare_candidates(
                 &alias.join(format!("candidate-{current_candidate}")),
             );
         }
-        spec.profile.spec.allow_database_ipc = task.access.database_ipc;
+        apply_lane_capabilities(&mut spec.profile.spec, &task.access);
         let common_git_path = repository
             .as_ref()
             .map(|path| path.to_path_buf())
