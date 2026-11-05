@@ -948,6 +948,35 @@ mod result_tests {
     }
 
     #[test]
+    fn graph_full_status_connects_attempts_inputs_and_settlement() {
+        let mut run = graph_status_fixture();
+        let node = &mut run.checkpoint.nodes[0];
+        node.attempts[1].input_cap = Some(262144);
+        node.attempts[1].input_manifest = Some(serde_json::from_value(serde_json::json!({
+            "schema_version":1, "source_commit":"1111111111111111111111111111111111111111",
+            "review_base":"2222222222222222222222222222222222222222", "integration_base":null,
+            "applied_route":{"adapter":"fixture", "model":"fixture/model"}, "omitted":0,
+            "inputs":[{"producer_node":"producer", "producer_attempt":{"graph_id":"fixture", "node_id":"producer", "route_index":0},
+                "kind":"commit", "required":true, "producer_result_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "commit":"1111111111111111111111111111111111111111", "delivery":"delivered", "file_delivery":"omitted"}]
+        })).unwrap());
+        node.outputs = Some(serde_json::from_value(serde_json::json!({
+            "schema_version":2, "result":null, "verdict":"VERDICT: PASS", "findings":[],
+            "branch":null, "commit":"1111111111111111111111111111111111111111", "warnings":[]
+        })).unwrap());
+        let json = serde_json::to_value(&run).unwrap();
+        let attempt = &json["checkpoint"]["nodes"][0]["attempts"][1];
+        assert_eq!(attempt["input_manifest"]["applied_route"]["model"], "fixture/model");
+        assert_eq!(attempt["input_manifest"]["inputs"][0]["producer_attempt"]["node_id"], "producer");
+        assert_eq!(attempt["input_manifest"]["inputs"][0]["delivery"], "delivered");
+        assert_eq!(attempt["outcome"], "task_failed");
+        let text = super::graph_human::graph_human_full(&run);
+        for fact in ["fixture/model", "producer", "selected_input", "required=true", "delivery=Delivered", "file=Omitted", "source=111111", "review_base=222222", "input_limit=262144", "TaskFailed", "outputs digest="] {
+            assert!(text.contains(fact), "missing {fact}: {text}");
+        }
+    }
+
+    #[test]
     fn cancelled_graph_status_shows_reason() {
         let mut run = graph_status_fixture();
         run.checkpoint.cancelled = true;

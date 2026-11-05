@@ -125,9 +125,51 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
             ));
         }
         human.push('\n');
-        if full && let Some(outputs) = &node.outputs {
-            for warning in &outputs.warnings {
-                human.push_str(&format!("    warning: {}\n", bounded_reason(warning)));
+        if full {
+            for attempt in &node.attempts {
+                if let Some(manifest) = &attempt.input_manifest {
+                    let route = manifest.applied_route.as_ref();
+                    human.push_str(&format!(
+                        "    attempt route_index={} state={:?} outcome={:?} applied_adapter={} applied_model={} applied_effort={} applied_account={} source={} review_base={} integration_base={} input_limit={} omitted={}\n",
+                        attempt.key.route_index, attempt.state, attempt.outcome,
+                        route.and_then(|route| route.adapter.as_deref()).unwrap_or("unavailable"),
+                        route.and_then(|route| route.model.as_deref()).unwrap_or("unavailable"),
+                        route.and_then(|route| route.effort.as_deref()).unwrap_or("unavailable"),
+                        route.and_then(|route| route.account.as_deref()).unwrap_or("unavailable"),
+                        manifest.source_commit.as_deref().unwrap_or("unavailable"),
+                        manifest.review_base.as_deref().unwrap_or("unavailable"),
+                        manifest.integration_base.as_deref().unwrap_or("unavailable"),
+                        attempt.input_cap.map_or_else(|| "unavailable".into(), |cap| cap.to_string()),
+                        manifest.omitted,
+                    ));
+                    for input in &manifest.inputs {
+                        let producer = input.producer_attempt.as_ref();
+                        human.push_str(&format!(
+                            "      selected_input node={} graph={} attempt={} kind={:?} required={} digest={} commit={} delivery={:?} file={:?}\n",
+                            input.producer_node,
+                            producer.map_or("unavailable", |key| key.graph_id.as_str()),
+                            producer.map_or_else(|| "unavailable".into(), |key| key.route_index.to_string()),
+                            input.kind, input.required,
+                            input.producer_result_digest.as_deref().unwrap_or("unavailable"),
+                            input.commit.as_deref().unwrap_or("unavailable"),
+                            input.delivery, input.file_delivery,
+                        ));
+                    }
+                }
+            }
+            if let Some(outputs) = &node.outputs {
+                human.push_str(&format!(
+                    "    outputs digest={} commit={} verdict={}\n",
+                    outputs
+                        .result
+                        .as_ref()
+                        .map_or("unavailable", |result| result.digest.as_str()),
+                    outputs.commit.as_deref().unwrap_or("unavailable"),
+                    outputs.verdict.as_deref().unwrap_or("unavailable")
+                ));
+                for warning in &outputs.warnings {
+                    human.push_str(&format!("    warning: {}\n", bounded_reason(warning)));
+                }
             }
         }
     }
