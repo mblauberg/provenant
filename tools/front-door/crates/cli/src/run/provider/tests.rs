@@ -4594,6 +4594,24 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
         std::fs::create_dir(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
+    // A separate Git directory's parent is not the checkout and must never
+    // become an implicit source grant.
+    let separate = base.join("separate-checkout");
+    std::fs::create_dir(&separate)?;
+    let separate_git = base.join("separate-git");
+    let init_args = vec![
+        git.clone().into_os_string(),
+        "init".into(),
+        "-q".into(),
+        "--separate-git-dir".into(),
+        separate_git.clone().into_os_string(),
+        separate.clone().into_os_string(),
+    ];
+    let init = executor.execute(ExecOptions::new(&init_args, &base, Duration::from_secs(5)))?;
+    assert_eq!(init.termination, Termination::Exit(0));
+    let separate_repo = utility.open_repo(&executor, &separate, budget, &cancel)?;
+    assert_eq!(separate_repo.common_git_dir(), separate_git);
+    assert!(run::resolve_reader_source(&state, &separate, &base).is_err());
     let mut primary = task.clone();
     primary.access.source_root = Some(project.clone());
     assert_eq!(source_cwd(&registry, &primary)?, project);

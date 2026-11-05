@@ -123,7 +123,9 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
             error.into()
         }
     })?;
-    if path == project {
+    // Only the parent of an actual `.git` directory is the primary checkout.
+    // A separate Git directory's parent can contain unrelated private files.
+    if path == project && repo.common_git_dir().file_name() == Some(OsStr::new(".git")) {
         return Ok(path);
     }
     provenant_confinement::verify_worktree(&repo, &path)
