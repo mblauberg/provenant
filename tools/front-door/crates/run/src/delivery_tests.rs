@@ -3173,24 +3173,34 @@ impl PrepareFixture {
             // child can briefly share the dropped lock's open file description
             // until it execs. Retry for about five seconds.
             let mut resumed = None;
-            provenant_test_support::wait_for(
+            let (_, observation) = provenant_test_support::wait_for(
                 "resumed settlement owner",
                 Duration::from_secs(5),
                 || {
                     let result = crate::settlement::Guard::claim_observed(&attempt, scope, &clock);
+                    let retryable = matches!(
+                        &result,
+                        Ok((
+                            None,
+                            Some(
+                                crate::settlement::ClaimRefusal::DriverLease
+                                    | crate::settlement::ClaimRefusal::JournalLock
+                            )
+                        ))
+                    );
                     let observation = match &result {
                         Ok((None, reason)) => format!("claim refused: {reason:?}"),
                         Ok((Some(_), _)) => "claimed".to_owned(),
                         Err(error) => format!("claim error: {error}"),
                     };
                     resumed = Some(result.map(|(driver, _)| driver));
-                    observation
+                    (retryable, observation)
                 },
-                |observation| !observation.starts_with("claim refused:"),
+                |(retryable, _)| !retryable,
             )?;
             settlement = resumed
                 .ok_or("no claim attempted")??
-                .ok_or("resumed owner")?;
+                .ok_or_else(|| format!("resumed owner: {observation}"))?;
         }
         let review = launch.terminal(
             &state,
