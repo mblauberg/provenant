@@ -164,7 +164,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    for index in 0..4 {
+    for index in 0..40 {
         let path = fixture.root.join(format!("foreign-{index}"));
         fixture.run(&["worktree", "add", "--detach", path.to_str().ok_or("path")?])?;
     }
