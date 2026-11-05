@@ -2538,6 +2538,17 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
     );
     assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
+    let mut unsupported = task.clone();
+    unsupported.route = provenant_run::RequestedRoute::Adapter {
+        extra: Default::default(),
+        provider: "cursor".into(),
+        name: "fixture".into(),
+    };
+    let error = provenant_run::Providers::prepare(&registry, &unsupported, "fixture", &paths, None)
+        .err()
+        .ok_or("unsupported named entry was accepted")?;
+    assert_eq!(error.to_string(), "cursor has no named model-less entries");
+    assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
     writeln!(
         OpenOptions::new()
             .append(true)

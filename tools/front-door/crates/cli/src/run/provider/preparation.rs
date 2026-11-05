@@ -219,10 +219,10 @@ pub(crate) fn prepare(
         paths,
         resume,
         |name| match registry.host {
-            Some(host) if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if provider == "command") => {
+            Some(host) if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if AdapterSpec::get(provider).is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)) => {
                 find_command_on_path(name, &host.executable_search_path)
             }
-            None if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if provider == "command") =>
+            None if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if AdapterSpec::get(provider).is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)) =>
             {
                 let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
                 find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
@@ -382,7 +382,8 @@ pub(super) fn prepare_with_wait(
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
-        && provider == "host-native"
+        && AdapterSpec::get(provider)
+            .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::DelegatedAgent)
     {
         AdapterSpec::get(provider)
             .ok_or("unknown adapter")?

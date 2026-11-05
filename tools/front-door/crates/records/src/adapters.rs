@@ -61,6 +61,14 @@ pub enum SetupRoot {
     XdgDataHome,
 }
 
+/// How a model-less named entry is prepared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedEntry {
+    None,
+    Command,
+    DelegatedAgent,
+}
+
 /// Evidence used to identify the model after a provider finishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelObservation {
@@ -142,6 +150,8 @@ pub struct AdapterSpec {
     pub exit_route: bool,
     /// Source of model identity after a run.
     pub model_observation: ModelObservation,
+    /// Preparation mechanism for a model-less named entry.
+    pub named_entry: NamedEntry,
     pub user_sessions: bool,
     /// Copy only session files when retaining private state.
     pub copy_sessions_only: bool,
@@ -350,6 +360,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         result_event_usage: true,
         exit_route: false,
         model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::None,
         user_sessions: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
@@ -423,6 +434,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         result_event_usage: false,
         exit_route: false,
         model_observation: ModelObservation::Rollout,
+        named_entry: NamedEntry::None,
         user_sessions: false,
         copy_sessions_only: true,
         quota_probe: QuotaProbeKind::Command,
@@ -495,6 +507,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         result_event_usage: false,
         exit_route: false,
         model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::None,
         user_sessions: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::HttpGet,
@@ -571,6 +584,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         result_event_usage: false,
         exit_route: false,
         model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::None,
         user_sessions: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::Command,
@@ -645,6 +659,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         result_event_usage: false,
         exit_route: false,
         model_observation: ModelObservation::SessionDatabase,
+        named_entry: NamedEntry::None,
         user_sessions: true,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::LocalLedger,
@@ -710,6 +725,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         result_event_usage: false,
         exit_route: true,
         model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::Command,
         user_sessions: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,
@@ -777,6 +793,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         result_event_usage: false,
         exit_route: false,
         model_observation: ModelObservation::Stream,
+        named_entry: NamedEntry::DelegatedAgent,
         user_sessions: false,
         copy_sessions_only: false,
         quota_probe: QuotaProbeKind::None,

@@ -21,7 +21,9 @@ pub(super) fn prepare_command(
     name: &str,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     use provenant_providers::Adapter;
-    if provider != "command" {
+    if !AdapterSpec::get(provider)
+        .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)
+    {
         return Err(unavailable(format!(
             "{provider} has no named model-less entries"
         )));
