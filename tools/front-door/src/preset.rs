@@ -1224,11 +1224,10 @@ pub fn expand_with(
             bases.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
-    let review_base = bases.into_iter().next();
     // The structural and schema checks operate on the typed graph, without
     // decoding a second copy of the fully assembled document.
     let mut typed = provenant_fabric_runtime::graph::GraphDocument {
-        review_base: review_base.clone(),
+        review_base: bases.into_iter().next(),
         context: Some(provenant_records::run::WorkContext {
             preset: Some(name.into()),
             pattern: Some(name.into()),
@@ -1240,7 +1239,7 @@ pub fn expand_with(
         delivery: None,
         decision_session: None,
         schema_version: 1,
-        graph_id: id.clone(),
+        graph_id: id,
         nodes: nodes
             .iter()
             .map(decode_lowered_node)
@@ -1290,13 +1289,12 @@ pub fn expand_with(
     typed.schema_version = u64::from(provenant_fabric_runtime::graph::minimum_schema_version(
         &typed,
     ));
-    let mut document = json!({"schema_version":typed.schema_version,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
-    if let Some(base) = review_base {
-        document["review_base"] = json!(base);
-    }
-    if let Some(map) = document.as_object_mut() {
-        map.extend(graph_fields);
-    }
+    let mut document = serde_json::to_value(&typed).map_err(|error| error.to_string())?;
+    let map = document.as_object_mut().ok_or("graph must be a table")?;
+    // Retain explicit empty fields until node lowering itself is typed. The
+    // graph's schema and document fields come from the typed value above.
+    map.insert("nodes".into(), Value::Array(nodes));
+    map.extend(graph_fields);
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
     let substitutions = layers.substitutions.take();
     let mut warnings = layers.warnings.take();
