@@ -47,9 +47,19 @@ boundary = "authority"
 reason = "A child cannot exceed its parent access or select another graph source."
 
 [[guard]]
+site = "run/src/launch.rs#child_access_within_impl"
+boundary = "credentials"
+reason = "Child roots may not reach credential stores, including through canonicalised paths."
+
+[[guard]]
+site = "run/src/launch.rs#applied_write_grants"
+boundary = "authority"
+reason = "Applied write grant paths must be representable so continuation and handoff use the selected attempt's actual authority."
+
+[[guard]]
 site = "run/src/launch.rs#applied_write_grants"
 boundary = "unclassified"
-reason = "Invalid paths or a fixed wire-size limit refuse launch while recording applied grants."
+reason = "A fixed wire-size limit refuses launch while recording applied grants; it needs a configurable default or a safe warning fallback."
 
 [[guard]]
 site = "run/src/launch.rs#start_inner"
@@ -145,6 +155,11 @@ reason = "Remaining private-state, path and runtime setup failures require class
 site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "authority"
 reason = "Request digest and host-owned retry checks bind launch to the validated request and caller."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "credentials"
+reason = "Authentication roots and writes must be confined to the selected provider and ordinary reads and writes cannot encompass credential roots."
 
 [[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
