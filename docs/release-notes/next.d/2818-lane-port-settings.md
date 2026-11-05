@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- Writers warn and start without an allocated port block if lane-port settings cannot be read or block allocation encounters an I/O error.
+- Writers report the port-pool setting origin on exhaustion and warn when an I/O error leaves them without an allocated block.
