@@ -2546,7 +2546,11 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
     if let Some(diagnostic) = &preview.login_diagnostic {
         text.push_str(&format!("login: {diagnostic}\n"));
     }
-    text.push_str(&format!("model policy sources={}\n{}\ncompaction break-even turns (15k summary, zero rework): {:?}\n", preview.model_policy.sources.join(", "), preview.model_policy.policy.guidance(), preview.compaction_break_even_turns));
+    text.push_str(&format!(
+        "model policy sources={}\ncompaction break-even turns (15k summary, zero rework): {:?}\n",
+        preview.model_policy.sources.join(", "),
+        preview.compaction_break_even_turns
+    ));
     for note in &preview.exclusion_notes {
         text.push_str(&format!("note: {note}\n"));
     }
@@ -2865,6 +2869,49 @@ mod route_tests {
         let roots = inputs.resolve(&Resolver)?;
         std::fs::create_dir_all(roots.state.as_path())?;
         Ok(roots)
+    }
+
+    #[test]
+    fn route_resolve_human_output_excludes_policy_prompt() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nstop_early_ok=false\n[domains.routing.model_policy.defaults.result]\nsections=['PRIVATE_SENTINEL']\n",
+        )?;
+        let command = super::Route::Resolve(super::RouteResolve {
+            writes: false,
+            account: None,
+            name: None,
+            request: super::RouteRequest {
+                read_heavy: false,
+                model: Some(super::Model("codex/gpt-6-luna".into())),
+                route: None,
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+                exclude: vec![],
+            },
+        });
+        let super::Data::Resolved(preview) = super::execute(
+            &command,
+            &roots,
+            provenant_core::WallTime::from_unix_seconds(100)?,
+        )?
+        else {
+            panic!("expected route preview")
+        };
+        assert!(
+            preview
+                .model_policy
+                .policy
+                .guidance()
+                .contains("PRIVATE_SENTINEL")
+        );
+        let text = super::resolved_text(&preview);
+        assert!(!text.contains("PRIVATE_SENTINEL"), "{text}");
+        assert!(!text.contains("Carry the task to completion"), "{text}");
+        Ok(())
     }
 
     #[test]
