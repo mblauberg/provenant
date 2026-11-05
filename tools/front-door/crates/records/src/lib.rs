@@ -4,8 +4,8 @@
 mod adapters;
 pub use adapters::{
     ADAPTER_SPECS, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES, LaunchCapabilities, LaunchField,
-    LaunchRequest, LoginObservation, LoginReprobe, QuotaProbeKind, SkillLocation,
-    UnsupportedLaunch,
+    LaunchRequest, LoginObservation, LoginReprobe, ModelObservation, NamedEntry, QuotaProbeKind,
+    SetupRoot, SkillLocation, UnsupportedLaunch,
 };
 mod artifact_ref;
 mod attempt_fact;

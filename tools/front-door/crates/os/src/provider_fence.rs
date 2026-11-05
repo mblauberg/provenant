@@ -11,7 +11,7 @@ fn directory(state: &Path, provider: &str) -> fs::Result<Directory> {
     if provider.is_empty()
         || !provider
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
         return Err(fs::FsError::InvalidComponent {
             name: provider.into(),
@@ -50,6 +50,18 @@ pub fn wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_lease_accepts_hyphens_and_rejects_paths() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let _lease = acquire(temp.path(), "fixture-provider", LockMode::Shared)?;
+        assert!(matches!(
+            acquire(temp.path(), "../fixture", LockMode::Shared),
+            Err(fs::FsError::InvalidComponent { .. })
+        ));
+        Ok(())
+    }
 
     #[test]
     fn launch_waits_for_update_then_keeps_its_shared_lease()

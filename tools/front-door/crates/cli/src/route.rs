@@ -585,11 +585,28 @@ impl From<provenant_config::ConfigError> for EdgeError {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum Data {
-    List(Box<provenant_routing::RouteList>),
+    List(Box<RouteListDisplay>),
     Resolved(Box<RoutePreview>),
     Pacing(Box<PacingReport>),
     Overrides(Box<OverrideReport>),
 }
+#[derive(Serialize)]
+pub struct RouteListDisplay {
+    #[serde(flatten)]
+    pub routes: Box<provenant_routing::RouteList>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recorded_readiness: Vec<RecordedReadiness>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub readiness_truncated: bool,
+}
+
+impl std::ops::Deref for RouteListDisplay {
+    type Target = provenant_routing::RouteList;
+    fn deref(&self) -> &Self::Target {
+        &self.routes
+    }
+}
+
 /// What a `route override` command recorded or cleared, and every scheduled
 /// override afterwards. Fields are always present; `recorded` is null and
 /// `cleared` empty when the command did neither.
@@ -813,11 +830,79 @@ pub struct RoutePreview {
     pub supported_efforts: Option<Vec<String>>,
     pub nearest_models: Vec<String>,
     pub pacing: Vec<provenant_routing::PacingPreview>,
+    /// Recorded model-scoped evidence, separate from live executable availability.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recorded_readiness: Vec<RecordedReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_diagnostic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota: Option<provenant_quota::QuotaSnapshot>,
 }
+#[derive(Serialize)]
+pub struct RecordedReadiness {
+    pub host: String,
+    pub account: String,
+    pub account_key: String,
+    pub model: String,
+    pub observation: provenant_quota::ReadinessRead,
+}
+
+pub(crate) fn recorded_model_readiness(
+    settings: &provenant_providers::accounts::Settings,
+    model: &ModelId,
+    pools: &[String],
+    selected: Option<&str>,
+    hint: Option<&str>,
+    lookup: impl Fn(&provenant_quota::ReadinessScope) -> provenant_quota::ReadinessRead,
+) -> Vec<RecordedReadiness> {
+    let mut seen = BTreeSet::new();
+    settings
+        .with_derived_accounts()
+        .entries
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            if entry.adapter != model.adapter()
+                || selected.is_some_and(|key| key != entry.key)
+                || hint.is_some_and(|hint| {
+                    hint != id
+                        && hint != entry.label
+                        && hint != entry.key
+                        && hint != format!("{}/{}", entry.adapter, entry.key)
+                })
+                || !seen.insert((entry.adapter.clone(), entry.key.clone()))
+                || provenant_records::AdapterSpec::get(&entry.adapter)
+                    .is_some_and(|spec| !spec.account_serves_model(&entry.key, model.model()))
+            {
+                return None;
+            }
+            let mut scope = provenant_quota::ReadinessScope {
+                host: provenant_quota::LOCAL_HOST.into(),
+                adapter: entry.adapter,
+                account_key: entry.key.clone(),
+                route: model.as_str().into(),
+            };
+            let mut observation = lookup(&scope);
+            if observation.state != provenant_quota::ReadinessState::Unavailable {
+                for pool in pools {
+                    scope.route.clone_from(pool);
+                    let pool_observation = lookup(&scope);
+                    if pool_observation.state == provenant_quota::ReadinessState::Unavailable {
+                        observation = pool_observation;
+                        break;
+                    }
+                }
+            }
+            Some(RecordedReadiness {
+                host: scope.host.clone(),
+                account: entry.label,
+                account_key: entry.key,
+                model: model.as_str().into(),
+                observation,
+            })
+        })
+        .collect()
+}
+
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
 /// served by the `opencode-go` provider. Free (Zen) and other configured
 /// providers must not inherit its account-level exhaustion.
@@ -995,8 +1080,10 @@ fn resolve_pacing_accounts(
     }
     Ok(())
 }
+#[allow(clippy::too_many_arguments)]
 fn with_context<T>(
     roots: &Roots,
+    registry: &[provenant_providers::Registration],
     availability: &[AvailabilityRecord],
     access: &[AccessContext<'_>],
     host: &str,
@@ -1006,6 +1093,7 @@ fn with_context<T>(
         &RoutingContext<'_>,
         &[provenant_quota::AccountRecord],
         &[provenant_quota::QuotaPolicy],
+        &provenant_providers::accounts::Settings,
     ) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
     let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
@@ -1019,7 +1107,7 @@ fn with_context<T>(
         .as_bool()
         .ok_or(RoutingError::InvalidValue)?;
     let domains = resolved_config.domains;
-    let policies = provenant_providers::scheduling_policies(&domains.quota, REGISTRY);
+    let policies = provenant_providers::scheduling_policies(&domains.quota, registry);
     let mut config = domains.routing;
     config.allow_unknown_partial_headroom = allow_unknown;
     config.partial_headroom_source = Some(partial_headroom_source);
@@ -1117,7 +1205,7 @@ fn with_context<T>(
             policy_account_hint: None,
             catalogue: &catalogue,
             config: &config,
-            registry: REGISTRY,
+            registry,
             availability,
             quota: &quota,
             capacity_cooldowns: &capacity_cooldowns,
@@ -1130,6 +1218,7 @@ fn with_context<T>(
         },
         &quota_records,
         &policies,
+        &domains.accounts,
     )
 }
 /// Resolve one production dispatch against fresh provider facts and validated
@@ -1160,6 +1249,7 @@ impl From<EdgeError> for DispatchError {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "fixture"))]
 pub(crate) fn resolve_dispatch(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
@@ -1174,6 +1264,7 @@ pub(crate) fn resolve_dispatch(
     resolve_dispatch_rejecting(
         request,
         roots,
+        REGISTRY,
         account,
         seed,
         availability,
@@ -1189,6 +1280,7 @@ pub(crate) fn resolve_dispatch(
 pub(crate) fn resolve_dispatch_rejecting(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
+    registry: &[provenant_providers::Registration],
     account: Option<&str>,
     seed: (&str, u64),
     availability: &[AvailabilityRecord],
@@ -1228,6 +1320,7 @@ pub(crate) fn resolve_dispatch_rejecting(
     let selected = resolve_dispatch_excluding(
         request,
         roots,
+        registry,
         account,
         seed,
         availability,
@@ -1255,6 +1348,7 @@ pub(crate) fn resolve_dispatch_rejecting(
         let relaxed = resolve_dispatch_excluding(
             request,
             roots,
+            registry,
             account,
             seed,
             availability,
@@ -1291,6 +1385,7 @@ pub(crate) fn resolve_dispatch_rejecting(
         let relaxed = resolve_dispatch_excluding(
             request,
             roots,
+            registry,
             account,
             seed,
             availability,
@@ -1347,6 +1442,7 @@ fn review_family_excluded(family: Option<&str>, families: &[String]) -> bool {
 fn resolve_dispatch_excluding(
     request: &provenant_routing::RouteRequest,
     roots: &Roots,
+    registry: &[provenant_providers::Registration],
     account: Option<&str>,
     seed: (&str, u64),
     availability: &[AvailabilityRecord],
@@ -1364,12 +1460,13 @@ fn resolve_dispatch_excluding(
     }
     with_context(
         roots,
+        registry,
         availability,
         access,
         host,
         &requested_models,
         true,
-        |context, records, policies| {
+        |context, records, policies, _| {
             let mut excluded_members = initial_exclusions.to_vec();
             let mut refusals = Vec::new();
             // Resolution already skips persisted mismatch and refusals, so this
@@ -1580,6 +1677,7 @@ pub(crate) fn account_evidence(
     settings: &provenant_quota::Settings,
     mut records: Vec<provenant_quota::AccountRecord>,
     now: i64,
+    registry: &[provenant_providers::Registration],
 ) -> (
     Vec<provenant_quota::AccountRecord>,
     Vec<provenant_quota::QuotaPolicy>,
@@ -1587,13 +1685,14 @@ pub(crate) fn account_evidence(
     settings.apply_calibration(&mut records, now);
     (
         records,
-        provenant_providers::scheduling_policies(settings, REGISTRY),
+        provenant_providers::scheduling_policies(settings, registry),
     )
 }
 /// Recheck each selected fallback against the latest persisted refusals.
 pub(crate) fn check_dispatch_candidate(
     roots: &Roots,
     route: &provenant_records::ResolvedRoute,
+    registry: &[provenant_providers::Registration],
 ) -> Result<(), String> {
     let catalogue = Catalogue::bundled().map_err(|e| e.to_string())?;
     let model =
@@ -1610,7 +1709,7 @@ pub(crate) fn check_dispatch_candidate(
     let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
     let records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
-    let (records, policies) = account_evidence(&domains.quota, records, now);
+    let (records, policies) = account_evidence(&domains.quota, records, now, registry);
     provenant_quota::Admission {
         policies: &policies,
         now_unix_seconds: now,
@@ -1625,24 +1724,114 @@ fn list_data(
     roots: &Roots,
     query: &RouteListRequest,
 ) -> Result<Box<provenant_routing::RouteList>, EdgeError> {
+    list_data_and_accounts(roots, query).map(|(routes, _)| routes)
+}
+
+fn list_data_and_accounts(
+    roots: &Roots,
+    query: &RouteListRequest,
+) -> Result<
+    (
+        Box<provenant_routing::RouteList>,
+        provenant_providers::accounts::Settings,
+    ),
+    EdgeError,
+> {
     with_context(
         roots,
+        REGISTRY,
         &[],
         &[],
         "local-preview",
         &[],
         false,
-        |context, _, _| {
-            Ok(Box::new(provenant_routing::list(
-                &provenant_routing::RouteListQuery {
-                    adapter: query.adapter.clone(),
-                    pool: query.pool.clone(),
-                    valid: query.valid,
-                },
-                context,
-            )?))
+        |context, _, _, accounts| {
+            Ok((
+                Box::new(provenant_routing::list(
+                    &provenant_routing::RouteListQuery {
+                        adapter: query.adapter.clone(),
+                        pool: query.pool.clone(),
+                        valid: query.valid,
+                    },
+                    context,
+                )?),
+                accounts.clone(),
+            ))
         },
     )
+}
+
+fn display_list_data(
+    roots: &Roots,
+    query: &RouteListRequest,
+) -> Result<Box<RouteListDisplay>, EdgeError> {
+    let (routes, accounts) = list_data_and_accounts(roots, query)?;
+    let catalogue = Catalogue::bundled()?;
+    let now = SystemClock::new().unix_seconds();
+    let mut models = BTreeSet::new();
+    models.extend(routes.models.iter().map(|entry| entry.model.clone()));
+    models.extend(routes.valid_pairs.iter().map(|pair| pair.model.clone()));
+    models.extend(
+        routes
+            .named_routes
+            .values()
+            .map(|route| route.model.clone()),
+    );
+    models.extend(
+        routes
+            .pools
+            .values()
+            .flatten()
+            .map(|member| member.model.clone()),
+    );
+    // Read each account's bounded file once for this display, without probing or writes.
+    let files = std::cell::RefCell::new(std::collections::BTreeMap::new());
+    let lookup = |scope: &provenant_quota::ReadinessScope| {
+        let key = (scope.adapter.clone(), scope.account_key.clone());
+        let mut files = files.borrow_mut();
+        let file = files.entry(key).or_insert_with(|| {
+            crate::quota::recorded_readiness_file(
+                roots.state.as_path(),
+                &scope.adapter,
+                &scope.account_key,
+            )
+            .map_err(|_| ())
+        });
+        match file {
+            Ok(Some(file)) => file.get(scope, now),
+            Ok(None) => provenant_quota::ReadinessRead::absent(),
+            Err(()) => provenant_quota::ReadinessRead::unknown(
+                provenant_quota::ReadinessReason::InvalidEvidence,
+            ),
+        }
+    };
+    let mut recorded_readiness = Vec::new();
+    let mut readiness_truncated = false;
+    for model in models {
+        let rows = recorded_model_readiness(
+            &accounts,
+            &model,
+            &catalogue.admission_pools(&model),
+            None,
+            None,
+            lookup,
+        );
+        for row in rows {
+            if recorded_readiness.len() == 256 {
+                readiness_truncated = true;
+                break;
+            }
+            recorded_readiness.push(row);
+        }
+        if readiness_truncated {
+            break;
+        }
+    }
+    Ok(Box::new(RouteListDisplay {
+        routes,
+        recorded_readiness,
+        readiness_truncated,
+    }))
 }
 
 pub(crate) fn effective_members(
@@ -2168,15 +2357,16 @@ fn edit_model_exclusion(
 
 fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeError> {
     match command {
-        Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
+        Route::List(query) => Ok(Data::List(display_list_data(roots, query)?)),
         Route::Resolve(query) => with_context(
             roots,
+            REGISTRY,
             &[],
             &[],
             "local-preview",
             &[],
             false,
-            |context, records, _| {
+            |context, records, _, accounts| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),
                     ..*context
@@ -2229,20 +2419,30 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                             | provenant_records::RouteExclusionReason::LoginExpired
                             | provenant_records::RouteExclusionReason::AccountMismatch),
                         ..
-                    } => {
-                        let config =
-                            provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
-                        Some(crate::quota::account_login_diagnostic(
-                            config.domains.accounts.entries.values(),
-                            records,
-                            &route.adapter,
-                            route.account_key.as_deref(),
-                            reason,
-                        ))
-                    }
+                    } => Some(crate::quota::account_login_diagnostic(
+                        accounts.entries.values(),
+                        records,
+                        &route.adapter,
+                        route.account_key.as_deref(),
+                        reason,
+                    )),
                     _ => None,
                 };
                 let pacing = provenant_routing::pacing_preview(&model, context);
+                let recorded_readiness = recorded_model_readiness(
+                    accounts,
+                    &model,
+                    &context.catalogue.admission_pools(&model),
+                    route.account_key.as_deref(),
+                    query.account.as_deref(),
+                    |scope| {
+                        crate::quota::read_readiness(
+                            roots.state.as_path(),
+                            scope,
+                            now.unix_seconds(),
+                        )
+                    },
+                );
                 let entry = context.catalogue.model(&model);
                 let allow_unknown_partial_headroom = context
                     .config
@@ -2262,6 +2462,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                         Vec::new()
                     },
                     pacing,
+                    recorded_readiness,
                     login_diagnostic,
                     quota,
                 })))
@@ -2269,7 +2470,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
         ),
         Route::Set(request) => {
             set_pool(roots, request)?;
-            Ok(Data::List(list_data(
+            Ok(Data::List(display_list_data(
                 roots,
                 &RouteListRequest {
                     valid: false,
@@ -2280,7 +2481,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
         }
         Route::Remove(request) => {
             remove_pool_member(roots, request)?;
-            Ok(Data::List(list_data(
+            Ok(Data::List(display_list_data(
                 roots,
                 &RouteListRequest {
                     valid: false,
@@ -2291,7 +2492,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
         }
         Route::Reset(request) => {
             reset_pool(roots, request)?;
-            Ok(Data::List(list_data(
+            Ok(Data::List(display_list_data(
                 roots,
                 &RouteListRequest {
                     valid: false,
@@ -2408,12 +2609,13 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
     };
     let blocked = with_context(
         roots,
+        REGISTRY,
         &[],
         &[],
         "local-preview",
         &[],
         false,
-        |context, records, policies| {
+        |context, records, policies, _| {
             let request = resolve_request(&query, context)?;
             let rules = effective_exclusion_rules(exclude, roots)?;
             let now = context.now.as_timestamp().as_second();
@@ -2498,6 +2700,49 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
         Err(error) => Some(error.to_string()),
     }
 }
+fn readiness_text(readiness: &RouteReadiness) -> String {
+    use provenant_records::RouteExclusionReason;
+    match readiness {
+        RouteReadiness::Ready {
+            expires_unix_seconds,
+            ..
+        } => format!("ready (observation expires at {expires_unix_seconds})"),
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::UnknownAvailability,
+            ..
+        } => "unknown (not probed; run `provenant quota tick` to refresh quota)".into(),
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::StaleAvailability,
+            ..
+        } => "unknown (observation expired; run `provenant quota tick` to refresh quota)".into(),
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::UnknownPartialHeadroom,
+            ..
+        } => "unknown (partial headroom is uncalibrated; run `provenant quota tick` to refresh quota)".into(),
+        RouteReadiness::Unavailable { reason, .. } => {
+            let label = serde_json::to_value(reason)
+                .ok()
+                .and_then(|value| value.as_str().map(|text| text.replace('_', " ")))
+                .unwrap_or_else(|| "unknown reason".into());
+            format!("unavailable ({label})")
+        }
+    }
+}
+
+fn unobserved_model(model: &ModelId, list: &RouteListDisplay) -> &'static str {
+    if list
+        .recorded_readiness
+        .iter()
+        .any(|record| record.model == model.as_str())
+    {
+        ""
+    } else if list.readiness_truncated {
+        "; readiness not shown (display limit reached)"
+    } else {
+        "; readiness unknown (not probed; run `provenant quota tick` to refresh quota)"
+    }
+}
+
 /// The human report for a resolved route preview, naming each exclusion that
 /// removed a pool candidate and where it came from.
 pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
@@ -2516,11 +2761,11 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
         })
         .collect::<String>();
     let mut text = format!(
-        "{}/{} effort={} {:?}{}{}\n",
+        "{}/{} effort={} {}{}{}\n",
         route.adapter,
         route.model,
         route.effort.as_deref().unwrap_or("unspecified"),
-        route.readiness,
+        readiness_text(&route.readiness),
         route
             .pool_selection
             .as_ref()
@@ -2543,10 +2788,23 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }),
         diagnostics
     );
+    for record in &preview.recorded_readiness {
+        text.push_str(&format!(
+            "recorded readiness {} [{}] for {}: {}\n",
+            record.account.escape_debug(),
+            record.account_key.escape_debug(),
+            record.model,
+            crate::quota::readiness_words(&record.observation)
+        ));
+    }
     if let Some(diagnostic) = &preview.login_diagnostic {
         text.push_str(&format!("login: {diagnostic}\n"));
     }
-    text.push_str(&format!("model policy sources={}\n{}\ncompaction break-even turns (15k summary, zero rework): {:?}\n", preview.model_policy.sources.join(", "), preview.model_policy.policy.guidance(), preview.compaction_break_even_turns));
+    text.push_str(&format!(
+        "model policy sources={}\ncompaction break-even turns (15k summary, zero rework): {:?}\n",
+        preview.model_policy.sources.join(", "),
+        preview.compaction_break_even_turns
+    ));
     for note in &preview.exclusion_notes {
         text.push_str(&format!("note: {note}\n"));
     }
@@ -2648,16 +2906,21 @@ pub fn run(
                         pair.effort.as_deref().unwrap_or("unspecified")
                     )
                 }));
-                lines.extend(
-                    list.models
-                        .iter()
-                        .map(|m| format!("{} efforts=[{}]", m.model.as_str(), m.efforts.join(","))),
-                );
-                lines.extend(
-                    list.named_routes
-                        .iter()
-                        .map(|(name, r)| format!("route {name} = {}", r.model.as_str())),
-                );
+                lines.extend(list.models.iter().map(|m| {
+                    format!(
+                        "{} efforts=[{}]{}",
+                        m.model.as_str(),
+                        m.efforts.join(","),
+                        unobserved_model(&m.model, list)
+                    )
+                }));
+                lines.extend(list.named_routes.iter().map(|(name, r)| {
+                    format!(
+                        "route {name} = {}{}",
+                        r.model.as_str(),
+                        unobserved_model(&r.model, list)
+                    )
+                }));
                 lines.extend(list.account_pacing.iter().map(|entry| {
                     format!(
                         "account {}/{} pacing={:?} source={} profile={:?} expires={:?}",
@@ -2692,12 +2955,29 @@ pub fn run(
                             .map(|row| OverrideRow::model_exclusion(row, now).line()),
                     );
                 }
+                if list.recorded_readiness.is_empty() {
+                    lines.push("readiness unknown (not probed; run `provenant quota tick` to refresh quota)".into());
+                }
+                lines.extend(list.recorded_readiness.iter().map(|record| {
+                    format!(
+                        "recorded readiness {} [{}] for {}: {}",
+                        record.account.escape_debug(),
+                        record.account_key.escape_debug(),
+                        record.model,
+                        crate::quota::readiness_words(&record.observation)
+                    )
+                }));
+                if list.readiness_truncated {
+                    lines.push(
+                        "warning: readiness display limited to 256 account/model rows".into(),
+                    );
+                }
                 lines.extend(list.pools.iter().map(|(name, members)| {
                     let models = members
                         .iter()
                         .map(|member| {
                             format!(
-                                "{} weight={} pacing={:?}{}",
+                                "{} weight={} pacing={:?}{}{}",
                                 member.model.as_str(),
                                 member.weight,
                                 member.pacing,
@@ -2705,6 +2985,7 @@ pub fn run(
                                     .effort
                                     .as_ref()
                                     .map_or(String::new(), |effort| format!(" effort={effort}")),
+                                unobserved_model(&member.model, list),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -2745,12 +3026,33 @@ pub fn run(
                 ("model exclusions", list.model_exclusions.len()),
                 ("exclusion notes", list.exclusion_notes.len()),
             ];
-            let rows = list
-                .named_routes
-                .iter()
-                .map(|(name, r)| format!("route {name} = {}", r.model.as_str()))
-                .chain(list.pools.keys().map(|name| format!("pool {name}")))
-                .collect();
+            let mut rows = Vec::new();
+            if list.readiness_truncated {
+                rows.push("warning: readiness display limited to 256 account/model rows".into());
+            }
+            if list.recorded_readiness.is_empty() {
+                rows.push(
+                    "readiness unknown (not probed; run `provenant quota tick` to refresh quota)"
+                        .into(),
+                );
+            }
+            rows.extend(list.recorded_readiness.iter().map(|record| {
+                format!(
+                    "recorded readiness {} [{}] for {}: {}",
+                    record.account.escape_debug(),
+                    record.account_key.escape_debug(),
+                    record.model,
+                    crate::quota::readiness_words(&record.observation)
+                )
+            }));
+            rows.extend(list.named_routes.iter().map(|(name, r)| {
+                format!(
+                    "route {name} = {}{}",
+                    r.model.as_str(),
+                    unobserved_model(&r.model, list)
+                )
+            }));
+            rows.extend(list.pools.keys().map(|name| format!("pool {name}")));
             Some(crate::Summary::new(
                 format!(
                     "catalogue {}: {}",
@@ -2848,6 +3150,139 @@ mod route_tests {
     };
     use std::error::Error;
 
+    #[test]
+    fn route_list_does_not_call_omitted_evidence_unprobed() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        let query = super::RouteListRequest {
+            valid: false,
+            adapter: Some("codex".into()),
+            pool: None,
+        };
+        let mut list = super::display_list_data(&roots, &query)?;
+        let model = super::ModelId::parse("codex/gpt-6-luna")?;
+        assert!(super::unobserved_model(&model, &list).contains("not probed"));
+        list.readiness_truncated = true;
+        assert!(super::unobserved_model(&model, &list).contains("not shown"));
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_route_readiness_keeps_model_and_account_scope() -> Result<(), Box<dyn Error>> {
+        use provenant_quota::{
+            ReadinessFile, ReadinessReason, ReadinessScope, ReadinessState, RouteReadiness,
+        };
+        let settings: provenant_providers::accounts::Settings =
+            serde_json::from_value(serde_json::json!({"entries":{
+                "one":{"adapter":"codex","label":"one","key":"key-one","directory":"/fixture/one"},
+                "two":{"adapter":"codex","label":"two","key":"key-two","directory":"/fixture/two"}
+            }}))?;
+        let model = super::ModelId::parse("codex/gpt-6-luna")?;
+        let scope = ReadinessScope {
+            host: provenant_quota::LOCAL_HOST.into(),
+            adapter: "codex".into(),
+            account_key: "key-one".into(),
+            route: model.as_str().into(),
+        };
+        let file = ReadinessFile {
+            records: vec![
+                RouteReadiness {
+                    schema_version: 1,
+                    scope: scope.clone(),
+                    state: ReadinessState::Unavailable,
+                    reason: Some(ReadinessReason::ProviderRefusal),
+                    observed_unix_seconds: 10,
+                    expires_unix_seconds: 20,
+                    reset_unix_seconds: None,
+                    evidence_ref: Some("fixture".into()),
+                },
+                RouteReadiness {
+                    schema_version: 1,
+                    scope: ReadinessScope {
+                        account_key: "key-two".into(),
+                        ..scope.clone()
+                    },
+                    state: ReadinessState::Ready,
+                    reason: None,
+                    observed_unix_seconds: 11,
+                    expires_unix_seconds: 20,
+                    reset_unix_seconds: None,
+                    evidence_ref: Some("fixture".into()),
+                },
+                RouteReadiness {
+                    schema_version: 1,
+                    scope: ReadinessScope {
+                        account_key: "key-two".into(),
+                        route: "verified-pool".into(),
+                        ..scope.clone()
+                    },
+                    state: ReadinessState::Unavailable,
+                    reason: Some(ReadinessReason::Exhausted),
+                    observed_unix_seconds: 12,
+                    expires_unix_seconds: 20,
+                    reset_unix_seconds: None,
+                    evidence_ref: Some("fixture".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        let rows = super::recorded_model_readiness(
+            &settings,
+            &model,
+            &[],
+            None,
+            Some("one"),
+            |requested| file.get(requested, 15),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].host, provenant_quota::LOCAL_HOST);
+        assert_eq!(rows[0].account_key, "key-one");
+        assert_eq!(rows[0].model, model.as_str());
+        assert_eq!(
+            rows[0].observation.reason,
+            Some(ReadinessReason::ProviderRefusal)
+        );
+        assert_eq!(rows[0].observation.observed_scope.as_ref(), Some(&scope));
+        assert_eq!(rows[0].observation.observed_unix_seconds, Some(10));
+        let other = super::recorded_model_readiness(
+            &settings,
+            &model,
+            &[],
+            None,
+            Some("two"),
+            |requested| file.get(requested, 15),
+        );
+        assert_eq!(other[0].observation.state, ReadinessState::Ready);
+        assert_eq!(other[0].observation.observed_unix_seconds, Some(11));
+        let pooled = super::recorded_model_readiness(
+            &settings,
+            &model,
+            &["verified-pool".into()],
+            None,
+            Some("two"),
+            |requested| file.get(requested, 15),
+        );
+        assert_eq!(
+            pooled[0].observation.reason,
+            Some(ReadinessReason::Exhausted)
+        );
+        assert_eq!(
+            pooled[0].observation.observed_scope.as_ref().unwrap().route,
+            "verified-pool"
+        );
+        let other_model = super::ModelId::parse("codex/gpt-6.1-terra")?;
+        let other = super::recorded_model_readiness(
+            &settings,
+            &other_model,
+            &[],
+            None,
+            Some("one"),
+            |requested| file.get(requested, 15),
+        );
+        assert_eq!(other[0].observation.state, ReadinessState::Unknown);
+        Ok(())
+    }
+
     fn exclusion_roots(temp: &tempfile::TempDir) -> Result<provenant_core::Roots, Box<dyn Error>> {
         use std::path::Path;
         struct Resolver;
@@ -2865,6 +3300,80 @@ mod route_tests {
         let roots = inputs.resolve(&Resolver)?;
         std::fs::create_dir_all(roots.state.as_path())?;
         Ok(roots)
+    }
+
+    #[test]
+    fn route_readiness_is_rendered_in_words() {
+        use provenant_records::RouteExclusionReason;
+        let ready = RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 120,
+        };
+        assert!(super::readiness_text(&ready).starts_with("ready "));
+        let unknown = super::readiness_text(&RouteReadiness::unknown());
+        assert!(
+            unknown.contains("unknown (not probed") && unknown.contains("provenant quota tick"),
+            "{unknown}"
+        );
+        let stale = super::readiness_text(&RouteReadiness::stale());
+        assert!(stale.contains("unknown (observation expired"), "{stale}");
+        let partial = RouteReadiness::Unavailable {
+            extra: Default::default(),
+            reason: RouteExclusionReason::UnknownPartialHeadroom,
+        };
+        assert!(super::readiness_text(&partial).starts_with("unknown (partial headroom"));
+        let refused = RouteReadiness::Unavailable {
+            extra: Default::default(),
+            reason: RouteExclusionReason::AuthRequired,
+        };
+        assert_eq!(
+            super::readiness_text(&refused),
+            "unavailable (auth required)"
+        );
+    }
+
+    #[test]
+    fn route_resolve_human_output_excludes_policy_prompt() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nstop_early_ok=false\n[domains.routing.model_policy.defaults.result]\nsections=['PRIVATE_SENTINEL']\n",
+        )?;
+        let command = super::Route::Resolve(super::RouteResolve {
+            writes: false,
+            account: None,
+            name: None,
+            request: super::RouteRequest {
+                read_heavy: false,
+                model: Some(super::Model("codex/gpt-6-luna".into())),
+                route: None,
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+                exclude: vec![],
+            },
+        });
+        let super::Data::Resolved(preview) = super::execute(
+            &command,
+            &roots,
+            provenant_core::WallTime::from_unix_seconds(100)?,
+        )?
+        else {
+            panic!("expected route preview")
+        };
+        assert!(
+            preview
+                .model_policy
+                .policy
+                .guidance()
+                .contains("PRIVATE_SENTINEL")
+        );
+        let text = super::resolved_text(&preview);
+        assert!(!text.contains("PRIVATE_SENTINEL"), "{text}");
+        assert!(!text.contains("Carry the task to completion"), "{text}");
+        Ok(())
     }
 
     #[test]
@@ -3668,7 +4177,7 @@ mod route_tests {
                 exclude: vec![],
             };
             let resolved = resolve(&request.to_domain()?)?;
-            assert!(super::check_dispatch_candidate(&roots, &resolved).is_err());
+            assert!(super::check_dispatch_candidate(&roots, &resolved, super::REGISTRY).is_err());
             assert_eq!(
                 resolved.alternatives.as_slice()[0].model,
                 "opencode-go/deepseek-v4.1-flash"
@@ -3706,13 +4215,13 @@ mod route_tests {
         let mut candidate = selected.clone();
         candidate.model = "opencode-go/unlisted".into();
         assert!(
-            super::check_dispatch_candidate(&roots, &candidate)
+            super::check_dispatch_candidate(&roots, &candidate, super::REGISTRY)
                 .unwrap_err()
                 .contains("unknown")
         );
         candidate.model = "opencode-go/glm-5.3-flash".into();
         assert!(
-            super::check_dispatch_candidate(&roots, &candidate)
+            super::check_dispatch_candidate(&roots, &candidate, super::REGISTRY)
                 .unwrap_err()
                 .contains("$60")
         );
@@ -3916,7 +4425,7 @@ mod route_tests {
         };
         let drawn = resolve(None)?;
         let spent = drawn.account_key.clone().ok_or("account")?;
-        assert!(super::check_dispatch_candidate(&roots, &drawn).is_ok());
+        assert!(super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).is_ok());
         // The provider refused the drawn account: the next dispatch keeps the
         // model and takes the other account instead of failing.
         crate::quota::persist_provider_refusal(
@@ -3933,10 +4442,10 @@ mod route_tests {
             Some(now + 3_600),
         )?;
         // A refusal written after resolution still stops the launch.
-        let error = super::check_dispatch_candidate(&roots, &drawn).unwrap_err();
+        let error = super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).unwrap_err();
         assert!(error.contains("scoped provider refusal"), "{error}");
         let redrawn = resolve(None)?;
-        assert!(super::check_dispatch_candidate(&roots, &redrawn).is_ok());
+        assert!(super::check_dispatch_candidate(&roots, &redrawn, super::REGISTRY).is_ok());
         assert_eq!(redrawn.model, "gpt-6-luna");
         assert!(matches!(redrawn.readiness, RouteReadiness::Ready { .. }));
         assert_ne!(redrawn.account_key.as_deref(), Some(spent.as_str()));

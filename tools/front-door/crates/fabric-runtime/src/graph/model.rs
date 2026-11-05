@@ -252,6 +252,8 @@ pub struct GraphNode {
     pub on_fail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<provenant_records::run::DeliveryMode>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub require_skill_location: bool,
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
@@ -1042,6 +1044,7 @@ pub struct Replay<'a> {
 
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
+    pub require_skill_location: bool,
     /// Remaining portion of the graph's single infrastructure allowance.
     pub settlement_retries: Option<u8>,
     /// Models selected for earlier attempts of this node.

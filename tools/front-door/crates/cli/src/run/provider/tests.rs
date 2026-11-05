@@ -1,4 +1,73 @@
 #[test]
+fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
+    use provenant_providers::ProviderError;
+    use provenant_routing::FallbackOutcome;
+    for error in [
+        ProviderError::LoginRequired,
+        ProviderError::CredentialUnavailable,
+        ProviderError::CredentialNotFound,
+        ProviderError::CredentialExpired,
+    ] {
+        let outcome = provider_preparation_fallback(&error);
+        assert_eq!(outcome, FallbackOutcome::AuthRequired);
+        let policy = provenant_routing::FallbackPolicy {
+            outcome,
+            handoff: provenant_routing::FallbackHandoff::Local,
+            custody_released: true,
+            read_only: false,
+            budget_remaining: true,
+            pinned: false,
+        };
+        assert!(policy.allows_switch());
+        assert!(
+            !provenant_routing::FallbackPolicy {
+                pinned: true,
+                ..policy
+            }
+            .allows_switch()
+        );
+        assert!(
+            !provenant_routing::FallbackPolicy {
+                budget_remaining: false,
+                ..policy
+            }
+            .allows_switch()
+        );
+        assert!(
+            !provenant_routing::FallbackPolicy {
+                custody_released: false,
+                ..policy
+            }
+            .allows_switch()
+        );
+        assert!(
+            !provenant_routing::FallbackPolicy {
+                handoff: provenant_routing::FallbackHandoff::UncertainOrLaunched,
+                ..policy
+            }
+            .allows_switch()
+        );
+    }
+    for error in [
+        ProviderError::UnsupportedPolicy,
+        ProviderError::IdentityMismatch,
+        ProviderError::UnknownIdentity,
+        ProviderError::InvalidPath,
+        ProviderError::IsolatedKeychainUnavailable("fixture".into()),
+        ProviderError::ProbeDirectory("fixture".into()),
+        ProviderError::CredentialReadFailed("fixture".into()),
+        ProviderError::PromptTooLarge,
+        ProviderError::Overflow,
+        ProviderError::Malformed,
+    ] {
+        assert_eq!(
+            provider_preparation_fallback(&error),
+            FallbackOutcome::Other
+        );
+    }
+}
+
+#[test]
 fn codex_auth_reprobe_uses_selected_home_and_trusts_status()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor, Termination};
@@ -549,6 +618,40 @@ fn version_probe_reports_outcomes_without_disclosing_output()
                 assert_eq!(record.last_update, Some(last_update.clone()));
             }
         }
+    }
+    for incomplete in 0..4 {
+        let executor = VersionExecutor(ExecOutcome {
+            termination: Termination::Exit(0),
+            timed_out: false,
+            stdout: CapturedStream {
+                bytes: b"opencode v2.0.32".to_vec(),
+                read_failed: incomplete == 0,
+                ..CapturedStream::default()
+            },
+            stderr: CapturedStream::default(),
+            drain_truncated: incomplete == 1,
+            overflow_stopped: incomplete == 2,
+            cancelled: incomplete == 3,
+            elapsed_micros: 0,
+        });
+        let executor = provenant_providers::host::HostProbeExecutor::new(&executor, &root)?;
+        let probe = Probe {
+            roots: Some(&roots),
+            executor: &executor,
+            home: &root,
+            user: "fixture".as_ref(),
+            scratch: &root,
+        };
+        assert!(matches!(
+            observe_account(
+                &entry,
+                Path::new("/fixture/opencode"),
+                &probe,
+                "fixture",
+                100
+            ),
+            Err(AccountObservationError::VersionUnavailable(_))
+        ));
     }
     Ok(())
 }
@@ -1141,7 +1244,7 @@ fn executable_discovery_after_wait_observes_the_completed_update()
         executables: Default::default(),
         executable_search_path: vec![temp.path().into()],
         git: "/usr/bin/git".into(),
-        codex_home: None,
+        default_account_directories: Default::default(),
         cargo_build_jobs: None,
         #[cfg(feature = "fixture")]
         fixture_state_write: false,
@@ -1225,6 +1328,301 @@ fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
         assert!(!super::preparation::login_check_can_clear(adapter, true));
     }
     assert!(super::preparation::login_check_can_clear("agy", true));
+}
+
+#[test]
+fn registry_only_provider_resolves_prepares_and_reports_quota()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, CancelToken, Digest, OperationId, RunId, TaskId};
+    use provenant_os::exec::SystemExecutor;
+    use provenant_providers::{
+        Adapter, Continuation, ExitObservation, LaunchSpec, PrepareInput, ProviderError,
+        ProviderEvent, ProviderOutcome, RouteProvenance, StreamState, VerifiedLineage,
+    };
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    struct Fixture;
+    impl Adapter for Fixture {
+        fn id(&self) -> &'static str {
+            "fixture-provider"
+        }
+        fn account(
+            &self,
+            _: &StreamState,
+        ) -> Result<provenant_providers::AccountDetection, ProviderError> {
+            Ok(provenant_providers::AccountDetection::Unknown)
+        }
+        fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError> {
+            let account = input.account.ok_or(ProviderError::UnknownIdentity)?;
+            account.validate_route(input.route)?;
+            let mut command_route = input.route.clone();
+            command_route.adapter = "command".into();
+            command_route.model.clear();
+            command_route.account_key = None;
+            let argv = vec![input.executable.to_string_lossy().into_owned()];
+            let command = provenant_providers::command::Invocation {
+                argv: &argv,
+                program: input.executable,
+                runtimes: &[],
+            };
+            provenant_providers::command::Command.prepare(PrepareInput {
+                route: &command_route,
+                account: None,
+                command: Some(command),
+                ..input
+            })
+        }
+        fn stream(
+            &self,
+            continuation: Option<&Continuation>,
+        ) -> Result<StreamState, ProviderError> {
+            provenant_providers::command::Command.stream(continuation)
+        }
+        fn observe(
+            &self,
+            state: &mut StreamState,
+            bytes: &[u8],
+        ) -> Result<Vec<ProviderEvent>, ProviderError> {
+            provenant_providers::command::Command.observe(state, bytes)
+        }
+        fn finish(
+            &self,
+            state: StreamState,
+            exit: ExitObservation,
+        ) -> Result<ProviderOutcome, ProviderError> {
+            provenant_providers::command::Command.finish(state, exit)
+        }
+        fn continuation(
+            &self,
+            outcome: &ProviderOutcome,
+            route: &provenant_records::ResolvedRoute,
+            digest: &str,
+        ) -> Result<Continuation, ProviderError> {
+            provenant_providers::command::Command.continuation(outcome, route, digest)
+        }
+        fn validate_provenance(
+            &self,
+            provenance: &RouteProvenance<'_>,
+        ) -> Result<VerifiedLineage, ProviderError> {
+            provenant_providers::command::Command.validate_provenance(provenance)
+        }
+    }
+    impl provenant_quota::QuotaSource for Fixture {
+        fn adapter_id(&self) -> &'static str {
+            "fixture-provider"
+        }
+        fn probe(
+            &self,
+            account: &provenant_quota::AccountScope,
+            input: &provenant_quota::QuotaProbeInput,
+        ) -> Result<provenant_quota::QuotaProbePlan, provenant_quota::QuotaError> {
+            Ok(provenant_quota::QuotaProbePlan {
+                kind: provenant_quota::QuotaEffectKind::Command,
+                account: account.clone(),
+                input: input.clone(),
+            })
+        }
+        fn decode(
+            &self,
+            plan: &provenant_quota::QuotaProbePlan,
+            _: &provenant_quota::ProbeCapture,
+        ) -> Result<provenant_quota::QuotaSnapshot, provenant_quota::QuotaError> {
+            Ok(provenant_quota::QuotaSnapshot {
+                schema_version: 1,
+                account: plan.account.clone(),
+                revision: 0,
+                status: provenant_quota::QuotaStatus::Available,
+                observed_unix_seconds: plan.input.now_unix_seconds,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![],
+                details: None,
+            })
+        }
+    }
+    struct Effects(std::cell::Cell<u32>);
+    impl provenant_quota::QuotaEffects for Effects {
+        fn accounts(
+            &self,
+        ) -> Result<Vec<provenant_quota::AccountScope>, provenant_quota::QuotaError> {
+            Ok(vec![provenant_quota::AccountScope {
+                adapter: "fixture-provider".into(),
+                account_key: "work".into(),
+                label: "work".into(),
+            }])
+        }
+        fn capture(
+            &self,
+            _: &provenant_quota::QuotaProbePlan,
+            _: Option<&provenant_quota::AccountRecord>,
+        ) -> Result<provenant_quota::ProbeCapture, provenant_quota::ProbeFailure> {
+            self.0.set(self.0.get() + 1);
+            Ok(provenant_quota::ProbeCapture {
+                stdout: vec![],
+                stderr: vec![],
+                exit_code: Some(0),
+                overflowed: false,
+            })
+        }
+    }
+    static ADAPTER: Fixture = Fixture;
+    let providers = [provenant_providers::Registration {
+        adapter: &ADAPTER,
+        quota_source: Some(&ADAPTER),
+        quota: provenant_quota::QuotaPolicy {
+            adapter: "fixture-provider",
+            timer_seconds: 300,
+            panel_seconds: 120,
+            probe_seconds: 10,
+            low_power: true,
+            solo: false,
+        },
+        ..provenant_providers::command::REGISTRATION
+    }];
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let assets = base.join("release");
+    let git_home = base.join("git-home");
+    for path in [&home, &state, &project, &assets, &git_home] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let account_dir = home.join("fixture-account");
+    std::fs::create_dir(&account_dir)?;
+    std::fs::write(
+        state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.accounts.entries.work]\nadapter='fixture-provider'\nlabel='work'\nkey='work'\ndirectory={:?}\n",
+            account_dir.to_str().ok_or("account path")?
+        ),
+    )?;
+    let executor = SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let effects = Effects(std::cell::Cell::new(0));
+    let report = crate::quota::execute(
+        &crate::quota::Quota::Tick {
+            adapter: crate::quota::Filter {
+                adapter: Some("fixture-provider".into()),
+            },
+            trigger: crate::quota::Trigger::Manual,
+            power: crate::quota::Power::Ac,
+        },
+        &roots,
+        &providers,
+        &effects,
+    )?;
+    assert_eq!(effects.0.get(), 1);
+    assert!(
+        report
+            .accounts
+            .iter()
+            .any(|row| row.account.adapter == "fixture-provider"
+                && row.status == provenant_quota::QuotaStatus::Available)
+    );
+    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let cancel = CancelToken::new();
+    let repo = utility.open_repo(
+        &executor,
+        &project,
+        provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
+        &cancel,
+    )?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let executable = assets.join("fixture-provider");
+    std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture 1.0\\n'\n")?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+    let run_id = RunId::from_bytes([2; 16]);
+    let attempt_id = AttemptId::from_bytes([1; 16]);
+    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let paths = run::LaunchPaths {
+        attempt_id,
+        operation_id: OperationId::parse("registry-fixture")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id,
+        deadline_unix_ms: u64::MAX,
+        scratch: attempt.join("scratch"),
+        provider_state: attempt.join("provider-state"),
+        temporary: attempt.join("tmp"),
+        temporary_alias: None,
+    };
+    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+    }
+    let prompt = "fixture prompt";
+    assert!(super::super::catalogued("fixture-provider/test", None).is_ok());
+    let task = run::TaskRequest {
+        context: None,
+        extra: Default::default(),
+        build_heavy: false,
+        title: None,
+        base: None,
+        head: None,
+        source_head: None,
+        base_ref: None,
+        task_id: TaskId::from_bytes([3; 16]),
+        profile: Default::default(),
+        prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
+        route: run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "fixture-provider".into(),
+            model: "fixture-provider/test".into(),
+            effort: None,
+        },
+        account: Some("work".into()),
+        fallback: vec![],
+        authority_digest: Digest::from_bytes([4; 32]),
+        writer: None,
+        deliver: None,
+        provider_timeout_seconds: 20,
+        delivery_id: None,
+        access: Default::default(),
+    };
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        assets: Some(&assets),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: Some(binding.project_id()),
+        host: None,
+        cancel: Some(&cancel),
+    };
+    let prepared = super::preparation::prepare_candidates(
+        &registry,
+        &providers,
+        &task,
+        prompt,
+        &paths,
+        None,
+        &|name| {
+            if name == "fixture-provider" {
+                Ok(executable.clone())
+            } else {
+                Err("unavailable".into())
+            }
+        },
+        None,
+        false,
+        None,
+    )?;
+    assert_eq!(prepared.route.provider.as_deref(), Some("fixture-provider"));
+    assert_eq!(prepared.route.account_key.as_deref(), Some("work"));
+    assert!(!prepared.argv.is_empty());
+    Ok(())
 }
 
 #[test]
@@ -4453,6 +4851,17 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
     ));
     assert!(matches!(
         account_observation_error(&entries[0], &ProviderError::CredentialUnavailable),
+        AccountObservationError::AuthRequired(_)
+    ));
+    assert!(matches!(
+        account_observation_error(&entries[0], &ProviderError::UnknownIdentity),
+        AccountObservationError::Other(_)
+    ));
+    assert!(matches!(
+        account_observation_error(
+            &entries[0],
+            &ProviderError::ProbeDirectory("fixture".into())
+        ),
         AccountObservationError::Other(_)
     ));
     Ok(())
@@ -4462,13 +4871,21 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
 fn absent_default_login_differs_from_directory_integrity_errors()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
-    let missing = temp.path().join("missing-codex");
+    let mut spec = *AdapterSpec::get("codex").unwrap();
+    spec.name = "fixture";
+    spec.login_hint = "fixture login";
+    let missing = temp.path().join("missing");
+    assert!(
+        default_directory_error(&spec, &missing, "not found".into())
+            .to_string()
+            .contains("fixture")
+    );
     assert_eq!(
-        default_directory_error(&missing, "not found".into()).skip_kind(),
+        default_directory_error(&spec, &missing, "not found".into()).skip_kind(),
         SkipKind::AuthRequired
     );
     assert_eq!(
-        default_directory_error(temp.path(), "permission denied".into()).skip_kind(),
+        default_directory_error(&spec, temp.path(), "permission denied".into()).skip_kind(),
         SkipKind::Account
     );
     #[cfg(unix)]
@@ -4476,7 +4893,7 @@ fn absent_default_login_differs_from_directory_integrity_errors()
         let broken = temp.path().join("broken-link");
         std::os::unix::fs::symlink(&missing, &broken)?;
         assert_eq!(
-            default_directory_error(&broken, "broken link".into()).skip_kind(),
+            default_directory_error(&spec, &broken, "broken link".into()).skip_kind(),
             SkipKind::Account
         );
     }

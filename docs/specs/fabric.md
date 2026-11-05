@@ -1406,8 +1406,10 @@ saved can be read back.
 
 A node may move to its next configured route only when a typed local
 preparation failure reports authentication, quota or adapter unavailability,
-and the host verifies that custody has been released. Task failure, input
-requirements, launched attempts and uncertain launches do not switch routes.
+and the host verifies that custody has been released. A confirmed launched
+read-only attempt may also switch after an adapter-classified authentication or
+usage-limit outcome, subject to its retry budget. Task failure, input
+requirements, launched writers and uncertain launches do not switch routes.
 The graph keeps each attempt's receipt. A quota-stopped writer may continue its
 retained work on another eligible account with a verified unfinished handoff.
 
@@ -1415,10 +1417,10 @@ The `settlement_retries` allowance (default 2), overridden by preset then node
 `retry.retries`, limits settlement successors. The graph seals the effective
 value and origin on first admission; replay does not replenish it. Verified
 pre-launch preparation fallbacks and same-key observation spend no settlement
-retries.
-- Why: route switches must not duplicate an attempt that may have started.
+retries; switching a launched reader spends one.
+- Why: a launched writer may have effects; read-only classified refusals can be retried within budget.
 - Test: `crates/fabric-runtime/src/graph/graph_tests.rs::preparation_fallback_does_not_consume_settlement_allowance`;
-  `tests/dispatch_provider.rs::graph_read_only_alias_does_not_redraw_after_launch_quota`
+  `crates/fabric-runtime/src/graph/graph_tests.rs::fallback_outcomes_are_named_by_access_and_launch_state`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ### Settlement advances graphs

@@ -3156,6 +3156,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         chair: chair.clone(),
         operation_id: OperationId::parse("context-ref-replay").unwrap(),
         tasks: vec![Submitted {
+            require_skill_location: true,
             settlement_retry_limit: None,
             context: None,
             build_heavy: false,
@@ -3184,6 +3185,11 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     };
     let (first, _) =
         submit(&session, &edge, submission("context-base"), &call).map_err(|f| f.message)?;
+    assert!(
+        session.store.request(first.run_id, &call)?.tasks[0]
+            .profile
+            .require_skill_location
+    );
     with_chair_index(&roots, &call, |index, index_call| {
         let binding = index
             .read(session.context.project_id, first.run_id, index_call)?
@@ -4707,6 +4713,9 @@ fn explicit_write_root_is_checked_at_preflight_and_routing()
     task.access = access;
     assert!(task.writer.is_none());
     assert!(route_request(&task)?.intent.writes);
+    assert!(!route_request(&task)?.intent.skill_location);
+    task.profile.require_skill_location = true;
+    assert!(route_request(&task)?.intent.skill_location);
     Ok(())
 }
 
@@ -5876,7 +5885,7 @@ fn capacity_guardian_context_records_and_reports_config_failure()
         executables: Default::default(),
         executable_search_path: Vec::new(),
         git: PathBuf::from("/usr/bin/git"),
-        codex_home: None,
+        default_account_directories: Default::default(),
         cargo_build_jobs: None,
         #[cfg(feature = "fixture")]
         fixture_state_write: false,
@@ -6051,6 +6060,7 @@ fn codex_rollout_error_reaches_the_decoded_reason() {
         .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
         .unwrap();
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+    assert_eq!(decoded.result, "OK");
     assert_eq!(
         decoded.session.as_deref(),
         Some("01234567-89ab-cdef-0123-456789abcdef")
@@ -6197,6 +6207,7 @@ fn opencode_without_a_session_record_observes_no_model() {
             Path::new("/nonexistent"),
         )
         .unwrap();
+    assert_eq!(decoded.result, "OK");
     assert!(decoded.observed_route.is_none());
     assert_eq!(
         decoded.reason.as_deref(),
@@ -6450,6 +6461,21 @@ fn codex_usage_records_cache_read_apart_from_uncached_input() {
 }
 
 #[test]
+fn command_exit_keeps_requested_route() {
+    let route = run::RouteRecord {
+        provider: Some("command".into()),
+        model: None,
+        ..Default::default()
+    };
+    let decoded = Registry::default()
+        .decode(&route, b"output", &clean_exit(), Path::new("/unused"))
+        .unwrap();
+    let observed = decoded.observed_route.expect("observed route");
+    assert_eq!(observed.provider.as_deref(), Some("command"));
+    assert_eq!(observed.source.as_deref(), Some("command_exit"));
+}
+
+#[test]
 fn claude_absent_usage_names_its_reason() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),
@@ -6488,6 +6514,15 @@ fn claude_absent_usage_names_its_reason() {
         decoded_no_usage.usage.source.as_deref(),
         Some("absent: result event has no usage")
     );
+
+    let unknown = run::RouteRecord {
+        provider: Some("unregistered-fixture".into()),
+        ..Default::default()
+    };
+    let decoded_unknown = Registry::default()
+        .decode(&unknown, b"", &clean_exit(), Path::new("/unused"))
+        .unwrap();
+    assert_eq!(decoded_unknown.usage.source, None);
 }
 
 #[test]

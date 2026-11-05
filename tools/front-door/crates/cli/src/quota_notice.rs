@@ -222,6 +222,7 @@ mod tests {
                     account_key: "key".into(),
                     label: "work".into(),
                 },
+                readiness: None,
                 login_expiry: Some(LoginExpiryView {
                     state: LoginExpiryState::Expiring,
                     expires_unix_seconds: Some(140),
