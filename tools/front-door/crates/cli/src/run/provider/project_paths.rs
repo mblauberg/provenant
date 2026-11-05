@@ -132,18 +132,19 @@ fn apply_to(
         "PROVENANT_PRIMARY_CHECKOUT".into(),
         primary.as_os_str().to_owned(),
     ));
-    if let Some(gitdir) = context
-        .worktree_gitdir
-        .filter(|git| context.writer || Some(*git) != context.common_git)
-    {
+    if let Some(gitdir) = context.worktree_gitdir {
         env.push((
             "PROVENANT_WORKTREE_GITDIR".into(),
             gitdir.as_os_str().to_owned(),
         ));
-        profile.spec.runtime_reads.push(PathGrant {
-            path: gitdir.to_owned(),
-            scope: PathScope::Subtree,
-        });
+        // A read-only plan already grants the common Git directory. Avoid
+        // adding a duplicate grant when its worktree is the primary checkout.
+        if context.writer || Some(gitdir) != context.common_git {
+            profile.spec.runtime_reads.push(PathGrant {
+                path: gitdir.to_owned(),
+                scope: PathScope::Subtree,
+            });
+        }
     }
     let mut shared = Vec::new();
     let mut exec = Vec::new();
@@ -345,9 +346,22 @@ mod tests {
                 );
             }
             if writer {
-                let reasons: Vec<_> = warnings
+                let shared_warnings: Vec<_> = warnings
                     .iter()
-                    .filter_map(|w| w["reason"].as_str())
+                    .filter(|warning| {
+                        warning["key"]
+                            .as_str()
+                            .is_some_and(|key| key.contains(".shared_paths["))
+                    })
+                    .collect();
+                assert!(
+                    shared_warnings
+                        .iter()
+                        .all(|warning| warning["code"] == "shared_path_ignored")
+                );
+                let reasons: Vec<_> = shared_warnings
+                    .iter()
+                    .filter_map(|warning| warning["reason"].as_str())
                     .collect();
                 assert!(reasons.contains(&"git_directory"));
                 assert!(reasons.contains(&"credential_root"));
@@ -355,6 +369,31 @@ mod tests {
                 assert!(reasons.contains(&"executable_root"));
             }
         }
+        let mut env = Vec::new();
+        let mut profile = ProviderProfile {
+            spec: ProviderProfileSpec::default(),
+            observations: Default::default(),
+        };
+        apply_to(
+            &mut env,
+            &mut profile,
+            &plan,
+            Context {
+                cwd: &primary,
+                home: &home,
+                state_root: &root.join("state"),
+                common_git: Some(&common),
+                worktree_gitdir: Some(&common),
+                writer: false,
+                settings: None,
+                project: "example",
+            },
+        );
+        assert!(env.contains(&(
+            "PROVENANT_WORKTREE_GITDIR".into(),
+            common.as_os_str().to_owned()
+        )));
+        assert!(!profile.spec.runtime_reads.contains(&grant(common.clone())));
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
