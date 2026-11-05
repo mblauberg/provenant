@@ -101,16 +101,14 @@ pub(super) fn account_observation_error(
     if matches!(
         error,
         ProviderError::LoginRequired
-            | ProviderError::CredentialUnavailable
             | ProviderError::CredentialNotFound
             | ProviderError::CredentialExpired
     ) {
         AccountObservationError::AuthRequired(format!(
-            "{} account {} needs sign-in; run `{}` for this account",
+            "{} account {} needs sign-in; {}",
             entry.adapter,
             entry.label,
-            AdapterSpec::get(&entry.adapter)
-                .map_or("provenant accounts list", |spec| spec.login_hint),
+            crate::quota::login_repair(Some(entry)),
         ))
     } else {
         AccountObservationError::Other(detect_failure(entry, error))
@@ -147,6 +145,73 @@ pub(super) fn unavailable_auth_detail(
         })
         .collect::<Option<Vec<_>>>()
         .map(|details| details.join("; "))
+}
+
+/// A bounded login check in the selected Codex home. Provider output is discarded.
+pub(super) fn codex_login_is_healthy(
+    entry: &provenant_providers::accounts::Registration,
+    executable: &Path,
+    probe: &Probe<'_>,
+) -> bool {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+    let argv = [
+        executable.as_os_str().to_owned(),
+        "login".into(),
+        "status".into(),
+    ];
+    let env = [
+        ("HOME".into(), probe.home.as_os_str().to_owned()),
+        ("CODEX_HOME".into(), entry.directory.as_os_str().to_owned()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ];
+    let mut options = ExecOptions::new(&argv, probe.scratch, std::time::Duration::from_secs(4));
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Discard;
+    options.stderr = StreamPolicy::Discard;
+    probe.executor.execute(options).is_ok_and(|out| {
+        out.termination == Termination::Exit(0)
+            && !out.timed_out
+            && !out.cancelled
+            && !out.drain_truncated
+            && !out.overflow_stopped
+    })
+}
+
+/// Cursor's status command uses the host login; never substitute it for a
+/// registration pointing at another directory.
+pub(super) fn cursor_login_is_healthy(
+    entry: &provenant_providers::accounts::Registration,
+    executable: &Path,
+    probe: &Probe<'_>,
+) -> bool {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+    if entry.directory != probe.home {
+        return false;
+    }
+    let argv = [executable.as_os_str().to_owned(), "status".into()];
+    let env = [
+        ("HOME".into(), probe.home.as_os_str().to_owned()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ];
+    let mut options = ExecOptions::new(&argv, probe.scratch, std::time::Duration::from_secs(4));
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    options.stderr = StreamPolicy::Discard;
+    probe.executor.execute(options).is_ok_and(|out| {
+        if out.termination != Termination::Exit(0)
+            || out.timed_out
+            || out.cancelled
+            || out.drain_truncated
+            || out.overflow_stopped
+            || out.stdout.truncated
+            || out.stdout.read_failed
+        {
+            return false;
+        }
+        let text = String::from_utf8_lossy(&out.stdout.bytes).to_ascii_lowercase();
+        !text.contains("not logged in")
+            && (text.contains("logged in") || text.contains("login successful"))
+    })
 }
 
 pub(super) fn observe_account(

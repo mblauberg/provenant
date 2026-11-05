@@ -254,6 +254,8 @@ pub enum ProbeFailure {
     Network,
     RateLimited,
     Auth,
+    /// The selected login's recorded credential has expired.
+    LoginExpired,
     /// The CLI is signed in as a different account than the registered key.
     AccountMismatch,
     /// An agy isolated account has no usable private login keychain.
@@ -269,6 +271,7 @@ impl ProbeFailure {
         match self {
             Self::MissingCli | Self::Disabled => crate::ReadinessReason::MissingExecutable,
             Self::Auth => crate::ReadinessReason::SignedOut,
+            Self::LoginExpired => crate::ReadinessReason::LoginExpired,
             Self::AccountMismatch => crate::ReadinessReason::AccountMismatch,
             _ => crate::ReadinessReason::CommandFailure,
         }
@@ -277,7 +280,10 @@ impl ProbeFailure {
     /// Failures only a login or re-registration repairs; the account is
     /// reported as `auth_required` until then.
     pub fn needs_login(self) -> bool {
-        matches!(self, Self::Auth | Self::AccountMismatch)
+        matches!(
+            self,
+            Self::Auth | Self::LoginExpired | Self::AccountMismatch
+        )
     }
 }
 
@@ -291,6 +297,9 @@ pub struct UpdateIntent {
     /// Probe result metadata stays in the in-memory write intent, never the
     /// v1 quota account JSON. `Some(None)` means a successful probe cleared it.
     pub readiness_probe_result: Option<Option<crate::ReadinessReason>>,
+    /// Safe expiry metadata and its freshness interval from this probe. Outer
+    /// None means no probe completed; inner None means expiry is unknown.
+    pub login_probe_expiry: Option<(Option<i64>, u64)>,
 }
 impl UpdateIntent {
     pub fn check(&self, current: Option<&AccountRecord>) -> Result<(), QuotaError> {
@@ -321,6 +330,9 @@ impl UpdateIntent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRow {
     pub account: AccountScope,
+    /// Account-scoped login expiry evidence, independent of quota status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_expiry: Option<LoginExpiryView>,
     pub snapshot: Option<QuotaSnapshot>,
     pub status: QuotaStatus,
     /// RFC 3339 expiry for an active free-pool refusal, when the provider recorded one.
@@ -344,6 +356,12 @@ pub struct AccountRow {
     /// Menu bar choices from the matching registered account, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<RowDisplay>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginExpiryView {
+    pub state: crate::LoginExpiryState,
+    pub expires_unix_seconds: Option<i64>,
+    pub observed_unix_seconds: Option<i64>,
 }
 fn is_false(value: &bool) -> bool {
     !value

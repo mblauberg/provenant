@@ -34,6 +34,25 @@ pub enum QuotaProbeKind {
     LocalLedger,
 }
 
+/// How preparation rechecks a recorded login failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginReprobe {
+    None,
+    Codex,
+    Cursor,
+    AccountIdentity,
+    ExecutableOnly,
+}
+
+/// How availability records supply fresh login evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginObservation {
+    None,
+    AccountAvailability,
+    Reprobe,
+    ExecutableOnly,
+}
+
 /// Location of a provider's user skill tree relative to the host home or an
 /// absolute environment override. The fallback is relative to the home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +77,10 @@ pub struct AdapterSpec {
     /// something else: agy's is the account's keychain home.
     pub account_config_dir: bool,
     pub local_login: bool,
+    pub login_reprobe: LoginReprobe,
+    pub login_observation: LoginObservation,
+    /// The login recheck identifies the signed-in account.
+    pub login_check_names_account: bool,
     /// Synthetic account label and key for an adapter using its local login.
     pub local_account: (&'static str, &'static str),
     pub argv_prompt: bool,
@@ -69,6 +92,8 @@ pub struct AdapterSpec {
     /// Also watch the host login keychain on macOS.
     pub credential_host_keychain: bool,
     pub login_hint: &'static str,
+    /// Account-scoped interactive login command, with {directory} shell quoted.
+    pub login_template: Option<&'static str>,
     /// Lowercase provider stderr fragments indicating a missing or expired login.
     pub auth_markers: &'static [&'static str],
     /// Shell wrapper path and environment selector, relative to scratch.
@@ -252,6 +277,9 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: true,
         account_config_dir: true,
         local_login: false,
+        login_reprobe: LoginReprobe::None,
+        login_observation: LoginObservation::AccountAvailability,
+        login_check_names_account: false,
         local_account: ("default", "local"),
         argv_prompt: false,
         authentication: None,
@@ -259,6 +287,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: true,
         credential_host_keychain: true,
         login_hint: "claude auth login",
+        login_template: Some("CLAUDE_CONFIG_DIR={directory} claude auth login"),
         auth_markers: &["not logged in", "authentication_failed"],
         shell_prefix: Some(("bin/claude-shell", "CLAUDE_CODE_SHELL_PREFIX")),
         context_directory_arg: Some("--add-dir"),
@@ -306,6 +335,9 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: true,
         account_config_dir: true,
         local_login: false,
+        login_reprobe: LoginReprobe::Codex,
+        login_observation: LoginObservation::Reprobe,
+        login_check_names_account: false,
         local_account: ("default", "local"),
         argv_prompt: false,
         authentication: Some("login"),
@@ -313,6 +345,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "codex login",
+        login_template: Some("CODEX_HOME={directory} codex login"),
         auth_markers: &[
             "please log out and sign in again",
             "refresh token expired",
@@ -364,6 +397,9 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: false,
         account_config_dir: false,
         local_login: true,
+        login_reprobe: LoginReprobe::Cursor,
+        login_observation: LoginObservation::Reprobe,
+        login_check_names_account: false,
         local_account: ("default", "local"),
         argv_prompt: true,
         authentication: Some("login"),
@@ -371,6 +407,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "agent login",
+        login_template: None,
         auth_markers: &[
             "authentication required. please run agent login",
             "not logged in",
@@ -421,6 +458,9 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: true,
         account_config_dir: false,
         local_login: true,
+        login_reprobe: LoginReprobe::AccountIdentity,
+        login_observation: LoginObservation::Reprobe,
+        login_check_names_account: true,
         local_account: ("default", "local"),
         argv_prompt: true,
         authentication: Some("keychain"),
@@ -432,6 +472,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "agy auth login",
+        login_template: Some("HOME={directory} agy` and use `/login"),
         auth_markers: &[
             "authentication required. please login to continue.",
             "authentication required. please log in",
@@ -482,6 +523,9 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: false,
         account_config_dir: false,
         local_login: true,
+        login_reprobe: LoginReprobe::ExecutableOnly,
+        login_observation: LoginObservation::ExecutableOnly,
+        login_check_names_account: false,
         local_account: ("go", "go"),
         argv_prompt: false,
         authentication: None,
@@ -494,6 +538,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "opencode auth login",
+        login_template: None,
         auth_markers: &["no api key found", "run opencode auth login"],
         shell_prefix: None,
         context_directory_arg: None,
@@ -537,6 +582,9 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: false,
         account_config_dir: false,
         local_login: false,
+        login_reprobe: LoginReprobe::None,
+        login_observation: LoginObservation::None,
+        login_check_names_account: false,
         local_account: ("default", "local"),
         argv_prompt: false,
         authentication: None,
@@ -544,6 +592,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "",
+        login_template: None,
         auth_markers: &[],
         shell_prefix: None,
         context_directory_arg: None,
@@ -589,6 +638,9 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         registered_account: false,
         account_config_dir: false,
         local_login: false,
+        login_reprobe: LoginReprobe::None,
+        login_observation: LoginObservation::None,
+        login_check_names_account: false,
         local_account: ("default", "local"),
         argv_prompt: false,
         authentication: None,
@@ -596,6 +648,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "",
+        login_template: None,
         auth_markers: &[],
         shell_prefix: None,
         context_directory_arg: None,

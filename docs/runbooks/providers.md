@@ -13,6 +13,22 @@ inspect metadata only. Recognised missing or expired provider logins settle as
 `auth_required`, including when every candidate is skipped before launch.
 Read-only graph nodes can then try their next declared route.
 
+Quota probes use the selected Claude account's directory only and check its
+registered fingerprint before and after reading the credential. A separately
+registered directory can contain a copied single-use refresh token. Quota does
+not automatically rotate it because it cannot establish independence without
+reading another account's secrets. Sign in interactively in that directory
+when it needs attention. Where the
+registration is known, `provenant quota` gives the account-specific command;
+otherwise it says the remedy is unavailable. A recorded expired credential is
+reported as `login_expired`; a failed probe alone does not establish expiry.
+Quota shows expiry as unknown when no fresh selected-account metadata is
+available. `domains.quota.login_expiry_warning_seconds` sets the advance
+warning window (default 3600 seconds; zero disables advance warnings). A quota
+tick sends a deduplicated notice for a known expiring or expired login to each
+registered local chair session. The notice contains the account label and expiry,
+not credential contents or provider output; `provenant quota` supplies recovery.
+
 ## Launch capabilities
 
 One declared table per adapter (`AdapterSpec::launch` in

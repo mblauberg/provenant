@@ -286,7 +286,7 @@ fn hosts_doctor_uses_the_configured_peer_transport() -> Result {
                 "claude":[{"label":"default (~/.claude)","signin":{
                     "state":"signed_out","token_validity":"unverified"
                 }}],
-                "peer_agent":"running",
+                "peer_agent":"running","login_accounts":[],
                 "managed":[],
                 "warnings":[]
             }}
@@ -353,7 +353,7 @@ fn hosts_doctor_rejects_untrusted_peer_reports() -> Result {
     let response_path = rig.root.join("ssh-response");
     let good = json!({
         "claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],
-        "peer_agent":"running","managed":[],"warnings":[]
+        "peer_agent":"running","login_accounts":[],"managed":[],"warnings":[]
     });
     std::fs::write(
         &ssh,
@@ -376,7 +376,7 @@ fn hosts_doctor_rejects_untrusted_peer_reports() -> Result {
     let invalid_replies = [
         json!({"result":"doctor","data":{
             "claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"valid"}}],
-            "peer_agent":"running","managed":[],"warnings":[]
+            "peer_agent":"running","login_accounts":[],"managed":[],"warnings":[]
         }}),
         {
             let mut report = good.clone();
@@ -3994,7 +3994,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         .ok_or("local")?;
     assert_eq!(local_health["available"], true);
     assert_eq!(local_health["protocol"], PROTOCOL);
-    assert_eq!(local_health["features"], CONSOLE_INBOX_PROTOCOL);
+    assert_eq!(local_health["features"], DOCTOR_PROTOCOL);
     let calls = std::fs::read_to_string(calls)?;
     assert_eq!(calls.lines().count(), 3);
     let actions = calls

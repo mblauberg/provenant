@@ -43,8 +43,28 @@ struct AgyAccount {
     keychain_available: bool,
 }
 #[derive(Serialize, Deserialize)]
+struct LoginAccount {
+    adapter: String,
+    label: String,
+    reason: Option<provenant_quota::ProbeFailure>,
+    last_success_unix_seconds: Option<i64>,
+    login_expiry: Option<provenant_quota::LoginExpiryView>,
+    repair: Option<String>,
+}
+fn login_account(row: provenant_quota::AccountRow) -> LoginAccount {
+    LoginAccount {
+        adapter: row.account.adapter,
+        label: row.account.label,
+        reason: row.error,
+        last_success_unix_seconds: row.snapshot.map(|snapshot| snapshot.observed_unix_seconds),
+        login_expiry: row.login_expiry,
+        repair: row.repair,
+    }
+}
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Report {
     claude: Vec<Identity>,
+    login_accounts: Vec<LoginAccount>,
     /// The executable lanes can resolve through their read-only Rust toolchain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nextest: Option<String>,
@@ -260,15 +280,24 @@ pub(crate) fn local(
             .ok()
             .map(|config| agy_accounts(&config.domains.accounts, home))
             .unwrap_or_default();
+    let mut warnings = crate::pool_effort_warnings(roots);
+    let login_accounts = match provenant_cli::quota::recorded_login_rows(roots) {
+        Ok(rows) => rows.into_iter().map(login_account).collect(),
+        Err(_) => {
+            warnings.push("login observations unavailable; run `provenant quota`".into());
+            Vec::new()
+        }
+    };
     Ok(Report {
         claude,
+        login_accounts,
         nextest: lane_nextest(home),
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
         tick_agent: crate::tick_agent::diagnosis(state, home),
         managed,
         agy_accounts,
         managed_error,
-        warnings: crate::pool_effort_warnings(roots),
+        warnings,
     })
 }
 struct DoctorError {
@@ -330,6 +359,15 @@ fn valid_remote(report: &Report) -> bool {
                 && !row.label.chars().any(char::is_control)
                 && row.signin.token_validity == "unverified"
         })
+        && report.login_accounts.len() <= 128
+        && report.login_accounts.iter().all(|row| {
+            [&row.adapter, &row.label].iter().all(|text| {
+                !text.is_empty() && text.len() <= 128 && !text.chars().any(char::is_control)
+            }) && row
+                .repair
+                .as_ref()
+                .is_none_or(|text| text.len() <= 4096 && !text.chars().any(char::is_control))
+        })
         && report.managed.len() <= 128
         && report.managed.iter().all(|row| {
             [&row.adapter, &row.label].iter().all(|text| {
@@ -357,6 +395,12 @@ fn valid_remote(report: &Report) -> bool {
             .warnings
             .iter()
             .all(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
+}
+fn discard_remote_repairs(report: &mut Report) {
+    report.tick_agent.repair = None;
+    for row in &mut report.login_accounts {
+        row.repair = None;
+    }
 }
 fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError> {
     let Some(name) = host else {
@@ -388,10 +432,12 @@ fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError>
     let PeerResult::Doctor { data, .. } = result else {
         return Err(DoctorError::malformed());
     };
-    let report: Report = serde_json::from_value(data).map_err(|_| DoctorError::malformed())?;
+    let mut report: Report = serde_json::from_value(data).map_err(|_| DoctorError::malformed())?;
     if !valid_remote(&report) {
         return Err(DoctorError::malformed());
     }
+    // Commands supplied by a peer are not trusted as local remedies.
+    discard_remote_repairs(&mut report);
     Ok(report)
 }
 pub fn run(command: Hosts, globals: &Globals) -> u8 {
@@ -423,6 +469,28 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                     text.push_str(" (status probe could not confirm sign-in)");
                 }
                 text.push_str("; token validity unverified\n");
+            }
+            for row in &report.login_accounts {
+                let reason = row
+                    .reason
+                    .and_then(|value| serde_json::to_value(value).ok())
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "no recorded login failure".into());
+                let observed = row
+                    .last_success_unix_seconds
+                    .and_then(|at| jiff::Timestamp::from_second(at).ok())
+                    .map_or_else(|| "unknown".into(), |at| at.to_string());
+                let expiry = row
+                    .login_expiry
+                    .as_ref()
+                    .and_then(|view| serde_json::to_value(view.state).ok())
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".into());
+                text.push_str(&format!("login {} [{}]: {reason}; expiry {expiry}; last successful observation {observed}", row.label.escape_debug(), row.adapter.escape_debug()));
+                if let Some(repair) = &row.repair {
+                    text.push_str(&format!("; {repair}"));
+                }
+                text.push('\n');
             }
             for row in &report.agy_accounts {
                 text.push_str(&format!(
@@ -537,9 +605,58 @@ mod tests {
     }
 
     #[test]
+    fn doctor_login_projection_keeps_account_reason_and_recovery() {
+        let row = provenant_quota::AccountRow {
+            account: provenant_quota::AccountScope {
+                adapter: "claude".into(),
+                account_key: "key".into(),
+                label: "work".into(),
+            },
+            login_expiry: Some(provenant_quota::LoginExpiryView {
+                state: provenant_quota::LoginExpiryState::Expired,
+                expires_unix_seconds: Some(90),
+                observed_unix_seconds: Some(100),
+            }),
+            snapshot: Some(provenant_quota::QuotaSnapshot {
+                schema_version: 1,
+                account: provenant_quota::AccountScope {
+                    adapter: "claude".into(),
+                    account_key: "key".into(),
+                    label: "work".into(),
+                },
+                revision: 0,
+                status: provenant_quota::QuotaStatus::Available,
+                observed_unix_seconds: 80,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![],
+                details: None,
+            }),
+            status: provenant_quota::QuotaStatus::AuthRequired,
+            resets_at: None,
+            refusals: vec![],
+            free_pool_refusal: false,
+            age_seconds: Some(20),
+            next_due_unix_seconds: None,
+            refreshing: false,
+            error: Some(provenant_quota::ProbeFailure::LoginExpired),
+            repair: Some("run selected login".into()),
+            capacity_cooldowns: vec![],
+            display: None,
+        };
+        let value = serde_json::to_value(super::login_account(row)).unwrap();
+        assert_eq!(value["label"], "work");
+        assert_eq!(value["reason"], "login_expired");
+        assert_eq!(value["last_success_unix_seconds"], 80);
+        assert_eq!(value["login_expiry"]["state"], "expired");
+        assert_eq!(value["repair"], "run selected login");
+    }
+
+    #[test]
     fn doctor_report_requires_the_peer_agent() {
         let report: super::Report =
-            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped"}"#).unwrap();
+            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","login_accounts":[]}"#)
+                .unwrap();
         assert!(report.nextest.is_none());
         assert!(report.managed.is_empty() && report.managed_error.is_none());
         assert_eq!(
@@ -568,37 +685,59 @@ mod tests {
     }
 
     #[test]
+    fn remote_doctor_discards_peer_repair_commands() {
+        let mut report: super::Report = serde_json::from_str(
+            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[{"adapter":"claude","label":"work","reason":"login_expired","last_success_unix_seconds":100,"login_expiry":null,"repair":"run peer command"}]}"#,
+        ).unwrap();
+        report.tick_agent.repair = Some("run another peer command".into());
+        super::discard_remote_repairs(&mut report);
+        assert!(report.login_accounts[0].repair.is_none());
+        assert!(report.tick_agent.repair.is_none());
+    }
+
+    #[test]
     fn remote_doctor_report_requires_bounded_safe_fields() {
         let report: super::Report = serde_json::from_str(
-            r#"{"claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],"peer_agent":"stopped","warnings":["check config"]}"#,
+            r#"{"claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],"peer_agent":"stopped","login_accounts":[],"warnings":["check config"]}"#,
         )
         .unwrap();
         assert!(super::valid_remote(&report));
 
         let mut report: super::Report = serde_json::from_str(
-            r#"{"claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],"peer_agent":"stopped","warnings":[]}"#,
+            r#"{"claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],"peer_agent":"stopped","login_accounts":[],"warnings":[]}"#,
         )
         .unwrap();
         report.warnings.push("x".repeat(1025));
         assert!(!super::valid_remote(&report));
 
-        let mut report: super::Report =
-            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","warnings":[]}"#).unwrap();
+        let mut report: super::Report = serde_json::from_str(
+            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[],"warnings":[]}"#,
+        )
+        .unwrap();
         report.warnings = vec!["ok".into(); 129];
         assert!(!super::valid_remote(&report));
 
-        let mut report: super::Report =
-            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","warnings":["safe"]}"#)
-                .unwrap();
+        let mut report: super::Report = serde_json::from_str(
+            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[],"warnings":["safe"]}"#,
+        )
+        .unwrap();
         report.warnings[0] = "bad\nwarning".into();
         assert!(!super::valid_remote(&report));
 
         let mut report: super::Report =
-            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped"}"#).unwrap();
+            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","login_accounts":[]}"#)
+                .unwrap();
         assert_eq!(report.tick_agent.state, "unknown");
         report.tick_agent.last_exit_reason = Some("x".repeat(1025));
         assert!(!super::valid_remote(&report));
         report.tick_agent.last_exit_reason = Some("bad\nreason".into());
+        assert!(!super::valid_remote(&report));
+
+        let mut report: super::Report = serde_json::from_str(
+            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[{"adapter":"claude","label":"work","reason":"login_expired","last_success_unix_seconds":100,"login_expiry":null,"repair":"safe"}]}"#,
+        ).unwrap();
+        assert!(super::valid_remote(&report));
+        report.login_accounts[0].repair = Some("bad\nrepair".into());
         assert!(!super::valid_remote(&report));
     }
 }
