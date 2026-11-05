@@ -33,7 +33,7 @@ use provenant_cli::fabric::Context;
 /// observations remain advisory; an actual held lease or retained fence refuses.
 fn peer_adoption_custody(
     context: &provenant_confinement::worktrees::WorktreeContext<'_>,
-    observation: &provenant_confinement::worktrees::WorktreeObservation,
+    observation: &provenant_confinement::worktrees::WorktreeInfo,
     cancel: &CancelToken,
 ) -> Result<Option<&'static str>, provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees::{
@@ -59,9 +59,9 @@ fn peer_adoption_custody(
         }
         Occupancy::Available => None,
     };
-    let mut tree = provenant_confinement::verify_worktree(context.repo, &observation.info.path)
+    let mut tree = provenant_confinement::verify_worktree(context.repo, &observation.path)
         .map_err(|error| WorktreeError::UnknownOccupancy {
-            path: observation.info.path.clone(),
+            path: observation.path.clone(),
             detail: format!("worktree registration could not be verified: {error}"),
         })?;
     let holder =
@@ -80,7 +80,6 @@ fn peer_adoption_custody(
         })?;
     worktrees::check_writer_terminal(tree.repo())?;
     let branch = observation
-        .info
         .branch
         .as_deref()
         .ok_or(WorktreeError::IdentityChanged)?;
@@ -91,7 +90,7 @@ fn peer_adoption_custody(
         .private_dir()
         .read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
     if head != format!("ref: {}\n", reference.as_str()).as_bytes()
-        || context.facts.resolve_commit(context, reference, cancel)? != observation.info.head
+        || context.facts.resolve_commit(context, reference, cancel)? != observation.head
     {
         return Err(WorktreeError::IdentityChanged);
     }
@@ -2569,29 +2568,29 @@ impl BinaryRunOwner<'_> {
                     facts: &facts,
                     ..*context
                 };
-                let existing = worktrees::list_with_observation(context, cancel)?
+                let existing = worktrees::list(context, cancel)?
                     .into_iter()
-                    .find(|entry| entry.info.branch.as_deref() == Some(branch.as_str()));
+                    .find(|entry| entry.branch.as_deref() == Some(branch.as_str()));
                 let Some(base) = base else {
                     return existing
-                        .map(|entry| (entry.info, None))
+                        .map(|entry| (entry, None))
                         .ok_or(WorktreeError::NotFound.into());
                 };
                 match existing {
                     Some(entry) => {
-                        if entry.info.head != base || entry.info.dirty != WorktreeCondition::Clean {
+                        if entry.head != base || entry.dirty != WorktreeCondition::Clean {
                             if matches!(&entry.occupancy, worktrees::Occupancy::Held) {
                                 let _ = peer_adoption_custody(context, &entry, cancel)?;
                             }
                             return Err(WorktreeError::BranchExistsWithBase {
                                 branch: spec.branch.clone(),
-                                head: entry.info.head,
+                                head: entry.head,
                                 base,
                             }
                             .into());
                         }
                         let warning = peer_adoption_custody(context, &entry, cancel)?;
-                        Ok((entry.info, warning))
+                        Ok((entry, warning))
                     }
                     None => {
                         let request = WorktreeCreate {
@@ -4119,7 +4118,7 @@ fn settle_owned_worktree(
                     // Retained lanes can resume with fresh caches. Restrict this
                     // pass to their owner, including detached remnants, and prove
                     // terminal state again while acquiring writer exclusion.
-                    if lane.writer == worktrees::WriterState::Free {
+                    if lane.occupancy.is_available() {
                         provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
                             &settled.roots.home,
                             &provenant_confinement::cache::CacheGcPolicy {

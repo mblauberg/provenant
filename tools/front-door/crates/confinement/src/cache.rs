@@ -1,7 +1,7 @@
 //! Lane cache collection.
 
 use crate::permissions::{PermissionError, validate_absolute};
-use crate::worktrees::{WorkerState, WriterState};
+use crate::worktrees::{Occupancy, WorkerState};
 use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, PayloadTree};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -56,7 +56,7 @@ pub struct CacheGcPolicy {
     pub selected_only: bool,
     /// Listing observations for canonical owners with live or unknown writers;
     /// never removed or re-probed during the sweep.
-    pub protected_owners: BTreeMap<PathBuf, WriterState>,
+    pub protected_owners: BTreeMap<PathBuf, Occupancy>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -476,8 +476,8 @@ fn prune_worktree_cache(
                     path: cache_root.join(name),
                     bytes: 0,
                     reason: match state {
-                        WriterState::Live => CacheGcReason::Live,
-                        WriterState::Busy => CacheGcReason::Busy,
+                        Occupancy::Observed { .. } => CacheGcReason::Live,
+                        Occupancy::Held => CacheGcReason::Busy,
                         _ => CacheGcReason::Unobservable,
                     },
                 });
@@ -1472,16 +1472,19 @@ mod tests {
             std::fs::create_dir(&owner)?;
             let path = cache(home, &"a".repeat(64), &owner)?;
             for (state, reason) in [
-                (WriterState::Live, CacheGcReason::Live),
-                (WriterState::Busy, CacheGcReason::Busy),
-                (WriterState::Unknown, CacheGcReason::Unobservable),
+                (Occupancy::Observed { process: None }, CacheGcReason::Live),
+                (Occupancy::Held, CacheGcReason::Busy),
+                (
+                    Occupancy::custody_unknown(owner.clone(), "fixture"),
+                    CacheGcReason::Unobservable,
+                ),
             ] {
                 for dry_run in [true, false] {
                     let policy = CacheGcPolicy {
                         idle_before_ns: Some(i128::MAX),
                         dry_run,
                         project_owners: [owner.clone()].into(),
-                        protected_owners: [(owner.clone(), state)].into(),
+                        protected_owners: [(owner.clone(), state.clone())].into(),
                         selected_only: false,
                         free_floor_bytes: None,
                     };
@@ -2176,7 +2179,7 @@ mod tests {
             idle_before_ns: Some(i128::MAX),
             dry_run: true,
             project_owners: caches.iter().map(|(_, owner)| owner.clone()).collect(),
-            protected_owners: [(caches[2].1.clone(), WriterState::Live)].into(),
+            protected_owners: [(caches[2].1.clone(), Occupancy::Observed { process: None })].into(),
             free_floor_bytes: None,
             selected_only: false,
         };

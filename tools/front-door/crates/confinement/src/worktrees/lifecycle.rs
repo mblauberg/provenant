@@ -93,26 +93,6 @@ pub fn list(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    Ok(list_with_observation(context, cancel)?
-        .into_iter()
-        .map(|observation| observation.info)
-        .collect())
-}
-
-/// The native census and registration/custody provenance for one inventory row.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorktreeObservation {
-    pub info: WorktreeInfo,
-    pub occupancy: Occupancy,
-}
-
-/// Like [`list`], preserving the native observation and whether registration
-/// or on-disk custody was itself unresolved. Admission callers use these
-/// typed facts to distinguish incomplete census from unresolved custody.
-pub fn list_with_observation(
-    context: &WorktreeContext<'_>,
-    cancel: &CancelToken,
-) -> Result<Vec<WorktreeObservation>, WorktreeError> {
     list_streaming(context, cancel, |_, _| {})
 }
 
@@ -122,10 +102,7 @@ pub fn list_cached(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    Ok(list_impl(context, cancel, |_, _| {}, true, true)?
-        .into_iter()
-        .map(|observation| observation.info)
-        .collect())
+    list_impl(context, cancel, |_, _| {}, true, true)
 }
 
 /// Report the inventory size before the census and each completed row after
@@ -135,7 +112,7 @@ pub fn list_streaming(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
     report: impl FnMut(usize, Option<&WorktreeInfo>),
-) -> Result<Vec<WorktreeObservation>, WorktreeError> {
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     list_impl(context, cancel, report, true, false)
 }
 
@@ -145,10 +122,7 @@ pub fn list_for_gc(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    Ok(list_impl(context, cancel, |_, _| {}, false, false)?
-        .into_iter()
-        .map(|observation| observation.info)
-        .collect())
+    list_impl(context, cancel, |_, _| {}, false, false)
 }
 
 fn list_impl(
@@ -157,7 +131,7 @@ fn list_impl(
     mut report: impl FnMut(usize, Option<&WorktreeInfo>),
     eager_git: bool,
     reuse_inventory: bool,
-) -> Result<Vec<WorktreeObservation>, WorktreeError> {
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     validate_binding(context)?;
     let entries = {
         let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
@@ -196,7 +170,7 @@ fn list_impl(
         let mut owner_evidence = None;
         let mut registration_evidence = None;
         let is_primary = path == primary;
-        let (dirty, writer, disk, registration_unknown) = if is_primary {
+        let (dirty, disk, registration_unknown) = if is_primary {
             owner = Ok(None);
             (
                 if eager_git {
@@ -205,7 +179,6 @@ fn list_impl(
                 } else {
                     WorktreeCondition::Unknown
                 },
-                combine_worker_state(WorkerState::Unknown, observed),
                 WorkerState::Unknown,
                 true,
             )
@@ -240,32 +213,15 @@ fn list_impl(
                         } else {
                             WorktreeCondition::Unknown
                         },
-                        if entry.locked || entry.prunable {
-                            WriterState::Unknown
-                        } else {
-                            combine_worker_state(disk, observed)
-                        },
                         disk,
                         entry.locked || entry.prunable || disk == WorkerState::Unknown,
                     )
                 }
                 Err(error) => {
                     registration_evidence = Some(format!("worktree verification failed: {error}"));
-                    (
-                        WorktreeCondition::Unknown,
-                        WriterState::Unknown,
-                        WorkerState::Unknown,
-                        true,
-                    )
+                    (WorktreeCondition::Unknown, WorkerState::Unknown, true)
                 }
             }
-        };
-        // Until all consumers use Occupancy, legacy inventory consumers must
-        // retain an unreadable owner rather than treating the tree as free.
-        let writer = if owner_evidence.is_some() && disk != WorkerState::Busy {
-            WriterState::Unknown
-        } else {
-            writer
         };
         let occupancy = if disk == WorkerState::Busy {
             Occupancy::Held
@@ -310,20 +266,17 @@ fn list_impl(
                 },
             }
         };
-        let observation = WorktreeObservation {
-            info: WorktreeInfo {
-                path,
-                branch: branch_text,
-                head: entry.head,
-                dirty,
-                writer,
-                owner,
-                primary: is_primary,
-            },
+        let info = WorktreeInfo {
+            path,
+            branch: branch_text,
+            head: entry.head,
+            dirty,
             occupancy,
+            owner,
+            primary: is_primary,
         };
-        report(total, Some(&observation.info));
-        result.push(observation);
+        report(total, Some(&info));
+        result.push(info);
     }
     Ok(result)
 }
@@ -527,18 +480,13 @@ pub fn create(
     let worker = context.workers.observe_roots(std::slice::from_ref(&target));
     let writer = worker.get(&target).copied().unwrap_or(WorkerState::Unknown);
     Ok(WorktreeInfo {
-        path: target,
+        path: target.clone(),
         branch: Some(branch.as_str().to_owned()),
         head: entry.head,
         dirty: WorktreeCondition::Clean,
         owner: Ok(None),
         primary: false,
-        writer: match writer {
-            WorkerState::Free => WriterState::Free,
-            WorkerState::Live => WriterState::Live,
-            WorkerState::Busy => WriterState::Busy,
-            WorkerState::Unknown => WriterState::Unknown,
-        },
+        occupancy: combine_occupancy(&target, WorkerState::Free, writer),
     })
 }
 
@@ -965,7 +913,7 @@ pub(super) fn remove_tree_when(
         dirty: WorktreeCondition::Clean,
         owner: Err("worktree registration was not observed".into()),
         primary: false,
-        writer: WriterState::Free,
+        occupancy: Occupancy::Available,
     };
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;
     Ok(RemovedTree {

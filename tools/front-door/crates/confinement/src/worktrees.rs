@@ -427,15 +427,6 @@ pub enum WorktreeCondition {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WriterState {
-    Free,
-    Busy,
-    Live,
-    Unknown,
-}
-
 /// A worktree's observed occupancy, including the scope and evidence when it
 /// cannot be determined. Process observations are advisory; held custody is
 /// determined by the writer exclusion slot and retained fences.
@@ -453,6 +444,29 @@ pub enum Occupancy {
     },
 }
 
+impl Occupancy {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Available => "free",
+            Self::Held => "busy",
+            Self::Observed { .. } => "live",
+            Self::Unknown { .. } => "unknown",
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+
+    pub fn custody_unknown(scope: PathBuf, evidence: impl Into<String>) -> Self {
+        Self::Unknown {
+            scope,
+            evidence: evidence.into(),
+            source: OccupancyUnknownSource::Custody,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OccupancyUnknownSource {
     Census,
@@ -467,7 +481,7 @@ pub struct WorktreeInfo {
     pub branch: Option<String>,
     pub head: GitOid,
     pub dirty: WorktreeCondition,
-    pub writer: WriterState,
+    pub occupancy: Occupancy,
     /// The existing owner record, or the evidence that it could not be read.
     pub owner: Result<Option<WorktreeOwner>, String>,
     pub primary: bool,
@@ -502,7 +516,7 @@ impl Serialize for WorktreeInfo {
         state.serialize_field("branch", &self.branch)?;
         state.serialize_field("head", &self.head)?;
         state.serialize_field("dirty", &self.dirty)?;
-        state.serialize_field("writer", &self.writer)?;
+        state.serialize_field("writer", self.occupancy.label())?;
         state.serialize_field("owner", self.owner_label())?;
         if self.is_unowned() {
             state.serialize_field("next", "This checkout has no Provenant lane owner; it may have been created outside Provenant. Inspect its custody, then select it explicitly with --worktree <path>.")?;

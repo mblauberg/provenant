@@ -117,7 +117,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
     }
     let mut lanes = list(&context, &cancel())?;
     for lane in &mut lanes {
-        lane.writer = WriterState::Unknown;
+        lane.occupancy = Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
     }
     struct CountingGit<'a> {
         inner: &'a dyn Executor,
@@ -613,9 +613,9 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
         rejected: AtomicUsize::new(0),
     };
     context.executor = &git;
-    let observation = list_with_observation(&context, &cancel())?
+    let observation = list(&context, &cancel())?
         .into_iter()
-        .find(|entry| entry.info.path == lane.path)
+        .find(|entry| entry.path == lane.path)
         .ok_or("missing worktree")?;
     assert!(matches!(
         observation.occupancy,
@@ -742,10 +742,11 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
             .find(|lane| lane.path == path)
             .ok_or("missing tree")?;
         if scenario != "unowned" {
-            lane.writer = WriterState::Unknown;
+            lane.occupancy =
+                Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
         } else {
             assert!(lane.is_unowned());
-            assert_eq!(lane.writer, WriterState::Free);
+            assert!(lane.occupancy.is_available());
         }
         let live = NamedLive;
         let unknown = UnknownWorkers;
@@ -928,10 +929,10 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         .into_iter()
         .find(|lane| lane.path == path)
         .ok_or("lane")?;
-    assert_eq!(lane.writer, WriterState::Busy);
-    let observation = list_with_observation(&context, &cancel())?
+    assert_eq!(lane.occupancy, Occupancy::Held);
+    let observation = list(&context, &cancel())?
         .into_iter()
-        .find(|entry| entry.info.path == path)
+        .find(|entry| entry.path == path)
         .ok_or("retained worktree")?;
     assert_eq!(observation.occupancy, Occupancy::Held);
     fs::write(path.join("uncommitted"), "preserve unfinished work")?;
@@ -1044,8 +1045,8 @@ fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Bo
             .iter()
             .find(|tree| tree.path == path)
             .ok_or("tree")?
-            .writer,
-        WriterState::Free
+            .occupancy,
+        Occupancy::Available
     );
     assert!(
         context
@@ -1133,8 +1134,8 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
             .iter()
             .find(|tree| tree.path == info.path)
             .ok_or("tree")?
-            .writer,
-        WriterState::Busy
+            .occupancy,
+        Occupancy::Held
     );
     let report = collect(
         &context,
@@ -1475,6 +1476,19 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
 
 #[test]
 fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<(), Box<dyn Error>> {
+    let scope = Path::new("/fixture/worktree");
+    assert!(matches!(
+        combine_occupancy(scope, WorkerState::Unknown, WorkerState::Live),
+        Occupancy::Unknown { scope: actual, source: OccupancyUnknownSource::Custody, .. } if actual == scope
+    ));
+    assert_eq!(
+        combine_occupancy(scope, WorkerState::Busy, WorkerState::Live),
+        Occupancy::Held
+    );
+    assert!(matches!(
+        combine_occupancy(scope, WorkerState::Free, WorkerState::Busy),
+        Occupancy::Unknown { scope: actual, source: OccupancyUnknownSource::Census, .. } if actual == scope
+    ));
     struct Incomplete;
     struct Contended;
     impl WorkerObserver for Contended {
@@ -1517,9 +1531,9 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
         &cancel(),
     )?;
     context.workers = &Incomplete;
-    let observation = list_with_observation(&context, &cancel())?
+    let observation = list(&context, &cancel())?
         .into_iter()
-        .find(|entry| entry.info.path == info.path)
+        .find(|entry| entry.path == info.path)
         .ok_or("missing worktree")?;
     assert!(matches!(
         observation.occupancy,
@@ -1527,16 +1541,16 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
             if scope == info.path && evidence == "fixture census incomplete"
     ));
     let _held = cache_writer_guard(context.project_state, &info.path).map_err(|_| "lease")?;
-    let observation = list_with_observation(&context, &cancel())?
+    let observation = list(&context, &cancel())?
         .into_iter()
-        .find(|entry| entry.info.path == info.path)
+        .find(|entry| entry.path == info.path)
         .ok_or("missing worktree")?;
     assert_eq!(observation.occupancy, Occupancy::Held);
     drop(_held);
     context.workers = &Contended;
-    let observation = list_with_observation(&context, &cancel())?
+    let observation = list(&context, &cancel())?
         .into_iter()
-        .find(|entry| entry.info.path == info.path)
+        .find(|entry| entry.path == info.path)
         .ok_or("missing worktree")?;
     assert!(matches!(
         observation.occupancy,
@@ -1556,35 +1570,31 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
     };
     save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
     assert_eq!(load_owner(&tree)?, Some(owner.clone()));
-    let registered = list_with_observation(&context, &cancel())?
+    let registered = list(&context, &cancel())?
         .into_iter()
-        .find(|entry| entry.info.path == info.path)
+        .find(|entry| entry.path == info.path)
         .ok_or("missing registered worktree")?;
     assert_eq!(
-        registered.info.owner.as_ref().ok().and_then(Option::as_ref),
+        registered.owner.as_ref().ok().and_then(Option::as_ref),
         Some(&owner)
     );
-    assert_eq!(
-        serde_json::to_value(&registered.info)?["owner"],
-        "registered"
-    );
+    assert_eq!(serde_json::to_value(&registered)?["owner"], "registered");
     let owner_path = tree.repo().private_git_dir().join("provenant-owner.json");
     let saved = fs::read(&owner_path)?;
     fs::write(&owner_path, b"invalid owner record")?;
     context.workers = &FreeWorkers;
-    let observation = list_with_observation(&context, &cancel())?
+    let observation = list(&context, &cancel())?
         .into_iter()
-        .find(|entry| entry.info.path == info.path)
+        .find(|entry| entry.path == info.path)
         .ok_or("missing worktree")?;
-    assert_eq!(observation.info.writer, WriterState::Unknown);
+    assert!(matches!(observation.occupancy, Occupancy::Unknown { .. }));
     assert!(
         observation
-            .info
             .owner
             .as_ref()
             .is_err_and(|evidence| evidence.contains("owner record could not be read"))
     );
-    assert_eq!(serde_json::to_value(&observation.info)?["owner"], "unknown");
+    assert_eq!(serde_json::to_value(&observation)?["owner"], "unknown");
     let policy = WorktreeGcPolicy {
         upstream: Some(info.head),
         terminal: &|_| true,
@@ -1597,7 +1607,7 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
     };
     collect(
         &context,
-        std::slice::from_ref(&observation.info),
+        std::slice::from_ref(&observation),
         &policy,
         &cancel(),
     )?;
@@ -1610,9 +1620,9 @@ fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<()
     ));
     fs::write(&owner_path, saved)?;
     fixture.run(&["worktree", "lock", info.path.to_str().ok_or("path")?])?;
-    let observation = list_with_observation(&context, &cancel())?
+    let observation = list(&context, &cancel())?
         .into_iter()
-        .find(|entry| entry.info.path == info.path)
+        .find(|entry| entry.path == info.path)
         .ok_or("missing worktree")?;
     assert!(matches!(
         observation.occupancy,
@@ -1664,7 +1674,7 @@ fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn E
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing worktree")?;
-    assert_eq!(listed.writer, WriterState::Busy);
+    assert_eq!(listed.occupancy, Occupancy::Held);
     assert_eq!(
         load_owner(&tree)?.and_then(|owner| owner.attempt_id),
         Some(attempt)
@@ -1697,7 +1707,7 @@ fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn E
             false,
             &cancel()
         ),
-        Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
+        Err(WorktreeError::WriterBusy { holder: Some(holder) }) if holder == attempt
     ));
     save_lane_owner_when_free(
         &context,
@@ -3346,7 +3356,7 @@ fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn 
     let mut lane = gc_merged_worktree(&fixture, &context, "foreign-output-lock")?;
     fs::create_dir(lane.path.join("target"))?;
     fs::write(lane.path.join("target/artifact"), "output")?;
-    lane.writer = WriterState::Unknown;
+    lane.occupancy = Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
     let state = context
         .project_state
         .open_verified_directory(&state_dir_name(&lane.path))?;
@@ -3693,7 +3703,8 @@ fn gc_managed_fallback_keeps_fresh_trees_at_the_tip_or_first_parent() -> Result<
                 .find(|lane| lane.path == created.path)
                 .ok_or("missing lane")?;
             if entry == "unknown-writer" {
-                lane.writer = WriterState::Unknown;
+                lane.occupancy =
+                    Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
             }
             let report = collect(
                 &context,
@@ -3766,7 +3777,8 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
         context.workers = &probe;
         let foreign = scenario.starts_with("foreign");
         if foreign {
-            lane.writer = WriterState::Unknown;
+            lane.occupancy =
+                Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
         }
         let report = collect(
             &context,
@@ -3849,7 +3861,7 @@ fn locked_registration_stays_unknown_when_census_reports_live() -> Result<(), Bo
         .into_iter()
         .find(|entry| entry.path == path)
         .ok_or("locked linked worktree missing from inventory")?;
-    assert_eq!(listed.writer, WriterState::Unknown);
+    assert!(matches!(listed.occupancy, Occupancy::Unknown { .. }));
     Ok(())
 }
 
@@ -5156,14 +5168,14 @@ fn create_list_remove_keeps_branch_and_refuses_primary() -> Result<(), Box<dyn E
     );
     assert_eq!(created.head, fixture.head()?);
     assert_eq!(created.dirty, WorktreeCondition::Clean);
-    assert_eq!(created.writer, WriterState::Free);
+    assert!(created.occupancy.is_available());
 
     let listed = list(&context, &cancellation)?;
     assert!(listed.iter().any(|entry| {
         entry.path == created.path
             && entry.branch.as_deref() == Some("refs/heads/feature/lifecycle")
             && entry.dirty == WorktreeCondition::Clean
-            && entry.writer == WriterState::Free
+            && entry.occupancy.is_available()
     }));
     assert!(matches!(
         remove(

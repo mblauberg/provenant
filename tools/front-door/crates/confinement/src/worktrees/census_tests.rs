@@ -2235,7 +2235,7 @@ fn only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree() -> Result<
     assert!(
         listed
             .iter()
-            .any(|entry| entry.path == created.path && entry.writer == WriterState::Free)
+            .any(|entry| entry.path == created.path && entry.occupancy.is_available())
     );
     remove_named(&placed, "landed")?;
     assert!(!created.path.exists());

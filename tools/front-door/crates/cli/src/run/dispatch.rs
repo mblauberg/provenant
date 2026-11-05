@@ -385,7 +385,7 @@ pub(super) fn dispatch_with_workers(
                         .find(|tree| tree.path == path)
                         .ok_or(worktrees::WorktreeError::NotFound)?;
                     if info.dirty != worktrees::WorktreeCondition::Clean
-                        || info.writer != worktrees::WriterState::Free
+                        || !info.occupancy.is_available()
                     {
                         return Err(worktrees::WorktreeError::Dirty(String::new()));
                     }
@@ -1487,11 +1487,11 @@ pub(super) fn dispatch_inner(
                                 lock_budget,
                                 ..*context
                             };
-                            let observation = worktrees::list_with_observation(context, &cancel)?
+                            let observation = worktrees::list(context, &cancel)?
                                 .into_iter()
-                                .find(|tree| tree.info.path == writer.worktree)
+                                .find(|tree| tree.path == writer.worktree)
                                 .ok_or(worktrees::WorktreeError::NotFound)?;
-                            let info = observation.info;
+                            let info = observation;
                             let branch =
                                 info.branch
                                     .ok_or(worktrees::WorktreeError::DetachedWorktree {
@@ -1500,7 +1500,7 @@ pub(super) fn dispatch_inner(
                             if !replay {
                                 super::worktree::warn_advisory_occupancy(
                                     &info.path,
-                                    &observation.occupancy,
+                                    &info.occupancy,
                                 )?;
                                 match worktrees::cache_writer_probe(
                                     context.project_state,

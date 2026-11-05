@@ -146,7 +146,7 @@ impl Error {
 #[serde(untagged)]
 enum Data {
     SeedBuilt(String),
-    Created(worktrees::WorktreeInfo),
+    Created(Box<worktrees::WorktreeInfo>),
     Listed(Vec<worktrees::WorktreeInfo>),
     Removed(worktrees::RemoveOutcome),
 }
@@ -257,11 +257,11 @@ fn execute(
             };
             Ok(match command {
                 Worktree::SeedBuild => unreachable!(),
-                Worktree::Create { branch, base } => Data::Created(worktrees::create(
+                Worktree::Create { branch, base } => Data::Created(Box::new(worktrees::create(
                     context,
                     WorktreeCreate { branch, base },
                     cancel,
-                )?),
+                )?)),
                 Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
                 Worktree::SessionList => unreachable!(),
                 Worktree::Remove(mut args) => {
@@ -1002,7 +1002,7 @@ fn collection_lock_for(
 
 fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
     use provenant_confinement::cache::{CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard};
-    use provenant_confinement::worktrees::{WorkerState, WriterState};
+    use provenant_confinement::worktrees::WorkerState;
 
     let workspace = if command.scheduled {
         roots::Workspace::Home
@@ -1220,8 +1220,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         dry_run: command.dry_run,
         protected_owners: lanes
             .iter()
-            .filter(|info| info.writer != WriterState::Free)
-            .map(|info| (info.path.clone(), info.writer))
+            .filter(|info| !info.occupancy.is_available())
+            .map(|info| (info.path.clone(), info.occupancy.clone()))
             .collect(),
         project_owners: lanes.iter().map(|info| info.path.clone()).collect(),
         selected_only: command.pressure && !command.scheduled,
@@ -1524,7 +1524,7 @@ mod human_tests {
             branch: Some("refs/heads/master".into()),
             head: GitOid::parse(&"4a".repeat(20))?,
             dirty: worktrees::WorktreeCondition::Dirty,
-            writer: worktrees::WriterState::Live,
+            occupancy: worktrees::Occupancy::Observed { process: None },
             owner: Err("worktree registration was not observed".into()),
             primary: false,
         })
@@ -1573,7 +1573,7 @@ mod human_tests {
     fn worktree_list_distinguishes_unowned_from_uncertain_custody() -> Check {
         let mut tree = info("/repo/native checkout")?;
         tree.owner = Ok(None);
-        tree.writer = worktrees::WriterState::Unknown;
+        tree.occupancy = worktrees::Occupancy::custody_unknown(tree.path.clone(), "fixture");
         let value = serde_json::to_value(&tree)?;
         assert_eq!(value["owner"], "unowned");
         assert_eq!(value["writer"], "unknown");
@@ -1583,7 +1583,10 @@ mod human_tests {
         );
         tree.owner = Err("worktree registration was not observed".into());
         assert!(serde_json::to_value(&tree)?.get("next").is_none());
-        assert_eq!(tree.writer, worktrees::WriterState::Unknown);
+        assert!(matches!(
+            tree.occupancy,
+            worktrees::Occupancy::Unknown { .. }
+        ));
         Ok(())
     }
 }

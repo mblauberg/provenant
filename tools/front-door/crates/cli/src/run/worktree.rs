@@ -153,15 +153,14 @@ pub(super) fn own_worktree(
             } else {
                 None
             };
-            let existing = worktrees::list_with_observation(context, cancel)?
+            let existing = worktrees::list(context, cancel)?
                 .into_iter()
                 .find(|observation| {
-                    observation.info.branch.as_deref()
-                        == Some(format!("refs/heads/{branch}").as_str())
+                    observation.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
                 });
             let (info, pinned) = match existing {
                 Some(observation) => {
-                    let info = observation.info;
+                    let info = observation;
                     if let Some(base) = requested_base_oid
                         && !worktrees::is_ancestor(context, base, info.head, cancel)?
                     {
@@ -171,10 +170,10 @@ pub(super) fn own_worktree(
                             base,
                         });
                     }
-                    warn_advisory_occupancy(&info.path, &observation.occupancy)?;
+                    warn_advisory_occupancy(&info.path, &info.occupancy)?;
                     let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
                     let owner = worktrees::load_owner(&tree);
-                    if matches!(observation.occupancy, Occupancy::Held) {
+                    if matches!(info.occupancy, Occupancy::Held) {
                         return Err(worktrees::WorktreeError::WriterBusy {
                             holder: owner.ok().flatten().and_then(|owner| owner.attempt_id),
                         });

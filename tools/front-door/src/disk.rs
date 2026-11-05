@@ -223,10 +223,10 @@ fn collect_resolved(
     match inventory {
         Ok(worktrees) => {
             for info in worktrees {
-                if info.writer != provenant_confinement::worktrees::WriterState::Free {
+                if !info.occupancy.is_available() {
                     policy
                         .protected_owners
-                        .insert(info.path.clone(), info.writer);
+                        .insert(info.path.clone(), info.occupancy);
                 }
                 policy.project_owners.insert(info.path);
             }

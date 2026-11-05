@@ -92,8 +92,9 @@ when the writer lock is free even if the census sees a process in the tree.
 Admission warns about that observation, or the scoped census evidence when
 it is incomplete. A refusal caused by incomplete census also carries that
 scope and evidence. Admission represents a held lease, an advisory process and
-unknown census or custody evidence as distinct occupancy outcomes. Reassignment
-rechecks the owner and HEAD under repository
+unknown census or custody evidence as distinct occupancy outcomes. Inventory,
+admission, cache retention and cleanup share that occupancy; the established
+`writer` output is a projection of it. Reassignment rechecks the owner and HEAD under repository
 and writer custody, and still refuses dirty trees, Git operations and retained
 writer fences. Peer worktree adoption also rechecks writer custody, branch,
 HEAD and Git-operation state before accepting an existing checkout;

@@ -359,9 +359,9 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
             &cancel,
             &Observer(state),
             |context| {
-                let entry = worktrees::list_with_observation(context, &cancel)?
+                let entry = worktrees::list(context, &cancel)?
                     .into_iter()
-                    .find(|entry| entry.info.path == info.path)
+                    .find(|entry| entry.path == info.path)
                     .ok_or(worktrees::WorktreeError::NotFound)?;
                 peer_adoption_custody(context, &entry, &cancel)
             },
@@ -384,9 +384,9 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
         &cancel,
         &Observer(WorkerState::Free),
         |context| {
-            worktrees::list_with_observation(context, &cancel)?
+            worktrees::list(context, &cancel)?
                 .into_iter()
-                .find(|entry| entry.info.path == info.path)
+                .find(|entry| entry.path == info.path)
                 .ok_or(worktrees::WorktreeError::NotFound)
         },
     )?;
@@ -414,9 +414,9 @@ fn peer_adoption_checks_lease_and_treats_census_as_advisory()
         &cancel,
         &Observer(WorkerState::Free),
         |context| {
-            worktrees::list_with_observation(context, &cancel)?
+            worktrees::list(context, &cancel)?
                 .into_iter()
-                .find(|entry| entry.info.path == info.path)
+                .find(|entry| entry.path == info.path)
                 .ok_or(worktrees::WorktreeError::NotFound)
         },
     )?;

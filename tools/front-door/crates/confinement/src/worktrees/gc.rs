@@ -104,10 +104,10 @@ fn collect_impl(
         // An unknown writer does not make ignored output disposable. Require
         // a complete free census and writer exclusion before considering it.
         // This is independent of the policy for removing foreign worktrees.
-        if (lane.writer == WriterState::Unknown
+        if (matches!(&lane.occupancy, Occupancy::Unknown { .. })
             || (!lane.path.starts_with(&managed)
                 && lane.is_unowned()
-                && lane.writer == WriterState::Free))
+                && lane.occupancy.is_available()))
             && !policy.regenerable.is_empty()
             && let Some(entry) = entries.iter().find(|entry| entry.path == lane.path)
         {
@@ -156,7 +156,9 @@ fn collect_impl(
             continue;
         }
         let foreign = policy.foreign_merged_clean && !(policy.terminal)(&lane.path);
-        if foreign || (policy.foreign_merged_clean && lane.writer == WriterState::Unknown) {
+        if foreign
+            || (policy.foreign_merged_clean && matches!(&lane.occupancy, Occupancy::Unknown { .. }))
+        {
             // The fallback proves ancestry and a free census, not that a managed
             // lane is finished: keep a fresh tree at the tip or on its first parent.
             if lane.path.starts_with(&managed)
@@ -198,10 +200,10 @@ fn collect_impl(
             }
             continue;
         }
-        if lane.writer != WriterState::Free {
-            let reason = match lane.writer {
-                WriterState::Busy => RetainReason::LockBusy,
-                WriterState::Live => RetainReason::LiveWriter,
+        if !lane.occupancy.is_available() {
+            let reason = match &lane.occupancy {
+                Occupancy::Held => RetainReason::LockBusy,
+                Occupancy::Observed { .. } => RetainReason::LiveWriter,
                 _ => RetainReason::UnknownWriter,
             };
             if reason == RetainReason::UnknownWriter

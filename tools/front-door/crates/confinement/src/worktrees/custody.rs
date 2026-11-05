@@ -385,15 +385,19 @@ pub(super) fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), Work
     Ok(())
 }
 
-pub(crate) fn combine_worker_state(state: WorkerState, native: WorkerState) -> WriterState {
+pub(crate) fn combine_occupancy(path: &Path, state: WorkerState, native: WorkerState) -> Occupancy {
     match (state, native) {
-        // A held lease is authoritative even when the census also sees a
-        // process. Preserve contention so callers can name the lease holder.
-        (WorkerState::Busy, _) => WriterState::Busy,
-        (WorkerState::Live, _) | (_, WorkerState::Live) => WriterState::Live,
-        (_, WorkerState::Busy) => WriterState::Busy,
-        (WorkerState::Unknown, _) | (_, WorkerState::Unknown) => WriterState::Unknown,
-        (WorkerState::Free, WorkerState::Free) => WriterState::Free,
+        (WorkerState::Busy, _) => Occupancy::Held,
+        (WorkerState::Unknown, _) => {
+            Occupancy::custody_unknown(path.to_path_buf(), "writer custody could not be verified")
+        }
+        (WorkerState::Live, _) | (_, WorkerState::Live) => Occupancy::Observed { process: None },
+        (_, WorkerState::Busy) | (_, WorkerState::Unknown) => Occupancy::Unknown {
+            scope: path.to_path_buf(),
+            evidence: "process census could not establish occupancy".into(),
+            source: OccupancyUnknownSource::Census,
+        },
+        (WorkerState::Free, WorkerState::Free) => Occupancy::Available,
     }
 }
 

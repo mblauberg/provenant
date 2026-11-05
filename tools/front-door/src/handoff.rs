@@ -181,7 +181,7 @@ fn inspect_context(
     cancel: &CancelToken,
 ) -> Result<Vec<Tree>, crate::worktrees::Error> {
     let context = &worktrees::WorktreeContext { facts, ..*context };
-    let observations = worktrees::list_with_observation(context, cancel)?;
+    let observations = worktrees::list(context, cancel)?;
     let common = context.repo.common_git_dir();
     let primary = common
         .file_name()
@@ -190,7 +190,7 @@ fn inspect_context(
         .flatten();
     let mut trees = Vec::with_capacity(observations.len());
     for observation in observations {
-        let info = observation.info;
+        let info = observation;
         let branch = info.branch.as_deref().map(short_branch);
         let (upstream, pushed) = match branch.as_deref() {
             Some(branch) => {
@@ -210,8 +210,8 @@ fn inspect_context(
             None => (None, false),
         };
         let path = fs::canonicalize(&info.path).unwrap_or(info.path);
-        let (live_writer, writer_unknown) = handoff_writer_state(&observation.occupancy);
-        let writer_evidence = match &observation.occupancy {
+        let (live_writer, writer_unknown) = handoff_writer_state(&info.occupancy);
+        let writer_evidence = match &info.occupancy {
             Occupancy::Unknown {
                 scope,
                 evidence,
@@ -219,7 +219,7 @@ fn inspect_context(
             } => Some(format!("{}: {evidence}", scope.display())),
             _ => None,
         };
-        let writer_advisory = match &observation.occupancy {
+        let writer_advisory = match &info.occupancy {
             Occupancy::Observed { process } => Some(process.as_ref().map_or_else(
                 || format!("{}: a process was observed", path.display()),
                 |process| format!("{}: process {process} ({})", path.display(), process.kind),
@@ -1361,7 +1361,6 @@ pub(crate) fn receive(
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
-    use provenant_confinement::worktrees::WriterState;
 
     #[test]
     fn git_text_refuses_stdout_past_its_bound() {
@@ -1714,7 +1713,7 @@ mod tests {
             branch: Some("feat/x".into()),
             head: base,
             dirty: WorktreeCondition::Clean,
-            writer: WriterState::Free,
+            occupancy: Occupancy::Available,
             owner: Err("worktree registration was not observed".into()),
             primary: false,
         };
