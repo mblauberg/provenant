@@ -1043,6 +1043,7 @@ mod cargo_setup_tests {
         let run = |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
             let output = provenant_os::fixture::git_command_at(&git)
                 .env_clear()
+                .envs(provenant_os::fixture::fixture_git_settings())
                 .env("PATH", "/usr/bin:/bin")
                 .env("HOME", &root)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -1060,16 +1061,7 @@ mod cargo_setup_tests {
         run(&["init", "-q"])?;
         std::fs::write(project.join("old name.txt"), "tracked")?;
         run(&["add", "old name.txt"])?;
-        run(&[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "initial",
-        ])?;
+        run(&["commit", "--allow-empty", "-qm", "initial"])?;
         run(&[
             "worktree",
             "add",
@@ -1103,16 +1095,7 @@ mod cargo_setup_tests {
         };
         // Use a real unrelated root, so both named commits exist.
         let tree = run(&["rev-parse", "HEAD^{tree}"])?;
-        let unrelated = run(&[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit-tree",
-            &tree,
-            "-m",
-            "unrelated root",
-        ])?;
+        let unrelated = run(&["commit-tree", &tree, "-m", "unrelated root"])?;
         let other = GitOid::parse(&unrelated)?;
         let mismatch = writer
             .require_source(other)
@@ -1126,18 +1109,7 @@ mod cargo_setup_tests {
         assert!(message.contains(&expected));
         writer.require_source(writer.base)?;
         // A continuation accepts when the predecessor descends from the original source.
-        let child_commit = run(&[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit-tree",
-            &tree,
-            "-p",
-            &expected,
-            "-m",
-            "child commit",
-        ])?;
+        let child_commit = run(&["commit-tree", &tree, "-p", &expected, "-m", "child commit"])?;
         let child_oid = GitOid::parse(&child_commit)?;
         let source_oid = GitOid::parse(&expected)?;
         writer.base = child_oid;

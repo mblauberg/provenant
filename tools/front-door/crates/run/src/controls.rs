@@ -740,19 +740,7 @@ mod lineage_tests {
     /// Initialise `project` with one empty commit, through the scrubbed fixture Git.
     fn init_base_repository(project: &Path) -> std::io::Result<()> {
         run_git(project, &["init", "-q"])?;
-        run_git(
-            project,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "Base",
-            ],
-        )?;
+        run_git(project, &["commit", "--allow-empty", "-qm", "Base"])?;
         Ok(())
     }
 

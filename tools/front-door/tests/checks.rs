@@ -239,20 +239,7 @@ fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
 }
 fn commit(rig: &TestRig, message: &str) -> Result<String> {
     git(rig, &["add", "--all"])?;
-    git(
-        rig,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            message,
-        ],
-    )?;
+    git(rig, &["commit", "-q", "--allow-empty", "-m", message])?;
     git(rig, &["rev-parse", "HEAD"])
 }
 fn legal(rig: &TestRig) -> Result {

@@ -74,20 +74,10 @@ fn linked_fixture() -> Result<LinkedFixture, Box<dyn std::error::Error>> {
     let mut env: Vec<_> = std::env::vars_os()
         .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
         .collect();
-    env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
-    env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+    env.extend(provenant_os::fixture::fixture_git_settings());
     for args in [
         vec!["init", "-q", "-b", "fixture-base"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "base"],
         vec![
             "worktree",
             "add",
@@ -1859,16 +1849,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "base"],
     ] {
         provenant_os::fixture::run_git(&project, &args)?;
     }
@@ -2178,19 +2159,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     let base_a = String::from_utf8(run_git(&project, &["rev-parse", "HEAD"])?)?
         .trim()
         .to_owned();
-    run_git(
-        &project,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "middle",
-        ],
-    )?;
+    run_git(&project, &["commit", "--allow-empty", "-qm", "middle"])?;
     let base_b = String::from_utf8(run_git(&project, &["rev-parse", "HEAD"])?)?
         .trim()
         .to_owned();
@@ -2209,20 +2178,8 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 },
                 &cancel,
             )?;
-            run_git(
-                &info.path,
-                &[
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.invalid",
-                    "commit",
-                    "--allow-empty",
-                    "-qm",
-                    "tip",
-                ],
-            )
-            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            run_git(&info.path, &["commit", "--allow-empty", "-qm", "tip"])
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
             let head = String::from_utf8(
                 run_git(&info.path, &["rev-parse", "HEAD"])
                     .map_err(|_| worktrees::WorktreeError::InvalidOutput)?,
@@ -2394,16 +2351,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
     std::fs::create_dir_all(&project)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "base"],
     ] {
         provenant_os::fixture::run_git(&project, &args)?;
     }
@@ -2624,16 +2572,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
     std::fs::create_dir_all(&project)?;
     for args in [
         vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "base"],
     ] {
         provenant_os::fixture::run_git(&project, &args)?;
     }
@@ -2760,16 +2699,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
     let run_git = |args: &[&str]| provenant_os::fixture::run_git(&project, args);
     for args in [
         &["init", "-q"][..],
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ][..],
+        &["commit", "--allow-empty", "-qm", "base"][..],
     ] {
         run_git(args)?;
     }
@@ -2843,16 +2773,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
     }
     // A relative base is resolved in the source checkout exactly once.
     // The new tree has no HEAD^, so admission must use creation's receipt.
-    run_git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "second",
-    ])?;
+    run_git(&["commit", "--allow-empty", "-qm", "second"])?;
     // Move the named base between early resolution and creation.
     struct MoveBase {
         project: PathBuf,
@@ -3129,27 +3050,9 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let command = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
         let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-            .chain(
-                [
-                    "-c",
-                    "core.hooksPath=/dev/null",
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.test",
-                ]
-                .into_iter()
-                .chain(args.iter().copied())
-                .map(OsString::from),
-            )
+            .chain(args.iter().map(OsString::from))
             .collect();
-        let env = vec![
-            (OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1")),
-            (
-                OsString::from("GIT_CONFIG_GLOBAL"),
-                OsString::from("/dev/null"),
-            ),
-        ];
+        let env = provenant_os::fixture::fixture_git_settings();
         let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(10));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 65536 };

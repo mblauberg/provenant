@@ -543,17 +543,7 @@ fn commit_file(rig: &TestRig) -> Result {
     git(rig, &["add", "file"])?;
     git(
         rig,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-qm",
-            "base",
-        ],
+        &["-c", "commit.gpgsign=false", "commit", "-qm", "base"],
     )?;
     Ok(())
 }
@@ -802,10 +792,6 @@ fn worktree_remove_accepts_an_owned_tree_after_a_commit() -> Result {
             "-C",
             path_str,
             "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "-c",
             "commit.gpgsign=false",
             "commit",
             "-q",
@@ -890,10 +876,6 @@ fn ownership_is_specific_to_one_creation_and_ends_with_the_tree() -> Result {
         &[
             "-C",
             moved.to_str().ok_or("path")?,
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
             "-c",
             "commit.gpgsign=false",
             "commit",

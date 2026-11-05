@@ -11,20 +11,7 @@ fn rig() -> Result<TestRig> {
     )?;
     // TestRig's executor supplies a clean environment, including for Git.
     let git = provenant_os::git::git_executable().ok_or("Git")?;
-    let output = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "Initial",
-        ],
-        None,
-    )?;
+    let output = rig.execute(&git, &["commit", "--allow-empty", "-qm", "Initial"], None)?;
     assert_eq!(code(&output), 0, "{output:?}");
     Ok(rig)
 }
