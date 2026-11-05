@@ -13,10 +13,12 @@ struct Identity {
 fn usable(identity: &Identity, at: i64) -> bool {
     identity.token.is_some() && identity.expires.is_some_and(|e| e > at.saturating_add(60))
 }
-// An expired access token alone does not prove that refresh was rejected.
-fn no_usable_identity(fixed: &Identity) -> ProbeFailure {
+// An expired token is evidence of expiry, not proof that refresh was rejected.
+fn no_usable_identity(fixed: &Identity, now: i64) -> ProbeFailure {
     if fixed.missing {
         ProbeFailure::Auth
+    } else if fixed.expires.is_some_and(|expiry| expiry <= now) {
+        ProbeFailure::LoginExpired
     } else {
         ProbeFailure::Network
     }
@@ -402,11 +404,11 @@ impl LiveQuota {
                 *self.login_expiry.borrow_mut() = fixed.expires;
             }
             if !usable(&fixed, self.now()) {
-                return Err(refresh_error.unwrap_or_else(|| no_usable_identity(&fixed)));
+                return Err(refresh_error.unwrap_or_else(|| no_usable_identity(&fixed, self.now())));
             }
         }
         if !usable(&fixed, self.now()) {
-            return Err(no_usable_identity(&fixed));
+            return Err(no_usable_identity(&fixed, self.now()));
         }
         details.fingerprint = Some(expected);
         self.http(
@@ -436,12 +438,15 @@ mod tests {
             missing: false,
             fingerprint: "fake".into(),
         };
-        assert_eq!(no_usable_identity(&identity), ProbeFailure::Network);
-        assert_eq!(no_usable_identity(&identity), ProbeFailure::Network);
+        assert_eq!(
+            no_usable_identity(&identity, 1000),
+            ProbeFailure::LoginExpired
+        );
+        assert_eq!(no_usable_identity(&identity, 999), ProbeFailure::Network);
         identity.expires = None;
-        assert_eq!(no_usable_identity(&identity), ProbeFailure::Network);
+        assert_eq!(no_usable_identity(&identity, 1000), ProbeFailure::Network);
         identity.missing = true;
-        assert_eq!(no_usable_identity(&identity), ProbeFailure::Auth);
+        assert_eq!(no_usable_identity(&identity, 1000), ProbeFailure::Auth);
     }
 
     #[test]
@@ -558,7 +563,7 @@ mod tests {
         );
         assert_eq!(
             status_fingerprint(Ok(outcome(b"invalid", 1, false))),
-            Err(ProbeFailure::Network)
+            Err(ProbeFailure::Malformed)
         );
         assert_eq!(
             status_fingerprint(Ok(outcome(br#"{"loggedIn":false}"#, 1, true))),

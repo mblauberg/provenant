@@ -1223,6 +1223,11 @@ fn uncertainty(
                 },
                 context.now_seconds(),
             );
+            if read.observed_scope.is_none()
+                && latest_reading(model, availability, context, true).is_some()
+            {
+                return None;
+            }
             ((index == 0 && read.state == provenant_quota::ReadinessState::Unknown)
                 || matches!(
                     read.project(),
@@ -1538,7 +1543,7 @@ fn candidate(
             .filter_map(|(account, reason, _)| {
                 reason.as_ref().map(|reason| {
                     format!(
-                        "{}: {}",
+                        "{}: {}; inspect `provenant quota --full`",
                         account.account_key.as_deref().unwrap_or("unknown account"),
                         exclusion_detail(reason)
                     )

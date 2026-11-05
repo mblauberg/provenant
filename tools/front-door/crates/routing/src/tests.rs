@@ -1648,6 +1648,42 @@ fn stale_availability_is_selectable_but_current_account_wins()
     assert!(
         matches!(selected.readiness, RouteReadiness::Ready { extra, .. } if extra.contains_key("availability_warning"))
     );
+    let records = ["current", "stale"].map(|key| AvailabilityRecord {
+        account_key: Some(key.into()),
+        ..availability()
+    });
+    let readings = [
+        quota(
+            "codex/gpt-6-luna",
+            "current",
+            provenant_quota::QuotaStatus::Available,
+            1,
+            50,
+            120,
+        )?,
+        quota(
+            "codex/gpt-6-luna",
+            "stale",
+            provenant_quota::QuotaStatus::Available,
+            1,
+            50,
+            90,
+        )?,
+    ];
+    let lookup = readiness_over(vec![]);
+    let context = RoutingContext {
+        availability: &records,
+        quota: &readings,
+        readiness: Some(&lookup),
+        access: &access,
+        ..context
+    };
+    assert_eq!(
+        resolve(&request("codex/gpt-6-luna")?, &context)?
+            .account_key
+            .as_deref(),
+        Some("current")
+    );
     Ok(())
 }
 

@@ -1,4 +1,4 @@
 ## Fixes
 ### Accounts, quota and routing
 
-- Claude quota probes report malformed status and credential responses as malformed rather than network failures (#2952).
+- Claude quota probes distinguish malformed responses and expired credentials from network failures (#2952).
