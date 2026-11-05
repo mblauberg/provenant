@@ -1,0 +1,261 @@
+use super::{
+    LandingError,
+    model::*,
+    ports::{Forge, MergeTree, PullRequestState, Repo},
+};
+use std::time::{Duration, Instant};
+
+/// Select eligible pull requests in requested order, up to the configured batch limit.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "batch collection is a wall-clock boundary"
+)]
+pub fn select_batch(
+    forge: &mut dyn Forge,
+    numbers: &[u64],
+    target: &str,
+    limit: usize,
+    batch_wait_seconds: u64,
+) -> Result<Vec<EligiblePr>, LandingError> {
+    if limit == 0 || numbers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let start = Instant::now();
+    let budget = Duration::from_secs(batch_wait_seconds);
+    loop {
+        let mut selected = Vec::new();
+        for &number in numbers {
+            if selected.iter().any(|pr: &EligiblePr| pr.number == number) {
+                continue;
+            }
+            let info = forge.pull_request(number)?;
+            if info.number != number
+                || info.state != PullRequestState::Open
+                || info.base_branch != target
+                || provenant_core::GitOid::parse(&info.head).is_err()
+            {
+                continue;
+            }
+            let approval = forge
+                .approvals(number, &info.head)?
+                .into_iter()
+                .find(|approval| {
+                    !approval.reference.is_empty()
+                        && !approval.reviewer.is_empty()
+                        && !approval.reviewer.eq_ignore_ascii_case(&info.author)
+                });
+            if info.author.is_empty() {
+                continue;
+            }
+            if let Some(approval) = approval {
+                selected.push(EligiblePr {
+                    number,
+                    head: info.head,
+                    approval: approval.reference,
+                    base_branch: info.base_branch,
+                });
+                if selected.len() == limit {
+                    break;
+                }
+            }
+        }
+        if selected.len() == limit || selected.len() == numbers.len() || start.elapsed() >= budget {
+            return Ok(selected);
+        }
+        std::thread::sleep(Duration::from_secs(1).min(budget.saturating_sub(start.elapsed())));
+    }
+}
+/// Build and push an exact candidate chain from the fetched target and approved heads.
+pub fn build_candidate(
+    repo: &mut dyn Repo,
+    base: &str,
+    prs: &[EligiblePr],
+    ref_prefix: &str,
+) -> Result<Candidate, LandingError> {
+    if provenant_core::GitOid::parse(base).is_err()
+        || prs.is_empty()
+        || prs
+            .iter()
+            .any(|pr| provenant_core::GitOid::parse(&pr.head).is_err())
+    {
+        return Err(LandingError::Failed(
+            "candidate requires a base and pinned heads".into(),
+        ));
+    }
+    let mut previous = base.to_owned();
+    let mut steps = Vec::with_capacity(prs.len());
+    for pr in prs {
+        let tree = match repo.merge_tree(&previous, &pr.head)? {
+            MergeTree::Tree(tree) => tree,
+            MergeTree::Conflict => return Err(LandingError::Conflict(pr.number)),
+        };
+        let message = format!("Merge pull request #{} at {}", pr.number, pr.head);
+        let commit = repo.commit_tree(&tree, &[previous, pr.head.clone()], &message)?;
+        previous = commit.clone();
+        steps.push(CandidateStep {
+            pr: pr.clone(),
+            commit,
+            tree,
+        });
+    }
+    let tree = steps
+        .last()
+        .ok_or_else(|| LandingError::Failed("empty candidate".into()))?
+        .tree
+        .clone();
+    // A retry may reproduce the same commit while an earlier candidate ref remains.
+    static NEXT_REF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    #[allow(clippy::disallowed_methods, reason = "unique candidate ref boundary")]
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| LandingError::Failed(format!("system clock: {error}")))?
+        .as_nanos();
+    let sequence = NEXT_REF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ref_name = format!(
+        "{ref_prefix}{}-{previous}-{nanos:x}-{:x}-{sequence:x}",
+        prs[0].number,
+        std::process::id()
+    );
+    repo.push_ref(&ref_name, &previous, None)?;
+    Ok(Candidate {
+        base: base.into(),
+        steps,
+        commit: previous,
+        tree,
+        ref_name,
+    })
+}
+
+#[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "custom worktree harness includes tests without the test runner"
+)]
+mod tests {
+    use super::*;
+    use crate::pr::landing::{
+        fakes::{FakeForge, FakeRepo},
+        ports::{Approval, PullRequestInfo},
+    };
+    fn info(number: u64, author: &str, branch: &str) -> PullRequestInfo {
+        PullRequestInfo {
+            number,
+            head: format!("{number:040x}"),
+            base_branch: branch.into(),
+            author: author.into(),
+            state: PullRequestState::Open,
+            merged_commit: None,
+        }
+    }
+    #[test]
+    fn selection_requires_independent_approval_at_head_and_target() -> Result<(), LandingError> {
+        let mut forge = FakeForge::default();
+        for (number, author, branch) in [
+            (1, "alice", "main"),
+            (2, "bob", "main"),
+            (3, "eve", "other"),
+            (4, "dave", "main"),
+        ] {
+            forge
+                .pull_requests
+                .insert(number, info(number, author, branch));
+        }
+        for (number, head, reviewer) in [
+            (1, "0000000000000000000000000000000000000001", "ALICE"),
+            (2, "0000000000000000000000000000000000000002", "carol"),
+            (3, "0000000000000000000000000000000000000003", "carol"),
+            (4, "old-head", "carol"),
+        ] {
+            forge.approvals_at_head.insert(
+                (number, head.into()),
+                vec![Approval {
+                    reference: format!("approval-{number}"),
+                    reviewer: reviewer.into(),
+                }],
+            );
+        }
+        let selected = select_batch(&mut forge, &[4, 2, 1, 3], "main", 4, 0)?;
+        assert_eq!(
+            selected.iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(selected[0].approval, "approval-2");
+        Ok(())
+    }
+    #[test]
+    fn selection_keeps_requested_order_and_limit_and_rejects_unpinned_heads()
+    -> Result<(), LandingError> {
+        let mut forge = FakeForge::default();
+        for number in 1..=3 {
+            let mut pr = info(number, "author", "main");
+            if number == 3 {
+                pr.head = "main".into();
+            }
+            forge.approvals_at_head.insert(
+                (number, pr.head.clone()),
+                vec![Approval {
+                    reference: "review".into(),
+                    reviewer: "reviewer".into(),
+                }],
+            );
+            forge.pull_requests.insert(number, pr);
+        }
+        let selected = select_batch(&mut forge, &[3, 2, 1], "main", 1, 0)?;
+        assert_eq!(
+            selected.iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            vec![2]
+        );
+        let selected = select_batch(&mut forge, &[3, 2, 1], "main", 3, 0)?;
+        assert_eq!(
+            selected.iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        let unpinned = vec![EligiblePr {
+            head: "main".into(),
+            ..selected[0].clone()
+        }];
+        assert!(
+            build_candidate(
+                &mut FakeRepo::default(),
+                &"a".repeat(40),
+                &unpinned,
+                "land/"
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn candidate_records_ordered_merge_chain_and_conflict() -> Result<(), LandingError> {
+        let prs: Vec<_> = (1..=2)
+            .map(|number| EligiblePr {
+                number,
+                head: format!("{number:040x}"),
+                approval: "approved".into(),
+                base_branch: "main".into(),
+            })
+            .collect();
+        let mut repo = FakeRepo::default();
+        let candidate = build_candidate(&mut repo, &"a".repeat(40), &prs, "land/")?;
+        assert_eq!(
+            repo.parents[&candidate.steps[0].commit],
+            vec!["a".repeat(40), format!("{:040x}", 1)]
+        );
+        assert_eq!(
+            repo.parents[&candidate.steps[1].commit],
+            vec![candidate.steps[0].commit.clone(), format!("{:040x}", 2)]
+        );
+        assert_eq!(candidate.tree, candidate.steps[1].tree);
+        assert_eq!(repo.refs.get(&candidate.ref_name), Some(&candidate.commit));
+        let mut conflict = FakeRepo::default();
+        conflict
+            .conflicts
+            .insert(("commit-0".into(), format!("{:040x}", 2)));
+        assert!(matches!(
+            build_candidate(&mut conflict, &"a".repeat(40), &prs, "land/"),
+            Err(LandingError::Conflict(2))
+        ));
+        assert!(conflict.pushes.is_empty());
+        Ok(())
+    }
+}

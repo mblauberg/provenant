@@ -665,6 +665,117 @@ fn follow_up(
     Ok(steps)
 }
 
+fn attribute(
+    tracker: &LandTracker,
+    view: &Pull,
+    number: u64,
+    head: GitOid,
+    reader: &super::wait::Reader<'_>,
+) -> Result<()> {
+    let bound = tracker.bind(&view.branch, number, head, reader);
+    let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
+        tracker.close(number, view)
+    } else {
+        Ok(())
+    };
+    bound.and(closed)
+}
+
+pub(super) struct BatchTracking {
+    tracker: Option<LandTracker>,
+    view: Pull,
+}
+
+/// Record the batch PR attribution before attempting its gate.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "bound forge reads for attribution"
+)]
+pub(super) fn batch_track(
+    project: &Path,
+    number: u64,
+    globals: &provenant_cli::Globals,
+) -> Result<BatchTracking> {
+    let reader = super::wait::Reader {
+        project,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        retry_command: format!("provenant land {number}"),
+    };
+    let rest = super::rest_pull(&|argv| reader.read(argv), &number.to_string())?;
+    let head = rest.head.sha;
+    let repository = rest
+        .base
+        .repo
+        .as_ref()
+        .ok_or("pull request has no base repository")?
+        .full_name
+        .clone();
+    let view = from_rest(rest);
+    let tracker = if view.cross_repository {
+        None
+    } else {
+        match LandTracker::resolve(globals, &repository) {
+            Ok(tracker) => {
+                if let Err(error) = attribute(&tracker, &view, number, head, &reader) {
+                    if error
+                        .downcast_ref::<super::wait::Failure>()
+                        .is_some_and(|failure| failure.code == "RATE_LIMITED")
+                    {
+                        return Err(error);
+                    }
+                    super::contributions::warn(Some(number), &error);
+                }
+                Some(tracker)
+            }
+            Err(error) => {
+                super::contributions::warn(Some(number), &error);
+                None
+            }
+        }
+    };
+    Ok(BatchTracking { tracker, view })
+}
+
+/// Run the existing local cleanup owner for a proven batch landing.
+pub(super) fn batch_follow_up(
+    project: &Path,
+    number: u64,
+    head: GitOid,
+    globals: &mut provenant_cli::Globals,
+    workers: &dyn WorkerObserver,
+    tracking: Option<&BatchTracking>,
+) -> Result<serde_json::Value> {
+    if let Some(tracking) = tracking.filter(|tracking| {
+        tracking.view.state == "MERGED"
+            && (tracking.view.cross_repository || tracking.tracker.is_some())
+    }) {
+        let steps = follow_up(project, &tracking.view, head, globals, workers)?;
+        return Ok(serde_json::to_value(steps)?);
+    }
+    let rest = super::rest_pull(
+        &|argv| super::execute(project, argv, false),
+        &number.to_string(),
+    )?;
+    let repository = rest.base.repo.as_ref().map(|repo| repo.full_name.clone());
+    let pull = from_rest(rest);
+    if !pull.cross_repository
+        && let Some(repository) = repository
+    {
+        let closed = if let Some(tracker) = tracking.and_then(|tracking| tracking.tracker.as_ref())
+        {
+            tracker.close(number, &pull)
+        } else {
+            LandTracker::resolve(globals, &repository)
+                .and_then(|tracker| tracker.close(number, &pull))
+        };
+        if let Err(error) = closed {
+            super::contributions::warn(Some(number), &error);
+        }
+    }
+    let steps = follow_up(project, &pull, head, globals, workers)?;
+    Ok(serde_json::to_value(steps)?)
+}
+
 /// Whether the local branch named like the pull request's may be cleaned up.
 enum Cleanup {
     /// The local branch tip, which the worktree removal must still find.
@@ -1188,13 +1299,7 @@ pub(crate) fn execute(
                     })
                     .as_ref()
                     .map_err(|error| error.to_string())?;
-                let bound = tracker.bind(&view.branch, number, current, &reader);
-                let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
-                    tracker.close(number, &view)
-                } else {
-                    Ok(())
-                };
-                bound.and(closed)
+                attribute(tracker, &view, number, current, &reader)
             })();
             if let Err(error) = binding {
                 if error

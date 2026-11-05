@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'land/**']
   pull_request:
 
 # Least privilege: the workflow grants nothing by default; every job
@@ -12,6 +12,10 @@ permissions: {}
 env:
   PROVENANT_ROOT: ${{ github.workspace }}
 
+# Landing candidate refs (`land/**`) run the full gate on the exact candidate
+# commit; macOS scoping is conservative there because `github.event.before` is
+# the previous candidate, not the base the candidate must be judged against.
+#
 # Concurrency policy (issue #170, deferred from #150/#168): PR runs cancel
 # their predecessor on the same ref — a superseded push means the stale run's
 # result can never matter, so cancelling it just frees runners faster.
@@ -43,7 +47,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/land/') }}
         run: scripts/select-macos-checks
 
   generated-reference:
@@ -172,7 +176,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/land/') }}
         run: ../../scripts/select-affected-crate-tests
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
