@@ -1368,6 +1368,22 @@ mod tests {
                 .iter()
                 .any(|reason| matches!(reason, crate::IncompleteReason::Malformed(_)))
         );
+        for path in &tool.dependency_closure.libraries {
+            assert_eq!(std::fs::canonicalize(path)?, *path);
+            assert!(spec.profile.spec.runtime_reads.iter().any(|grant| {
+                grant.path == *path
+                    && grant.scope == provenant_confinement::permissions::PathScope::Exact
+            }));
+            assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
+                grant.scope != provenant_confinement::permissions::PathScope::Subtree
+                    || !path.starts_with(&grant.path)
+            }));
+            assert!(
+                provenant_confinement::write_grants(plan.permissions(), &spec.profile)
+                    .iter()
+                    .all(|grant| !path.starts_with(&grant.path))
+            );
+        }
         for path in [&first, &second, &denied[2], &hidden] {
             assert!(
                 tool.dependency_closure.libraries.contains(path),

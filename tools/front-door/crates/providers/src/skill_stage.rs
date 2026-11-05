@@ -306,12 +306,25 @@ mod tests {
         std::fs::write(source.join("SKILL.md"), b"local")?;
         std::fs::write(external.join("SKILL.md"), b"external")?;
         std::fs::write(&secret, b"secret-sentinel")?;
+        let installed = home.join(".local/share/provenant/v1/releases/example/skill");
+        std::fs::create_dir_all(&installed)?;
+        std::fs::write(installed.join("SKILL.md"), b"installed")?;
+        symlink(source.join("SKILL.md"), source.join("internal"))?;
+        symlink(&installed, source.join("installed"))?;
         symlink(&external, source.join("linked"))?;
         symlink(&secret, source.join("credential"))?;
         symlink(&source, external.join("cycle"))?;
         let destination = home.join("attempt/skills");
         let staged = capture(&source, &destination, &home, 1024);
-        assert_eq!(staged.file_count, 2);
+        assert_eq!(staged.file_count, 4);
+        for (path, expected) in [
+            ("internal", b"local".as_slice()),
+            ("installed/SKILL.md", b"installed"),
+            ("linked/SKILL.md", b"external"),
+        ] {
+            assert!(staged.setup.iter().any(|step| matches!(step,
+                SetupStep::WriteFile { path: staged_path, bytes } if staged_path == &destination.join(path) && bytes == expected)));
+        }
         assert!(
             staged
                 .warnings
