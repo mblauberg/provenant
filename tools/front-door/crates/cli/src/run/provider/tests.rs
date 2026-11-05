@@ -2560,7 +2560,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         .profile
         .knobs
         .insert("lanes.publish".into(), serde_json::json!(true));
-    let _publishing = prepare_with(
+    let publishing = prepare_with(
         &registry,
         &publishing_task,
         "publishing policy fixture",
@@ -2580,6 +2580,23 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         .as_ref()
         .ok_or("writer missing")?
         .worktree;
+    let gitdir = String::from_utf8(provenant_os::fixture::run_git(
+        worktree,
+        &["rev-parse", "--absolute-git-dir"],
+    )?)?;
+    let expected_gitdir = std::fs::canonicalize(gitdir.trim())?;
+    let variable = |name: &str| {
+        publishing
+            .environment
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| PathBuf::from(value))
+    };
+    assert_eq!(
+        variable("PROVENANT_PRIMARY_CHECKOUT"),
+        Some(project.canonicalize()?)
+    );
+    assert_eq!(variable("PROVENANT_WORKTREE_GITDIR"), Some(expected_gitdir));
     // The runtime populates this private Git directory after preparation.
     let private_common = publishing_paths.temporary.join("candidate-0/git-common");
     std::fs::create_dir_all(private_common.join("objects"))?;
