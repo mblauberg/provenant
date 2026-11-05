@@ -34,6 +34,36 @@
                       }
                     ]
                   },
+                  "exit_code": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "finished_at": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "retry_of": {
                     "anyOf": [
                       {
@@ -69,6 +99,9 @@
                   "run_id",
                   "task_id",
                   "state",
+                  "reason",
+                  "exit_code",
+                  "finished_at",
                   "retry_of",
                   "superseded_by",
                   "cause"

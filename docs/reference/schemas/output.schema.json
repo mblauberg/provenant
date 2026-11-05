@@ -465,6 +465,7 @@
                   "type": "string"
                 },
                 "runtime_deadline": {},
+                "selected": {},
                 "settlement": {
                   "anyOf": [
                     {
@@ -515,6 +516,13 @@
                       "type": "null"
                     }
                   ]
+                },
+                "tail": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tail_clamped": {
+                  "type": "boolean"
                 },
                 "tail_text": {
                   "type": "string"
@@ -1446,6 +1454,7 @@
                   "type": "string"
                 },
                 "runtime_deadline": {},
+                "selected": {},
                 "settlement": {
                   "anyOf": [
                     {
@@ -1496,6 +1505,13 @@
                       "type": "null"
                     }
                   ]
+                },
+                "tail": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tail_clamped": {
+                  "type": "boolean"
                 },
                 "tail_text": {
                   "type": "string"
@@ -2337,6 +2353,7 @@
                   "type": "string"
                 },
                 "runtime_deadline": {},
+                "selected": {},
                 "settlement": {
                   "anyOf": [
                     {
@@ -2387,6 +2404,13 @@
                       "type": "null"
                     }
                   ]
+                },
+                "tail": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tail_clamped": {
+                  "type": "boolean"
                 },
                 "tail_text": {
                   "type": "string"
@@ -3234,6 +3258,7 @@
                   "type": "string"
                 },
                 "runtime_deadline": {},
+                "selected": {},
                 "settlement": {
                   "anyOf": [
                     {
@@ -3284,6 +3309,13 @@
                       "type": "null"
                     }
                   ]
+                },
+                "tail": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tail_clamped": {
+                  "type": "boolean"
                 },
                 "tail_text": {
                   "type": "string"
@@ -3855,10 +3887,24 @@
                 },
                 "changed_files_total": {},
                 "clipped": {
-                  "type": "boolean"
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "complete": {
-                  "type": "boolean"
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "continuation": {},
                 "delivery": {},
@@ -3932,8 +3978,15 @@
                 },
                 "last_output_at": {},
                 "length": {
-                  "minimum": 0,
-                  "type": "integer"
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "next_offset": {
                   "minimum": 0,
