@@ -159,6 +159,9 @@ impl Drop for Host {
         let _ = self.0.wait();
     }
 }
+// Explicit process and real-time boundary: this test must SIGKILL a host without
+// supervisor cleanup, then wait for its replacement to bind the retained socket.
+#[allow(clippy::disallowed_methods)]
 fn start(rig: &TestRig, attempt: AttemptId, recover: bool) -> Result<Host> {
     let ready = rig.root.join("ready");
     if ready.exists() {
