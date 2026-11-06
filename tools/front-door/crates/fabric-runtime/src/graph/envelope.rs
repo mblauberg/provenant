@@ -169,7 +169,8 @@ pub(super) fn checkpoint_bound(
         .iter()
         .map(|node| {
             // An admitted planner never stores its fragment again.
-            let admitted = expansions.iter().any(|e| e.source == node.id);
+            let admitted = expansions.iter().any(|e| e.source == node.id &&
+                (e.patch.is_none() || e.extra.get("final_result") == Some(&serde_json::Value::Bool(true))));
             node_bound(
                 plan,
                 node,
@@ -208,7 +209,7 @@ fn node_bound(
     admitted: bool,
     repair_gate: bool,
 ) -> usize {
-    let expands = node.plan.is_some() || plans::writer(node);
+    let expands = plans::agent(node);
     let gate = node.condition.is_some();
     let ci = matches!(node.condition, Some(GateCondition::Ci { .. }));
     let boundary = gate || node.loop_body.is_some();
@@ -227,7 +228,7 @@ fn node_bound(
         writer_binding_pending: plans::writer(node),
         review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
         review_base_pending: false,
-        fragment: (node.plan.is_some() && !admitted).then(String::new),
+        fragment: (plans::agent(node) && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
         expansion_pause: expands.then(String::new),
         expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
@@ -366,7 +367,7 @@ fn node_bound(
     if expands {
         bytes += MAX_ADVANCE_ERROR_BYTES; // expansion pause
     }
-    if node.plan.is_some() && !admitted {
+    if plans::agent(node) && !admitted {
         bytes += plans::STORED_BLOCK_BYTES;
     }
     if plans::writer(node) {

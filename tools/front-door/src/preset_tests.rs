@@ -674,12 +674,12 @@ condition = { type = "budget" }
             r#"
 stages = [{ id = "plan", role = "planner" }]
 [roles.planner]
-kind = "plan"
+kind = "task"
 tier = "senior"
 prompt = "Plan the approved slice"
 plan = { kinds = ["task"], max_nodes = 2 }
 "#,
-            NodeKind::Plan,
+            NodeKind::Task,
         ),
         (
             "role-composite",
@@ -710,7 +710,7 @@ composite = { nodes = [{ id = "check", access = "read_only", prompt = "Check the
                 assert_eq!(spec.body[0].kind, Some(NodeKind::Gate));
             }
             NodeKind::Gate => assert!(document.nodes[0].condition.is_some()),
-            NodeKind::Plan => assert_eq!(document.nodes[0].plan.as_ref().unwrap().max_nodes, 2),
+            NodeKind::Task => assert_eq!(document.nodes[0].plan.as_ref().unwrap().max_nodes, 2),
             NodeKind::Composite => {
                 assert_eq!(document.nodes[0].composite.as_ref().unwrap().nodes.len(), 1)
             }
@@ -842,7 +842,7 @@ fn explain_pending_checks_follow_the_document() {
             vec!["route_readiness", "source"],
         ),
         (
-            json!({"nodes":[{"id":"plan","kind":"plan","access":"read_only","prompt":"x"}]}),
+            json!({"nodes":[{"id":"plan","kind":"task","access":"read_only","prompt":"x","plan":{"max_nodes":2}}]}),
             vec!["planner_authority", "route_readiness"],
         ),
         (
@@ -1798,7 +1798,7 @@ fn preset_run_binds_skill_requirement_to_task_nodes() {
         .as_array_mut()
         .unwrap()
         .push(json!({
-            "id":"planner", "kind":"plan", "access":"read_only", "prompt":"plan",
+            "id":"planner", "kind":"task", "access":"read_only", "prompt":"plan",
             "plan":{"fallback":{"nodes":[{"id":"fallback", "access":"read_only", "prompt":"work"}]}}
         }));
     let directory = tempfile::tempdir().unwrap();

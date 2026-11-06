@@ -9,7 +9,7 @@
       "access": "read_only",
       "depends_on": [],
       "id": "plan",
-      "kind": "plan",
+      "kind": "task",
       "plan": {
         "disjoint_waves": true,
         "fallback": {

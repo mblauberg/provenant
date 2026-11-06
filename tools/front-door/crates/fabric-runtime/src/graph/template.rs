@@ -88,7 +88,7 @@ pub struct Template {
     /// Outputs the leaf promises. `findings` makes the findings block required.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<OutputKind>,
-    /// Executor for a deterministic or planning leaf (`gate`, `decide`, `land`, `plan`).
+    /// Executor for a deterministic or planning leaf (`gate`, `decide`, `land`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<NodeKind>,
     /// Further compiled-node fields for a leaf, such as `condition` or `plan`.
@@ -117,6 +117,9 @@ impl Template {
 
     /// Structural checks every layer shares.
     pub fn check(&self) -> Result<(), String> {
+        if let Some(name) = self.extra.keys().next() {
+            return Err(format!("unknown template field {name}"));
+        }
         if self.is_composite() && (self.brief.is_some() || self.tier.is_some()) {
             return Err("a template sets either a leaf brief and tier or nodes, not both".into());
         }
@@ -498,6 +501,17 @@ impl TemplateLibrary {
         Ok(library)
     }
 
+    /// Effective layers, retaining flavour overrides for deterministic replay.
+    pub fn snapshot(&self) -> BTreeMap<String, Template> {
+        self.entries.iter().filter_map(|(name, layers)| {
+            layers.values().next_back().map(|template| (name.clone(), template.clone()))
+        }).collect()
+    }
+
+    pub fn snapshot_layers(&self) -> BTreeMap<String, Layer> {
+        self.entries.keys().filter_map(|name| self.layer(name).map(|layer| (name.clone(), layer))).collect()
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.keys().map(String::as_str)
     }
@@ -518,7 +532,7 @@ impl TemplateLibrary {
     /// Resolve a name, applying each flavour over its base.
     pub fn resolve(&self, name: &str) -> Result<Template, String> {
         if !valid_template_name(name) {
-            return Err(format!("template name {name:?} is invalid"));
+            return Err("invalid template name; use letters, digits, underscores, hyphens and dots".into());
         }
         let own = self.own(name);
         match name.rsplit_once('.') {
@@ -760,7 +774,16 @@ impl<'a> Compiler<'a> {
                 member.extend(fields);
             }
             member.insert("id".into(), Value::String(item_id(item, &mut ids)));
-            children.push(self.lower_in(&Value::Object(member), &scoped, stack)?);
+            let mut child = self.lower_in(&Value::Object(member), &scoped, stack)?;
+            if !Value::Object(copy.clone()).to_string().contains("${item}")
+                && copy.get("use").and_then(Value::as_str)
+                    .and_then(|name| self.library.resolve(name).ok())
+                    .is_some_and(|template| !template.parameters.contains_key(ITEM))
+                && let Some(prompt) = child.get("prompt").and_then(Value::as_str).map(str::to_owned)
+            {
+                child["prompt"] = Value::String(format!("{prompt}\n\nItem: {item}"));
+            }
+            children.push(child);
         }
         let exports = default_exports(&children);
         boundary.insert("kind".into(), Value::String("composite".into()));
@@ -940,6 +963,7 @@ impl<'a> Compiler<'a> {
                 fix.as_object_mut()
                     .ok_or("repair writer must be a node")?
                     .remove("id");
+                children[2]["plan"]["max_nodes"] = serde_json::json!(32);
                 children[2]["plan"]["patterns"] = serde_json::json!([{
                     "name": "repair-slice", "brief": prompt, "access": access, "node": fix
                 }]);
@@ -1034,6 +1058,11 @@ impl<'a> Compiler<'a> {
             leaf.remove("tier");
         }
         leaf.extend(overrides);
+        if template.brief.is_some() && !leaf.contains_key("acceptance_checks")
+            && let Some(brief) = leaf.get("prompt").cloned()
+        {
+            leaf.insert("acceptance_checks".into(), Value::Array(vec![brief]));
+        }
         self.finish(leaf, stack)
     }
 

@@ -7,6 +7,10 @@ use provenant_fabric_runtime::graph::{
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
+    FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
+}
+
 fn encode(value: impl serde::Serialize) -> Result<Value, FacadeError> {
     serde_json::to_value(value).map_err(|_| FacadeError::StateCorrupt)
 }
@@ -164,16 +168,16 @@ impl Factory {
         let mut library = TemplateLibrary::bundled();
         library
             .load_dir(Layer::User, &config.join("provenant/templates"))
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            .map_err(graph_input_reason)?;
         library
             .load_dir(Layer::Repository, &self.cwd.join(".provenant/templates"))
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            .map_err(graph_input_reason)?;
         if let Some(inline) = inline.filter(|value| !value.is_null()) {
             let templates: BTreeMap<String, Template> = serde_json::from_value(inline.clone())
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                .map_err(graph_input_reason)?;
             library = library
                 .with(Layer::Inline, &templates)
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                .map_err(graph_input_reason)?;
         }
         Ok(library)
     }
@@ -313,7 +317,16 @@ impl Factory {
             .cloned()
             .unwrap_or_else(|| json!({}));
         if let Some(document) = lane_document.filter(|document| document.get("use").is_none()) {
-            inline["lane-document"] = document.clone();
+            let mut template = document.clone();
+            if let Some(fields) = template.as_object_mut() {
+                for key in ["schema_version", "graph_id", "templates", "integration_branch",
+                    "limits", "delivery", "review_base", "context", "decision_session", "review",
+                    "retry", "exclude", "network", "capability", "no_capability"]
+                {
+                    fields.remove(key);
+                }
+            }
+            inline["lane-document"] = template;
         }
         let library = self.template_library(Some(&inline))?;
         let resolver = self.launch_resolvers(raw)?;
@@ -350,7 +363,7 @@ impl Factory {
                     ..Default::default()
                 };
                 patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
+                    .map_err(graph_input_reason)?
             } else {
                 serde_json::from_value::<GraphDocument>(raw.clone())
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?
@@ -374,7 +387,7 @@ impl Factory {
             }
             let template = library
                 .resolve(node["use"].as_str().unwrap_or("task"))
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                .map_err(graph_input_reason)?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             let overrides = input
                 .get("set")
@@ -441,8 +454,11 @@ impl Factory {
                 &context,
                 integration_branch.as_ref().and_then(Value::as_str),
             )
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?
+            .map_err(graph_input_reason)?
         };
+        document.extra.insert("template_layers".into(), json!(library.snapshot_layers()));
+        document.extra.insert("template_library".into(), json!(library.snapshot()));
+        document.extra.insert("template_resolvers".into(), json!(resolver));
         if let Some(raw) = raw {
             let mut compiled = encode(&document)?;
             for key in [
@@ -505,7 +521,7 @@ impl Factory {
             &submission_key,
             &self.context.config.graph.limits,
         )
-        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        .map_err(graph_input_reason)?;
         // Patch admission scans nodes and parameters. Graph-wide metadata is
         // retained separately, so scan the complete bound record before any
         // preview or publication can expose or persist it.
@@ -589,7 +605,7 @@ impl Factory {
                 limits: &self.context.config.graph.limits,
             },
         )
-        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        .map_err(graph_input_reason)?;
         for expansion in &mut checkpoint.expansions {
             for node in &mut expansion.nodes {
                 let mut value = encode(&*node)?;
@@ -680,7 +696,7 @@ impl Factory {
                     limits: &self.context.config.graph.limits,
                 },
             )
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            .map_err(graph_input_reason)?;
             journal.save(&checkpoint).map_err(graph_journal_error)?;
         } else if input.get("brief").is_some_and(|value| !value.is_null()) {
             return Err(FacadeError::invalid(InvalidInputDetail::Field(
@@ -1045,6 +1061,56 @@ mod tests {
             mcp_project: None,
             workers: &Workers,
         })
+    }
+
+    #[test]
+    fn graph_template_errors_reach_the_agent_with_file_and_reason() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let directory = rig.project.join(".provenant/templates");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("review.typo.toml");
+        std::fs::write(&path, "acess = \"read_only\"\n")?;
+        let error = factory.template_library(None).unwrap_err();
+        let diagnostic = error.diagnostic();
+        let text = diagnostic.detail.ok_or("agent diagnostic")?;
+        assert!(text.contains("review.typo.toml"), "{text}");
+        assert!(text.contains("acess"), "{text}");
+        let wire = serde_json::to_value(&error)?;
+        assert!(wire["detail"].as_str().ok_or("wire detail")?.contains("acess"));
+        std::fs::remove_file(path)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let error = factory.graph_document(json!({"op":"run", "use":"task.typo", "explain":true}), budget, &cancel).unwrap_err();
+        assert!(error.diagnostic().detail.ok_or("template refusal")?.contains("unknown template flavour task.typo"));
+        let error = factory.graph_document(json!({"op":"run", "document":{"graph_id":"cycle", "nodes":[
+            {"id":"a", "use":"task", "after":["b"]},
+            {"id":"b", "use":"task", "after":["a"]}
+        ]}, "explain":true}), budget, &cancel).unwrap_err();
+        assert!(error.diagnostic().detail.ok_or("patch refusal")?.contains("cycle"));
+        Ok(())
+    }
+
+    #[test]
+    fn submission_snapshots_repo_templates_and_task_over_has_distinct_briefs() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let directory = rig.project.join(".provenant/templates");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(directory.join("review.local.toml"), "brief = \"Review local invariants\"\n")?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let response = factory.graph_document(json!({"op":"run", "use":"task", "over":["alpha","beta"], "explain":true}), budget, &cancel)?;
+        let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
+        assert_eq!(document.extra["template_library"]["review.local"]["brief"], "Review local invariants");
+        assert!(document.extra["template_resolvers"].get("review-panel").is_some());
+        let expanded = document.expanded(&factory.context.config.graph.limits)?;
+        let prompts: Vec<_> = expanded.nodes.iter().filter(|node| node.composite.is_none()).map(|node| node.prompt.as_str()).collect();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[0].contains("alpha"));
+        assert!(prompts[1].contains("beta"));
+        assert_ne!(prompts[0], prompts[1]);
+        Ok(())
     }
 
     #[test]
