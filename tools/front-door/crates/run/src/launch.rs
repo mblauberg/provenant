@@ -1762,7 +1762,7 @@ impl RunStore {
             let prepared = providers
                 .check_policy(task)
                 .map(|()| priority)
-                .map_err(|reason| (RefusalKind::Policy, PrepareRefusal::from(reason)))
+                .map_err(|reason| (RefusalKind::Policy, Box::new(PrepareRefusal::from(reason))))
                 .and_then(|priority| {
                     providers
                         .prepare(
@@ -1776,7 +1776,7 @@ impl RunStore {
                             }),
                         )
                         .map(|plan| (plan, priority))
-                        .map_err(|reason| (reason.kind(), reason))
+                        .map_err(|reason| (reason.kind(), Box::new(reason)))
                 });
             let (mut plan, priority) = match prepared {
                 Ok(prepared) => prepared,
