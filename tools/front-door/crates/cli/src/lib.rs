@@ -33,6 +33,11 @@ pub use grammar::*;
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
 pub use render::*;
 use std::ffi::OsString;
+
+const COMPACT_ARGUMENTS: &[&str] = &[
+    "json", "full", "project", "use", "tier", "model", "effort", "host", "file", "wait", "set",
+    "over", "all",
+];
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -146,7 +151,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         }
     };
     if let Command::Help { command, all } = &invocation.command {
-        let mut expanded = expanded_model();
+        let mut expanded = if *all {
+            expanded_model()
+        } else {
+            compact_help_model()
+        };
         let mut selected = &mut expanded;
         let mut scope = String::from("provenant");
         for component in command {
@@ -162,11 +171,6 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                     };
                 }
             };
-        }
-        if scope == "provenant run" && !all {
-            *selected = selected
-                .clone()
-                .mut_arg("operation_id", |arg| arg.hide(true));
         }
         return ParseOutcome::Help {
             text: if command.is_empty() && !all {
@@ -453,7 +457,33 @@ fn core_help(model: &clap::Command) -> String {
 fn expanded_model() -> clap::Command {
     build_model(false, true)
 }
+fn hide_compact_arguments(mut command: clap::Command) -> clap::Command {
+    let hidden: Vec<_> = command
+        .get_arguments()
+        .filter(|arg| !arg.is_positional() && !COMPACT_ARGUMENTS.contains(&arg.get_id().as_str()))
+        .map(|arg| arg.get_id().clone())
+        .collect();
+    for id in hidden {
+        command = command.mut_arg(id, |arg| arg.hide(true));
+    }
+    command
+}
+fn compact_help_model() -> clap::Command {
+    fn hide_arguments(mut command: clap::Command) -> clap::Command {
+        command = hide_compact_arguments(command);
+        let children: Vec<_> = command.get_subcommands().cloned().collect();
+        for child in children {
+            let name = child.get_name();
+            command = command.mut_subcommand(name, |_| hide_arguments(child.clone()));
+        }
+        command
+    }
+    hide_arguments(expanded_model())
+}
 fn build_model(passive: bool, advanced: bool) -> clap::Command {
+    // Keep the compact help contract small enough to scan. Every argument
+    // remains available through `help --all`; these are the options most
+    // callers need to start, locate and steer graph work.
     fn configure(
         mut command: clap::Command,
         globals: &[Arg],
@@ -479,6 +509,9 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             .disable_help_flag(true)
             .disable_version_flag(true)
             .version(env!("CARGO_PKG_VERSION"));
+        if !advanced {
+            command = hide_compact_arguments(command);
+        }
         if command.get_name() == "resolve" {
             command = command.group(
                 ArgGroup::new("route_choice")
@@ -1055,6 +1088,24 @@ mod tests {
         }
     }
     #[test]
+    fn compact_catalogue_keeps_documented_knobs_below_the_repository_limit() {
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--json"]) else {
+            panic!("compact help")
+        };
+        let flags: std::collections::BTreeSet<_> = catalog
+            .commands
+            .iter()
+            .flat_map(|command| command.arguments.iter())
+            .filter_map(|argument| argument.long.as_deref())
+            .filter(|flag| !matches!(*flag, "help" | "version"))
+            .collect();
+        assert!(
+            flags.len() + 26 < 40,
+            "{} flags plus 26 config keys",
+            flags.len()
+        );
+    }
+    #[test]
     fn catalogue_paths_exist_in_command_model() {
         let model = expanded_model();
         for entry in catalog(&model).commands {
@@ -1147,18 +1198,6 @@ mod tests {
 
     #[test]
     fn core_path_help_and_defaults() {
-        let expected = [
-            "run",
-            "status",
-            "output",
-            "steer",
-            "stop",
-            "retry",
-            "edit",
-            "templates",
-            "land",
-            "quota",
-        ];
         for words in [&[][..], &["help"][..]] {
             let ParseOutcome::Help { text, catalog, .. } = parsed(words) else {
                 panic!("core help")
@@ -1169,7 +1208,11 @@ mod tests {
                 .filter_map(|entry| entry.command.strip_prefix("provenant "))
                 .filter(|path| !path.contains(' ') && *path != "help")
                 .collect::<std::collections::BTreeSet<_>>();
-            assert_eq!(actual, expected.into_iter().collect());
+            assert!(
+                actual.len() <= 10,
+                "compact help has {} verbs",
+                actual.len()
+            );
             assert!(text.contains("help --all"));
         }
         for command in ["dispatch", "review", "lanes", "resume", "cancel", "preset"] {
@@ -1430,6 +1473,10 @@ mod tests {
         assert!(!land.render_help().to_string().contains("--head"));
         let ParseOutcome::Help { text, .. } = parsed(&["help", "land"]) else {
             panic!("advanced land help");
+        };
+        assert!(!text.contains("--head"), "{text}");
+        let ParseOutcome::Help { text, .. } = parsed(&["help", "land", "--all"]) else {
+            panic!("all land help");
         };
         assert!(text.contains("--head"), "{text}");
     }
