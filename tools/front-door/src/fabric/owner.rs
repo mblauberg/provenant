@@ -582,7 +582,149 @@ pub(crate) fn unanimous_preparation_cause(
         .then(|| first.clone())
 }
 
+fn repair_scope_grew(
+    review: &provenant_routing::ReviewConfig,
+    before: &[String],
+    after: &[String],
+) -> bool {
+    let rank = |tier: Option<&str>| match tier {
+        Some("terminal") => 3,
+        Some("crucial") => 2,
+        Some("substantial") => 1,
+        _ => 0,
+    };
+    let old_floor = review.path_floors(before);
+    let new_floor = review.path_floors(after);
+    after.iter().any(|path| !before.contains(path))
+        || rank(new_floor.tier.as_deref()) > rank(old_floor.tier.as_deref())
+}
+
+impl BoundGraphOwner<'_> {
+    fn repair_git(&self, directory: &Path, args: &[&str]) -> Result<String, String> {
+        use provenant_os::exec::{ExecOptions, Executor, Termination};
+        let git = provenant_os::git::git_executable()
+            .ok_or("Git executable unavailable")?;
+        let mut argv = vec![git.into_os_string()];
+        argv.extend(args.iter().map(std::ffi::OsString::from));
+        let remaining = std::time::Duration::from_micros(
+            self.budget.remaining(self.factory.clock.mono_now()).as_micros(),
+        ).min(std::time::Duration::from_secs(30));
+        let mut options = ExecOptions::new(&argv, directory, remaining);
+        options.cancel = Some(self.cancel);
+        let output = self.factory.executor.execute(options)
+            .map_err(|_| "repair Git command could not run".to_owned())?;
+        if output.termination != Termination::Exit(0) || output.timed_out || output.stdout.truncated {
+            return Err("repair Git command did not complete within its bounds".into());
+        }
+        String::from_utf8(output.stdout.bytes)
+            .map_err(|_| "repair Git output is not UTF-8".into())
+    }
+}
+
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn detect_repair_growth(&mut self, before: &str, after: &str) -> Result<bool, String> {
+        let before = provenant_core::GitOid::parse(before).map_err(|_| "repair source commit is invalid")?;
+        let after = provenant_core::GitOid::parse(after).map_err(|_| "repaired commit is invalid")?;
+        let base = self
+            .integration_base
+            .and_then(|bases| bases.review.or(bases.integration))
+            .ok_or("cannot assess repair growth without a pinned review base")?;
+        let paths = |subject: &provenant_core::GitOid| -> Result<Vec<String>, String> {
+            let range = format!("{base}...{subject}");
+            let names = self.repair_git(
+                &self.factory.cwd,
+                &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
+            )?;
+            Ok(names
+                .split('\0')
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect())
+        };
+        let old = paths(&before)?;
+        let new = paths(&after)?;
+        let routing: provenant_routing::RoutingConfig =
+            provenant_config::read_domain(self.factory.context.roots.state.as_path(), "routing")
+                .map_err(|_| "repair review configuration is unavailable; correct routing settings")?;
+        Ok(repair_scope_grew(&routing.review, &old, &new))
+    }
+
+    fn resolve_repair_panel(
+        &mut self,
+        document: &provenant_fabric_runtime::graph::GraphDocument,
+        subject: &str,
+    ) -> Result<provenant_fabric_runtime::graph::RepairPanelResolution, String> {
+        let subject = provenant_core::GitOid::parse(subject).map_err(|_| "repair review subject is invalid")?;
+        let base = self
+            .integration_base
+            .and_then(|bases| bases.review.or(bases.integration))
+            .ok_or("cannot replan review without a pinned base")?;
+        let range = format!("{base}...{subject}");
+        let names = self.repair_git(
+            &self.factory.cwd,
+            &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
+        )?;
+        let paths: Vec<String> = names
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let routing: provenant_routing::RoutingConfig =
+            provenant_config::read_domain(self.factory.context.roots.state.as_path(), "routing")
+                .map_err(|_| "repair review configuration is unavailable; correct routing settings")?;
+        let raw = serde_json::to_value(document).map_err(|_| "repair review document could not be encoded")?;
+        let mut request: provenant_routing::ReviewRequest = raw
+            .get("review")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| "repair review request is invalid; correct graph review settings")?
+            .unwrap_or_default();
+        if request.kind.is_none() {
+            request.kind = raw["context"]["task_kind"].as_str().map(str::to_owned);
+        }
+        // A growth signal does not carry a new tier. Resolve at the highest
+        // tier until the graph carries a measured replacement risk record.
+        request.risk_tier = Some("terminal".into());
+        request.shape = None;
+        request.lenses.clear();
+        let panel = routing
+            .review
+            .resolve_panel(&request, None, &paths, false)
+            .map_err(|_| "repair review panel could not resolve; correct review routing settings")?;
+        let single = panel.slots.len() == 1;
+        let frame = !single && panel.frame;
+        let verifiers = if single { 0 } else { panel.verifiers };
+        let synthesis = !single && panel.synthesis == provenant_routing::ReviewSynthesis::Model;
+        let advice = panel.slots.iter().map(|slot| (
+            slot.lens.clone(),
+            if slot.lens == "tests" {
+                include_str!("../../assets/review-tests-advice.txt").to_owned()
+            } else {
+                String::new()
+            },
+        )).collect();
+        let slots = panel.slots
+            .into_iter()
+            .map(|slot| {
+                let (key, route) = crate::graph_support::tier_route(&slot.lens, &slot.tier, None, true)
+                    .map_err(|_| "repair review route is invalid; correct reviewer tier settings")?;
+                let mut fields = serde_json::Map::new();
+                fields.insert(key.into(), route);
+                Ok(provenant_fabric_runtime::graph::RepairPanelSlot {
+                    lens: slot.lens,
+                    route: fields.into(),
+                    family_group: slot
+                        .distinct_families
+                        .then(|| crate::graph_support::format_family_group(slot.group_index)),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(provenant_fabric_runtime::graph::RepairPanelResolution {
+            slots, frame, verifiers, synthesis, advice,
+        })
+    }
+
     fn input_cap_source(&self) -> provenant_fabric_runtime::graph::InputCapSource {
         self.factory.context.graph_prompt_limit_source
     }
@@ -2382,6 +2524,24 @@ mod journal_error_tests {
         usage.output_excluding_reasoning = Some(0);
         usage.reasoning = Some(1);
         assert!(!quota_alias_has_no_work("", &usage, false, None));
+    }
+
+    #[test]
+    fn repair_scope_comparison_detects_new_paths() {
+        let review = provenant_routing::ReviewConfig::default();
+        let original = vec!["src/a.rs".to_owned()];
+        assert!(!super::repair_scope_grew(&review, &original, &original));
+        assert!(super::repair_scope_grew(
+            &review,
+            &original,
+            &["src/a.rs".into(), "src/b.rs".into()]
+        ));
+        assert!(super::repair_scope_grew(
+            &review,
+            &original,
+            &["src/b.rs".into()]
+        ));
+        assert!(!super::repair_scope_grew(&review, &original, &[]));
     }
 
     #[test]

@@ -83,6 +83,13 @@ struct FakeOwner {
     family_pool: Vec<String>,
     prior_attempts: Vec<Vec<String>>,
     models: std::collections::BTreeMap<String, String>,
+    repair_panel: Option<Vec<String>>,
+    repair_panel_calls: usize,
+    repair_panel_frame: bool,
+    repair_panel_verifiers: usize,
+    repair_panel_synthesis: bool,
+    repair_growth: bool,
+    repair_growth_calls: usize,
     require_distinct: Vec<bool>,
     skill_requirements: Vec<bool>,
     deadlines: Vec<Option<u64>>,
@@ -113,6 +120,27 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn detect_repair_growth(&mut self, _: &str, _: &str) -> Result<bool, String> {
+        self.repair_growth_calls += 1;
+        Ok(self.repair_growth)
+    }
+    fn resolve_repair_panel(
+        &mut self,
+        _: &GraphDocument,
+        _: &str,
+    ) -> Result<RepairPanelResolution, String> {
+        self.repair_panel_calls += 1;
+        self.repair_panel
+            .clone()
+            .ok_or_else(|| "fixture has no panel".into())
+            .map(|lenses| RepairPanelResolution {
+                frame: self.repair_panel_frame, verifiers: self.repair_panel_verifiers,
+                synthesis: self.repair_panel_synthesis, advice: Default::default(),
+                slots: lenses.into_iter().enumerate().map(|(index, lens)| RepairPanelSlot {
+                lens, route: serde_json::json!({"route":{"alias":if index == 0 {"senior"} else {"principal"}}}),
+                family_group: Some("group-0".into()),
+            }).collect() })
+    }
     fn input_cap_source(&self) -> InputCapSource {
         self.input_cap_source
             .unwrap_or(InputCapSource::EffectiveGraphLimits)
@@ -4593,7 +4621,7 @@ fn legacy_partial_output_replays_with_warnings_and_truncated_authored_text() {
 }
 
 #[test]
-fn qualified_findings_survive_reduction_and_model_synthesis() {
+fn qualified_findings_survive_model_synthesis() {
     for dispositions in [vec![], vec!["accepted"]] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"qualified-findings","nodes":[
@@ -4646,6 +4674,51 @@ fn qualified_findings_survive_reduction_and_model_synthesis() {
             run.checkpoint
         );
     }
+}
+
+#[test]
+fn qualified_findings_survive_deterministic_review_reduction() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"reduced-finding-lenses","nodes":[
+            {"id":"panel","kind":"composite","access":"read_only",
+             "composite":{"min_successful":1,"reduce_verdict":true,"nodes":[
+                 {"id":"tests","template":"review.tests","review_lens":"tests","access":"read_only","prompt":"review","route":{"alias":"first"}},
+                 {"id":"security","template":"review.security","review_lens":"security","access":"read_only","prompt":"review","route":{"alias":"second"}}
+             ],"exports":[{"node":"tests","outputs":["result","findings"]},{"node":"security","outputs":["result","findings"]}]}}
+        ]
+    })).unwrap();
+    let finding =
+        entry(",\"lens\":\"wrong\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"");
+    let result = format!("{}\nVERDICT: FAIL", findings_text(&finding));
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal_with_result(AttemptOutcome::Succeeded, &result),
+            terminal_with_result(AttemptOutcome::Succeeded, &result),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let panel = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "panel")
+        .unwrap();
+    assert!(panel.attempts.is_empty());
+    let findings = &panel.outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), 2);
+    for (finding, lens) in findings.iter().zip(["tests", "security"]) {
+        assert_eq!(finding.extra["lens"], lens);
+        assert_eq!(finding.extra["evidence"], "observed");
+        assert_eq!(finding.extra["proposed_fix"], "repair");
+    }
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
 }
 
 #[test]

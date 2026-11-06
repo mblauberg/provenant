@@ -165,7 +165,6 @@ fn graph_envelope_reason(
     )
 }
 
-#[cfg(test)]
 fn graph_envelope_bound(
     document: &GraphDocument,
     expansions: &[Expansion],
@@ -290,6 +289,20 @@ pub trait AttemptOwner {
         _reference: &str,
     ) -> Result<bool, Self::Error> {
         Ok(false)
+    }
+
+    /// Resolve a fresh panel for a repair whose risk or scope has grown.
+    fn resolve_repair_panel(
+        &mut self,
+        _document: &GraphDocument,
+        _subject: &str,
+    ) -> Result<RepairPanelResolution, String> {
+        Err("host cannot resolve @review-panel for the repaired head".into())
+    }
+
+    /// Compare a repair's pinned before and after commits against its review base.
+    fn detect_repair_growth(&mut self, _before: &str, _after: &str) -> Result<bool, String> {
+        Err("host cannot assess repair scope and risk".into())
     }
 
     /// Resolve a node-specific review base in its bound execution context.
@@ -476,6 +489,24 @@ pub trait AttemptOwner {
         worktree: Option<&str>,
         replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error>;
+}
+
+/// Full host-selected review topology and per-lens routing for a repair replan.
+#[derive(Clone, Debug)]
+pub struct RepairPanelResolution {
+    pub slots: Vec<RepairPanelSlot>,
+    pub frame: bool,
+    pub verifiers: usize,
+    pub synthesis: bool,
+    pub advice: std::collections::BTreeMap<String, String>,
+}
+
+/// Host-selected lens and routing fields for a repair review slot.
+#[derive(Clone, Debug)]
+pub struct RepairPanelSlot {
+    pub lens: String,
+    pub route: serde_json::Value,
+    pub family_group: Option<String>,
 }
 
 /// The file journal persists every state transition atomically. Its held lock
@@ -1682,7 +1713,155 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
                     continue;
                 }
-                let reason = if matches!(condition, GateCondition::Ci { .. }) {
+                let mut replan_error = None;
+                let reported = repair::growth_in_round(node, &plan, &checkpoint, &positions);
+                let mut growth = reported;
+                if repair::is_repair_gate(node, &plan, &positions) {
+                    if !reported && repair::risk_assessment_missing(node, &plan, &checkpoint) {
+                        replan_error = Some(
+                            "cannot assess repair growth: delta reviewer omitted a valid risk tier"
+                                .into(),
+                        );
+                    }
+                    if let Some((before, after)) = repair::repair_commits(node, &checkpoint)
+                        .map(|(before, after)| (before.to_owned(), after.to_owned())) {
+                        if let Some(value) = repair::cached_growth(&checkpoint.nodes[node_index], &before, &after) {
+                            growth |= value;
+                        } else {
+                            match owner.detect_repair_growth(&before, &after) {
+                                Ok(value) => {
+                                    checkpoint.nodes[node_index].extra.insert("repair_growth".into(),
+                                        serde_json::json!({"before":before,"after":after,"grew":value}));
+                                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                                    growth |= value;
+                                }
+                                Err(error) if !reported => {
+                                    replan_error = Some(format!("cannot assess repair growth: {error}"))
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                    } else if document.schema_version >= 2 && !reported {
+                        replan_error =
+                            Some("cannot assess repair growth: pinned commits unavailable".into());
+                    }
+                }
+                if growth {
+                    if let Some((parent, commit)) = repair::replan_source(node, &checkpoint)
+                        .map(|(parent, commit)| (parent.to_owned(), commit.to_owned()))
+                    {
+                        if repair::panel_expansion(&checkpoint, &parent).is_none() {
+                            let result = (|| -> Result<_, String> {
+                                commit
+                                    .parse::<provenant_core::GitOid>()
+                                    .map_err(|e| e.to_string())?;
+                                let panel = owner.resolve_repair_panel(document, &commit)?;
+                                let single = panel.slots.len() == 1;
+                                let topology = format!("f{}-v{}-s{}", u8::from(panel.frame && !single),
+                                    u8::from(panel.verifiers > 0 && !single), u8::from(panel.synthesis && !single));
+                                let verifier_ids = if single { Vec::new() } else { (1..=panel.verifiers).map(|index| index.to_string()).collect() };
+                                let slots = panel.slots;
+                                let mut routes = Vec::with_capacity(slots.len());
+                                let mut lenses = Vec::with_capacity(slots.len());
+                                for slot in slots {
+                                    lenses.push(slot.lens.clone());
+                                    let mut fields = slot
+                                        .route
+                                        .as_object()
+                                        .cloned()
+                                        .ok_or("invalid panel route")?;
+                                    if document.schema_version >= 2
+                                        && let Some(group) = slot.family_group
+                                    {
+                                        fields.insert("family_group".into(), group.into());
+                                    }
+                                    fields.insert("distinct_from".into(), "dependencies".into());
+                                    fields.insert("distinct_strength".into(), "prefer".into());
+                                    fields.insert("require_findings".into(), true.into());
+                                    fields.insert("required_verdict".into(), "VERDICT: PASS".into());
+                                    routes.push(
+                                        serde_json::to_string(&fields)
+                                            .map_err(|error| error.to_string())?,
+                                    );
+                                }
+                                let mut resolvers = std::collections::BTreeMap::from([
+                                    ("review-panel".into(), lenses.clone()),
+                                    ("review-panel-routes".into(), routes),
+                                    ("review-topology".into(), vec![topology]),
+                                    ("review-verifiers".into(), verifier_ids),
+                                ]);
+                                for lens in lenses {
+                                    resolvers.insert(format!("review-advice-{lens}"), vec![panel.advice.get(&lens).cloned().unwrap_or_default()]);
+                                }
+                                let library = template::TemplateLibrary::bundled();
+                                let context = patch::PatchContext {
+                                    library: &library,
+                                    resolvers: &resolvers,
+                                    scan: &patch::scan_for_secrets,
+                                    journal: None,
+                                    limits,
+                                };
+                                let mut prospective = checkpoint.clone();
+                                let change = repair::panel_patch(
+                                    &parent,
+                                    &commit,
+                                    patch::revision(&prospective),
+                                );
+                                patch::admit_patch(
+                                    &mut patch::LiveGraph {
+                                        document,
+                                        checkpoint: &mut prospective,
+                                    },
+                                    Some(&parent),
+                                    &change,
+                                    &context,
+                                )
+                                .map_err(|error| error.message)?;
+                                let preview = plans::expand(
+                                    document,
+                                    &prospective.extensions,
+                                    &prospective.expansions,
+                                    limits,
+                                )
+                                .map_err(|error| error.to_string())?;
+                                let (new_plan, new_positions) =
+                                    validate_flat_plan(&preview, &plans::generous())
+                                        .map_err(|error| error.to_string())?;
+                                owner
+                                    .validate_expansion(&preview, &prospective)
+                                    .map_err(|error| error.to_string())?;
+                                Ok((prospective, preview, new_plan, new_positions))
+                            })();
+                            match result {
+                                Ok((prospective, preview, new_plan, new_positions)) => {
+                                    journal.save(&prospective).map_err(GraphError::Journal)?;
+                                    checkpoint = prospective;
+                                    (expanded, plan, positions) =
+                                        (preview, new_plan, new_positions);
+                                    continue 'schedule;
+                                }
+                                Err(error) => {
+                                    replan_error =
+                                        Some(format!("full panel replan required: {error}"))
+                                }
+                            }
+                        } else if let Some(panel) = repair::panel_expansion(&checkpoint, &parent) {
+                            if !repair::panel_reviews_commit(panel, &commit) {
+                                replan_error = Some("full panel reviewed a different repaired commit; retry the repair container".into());
+                            } else if repair::panel_pending(&checkpoint, panel) {
+                                continue;
+                            } else {
+                                replan_error = repair::panel_failure(&checkpoint, panel);
+                            }
+                        }
+                    } else {
+                        replan_error =
+                            Some("full panel replan required: repaired commit unavailable".into());
+                    }
+                }
+                let reason = if growth || replan_error.is_some() {
+                    replan_error
+                } else if matches!(condition, GateCondition::Ci { .. }) {
                     if observed_ci.contains(&node.id) {
                         continue;
                     }

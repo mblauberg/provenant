@@ -277,6 +277,37 @@ fn review_panel_binds_per_lens_resolver_values() {
 }
 
 #[test]
+fn review_panel_resolver_keeps_each_route_and_family_group() {
+    let bundled = library();
+    let resolvers = BTreeMap::from([
+        ("review-panel".to_owned(), vec!["correctness".to_owned(), "security".to_owned()]),
+        ("review-panel-routes".to_owned(), vec![
+            r#"{"route":{"alias":"senior"},"family_group":"group-0"}"#.to_owned(),
+            r#"{"routes":[{"alias":"principal"},{"alias":"principal"}],"family_group":"group-1"}"#.to_owned(),
+        ]),
+    ]);
+    let compiled = Compiler {
+        library: &bundled,
+        resolvers: &resolvers,
+    }
+    .compile(&json!({
+        "id":"panel", "use":"review", "over":"@review-panel", "with":{"lens":"${item}"}
+    }))
+    .unwrap();
+    let members = &compiled.composite.unwrap().nodes;
+    assert_eq!(
+        members[0].route.as_ref().unwrap().alias.as_deref(),
+        Some("senior")
+    );
+    assert_eq!(members[0].family_group.as_deref(), Some("group-0"));
+    assert_eq!(
+        members[1].routes.as_ref().unwrap()[0].alias.as_deref(),
+        Some("principal")
+    );
+    assert_eq!(members[1].family_group.as_deref(), Some("group-1"));
+}
+
+#[test]
 fn composite_template_from_a_repository_layer_nests_a_swarm() {
     let mut library = library();
     library
@@ -509,6 +540,16 @@ fn delivery_templates_admit_bounded_review_repairs() {
         let delivery_limits = crate::config::GraphLimits::default();
         doc.admit(&delivery_limits).unwrap();
         let expanded = doc.expanded(&delivery_limits).unwrap();
+        let delta = expanded
+            .nodes
+            .iter()
+            .find(|node| {
+                node.id.contains("repair--cycles--r1--check--")
+                    && node.extra.contains_key("repair_lens")
+            })
+            .unwrap();
+        assert_eq!(delta.extra["repair_risk_assessment"], true);
+        assert!(delta.prompt.contains("top-level risk_tier"));
         let repair = expanded
             .nodes
             .iter()
