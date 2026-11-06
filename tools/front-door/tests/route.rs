@@ -189,17 +189,12 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     let unknown = call(&rig, &["route", "resolve", "codex/gpt-6.1-luna"], 0)?;
     assert!(unknown["data"]["supported_efforts"].is_null());
     assert_eq!(unknown["data"]["nearest_models"][0], "codex/gpt-6-luna");
-    let refused = call(
+    let unlisted = call(
         &rig,
         &["route", "resolve", "codex/gpt-6.1-luna", "--effort", "high"],
-        2,
+        0,
     )?;
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .ok_or("message")?
-            .contains("codex/gpt-6-luna")
-    );
+    assert_eq!(unlisted["data"]["eligibility"], "unverified_model");
     let output = rig.command(&["route", "resolve", "opencode/opencode-go/glm-5.3-flash"])?;
     assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("supported efforts: none"));
     Ok(())

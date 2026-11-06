@@ -306,7 +306,6 @@ fn effort_errors_report_recorded_controls_and_nearest_models()
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
     for (model, expected) in [
-        ("codex/gpt-6.1-luna", "codex/gpt-6-luna"),
         ("codex/gpt-6-luna", "supported efforts: low"),
         ("opencode/opencode-go/glm-5.3-flash", "takes no effort"),
     ] {
@@ -548,6 +547,17 @@ fn exact_unknown_is_retained_but_requires_availability() -> Result<(), Box<dyn s
     ));
     assert_eq!(route.exclusions.len(), 1);
     assert!(route.alternatives.as_slice().is_empty());
+    let mut with_effort = request("codex/unlisted-exact-id")?;
+    with_effort.effort = Some("high".into());
+    assert_eq!(
+        resolve(&with_effort, &context)?.effort.as_deref(),
+        Some("high")
+    );
+    with_effort.effort = Some("invalid effort".into());
+    assert!(matches!(
+        resolve(&with_effort, &context),
+        Err(RoutingError::UnsupportedEffort { .. })
+    ));
     assert!(matches!(
         resolve(&request("invented/id")?, &context),
         Err(RoutingError::UnknownAdapter)
@@ -1526,7 +1536,7 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/unlisted"},"effort":"high"}"#,
-            Err("unsupported effort"),
+            Ok(Some("high")),
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":"bad effort"}"#,
@@ -1606,7 +1616,9 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
     let context = context(&catalogue, &config, now()?);
     let mut query = request("codex/test")?;
     query.effort = Some("high".into());
-    query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("agy/unknown")?])?);
+    query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse(
+        "opencode/opencode-go/glm-5.3-flash",
+    )?])?);
     assert!(matches!(
         resolve(&query, &context),
         Err(RoutingError::UnsupportedEffort { .. })
