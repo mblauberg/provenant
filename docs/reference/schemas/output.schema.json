@@ -565,7 +565,10 @@
                     "process_crash",
                     "settlement_failure",
                     "provider_early_stop",
-                    "free_pool_quota"
+                    "free_pool_quota",
+                    "command_unavailable",
+                    "host_native_unconfigured",
+                    "identity_unobserved"
                   ],
                   "type": "string"
                 },
@@ -1593,7 +1596,10 @@
                     "process_crash",
                     "settlement_failure",
                     "provider_early_stop",
-                    "free_pool_quota"
+                    "free_pool_quota",
+                    "command_unavailable",
+                    "host_native_unconfigured",
+                    "identity_unobserved"
                   ],
                   "type": "string"
                 },
@@ -2531,7 +2537,10 @@
                     "process_crash",
                     "settlement_failure",
                     "provider_early_stop",
-                    "free_pool_quota"
+                    "free_pool_quota",
+                    "command_unavailable",
+                    "host_native_unconfigured",
+                    "identity_unobserved"
                   ],
                   "type": "string"
                 },
@@ -3475,7 +3484,10 @@
                     "process_crash",
                     "settlement_failure",
                     "provider_early_stop",
-                    "free_pool_quota"
+                    "free_pool_quota",
+                    "command_unavailable",
+                    "host_native_unconfigured",
+                    "identity_unobserved"
                   ],
                   "type": "string"
                 },
@@ -4616,7 +4628,10 @@
                     "process_crash",
                     "settlement_failure",
                     "provider_early_stop",
-                    "free_pool_quota"
+                    "free_pool_quota",
+                    "command_unavailable",
+                    "host_native_unconfigured",
+                    "identity_unobserved"
                   ],
                   "type": "string"
                 },

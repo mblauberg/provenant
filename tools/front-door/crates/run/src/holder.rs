@@ -1724,6 +1724,9 @@ impl RunStore {
             };
             if let Some(reason) = refusal {
                 decoded.outcome = Outcome::Failed;
+                if reason == "provider identity was not observed" {
+                    decoded.terminal_cause = Some(TerminalCause::IdentityUnobserved);
+                }
                 // Keep the decoder's typed identity evidence error, if any.
                 decoded.reason = Some(match decoded.reason.take() {
                     detail if reason == "provider identity was not observed" => {
@@ -1745,6 +1748,7 @@ impl RunStore {
                 });
             }
         }
+        let mut terminal_note = None;
         let frozen_policy = self.staged_policy_retry(&record)?;
         let frozen_policy_retry = frozen_policy
             .as_ref()
@@ -1802,6 +1806,7 @@ impl RunStore {
             };
             if staged {
                 if let Some(note) = assessment.note {
+                    terminal_note = Some(note.clone());
                     decoded.reason = Some(match decoded.reason.take() {
                         Some(reason) => format!("{reason}; {note}"),
                         None => note,
@@ -1984,10 +1989,12 @@ impl RunStore {
             Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
         ) {
             decoded.terminal_cause = None;
+            terminal_note = None;
         }
         let decoded_reason = decoded.reason.take().map(bounded_reason);
         let publication = TerminalPublication {
             terminal_cause: decoded.terminal_cause,
+            terminal_note,
             outcome: decoded.outcome,
             finished_at,
             started_at: record.started_at,

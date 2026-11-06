@@ -364,6 +364,8 @@ pub(super) enum PrepareError {
     Refusal {
         message: String,
         cause: provenant_records::run::TerminalCause,
+        /// Fixed-form text naming a configured value, never captured output.
+        note: Option<String>,
     },
     #[error(transparent)]
     Prompt(#[from] LaunchPromptError),
@@ -382,13 +384,22 @@ pub(super) enum PrepareError {
 impl PrepareError {
     fn into_refusal(self) -> run::PrepareRefusal {
         match self {
-            Self::Refusal { message, cause } => run::PrepareRefusal {
+            Self::Refusal {
+                message,
+                cause,
+                note,
+            } => run::PrepareRefusal {
                 terminal_cause: Some(cause),
+                terminal_note: note,
                 message,
                 skipped_routes: Vec::new(),
-                fallback_outcome: (cause
-                    == provenant_records::run::TerminalCause::UnregisteredAccount)
-                    .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable),
+                fallback_outcome: matches!(
+                    cause,
+                    provenant_records::run::TerminalCause::UnregisteredAccount
+                        | provenant_records::run::TerminalCause::CommandUnavailable
+                        | provenant_records::run::TerminalCause::HostNativeUnconfigured
+                )
+                .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable),
             },
             Self::Candidates {
                 message,
@@ -397,6 +408,7 @@ impl PrepareError {
                 ..
             } => run::PrepareRefusal {
                 terminal_cause: None,
+                terminal_note: None,
                 message,
                 skipped_routes,
                 fallback_outcome,
@@ -474,16 +486,19 @@ pub(super) fn prepare_with_wait(
         let roots = registry.roots.ok_or("routing context is unavailable")?;
         let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
             .map_err(|error| error.to_string())?;
-        let native = config.domains.fabric.host_native.get(name).ok_or_else(|| {
-            PrepareError::Candidates {
-                message: "the requested host-native route is not configured in domains.fabric.host_native; select a configured route".into(),
-                plans: Vec::new(),
-                skipped_routes: Vec::new(),
-                fallback_outcome: Some(
-                    provenant_records::run::PreparationFailure::AdapterUnavailable,
-                ),
-            }
-        })?;
+        let native =
+            config
+                .domains
+                .fabric
+                .host_native
+                .get(name)
+                .ok_or_else(|| PrepareError::Refusal {
+                    message: provenant_records::run::TerminalCause::HostNativeUnconfigured
+                        .reason()
+                        .into(),
+                    cause: provenant_records::run::TerminalCause::HostNativeUnconfigured,
+                    note: None,
+                })?;
         let provenant_fabric_runtime::config::HostNativeConfig::ClaudeAgent {
             model,
             effort,
@@ -1362,6 +1377,7 @@ pub(super) fn prepare_candidates(
             let entry = matching.next().ok_or_else(|| PrepareError::Refusal {
                 message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
                 cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                note: None,
             })?;
             if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
                 return Err(PrepareError::Other(
@@ -1432,6 +1448,7 @@ pub(super) fn prepare_candidates(
             } => PrepareError::Refusal {
                 message,
                 cause: provenant_records::run::TerminalCause::UnknownPacingAccount,
+                note: None,
             },
             other => PrepareError::Other(other.to_string()),
         },

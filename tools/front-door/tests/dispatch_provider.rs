@@ -4562,6 +4562,7 @@ fn persisted_attempt_with(
             running.revision,
             &provenant_run::TerminalPublication {
                 terminal_cause: None,
+                terminal_note: None,
                 outcome: provenant_run::Outcome::Succeeded,
                 finished_at: clock.wall_now()?,
                 started_at: running.started_at,

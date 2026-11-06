@@ -5557,6 +5557,7 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
     seal_exit(&store, &observed)?;
     let publication = TerminalPublication {
         terminal_cause: None,
+        terminal_note: None,
         outcome: Outcome::Failed,
         finished_at: WallTime::from_micros(160)?,
         started_at: Some(WallTime::from_micros(120)?),
@@ -8934,6 +8935,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
                 terminal_cause: None,
+                terminal_note: None,
                 message: self.message.into(),
                 fallback_outcome: None,
                 skipped_routes: [
@@ -9025,6 +9027,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
                 terminal_cause: None,
+                terminal_note: None,
                 message: "all candidates require sign-in; run provenant accounts".into(),
                 fallback_outcome: (!self.0)
                     .then_some(provenant_records::run::PreparationFailure::AuthRequired),

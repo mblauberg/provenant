@@ -795,6 +795,9 @@ pub enum TerminalCause {
     SettlementFailure,
     ProviderEarlyStop,
     FreePoolQuota,
+    CommandUnavailable,
+    HostNativeUnconfigured,
+    IdentityUnobserved,
 }
 
 impl TerminalCause {
@@ -820,6 +823,15 @@ impl TerminalCause {
             }
             Self::FreePoolQuota => {
                 crate::diagnostic::ProviderFailureFact::Quota { free_pool: true }.reason()
+            }
+            Self::CommandUnavailable => {
+                "the configured command could not be resolved; correct its argv in domains.fabric.commands"
+            }
+            Self::HostNativeUnconfigured => {
+                "the requested host-native route is not configured in domains.fabric.host_native; select a configured route"
+            }
+            Self::IdentityUnobserved => {
+                "provider identity was not observed; inspect the local session evidence"
             }
         }
     }

@@ -9,6 +9,21 @@ fn unavailable(message: String) -> PrepareError {
     }
 }
 
+/// The configured executable could not be resolved. The note names the
+/// operator's own `argv[0]`, not the OS error, which may echo other paths.
+fn executable_unavailable(program: &str) -> PrepareError {
+    PrepareError::Refusal {
+        message: provenant_records::run::TerminalCause::CommandUnavailable
+            .reason()
+            .into(),
+        cause: provenant_records::run::TerminalCause::CommandUnavailable,
+        note: Some(format!(
+            "executable {}",
+            provenant_records::diagnostic::safe_text(program)
+        )),
+    }
+}
+
 /// Resolve only a host-configured entry. The result enters the ordinary lane
 /// launcher, supervisor, guardian and settlement path below this edge.
 pub(super) fn prepare_command(
@@ -73,9 +88,9 @@ pub(super) fn prepare_command(
     let invocation = if program.contains('/') {
         cwd.join(program)
     } else {
-        locate(program).map_err(unavailable)?
+        locate(program).map_err(|_| executable_unavailable(program))?
     };
-    let executable = canonical(&invocation).map_err(unavailable)?;
+    let executable = canonical(&invocation).map_err(|_| executable_unavailable(program))?;
     let runtimes = command
         .runtimes
         .iter()

@@ -65,7 +65,7 @@ lane_row! {
         transcript: Option<LaneTranscript> => nullable(object(&[("adapter", string()), ("session", string()), ("path", nullable(super::schema::worktree_path()))], &[]));
     }
     optional {
-        terminal_cause: crate::run::TerminalCause => choices(&["unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "settlement_failure", "provider_early_stop", "free_pool_quota"]);
+        terminal_cause: crate::run::TerminalCause => choices(&["unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved"]);
         host: String => string();
         resolved_route: Value => any();
         title: String => string();
@@ -110,7 +110,17 @@ impl LaneRow {
                     .or_else(|| {
                         (reason.is_some() || *outcome != crate::run::Outcome::Succeeded)
                             .then(|| outcome.diagnostic_reason().to_owned())
-                    }),
+                    })
+                    // The note is Provenant's own fixed-form text (a retry
+                    // decision or a configured executable), never provider output.
+                    .map(
+                        |safe| match extra.get("terminal_note").and_then(Value::as_str) {
+                            Some(note) if !note.is_empty() => {
+                                format!("{safe}; {}", crate::diagnostic::safe_text(note))
+                            }
+                            _ => safe,
+                        },
+                    ),
             ),
             other => (
                 serde_json::to_value(other)
@@ -462,6 +472,9 @@ mod terminal_cause_tests {
             TerminalCause::SettlementFailure,
             TerminalCause::ProviderEarlyStop,
             TerminalCause::FreePoolQuota,
+            TerminalCause::CommandUnavailable,
+            TerminalCause::HostNativeUnconfigured,
+            TerminalCause::IdentityUnobserved,
         ] {
             let mut extra = crate::ExtraFields::default();
             extra.insert(

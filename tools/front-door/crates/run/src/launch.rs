@@ -219,6 +219,8 @@ pub struct Decoded {
 #[error("{message}")]
 pub struct PrepareRefusal {
     pub terminal_cause: Option<TerminalCause>,
+    /// Fixed-form text naming a configured value, never captured output.
+    pub terminal_note: Option<String>,
     pub message: String,
     pub skipped_routes: Vec<SkippedRoute>,
     pub fallback_outcome: Option<provenant_records::run::PreparationFailure>,
@@ -247,6 +249,7 @@ impl From<String> for PrepareRefusal {
         Self {
             message,
             terminal_cause: None,
+            terminal_note: None,
             skipped_routes: Vec::new(),
             fallback_outcome: None,
         }
@@ -1798,6 +1801,7 @@ impl RunStore {
                             finished_at: now()?,
                             failure: refusal.fallback_outcome,
                             terminal_cause: refusal.terminal_cause,
+                            terminal_note: refusal.terminal_note,
                         },
                         call,
                     ) {
@@ -1951,6 +1955,7 @@ impl RunStore {
                                 finished_at: now()?,
                                 failure: None,
                                 terminal_cause,
+                                terminal_note: None,
                             },
                             call,
                         )?;
