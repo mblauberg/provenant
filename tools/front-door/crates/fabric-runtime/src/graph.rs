@@ -1008,6 +1008,57 @@ fn apply_launch_disposition(
     Ok(())
 }
 
+/// Apply an accepted, nonterminal attempt observation without I/O.
+fn apply_pending_observation(
+    attempt: &mut GraphAttempt,
+    state: &mut NodeState,
+    reference: Option<String>,
+) {
+    attempt.state = AttemptState::Running;
+    attempt.attempt_ref = reference;
+    *state = NodeState::Running;
+}
+
+/// Apply an unresolved attempt observation without authorising a new route.
+fn apply_unknown_observation(
+    attempt: &mut GraphAttempt,
+    state: &mut NodeState,
+    reference: Option<String>,
+) {
+    attempt.state = AttemptState::Unresolved;
+    attempt.attempt_ref = reference;
+    *state = NodeState::Running;
+}
+
+/// Apply a settled gate using already-observed inputs, before checkpoint save.
+fn apply_gate_result(
+    progress: &mut NodeProgress,
+    reason: Option<String>,
+    on_fail: Option<String>,
+    is_ci: bool,
+) {
+    let passed = reason.is_none();
+    progress.state = if passed {
+        NodeState::Succeeded
+    } else {
+        NodeState::Failed
+    };
+    progress.gate = Some(GateResult {
+        extra: Default::default(),
+        passed,
+        reason: reason.map(|reason| bounded(&reason, OUTPUT_FIELD_BYTES)),
+        on_fail,
+    });
+    progress.outputs = Some(if is_ci {
+        ci::outputs(passed, progress.ci.as_ref())
+    } else {
+        gate_outputs(passed)
+    });
+    if let Some(ci) = progress.ci.as_mut() {
+        ci.wake_at = None;
+    }
+}
+
 /// Revert cancellation-only state changes without altering attempt records.
 fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (String, &'static str)> {
     let saved_wake = checkpoint.wake_at;
@@ -1782,27 +1833,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 } else {
                     gate_failure(condition, node, &checkpoint, &positions, &effective_budget)
                 };
-                let progress = &mut checkpoint.nodes[node_index];
-                progress.state = if reason.is_none() {
-                    NodeState::Succeeded
-                } else {
-                    NodeState::Failed
-                };
-                progress.gate = Some(GateResult {
-                    extra: Default::default(),
-                    passed: reason.is_none(),
-                    reason: reason.map(|reason| bounded(&reason, OUTPUT_FIELD_BYTES)),
-                    on_fail: node.on_fail.clone(),
-                });
-                let passed = progress.state == NodeState::Succeeded;
-                progress.outputs = Some(if matches!(condition, GateCondition::Ci { .. }) {
-                    ci::outputs(passed, progress.ci.as_ref())
-                } else {
-                    gate_outputs(passed)
-                });
-                if let Some(ci) = progress.ci.as_mut() {
-                    ci.wake_at = None;
-                }
+                apply_gate_result(
+                    &mut checkpoint.nodes[node_index],
+                    reason,
+                    node.on_fail.clone(),
+                    matches!(condition, GateCondition::Ci { .. }),
+                );
                 asks::refresh_wake(&mut checkpoint);
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 continue;
@@ -3138,15 +3174,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     retry_was_pending = progress.launch_retry.take().is_some();
                     match observation {
                         AttemptObservation::Pending { attempt_ref } => {
-                            attempt.state = AttemptState::Running;
-                            attempt.attempt_ref = attempt_ref;
-                            progress.state = NodeState::Running;
+                            apply_pending_observation(attempt, &mut progress.state, attempt_ref);
                             false
                         }
                         AttemptObservation::Unknown { attempt_ref } => {
-                            attempt.state = AttemptState::Unresolved;
-                            attempt.attempt_ref = attempt_ref;
-                            progress.state = NodeState::Running;
+                            apply_unknown_observation(attempt, &mut progress.state, attempt_ref);
                             false
                         }
                         AttemptObservation::Terminal {

@@ -2499,6 +2499,9 @@ impl RunStore {
     /// this project. Nonterminal work takes priority over temporary cleanup.
     pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
         call.check()?;
+        // Listing below reports unreadable evidence without hiding known runs.
+        let _ = self.cutover_writer_reservations(call);
+        call.check()?;
         let limit = crate::db::sql_int(limit)?;
         let ids: Vec<String> = {
             let mut query = self.db.prepare(
@@ -2718,6 +2721,10 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
+        call.check()?;
+        // The listing path retains its per-run error reporting if cutover fails.
+        let _ = self.cutover_writer_reservations(call);
+        call.check()?;
         let mut ids: Vec<String> = {
             let mut query = self
                 .db
@@ -3599,6 +3606,63 @@ mod tests {
         })?;
         assert_eq!(queued[0], (run.attempts[0].attempt_id, Reconciled::Queued));
         assert!(matches!(&queued[1], (id, Reconciled::Uncertain { .. }) if *id == orphan));
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_carries_slot_root_fence_before_discovering_its_attempt()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let orphan = AttemptId::from_bytes([7; 16]);
+        let slot = context
+            .state_root
+            .as_path()
+            .join("worktrees")
+            .join(context.project_id.to_string())
+            .join("orphan");
+        std::fs::create_dir_all(&slot)?;
+        let directory = provenant_os::fs::Directory::open_anchor(&slot)?;
+        drop(custody::acquire_reader(
+            directory.try_clone()?,
+            Scope {
+                run: run.run_id,
+                attempt: orphan,
+                generation: 1,
+            },
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?);
+        let child = slot.join(orphan.to_string()).join("reservation.json");
+        let mut legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&child)?)?;
+        let metadata = directory.metadata()?;
+        legacy["reservation_device"] = metadata.device.into();
+        legacy["reservation_inode"] = metadata.inode.into();
+        std::fs::write(slot.join("reservation.json"), serde_json::to_vec(&legacy)?)?;
+        std::fs::remove_file(&child)?;
+        store.attempt_dir(run.run_id, orphan, true)?;
+        assert!(store.writer_fence_listing()?.reservations.is_empty());
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(
+            found
+                .iter()
+                .any(|(id, state)| *id == orphan && matches!(state, Reconciled::Uncertain { .. }))
+        );
+        assert!(!slot.join("reservation.json").exists());
+        assert!(child.exists());
+        assert_eq!(store.writer_fences()?[0].scope.attempt, orphan);
         Ok(())
     }
 

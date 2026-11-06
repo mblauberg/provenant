@@ -10433,6 +10433,40 @@ fn launch_wake_is_capped_by_the_original_deadline() {
 }
 
 #[test]
+fn nonterminal_observation_transitions_need_no_owner_or_journal() {
+    let mut attempt = GraphAttempt {
+        extra: Default::default(),
+        review_substitution: false,
+        key: AttemptKey {
+            extra: Default::default(),
+            graph_id: "g".into(),
+            node_id: "n".into(),
+            route_index: 0,
+        },
+        route: route("first"),
+        state: AttemptState::Starting,
+        attempt_ref: None,
+        outcome: None,
+        launched: true,
+        launch_actor: "actor".into(),
+        settled: 0,
+        input_cap: None,
+        input_cap_source: None,
+        input_manifest: None,
+        usage: None,
+    };
+    let mut state = NodeState::Pending;
+    apply_unknown_observation(&mut attempt, &mut state, None);
+    assert_eq!(attempt.state, AttemptState::Unresolved);
+    assert_eq!(state, NodeState::Running);
+    apply_pending_observation(&mut attempt, &mut state, Some("host/1".into()));
+    assert_eq!(attempt.state, AttemptState::Running);
+    assert_eq!(attempt.attempt_ref.as_deref(), Some("host/1"));
+    assert_eq!(state, NodeState::Running);
+    assert_eq!(attempt.key.route_index, 0);
+}
+
+#[test]
 fn launch_retry_without_a_wall_clock_keeps_the_prior_checkpoint() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {

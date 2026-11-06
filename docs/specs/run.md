@@ -611,6 +611,12 @@ after the original recovery process exits. Predecessors without an import marker
 keep their existing admission semantics. Reservation release retires the marker's
 active fence; its evidence may remain beside the retired reservation.
 
+After the custody cutover, recovery carries a retained slot-root reservation
+to the attempt it names under the writer lock. The attempt record is durable
+before the slot record is removed, and a carried reservation excludes successor
+writers until it is settled. A conflicting or unreadable record stays fenced;
+unreadable evidence appears in reconciliation. Unknown fields are preserved.
+
 If launch preparation fails after acquiring custody, it withdraws the
 unlaunched reservation before reporting a local refusal. A failed withdrawal
 keeps the reservation and durably blocks the operation with the preparation
