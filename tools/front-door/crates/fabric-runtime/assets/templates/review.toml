@@ -1,8 +1,11 @@
 doc = "Find defects at a pinned head."
-brief = "Review the change at its pinned head through the ${lens} lens. Report defects with file, line, severity and evidence."
+brief = "Review the change at its pinned head through the ${lens} lens. End with a findings block containing schema_version 1 and a findings array. Each finding records id, lens (${lens}), severity, file, line, summary, status, evidence and proposed_fix. Preserve qualified IDs when re-reviewing findings. Flag a concrete design defect as design_defect=true with its evidence; record risk_grew=true or scope_grew=true when the delta expands either. Use an empty array for no findings. End with exactly one final verdict line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE."
 tier = "senior"
 access = "read_only"
 outputs = ["result", "findings"]
+
+[node]
+review_lens = "${lens}"
 
 [parameters.lens]
 type = "string"

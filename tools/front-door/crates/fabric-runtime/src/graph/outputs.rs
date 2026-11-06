@@ -187,6 +187,39 @@ pub(super) fn make_outputs_with_upstream(
     }
 }
 
+/// A model may reconcile findings, but omission is not evidence of closure.
+/// Keep every qualified upstream identity unless its output explicitly disposes
+/// of it; parsing has already inherited that identity's original evidence.
+pub(super) fn retain_synthesis_findings(outputs: &mut NodeOutputs, upstream: &[Finding]) {
+    let missing: Vec<_> = upstream
+        .iter()
+        .filter(|source| {
+            !outputs
+                .findings
+                .iter()
+                .any(|finding| finding.id == source.id)
+        })
+        .cloned()
+        .collect();
+    let mut dropped = 0;
+    for finding in missing {
+        outputs.findings.push(finding);
+        if outputs.findings.len() > MAX_FINDINGS
+            || canonical_len(&outputs.findings) > FINDINGS_BYTES
+        {
+            outputs.findings.pop();
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        outputs.findings_available = Some(false);
+        outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
+        outputs.warnings.push(format!(
+            "synthesis findings exceed cap: {dropped} upstream findings omitted; inspect source outputs"
+        ));
+    }
+}
+
 /// Whether `id` names `finding` in another form: a suffix of its qualified
 /// id, the qualified form of its short id, or the finding it carries forward.
 fn names_finding(finding: &Finding, id: &str) -> bool {
@@ -506,7 +539,14 @@ fn parse_findings(
             finding.extra.retain(|key, _| {
                 matches!(
                     key.as_str(),
-                    "propagates" | "verification" | "lens" | "evidence" | "proposed_fix"
+                    "propagates"
+                        | "verification"
+                        | "lens"
+                        | "evidence"
+                        | "proposed_fix"
+                        | "design_defect"
+                        | "risk_grew"
+                        | "scope_grew"
                 )
             });
             finding.summary.clear();
@@ -1693,7 +1733,7 @@ mod alias_tests {
             "id":"F1", "severity":"high", "file":"src/lib.rs", "line":17,
             "summary":"description", "status":"open", "detail":"x".repeat(8000),
             "propagates":"review:F1", "lens":"tests", "evidence":"observed",
-            "proposed_fix":"repair"
+            "proposed_fix":"repair", "design_defect":true, "risk_grew":true, "scope_grew":true
         }))
         .unwrap();
         upstream.summary = "s".repeat(1000);
@@ -1720,6 +1760,9 @@ mod alias_tests {
             assert_eq!(finding.extra["lens"], "tests");
             assert_eq!(finding.extra["evidence"], "observed");
             assert_eq!(finding.extra["proposed_fix"], "repair");
+            for field in ["design_defect", "risk_grew", "scope_grew"] {
+                assert_eq!(finding.extra[field], true);
+            }
             assert_eq!(
                 finding
                     .extra

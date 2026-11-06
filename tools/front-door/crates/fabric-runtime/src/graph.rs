@@ -2887,21 +2887,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                         _ => None,
                     };
-                // Every selected upstream finding identity needs a disposition.
-                let upstream_findings: Vec<Finding> = if node.dispositions.is_empty() {
-                    Default::default()
-                } else {
-                    selected_findings(node, &plan, &checkpoint, &positions)
-                        .into_iter()
-                        .map(|(source, mut finding)| {
-                            finding.extra.insert(
-                                "propagates".into(),
-                                format!("{source}:{}", finding.id).into(),
-                            );
-                            finding
-                        })
-                        .collect()
-                };
+                // Synthesis retains qualified evidence even without a disposition contract.
+                let upstream_findings: Vec<Finding> =
+                    if node.dispositions.is_empty() && node.kind != Some(NodeKind::Synthesise) {
+                        Default::default()
+                    } else {
+                        selected_findings(node, &plan, &checkpoint, &positions)
+                            .into_iter()
+                            .map(|(source, mut finding)| {
+                                finding.extra.insert(
+                                    "propagates".into(),
+                                    format!("{source}:{}", finding.id).into(),
+                                );
+                                finding
+                            })
+                            .collect()
+                    };
                 let proof_dispositions = if node.dispositions.is_empty()
                     && node.role.as_deref() == Some("review.verify")
                 {
@@ -2972,11 +2973,21 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 commit,
                                 &upstream_findings,
                             );
+                            if node.kind == Some(NodeKind::Synthesise)
+                                && node.dispositions.is_empty()
+                            {
+                                retain_synthesis_findings(&mut outputs, &upstream_findings);
+                            }
                             if node.access == AccessMode::ReadOnly
                                 && let Some(lens) = node
                                     .role
                                     .as_deref()
                                     .and_then(|role| role.strip_prefix("lens."))
+                                    .or_else(|| {
+                                        node.extra
+                                            .get("review_lens")
+                                            .and_then(serde_json::Value::as_str)
+                                    })
                             {
                                 for finding in &mut outputs.findings {
                                     if !upstream_findings
