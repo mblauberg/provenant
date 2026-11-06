@@ -41,10 +41,12 @@ impl provenant_os::capture::FrameDecoder for LiveUsage {
         frame: &[u8],
     ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
         use provenant_os::capture::FrameEvent;
-        Ok(live_usage(frame).map_or(FrameEvent::Progress, |tokens| FrameEvent::Usage {
-            key: TURNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            tokens,
-        }))
+        Ok(
+            live_usage(frame).map_or(FrameEvent::Progress, |tokens| FrameEvent::Usage {
+                key: TURNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                tokens,
+            }),
+        )
     }
     fn reports_usage(&self) -> bool {
         true

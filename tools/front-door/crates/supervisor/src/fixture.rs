@@ -789,10 +789,7 @@ pub fn dispatch() -> io::Result<bool> {
             let path = fixture_path(&args, 3)?;
             let mut stream = std::os::unix::net::UnixStream::connect(&path)?;
             stream.write_all(b"R")?;
-            io::stdout().write_all(b"usage:1:600\nusage:1:600\n")?;
-            io::stdout().flush()?;
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            io::stdout().write_all(b"usage:2:600\n")?;
+            io::stdout().write_all(b"usage:1:600\nusage:1:600\nusage:2:600\n")?;
             io::stdout().flush()?;
             wait_for_eof(&mut stream)?;
         }
