@@ -4470,16 +4470,21 @@ mod route_tests {
             resolve(&request(Some("opencode/opencode-go/glm-5.3-flash"), None)?).unwrap_err();
         let error = error.to_string();
         assert!(error.contains("glm-5.3-flash") && error.contains("$60"));
-        let error = resolve(&request(Some("opencode/opencode-go/unlisted"), None)?).unwrap_err();
-        let error = error.to_string();
-        assert!(
-            error.contains("opencode-go/unlisted")
-                && error.contains("not an admitted OpenCode route")
-                && error.contains("opencode/opencode-go/glm-5.3-flash")
-        );
-        let error = resolve(&request(Some("opencode/opencode-go/glm-5.2"), None)?).unwrap_err();
-        let error = error.to_string();
-        assert!(error.contains("glm-5.2") && error.contains("opencode/opencode-go/glm-5.3-flash"));
+        // Isolate catalogue eligibility from the independent allowance floor.
+        let floor_config = std::fs::read_to_string(&path)?;
+        std::fs::write(
+            &path,
+            floor_config.replace(
+                "min_monthly_allowance_usd=61",
+                "min_monthly_allowance_usd=0",
+            ),
+        )?;
+        for model in ["opencode-go/unlisted", "opencode-go/glm-5.2"] {
+            let resolved = resolve(&request(Some(&format!("opencode/{model}")), None)?)?;
+            assert_eq!(resolved.model, model);
+            assert_eq!(resolved.eligibility, RouteEligibility::UnverifiedModel);
+        }
+        std::fs::write(&path, floor_config)?;
         let fallback = |model: Option<&str>, route: Option<&str>| -> Result<(), Box<dyn Error>> {
             let request = super::RouteRequest {
                 read_heavy: false,
