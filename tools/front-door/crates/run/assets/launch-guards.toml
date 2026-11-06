@@ -66,6 +66,16 @@ boundary = "authority"
 reason = "A continuation requires its recorded session, applied route and account identity and must match the selected route."
 
 [[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "object_integrity"
+reason = "Hard-linked retained state cannot be copied as an independent history object."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "authority"
+reason = "Retained state copying must remain on the anchored filesystem."
+
+[[guard]]
 site = "run/src/launch.rs#child_access_within_impl"
 boundary = "authority"
 reason = "A child cannot exceed its parent access or select another graph source."

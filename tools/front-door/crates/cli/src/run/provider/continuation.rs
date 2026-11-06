@@ -40,6 +40,8 @@ pub(super) enum ContinuationError {
     MissingRoute,
     #[error(transparent)]
     Provider(#[from] provenant_providers::ProviderError),
+    #[error(transparent)]
+    StateCopy(#[from] StateCopyError),
     #[error("{0}")]
     Other(String),
 }
@@ -52,6 +54,7 @@ impl ContinuationError {
                 BoundaryClass::Authority
             }
             Self::Provider(error) => error.boundary_class(),
+            Self::StateCopy(error) => error.class,
             Self::Other(_) => BoundaryClass::None,
         }
     }
@@ -126,7 +129,7 @@ pub(super) fn continuation_for(
     match find_session_state(&prior_state, session) {
         // Codex's SQLite index holds absolute rollout paths. Rebuild it from
         // the copied sessions instead of resolving back into settled history.
-        Ok(Some(retained)) => copy_state(&retained, private_state, AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only))?,
+        Ok(Some(retained)) => copy_state_classified(&retained, private_state, RETAINED_STATE, AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only))?,
         // These adapters retain sessions in their existing user data stores.
         Ok(None) if AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.user_sessions) => {}
         Ok(None) => return Err("the prior attempt's retained provider state is missing or has expired; dispatch a new lane with its retained result or transcripts as context".into()),
@@ -298,16 +301,47 @@ pub(super) fn find_session_state_within(
 /// A leftover process may still change the tree, so every entry is opened from
 /// its parent's handle without following a link, and the opened descriptor is
 /// checked and copied.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(super) struct StateCopyError {
+    message: String,
+    class: provenant_records::diagnostic::BoundaryClass,
+}
+impl From<String> for StateCopyError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            class: provenant_records::diagnostic::BoundaryClass::None,
+        }
+    }
+}
+impl From<&str> for StateCopyError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+#[cfg(test)]
 pub(super) fn copy_state(from: &Path, to: &Path, sessions_only: bool) -> Result<(), String> {
     copy_state_within(from, to, RETAINED_STATE, sessions_only)
 }
 
+#[cfg(test)]
 pub(super) fn copy_state_within(
     from: &Path,
     to: &Path,
     limits: StateLimits,
     sessions_only: bool,
 ) -> Result<(), String> {
+    copy_state_classified(from, to, limits, sessions_only).map_err(|error| error.to_string())
+}
+
+fn copy_state_classified(
+    from: &Path,
+    to: &Path,
+    limits: StateLimits,
+    sessions_only: bool,
+) -> Result<(), StateCopyError> {
     let failed =
         |detail: &dyn std::fmt::Display| format!("copying retained provider state: {detail}");
     // The anchor opens without following its final component; this stat only
@@ -320,7 +354,7 @@ pub(super) fn copy_state_within(
     }
     let source = Directory::open_anchor(from).map_err(|error| failed(&error))?;
     let (Some(parent), Some(name)) = (to.parent(), to.file_name()) else {
-        return Err(failed(&"the destination has no parent directory"));
+        return Err(failed(&"the destination has no parent directory").into());
     };
     std::fs::create_dir_all(parent).map_err(|error| failed(&error))?;
     let parent = Directory::open_anchor(parent).map_err(|error| failed(&error))?;
@@ -345,27 +379,61 @@ pub(super) fn copy_state_within(
         .map_err(CopyRefusal::from)
         .and_then(|target| copy_tree(&source, &target, limits.depth, &mut budget, sessions_only))
         .and_then(|()| Ok(parent.replace(&staging, &parent, name)?));
-    let copied = copied.map_err(|refusal| match refusal {
-        CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
-        CopyRefusal::TooLarge => {
-            format!("retained provider state exceeds its {bytes} byte copy budget")
-        }
-        CopyRefusal::TooMany => {
-            format!("retained provider state exceeds {} entries", limits.entries)
-        }
-        CopyRefusal::TooDeep => format!(
-            "retained provider state nests deeper than {} directories",
-            limits.depth
-        ),
-        CopyRefusal::CrossDevice => "retained provider state crosses a filesystem boundary".into(),
-        CopyRefusal::Fs(error) => failed(&error),
+    let copied = copied.map_err(|refusal| {
+        let class = refusal.boundary_class();
+        let message = match refusal {
+            CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
+            CopyRefusal::TooLarge => {
+                format!("retained provider state exceeds its {bytes} byte copy budget")
+            }
+            CopyRefusal::TooMany => {
+                format!("retained provider state exceeds {} entries", limits.entries)
+            }
+            CopyRefusal::TooDeep => format!(
+                "retained provider state nests deeper than {} directories",
+                limits.depth
+            ),
+            CopyRefusal::CrossDevice => {
+                "retained provider state crosses a filesystem boundary".into()
+            }
+            CopyRefusal::Fs(error) => failed(&error),
+        };
+        StateCopyError { message, class }
     });
     if let Err(refusal) = &copied
         && let Err(error) = remove_staged(&parent, &staging)
     {
-        return Err(format!("{refusal}; removing its staged copy: {error}"));
+        return Err(StateCopyError {
+            message: format!("{refusal}; removing its staged copy: {error}"),
+            class: refusal.class,
+        });
     }
     copied
+}
+
+#[test]
+fn retained_state_hard_link_is_an_integrity_refusal() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::diagnostic::BoundaryClass;
+    let temp = tempfile::tempdir()?;
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source)?;
+    let external = temp.path().join("external");
+    std::fs::write(&external, "state")?;
+    if let Err(error) = std::fs::hard_link(&external, source.join("link")) {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            eprintln!("hard-link fixture unavailable: {error}");
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+    let error = copy_state_classified(&source, &temp.path().join("copy"), RETAINED_STATE, false)
+        .unwrap_err();
+    assert_eq!(error.class, BoundaryClass::Integrity);
+    assert_eq!(
+        error.to_string(),
+        "retained provider state holds a hard-linked file"
+    );
+    Ok(())
 }
 
 /// Remove a refused copy's staging tree. The host made it fresh and private,
@@ -401,6 +469,33 @@ pub(super) enum CopyRefusal {
     TooDeep,
     CrossDevice,
     Fs(FsError),
+}
+
+impl CopyRefusal {
+    fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass;
+        match self {
+            Self::HardLink => BoundaryClass::Integrity,
+            Self::CrossDevice => BoundaryClass::Authority,
+            Self::TooLarge | Self::TooMany | Self::TooDeep | Self::Fs(_) => BoundaryClass::None,
+        }
+    }
+}
+
+#[test]
+fn retained_state_copy_distinguishes_boundaries_from_resource_limits() {
+    use provenant_records::diagnostic::BoundaryClass;
+    assert_eq!(
+        CopyRefusal::HardLink.boundary_class(),
+        BoundaryClass::Integrity
+    );
+    assert_eq!(
+        CopyRefusal::CrossDevice.boundary_class(),
+        BoundaryClass::Authority
+    );
+    assert_eq!(CopyRefusal::TooLarge.boundary_class(), BoundaryClass::None);
+    assert_eq!(CopyRefusal::TooMany.boundary_class(), BoundaryClass::None);
+    assert_eq!(CopyRefusal::TooDeep.boundary_class(), BoundaryClass::None);
 }
 
 impl From<FsError> for CopyRefusal {
