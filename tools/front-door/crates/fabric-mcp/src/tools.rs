@@ -153,7 +153,10 @@ pub trait McpFacade: F3Facade {
     }
 
     /// Compile a lane launch without writing a local graph or coordination store.
-    fn compile_lane_run(&self, input: &Value) -> Result<provenant_fabric_runtime::graph::relay::RelayOp, ServiceError> {
+    fn compile_lane_run(
+        &self,
+        input: &Value,
+    ) -> Result<provenant_fabric_runtime::graph::relay::RelayOp, ServiceError> {
         lane_run_request(input)
     }
 
@@ -1536,7 +1539,6 @@ pub fn lane_run_request(
         reason: Some("run".into()),
         launch: None,
     }))
-
 }
 
 fn new_operation_id() -> Result<String, provenant_fabric_runtime::coordination::CoordinationError> {
