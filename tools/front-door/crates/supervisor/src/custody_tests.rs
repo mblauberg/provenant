@@ -152,6 +152,49 @@ fn slot_reservation_cutover_preserves_anchor_and_unknown_fields() -> TestResult 
 }
 
 #[test]
+fn slot_reservation_listing_discovers_recovery_before_cutover() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("writer");
+    std::fs::create_dir(&path)?;
+    let slot = Directory::open_anchor(&path)?;
+    publish_reservation(&slot, &legacy_reservation(scope(), &slot.metadata()?))?;
+    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
+    assert!(listing.issues.is_empty());
+    let fence = listing
+        .reservations
+        .iter()
+        .find(|r| r.scope == scope())
+        .unwrap();
+    assert_eq!(
+        fence.custody_directory(),
+        Some(std::path::Path::new("writer"))
+    );
+    assert!(path.join("reservation.json").exists());
+    let clock = SystemClock;
+    let recovery = acquire_recovery(
+        Directory::open_anchor(&root.path().join(fence.custody_directory().unwrap()))?,
+        fence.scope,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &CancelToken::new(),
+        &clock,
+    )?;
+    assert_eq!(recovery.scope(), scope());
+    assert!(!path.join("reservation.json").exists());
+    assert!(
+        path.join(scope().attempt.to_string())
+            .join("reservation.json")
+            .exists()
+    );
+    recovery.withdraw_prepared()?;
+    assert!(
+        list_writer_reservations(&Directory::open_anchor(root.path())?)?
+            .reservations
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
 fn unreadable_slot_reservation_remains_visible_and_fenced() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");
@@ -297,6 +340,29 @@ fn slot_reservation_cutover_keeps_conflicting_evidence_fenced() -> TestResult {
     assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
     assert_eq!(std::fs::read(path.join("reservation.json"))?, original);
     assert!(reservation_present(&slot, scope())?);
+    Ok(())
+}
+
+#[test]
+fn slot_reservation_cutover_preserves_conflicting_future_fields() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let mut value = serde_json::to_value(legacy_reservation(scope(), &slot.metadata()?))?;
+    value["slot_exclusive"] = serde_json::json!({"future": true});
+    write_record(&slot, "reservation.json", &value, PublishMode::NoReplace)?.require_durable()?;
+    let clock = SystemClock;
+    assert!(matches!(
+        acquire_recovery(
+            slot.try_clone()?,
+            scope(),
+            WaitBudget::nonblocking(clock.mono_now()),
+            &CancelToken::new(),
+            &clock,
+        ),
+        Err(CustodyError::Fenced)
+    ));
+    let retained: serde_json::Value = read_record(&slot, "reservation.json", RECORD_LIMIT)?;
+    assert_eq!(retained, value);
     Ok(())
 }
 

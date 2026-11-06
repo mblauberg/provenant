@@ -556,6 +556,11 @@ fn carry_forward_slot_reservation(directory: &Directory) -> Result<()> {
         return Err(CustodyError::Fenced);
     }
     let object = value.as_object_mut().ok_or(CustodyError::Fenced)?;
+    // Do not overwrite future fields in retained evidence. These names are
+    // introduced by the cutover and are never expected in a slot record.
+    if object.contains_key("slot_exclusive") || object.contains_key("slot_original_device") {
+        return Err(CustodyError::Fenced);
+    }
     // A carried reservation may still have a live provider that lost its lock.
     // Keep excluding all writers until that reservation is settled.
     object.insert("slot_exclusive".into(), true.into());
@@ -1882,10 +1887,33 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
                 let attempt = attempt?;
                 if attempt == OsStr::new("reservation.json") {
                     let path = PathBuf::from(&name).join(&attempt);
-                    listing.issues.push(ReservationIssue {
-                        reservation: path,
-                        reason: "slot-root writer reservation requires reconciliation".into(),
-                    });
+                    // Discovery is read-only. Recovery takes the writer lock and
+                    // performs the durable cutover before using this evidence.
+                    let record = (|| -> Result<Reservation> {
+                        let record: Reservation =
+                            read_record(&slot, "reservation.json", RECORD_LIMIT)?;
+                        record.validate()?;
+                        let anchor = slot.metadata()?;
+                        if record.reservation_inode != anchor.inode
+                            || (record.reservation_device != anchor.device
+                                && record.attempt_device != Some(record.reservation_device))
+                        {
+                            return Err(CustodyError::InvalidRecord);
+                        }
+                        Ok(record)
+                    })();
+                    match record {
+                        Ok(record) => listing.reservations.push(WriterReservation {
+                            scope: record.scope,
+                            reservation: path,
+                        }),
+                        Err(error) => listing.issues.push(ReservationIssue {
+                            reservation: path,
+                            reason: format!(
+                                "slot-root writer reservation requires reconciliation: {error}"
+                            ),
+                        }),
+                    }
                     continue;
                 }
                 let path = PathBuf::from(&name).join(&attempt).join("reservation.json");
