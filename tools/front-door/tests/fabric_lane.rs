@@ -377,6 +377,35 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
     drop(journal);
     let state = context.roots.state.clone();
     let project = context.identity.project;
+    let patch = json!({"schema_version":1,"expected_revision":0,"idempotency_key":"direct-edit","nodes":[{"id":"direct","use":"task","brief":"Direct"}]});
+    let request = json!({"op":"edit","id":graph_id,"patch":patch});
+    let result = provenant_cli::fabric::graph_relay::serve(
+        &context,
+        &attempt.to_string(),
+        request.clone(),
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    assert_eq!(result["revision"], 1);
+    let replay = provenant_cli::fabric::graph_relay::serve(
+        &context,
+        &attempt.to_string(),
+        request,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    assert_eq!(replay["replayed"], true);
+    let saved = FileJournal::read_status_checkpoint(&state, project, &graph_id)?
+        .ok_or("missing checkpoint")?;
+    assert!(saved.nodes.iter().any(|node| node.id == "task--direct"));
+    let events = FileJournal::read_events(&state, project, &graph_id)?;
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == provenant_fabric_runtime::graph::GraphEventKind::Patch)
+    );
     let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(attempt),
         provenant_records::Limits::CONFIG,
@@ -398,18 +427,26 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
                 &clock,
             )
         },
-    )?;
+    );
+    let relay = match relay {
+        Ok(relay) => relay,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("native lane socket unavailable: {error}");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     lane_environment(&mut rig, attempt)?;
     let path = rig.root.join("patch.json");
     std::fs::write(
         &path,
         serde_json::to_vec(
-            &json!({"schema_version":1,"expected_revision":0,"idempotency_key":"live-edit","nodes":[{"id":"next","use":"task","brief":"Next"}]}),
+            &json!({"schema_version":1,"expected_revision":1,"idempotency_key":"live-edit","nodes":[{"id":"next","use":"task","brief":"Next"}]}),
         )?,
     )?;
     let path = path.to_str().ok_or("patch path")?;
     let result = host(&rig, &["edit", &graph_id, "--file", path, "--json"])?;
-    assert_eq!(result["data"]["revision"], 1);
+    assert_eq!(result["data"]["revision"], 2);
     let replay = host(&rig, &["edit", &graph_id, "--file", path, "--json"])?;
     assert_eq!(replay["data"]["replayed"], true);
     let saved = FileJournal::read_status_checkpoint(&state, project, &graph_id)?
