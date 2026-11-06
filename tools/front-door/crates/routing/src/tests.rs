@@ -6240,3 +6240,183 @@ fn model_choice_outside_route_obeys_restrictions() -> Result<(), Box<dyn std::er
     assert_eq!(resolve(&query, &ctx)?.model, "gpt-6-luna");
     Ok(())
 }
+
+#[test]
+fn alias_skips_known_spent_members_and_refuses_all_with_resets()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({"pools":{"trial":[
+        {"model":"codex/gpt-6-luna","weight":100},
+        {"model":"codex/gpt-6.1-sol","weight":1}
+    ]}}))?;
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let spent = |model: &str, reset| -> Result<QuotaObservation, RoutingError> {
+        let mut q = quota(model, "opaque-account", QuotaStatus::Exhausted, 1, 50, 120)?;
+        q.snapshot.windows.push(QuotaWindow {
+            pool: "secondary".into(),
+            window_seconds: Some(1000),
+            used_basis_points: 10_000,
+            resets_unix_seconds: Some(reset),
+        });
+        Ok(q)
+    };
+    let first = spent("codex/gpt-6-luna", 400)?;
+    let readings = [spent("codex/gpt-6-luna", 400)?];
+    let ctx = RoutingContext {
+        availability: &records,
+        access: &access,
+        quota: &readings,
+        ..context(&catalogue, &config, now()?)
+    };
+    let mut alias = request("codex/gpt-6-luna")?;
+    alias.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    assert_eq!(resolve(&alias, &ctx)?.model, "gpt-6.1-sol");
+    assert_eq!(
+        resolve(&request("codex/gpt-6-luna")?, &ctx)?.model,
+        "gpt-6-luna"
+    );
+    let readings = [first, spent("codex/gpt-6.1-sol", 300)?];
+    let ctx = RoutingContext {
+        quota: &readings,
+        ..ctx
+    };
+    let rejected = [ModelId::parse("codex/gpt-6.1-sol")?];
+    let Err(RoutingError::NoEligiblePoolMember {
+        exclusions: overlap,
+    }) = resolve_for_account_with_seed_excluding(&alias, &ctx, None, "overlap", 0, &rejected, &[])
+    else {
+        panic!("all exhausted members must refuse")
+    };
+    assert!(overlap.iter().any(|e| e.contains("codex/gpt-6.1-sol")
+        && e.contains("admission rejected")
+        && e.contains("300")));
+    let Err(RoutingError::NoEligiblePoolMember { exclusions }) = resolve(&alias, &ctx) else {
+        panic!("all spent alias must refuse")
+    };
+    assert!(
+        exclusions
+            .iter()
+            .any(|e| e.contains("codex/gpt-6-luna") && e.contains("400"))
+    );
+    assert!(
+        exclusions
+            .iter()
+            .any(|e| e.contains("codex/gpt-6.1-sol") && e.contains("300"))
+    );
+    Ok(())
+}
+
+fn go_alias_quota_case(
+    all_spent: bool,
+    fresh: bool,
+    seed: u64,
+) -> Result<ResolvedRoute, Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({"pools":{"trial":[
+        {"model":"opencode/opencode-go/deepseek-v4.1-flash","weight":100},
+        {"model":"codex/gpt-6-luna","weight":1}
+    ]}}))?;
+    let records = [
+        availability(),
+        AvailabilityRecord {
+            adapter: "opencode".into(),
+            account_key: Some("go".into()),
+            ..availability()
+        },
+    ];
+    let access = [
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        },
+        AccessContext {
+            adapter: "opencode",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        },
+    ];
+    let mut q = quota(
+        "opencode/opencode-go/deepseek-v4.1-flash",
+        "go",
+        provenant_quota::QuotaStatus::Available,
+        1,
+        50,
+        if fresh { 120 } else { 60 },
+    )?;
+    q.snapshot.account.adapter = "opencode".into();
+    q.snapshot.windows.push(provenant_quota::QuotaWindow {
+        pool: "five_hour".into(),
+        window_seconds: Some(18000),
+        used_basis_points: 10000,
+        resets_unix_seconds: (!all_spent).then_some(400),
+    });
+    let mut readings = vec![q];
+    if all_spent {
+        readings.push(quota(
+            "codex/gpt-6-luna",
+            "opaque-account",
+            provenant_quota::QuotaStatus::Exhausted,
+            1,
+            50,
+            60,
+        )?);
+    }
+    let ctx = RoutingContext {
+        availability: &records,
+        access: &access,
+        quota: &readings,
+        ..context(&catalogue, &config, now()?)
+    };
+    let mut alias = request("codex/gpt-6-luna")?;
+    alias.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    Ok(resolve_with_seed(&alias, &ctx, "go-exhaustion", seed)?)
+}
+
+#[test]
+fn alias_ranks_stale_go_allowance_last_without_refusing_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    for seed in 0..20 {
+        let stale = go_alias_quota_case(false, false, seed)?;
+        assert_eq!(stale.model, "gpt-6-luna");
+        assert!(
+            stale.pool_selection.as_ref().unwrap().candidates[0]
+                .exclusion
+                .is_none()
+        );
+        let fresh = go_alias_quota_case(false, true, seed)?;
+        assert_eq!(fresh.model, "gpt-6-luna");
+        assert!(
+            fresh.pool_selection.as_ref().unwrap().candidates[0]
+                .exclusion
+                .as_deref()
+                .is_some_and(|e| e.contains("exhausted"))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn alias_with_only_stale_spent_members_and_no_reset_still_launches()
+-> Result<(), Box<dyn std::error::Error>> {
+    for seed in 0..20 {
+        let selected = go_alias_quota_case(true, false, seed)?;
+        assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+        assert!(
+            selected
+                .pool_selection
+                .as_ref()
+                .unwrap()
+                .candidates
+                .iter()
+                .all(|c| c.exclusion.is_none())
+        );
+    }
+    Ok(())
+}

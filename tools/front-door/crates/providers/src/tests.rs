@@ -2735,6 +2735,42 @@ fn claude_lanes_disable_commit_and_pr_attribution() -> Result<(), ProviderError>
 }
 
 #[test]
+fn claude_requested_permission_modes_are_not_overridden() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let token = fixture_token();
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    for (access, mode) in [
+        (Access::ReadOnly, "dontAsk"),
+        (Access::WorktreeWrite, "default"),
+    ] {
+        let plan = fixture_access_plan(access, None, false);
+        let mut input = fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            Some(&token),
+        );
+        input.host_var = &|key| (key == "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB").then(|| "1".into());
+        let launch = claude::Claude.prepare(input)?;
+        assert!(
+            launch
+                .env
+                .iter()
+                .all(|(key, _)| key != "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")
+        );
+        assert!(
+            launch
+                .argv
+                .windows(2)
+                .any(|args| args[0] == "--permission-mode" && args[1] == mode)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let repo = std::path::Path::new("/fixture/repo");
@@ -2789,7 +2825,6 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 "CLAUDE_CODE_TMPDIR",
                 "DISABLE_AUTOUPDATER",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-                "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
                 "GIT_CONFIG_GLOBAL",
                 "GIT_CONFIG_NOSYSTEM",
             ],
@@ -2903,7 +2938,6 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 assert!(spec.profile.spec.authentication.is_empty());
                 assert!(spec.profile.spec.deny_keychain_access);
                 for (key, value) in [
-                    ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1"),
                     ("GIT_CONFIG_GLOBAL", "/dev/null"),
                     ("GIT_CONFIG_NOSYSTEM", "1"),
                 ] {
@@ -6269,8 +6303,7 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
 
 #[cfg(feature = "recording")]
 #[test]
-fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
--> Result<(), ProviderError> {
+fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), ProviderError> {
     let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
     let mut route = route("claude", "fixture-model");
     route.account_key = None;
@@ -6302,7 +6335,6 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
     assert!(launch.profile.spec.deny_keychain_access);
     assert!(launch.profile.spec.authentication.is_empty());
     for (key, value) in [
-        ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1"),
         (
             "CARGO_HOME",
             "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/cargo-home",

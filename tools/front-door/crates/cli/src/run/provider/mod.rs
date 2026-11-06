@@ -18,6 +18,7 @@ mod command;
 mod confinement;
 mod continuation;
 mod fixtures;
+mod gh_auth;
 mod observation;
 mod preparation;
 mod project_paths;

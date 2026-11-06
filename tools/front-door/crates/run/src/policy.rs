@@ -391,6 +391,27 @@ impl RunStore {
             .into(),
         );
         next.retry_of = Some(old.attempt_id);
+        if retry.cause == PolicyCause::Quota
+            && !retry.resume
+            && matches!(retry.route, RequestedRoute::Named { .. })
+            && let Some(model) = old
+                .applied_route
+                .as_ref()
+                .and_then(|route| route.model.as_ref())
+        {
+            let exclusions = next
+                .profile
+                .knobs
+                .entry("routing.flag_exclude".into())
+                .or_insert_with(|| serde_json::json!([]));
+            let exclusions = exclusions
+                .as_array_mut()
+                .ok_or(RunError::Validation("quota retry exclusions"))?;
+            let selector = serde_json::json!(model);
+            if !exclusions.contains(&selector) {
+                exclusions.push(selector);
+            }
+        }
         next.requested_route = retry.route;
         next.resolved_route = None;
         next.applied_route = None;
@@ -610,6 +631,60 @@ mod tests {
                 directory.unlink(std::ffi::OsStr::new(AttemptFile::Handoff.name()))?;
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn quota_alias_successor_records_accumulated_spent_members()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let mut old = store.record(input.attempts[0].attempt_id, &call)?;
+        old.applied_route = Some(RouteRecord {
+            model: Some("codex/gpt-6-luna".into()),
+            ..Default::default()
+        });
+        old.profile.knobs.insert(
+            "routing.flag_exclude".into(),
+            serde_json::json!(["claude/claude-opus-4-6"]),
+        );
+        let retry = PolicyRetry {
+            schema_version: 2,
+            cause: PolicyCause::Quota,
+            action: PolicyAction::Retry,
+            route: RequestedRoute::Named {
+                extra: Default::default(),
+                name: "junior".into(),
+                effort: None,
+            },
+            resume: false,
+            max_attempts: 3,
+            instruction: "Complete the original task.".into(),
+            not_before_unix_seconds: None,
+        };
+        store.stage_policy_retry(&old, &retry, &call)?;
+        let mut terminal = old.clone();
+        terminal.state = AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: Outcome::QuotaLimited,
+            finished_at: input.created_at,
+            exit_code: Some(1),
+            reason: None,
+        };
+        let (next, _) = store
+            .policy_successor(&old, &terminal, &call)?
+            .ok_or("successor")?;
+        assert_eq!(next.retry_of, Some(old.attempt_id));
+        assert_eq!(next.requested_route, retry.route);
+        assert_eq!(
+            next.profile.knobs["routing.flag_exclude"],
+            serde_json::json!(["claude/claude-opus-4-6", "codex/gpt-6-luna"])
+        );
         Ok(())
     }
 

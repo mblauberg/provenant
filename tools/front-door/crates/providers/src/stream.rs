@@ -81,6 +81,8 @@ pub struct ProviderOutcome {
     terminal: bool,
     exit: ExitObservation,
     final_events: Vec<ProviderEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protocol_error: Option<String>,
 }
 impl ProviderOutcome {
     pub fn adapter(&self) -> &str {
@@ -94,6 +96,9 @@ impl ProviderOutcome {
     }
     pub fn final_events(&self) -> &[ProviderEvent] {
         &self.final_events
+    }
+    pub fn protocol_error(&self) -> Option<&str> {
+        self.protocol_error.as_deref()
     }
     pub fn status(&self) -> OutcomeStatus {
         self.status
@@ -318,6 +323,7 @@ impl StreamState {
         exit: ExitObservation,
     ) -> Result<ProviderOutcome, ProviderError> {
         let mut final_events = std::mem::take(&mut self.retained_events);
+        let mut protocol_error = None;
         if self.adapter == "command" {
             let mut text = String::new();
             if self.tail_truncated {
@@ -354,7 +360,10 @@ impl StreamState {
             let line = std::mem::take(&mut self.pending);
             match self.line(&line) {
                 Ok(events) => final_events.extend(events),
-                Err(_) => self.malformed = true,
+                Err(error) => {
+                    self.malformed = true;
+                    protocol_error = Some(error.to_string());
+                }
             }
         }
         let status = if self.malformed {
@@ -384,6 +393,7 @@ impl StreamState {
             terminal: self.terminal,
             exit,
             final_events,
+            protocol_error,
         })
     }
 }

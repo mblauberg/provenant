@@ -1962,17 +1962,54 @@ const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
 const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";
 
 /// Captured text can suggest a denial, but cannot establish its source or
-/// supply a path safe for a remote diagnostic.
+/// supply a path safe for a remote diagnostic. The operation is a closed fact;
+/// the path stays in the captured output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ObservedAccessDenial {
-    Path,
+    Create,
+    Remove,
+    Read,
+    Write,
+    Other,
 }
 
 impl ObservedAccessDenial {
+    fn of(line: &str) -> Self {
+        if line.contains("deny(1) file-write-create") {
+            Self::Create
+        } else if line.contains("deny(1) file-write-unlink") {
+            Self::Remove
+        } else if line.contains("deny(1) file-write") {
+            Self::Write
+        } else if line.contains("deny(1) file-read") {
+            Self::Read
+        } else if line.contains("cannot create") || line.starts_with("touch:") {
+            Self::Create
+        } else if line.contains("cannot remove") || line.starts_with("rm:") {
+            Self::Remove
+        } else if line.contains("cannot open") || line.starts_with("cat:") {
+            Self::Read
+        } else {
+            Self::Other
+        }
+    }
+
     fn diagnostic(self) -> &'static str {
         match self {
-            Self::Path => {
-                "A path access denial was observed; check the declared access grant and filesystem permissions, then inspect the captured output locally if needed"
+            Self::Create => {
+                "A file create was denied; check the declared access grant and filesystem permissions, then see the path in the captured output"
+            }
+            Self::Remove => {
+                "A file remove was denied; check the declared access grant and filesystem permissions, then see the path in the captured output"
+            }
+            Self::Read => {
+                "A file read was denied; check the declared access grant and filesystem permissions, then see the path in the captured output"
+            }
+            Self::Write => {
+                "A file write was denied; check the declared access grant and filesystem permissions, then see the path in the captured output"
+            }
+            Self::Other => {
+                "A path access denial was observed; check the declared access grant and filesystem permissions, then see the path in the captured output"
             }
         }
     }
@@ -1981,11 +2018,13 @@ impl ObservedAccessDenial {
 fn path_denial_hint(stderr: &[u8]) -> Option<ObservedAccessDenial> {
     let text = String::from_utf8_lossy(stderr);
     text.lines()
-        .any(|line| {
+        .find(|line| {
             line.contains('/')
-                && (line.contains("Permission denied") || line.contains("Operation not permitted"))
+                && (line.contains("Permission denied")
+                    || line.contains("Operation not permitted")
+                    || line.contains("deny(1) file-"))
         })
-        .then_some(ObservedAccessDenial::Path)
+        .map(ObservedAccessDenial::of)
 }
 
 /// Terminal evidence refuses a longer reason, so every published reason fits.
@@ -2044,6 +2083,37 @@ mod host_clock_tests {
         assert!(!hint.contains("/private/host"));
         assert!(!hint.contains("TOKEN_SENTINEL"));
         assert!(!hint.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn path_denial_hints_name_the_operation() {
+        for (line, expected, phrase) in [
+            (
+                &b"touch: /fixture/repo/file: Operation not permitted"[..],
+                ObservedAccessDenial::Create,
+                "file create",
+            ),
+            (
+                b"cat: /fixture/secret: Permission denied",
+                ObservedAccessDenial::Read,
+                "file read",
+            ),
+            (
+                b"deny(1) file-write-create /fixture/repo/new",
+                ObservedAccessDenial::Create,
+                "file create",
+            ),
+            (
+                b"deny(1) file-write-data /fixture/repo/new",
+                ObservedAccessDenial::Write,
+                "file write",
+            ),
+        ] {
+            let cause = path_denial_hint(line).expect("path denial");
+            assert_eq!(cause, expected);
+            assert!(cause.diagnostic().contains(phrase));
+            assert!(!cause.diagnostic().contains("/fixture"));
+        }
     }
 
     #[test]

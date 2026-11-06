@@ -520,8 +520,8 @@ fn refresh_account(
 /// Claude uses the selected config directory. The host reads its login token
 /// and passes it through an inherited pipe, so the keychain stays
 /// unreadable. Both lane types deny keychain services and the security
-/// executable and ask Claude to scrub subprocess credentials. Writers use
-/// private configuration; read-only lanes retain their transcript location.
+/// executable. Writers use private configuration; read-only lanes retain
+/// their transcript location.
 /// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
@@ -618,7 +618,6 @@ fn prepare(
     let mut package_omissions = Vec::new();
     let package = package_grant(input.executable, &mut package_omissions);
     let scratch = &plan.scratch.path;
-    // Scrub mode forces default permissions, regardless of --permission-mode.
     let allowed_tools = if shell && input.images.is_empty() {
         "Read,Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
     } else if shell {
@@ -737,11 +736,10 @@ fn prepare(
     let mut tool_exec_roots = ["/bin", "/usr/bin", "/usr/libexec"].map(subtree).to_vec();
     let tool_writes = Vec::new();
     env.extend([
-        ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB".into(), "1".into()),
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
     ]);
-    // The git wrapper script; the scrub drops GIT_CONFIG_GLOBAL from Bash.
+    // The git wrapper script remains available to Bash.
     tool_exec_roots.push(subtree(scratch.join("bin")));
     // Use the same read-only toolchain, public TLS configuration and CLT
     // selection as Codex. Access still controls private caches and writes.
@@ -936,7 +934,40 @@ fn rate_limited(text: Option<String>, fallback: &str) -> E {
 }
 
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
-    Ok(match wire::<Event>(bytes)? {
+    let event = wire::<Event>(bytes).map_err(|error| {
+        // Startup failures can use a result shape without session metadata.
+        // Preserve the provider's diagnostic while retaining malformed status.
+        let Ok(value) = wire::<serde_json::Value>(bytes) else {
+            return error;
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("result") {
+            return error;
+        }
+        let message = value
+            .get("errors")
+            .and_then(|v| v.as_array())
+            .map(|errors| {
+                errors
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .filter(|message| !message.is_empty())
+            .or_else(|| {
+                value
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            });
+        match message.filter(|message| !message.is_empty()) {
+            Some(message) => ProviderError::MalformedResult(
+                provenant_confinement::redact::bounded_line(&message, 2048),
+            ),
+            None => error,
+        }
+    })?;
+    Ok(match event {
         Event::System {
             subtype,
             session_id,

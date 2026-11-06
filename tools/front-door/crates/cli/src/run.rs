@@ -617,7 +617,10 @@ impl Registry<'_> {
         let Ok(mut state) = adapter.stream(None) else {
             return Ok(failed("provider stream is unavailable"));
         };
-        let mut events = adapter.observe(&mut state, stdout).unwrap_or_default();
+        let (mut events, parse_error) = match adapter.observe(&mut state, stdout) {
+            Ok(events) => (events, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
         let code = match exit.termination {
             Some(provenant_os::exec::Termination::Exit(code)) => Some(code),
             _ => None,
@@ -847,7 +850,11 @@ impl Registry<'_> {
                 decoded.complete = false;
                 (
                     run::Outcome::Failed,
-                    Some("provider protocol is malformed".into()),
+                    Some(
+                        parse_error
+                            .or_else(|| outcome.protocol_error().map(str::to_owned))
+                            .unwrap_or_else(|| "provider protocol is malformed".into()),
+                    ),
                 )
             }
         };
