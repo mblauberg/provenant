@@ -876,7 +876,10 @@ pub(super) fn prepare(
     context: &PatchContext<'_>,
     mode: Preparation<'_>,
 ) -> Result<Prepared, PatchError> {
-    let retry = match mode { Preparation::Live { retry } => retry, Preparation::FinalFragment => None };
+    let retry = match mode {
+        Preparation::Live { retry } => retry,
+        Preparation::FinalFragment => None,
+    };
     if patch.schema_version != PATCH_SCHEMA_VERSION {
         return Err(PatchError::invalid(format!(
             "patch requires schema_version {PATCH_SCHEMA_VERSION}"

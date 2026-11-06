@@ -122,7 +122,8 @@ pub struct Expansion {
 impl Expansion {
     /// Live children and edits leave their producer open for its final output.
     pub(super) fn closes_producer(&self) -> bool {
-        self.patch.is_none() || self.extra.get("final_fragment") == Some(&serde_json::Value::Bool(true))
+        self.patch.is_none()
+            || self.extra.get("final_fragment") == Some(&serde_json::Value::Bool(true))
     }
 }
 
@@ -1677,12 +1678,11 @@ pub(super) fn settle(
         .find(|n| n.id == node.id)
         .and_then(|n| n.extra.get("retry_generation"))
         .cloned();
-    if checkpoint
-        .expansions
-        .iter()
-        .any(|e| e.source == node.id && e.extra.get("retry_generation") == generation.as_ref()
-            && e.closes_producer())
-    {
+    if checkpoint.expansions.iter().any(|e| {
+        e.source == node.id
+            && e.extra.get("retry_generation") == generation.as_ref()
+            && e.closes_producer()
+    }) {
         return None;
     }
     if node

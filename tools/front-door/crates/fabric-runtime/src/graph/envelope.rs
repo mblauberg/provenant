@@ -169,7 +169,9 @@ pub(super) fn checkpoint_bound(
         .iter()
         .map(|node| {
             // An admitted planner never stores its fragment again.
-            let admitted = expansions.iter().any(|e| e.source == node.id && e.closes_producer());
+            let admitted = expansions
+                .iter()
+                .any(|e| e.source == node.id && e.closes_producer());
             node_bound(
                 plan,
                 node,
