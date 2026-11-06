@@ -1418,6 +1418,20 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
         .iter()
         .find(|row| row["attempt_id"] == second_id)
         .ok_or("second")?;
+    let database = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    let sealed: Vec<u8> = database.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [&second_id],
+        |row| row.get(0),
+    )?;
+    let sealed: provenant_run::AttemptRecord = serde_json::from_slice(&sealed)?;
+    assert_eq!(
+        sealed
+            .context
+            .and_then(|context| context.writer_predecessor),
+        writer.then(|| first_id.parse()).transpose()?,
+        "graph writer predecessor must survive admission"
+    );
     assert_eq!(first["state"], "quota_limited", "{lanes}");
     assert_eq!(
         first["usage"]["output_excluding_reasoning"], 2280,

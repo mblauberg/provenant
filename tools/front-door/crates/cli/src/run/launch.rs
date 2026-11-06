@@ -225,7 +225,7 @@ pub(super) fn launch_with_deadline(
         provenant_os::exec::detached_receipt(&argv, edge.cwd, wait.max(preparation_budget));
     // Unit tests run inside a test harness, which cannot re-execute itself as
     // the CLI. End-to-end tests exercise the actual worker process.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixture"))]
     if matches!(result, Err(provenant_os::exec::ExecError::TestHarness)) {
         return launch_prepared(session, record.run_id, edge, call, None);
     }

@@ -396,8 +396,10 @@ pub(super) fn available_provider_leases(
     clock: &dyn provenant_core::Clock,
     cancel: &provenant_core::CancelToken,
 ) -> Result<std::collections::BTreeMap<String, provenant_os::fs::LockGuard>, ProviderLeaseError> {
-    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), wait.unwrap_or(30).min(30))
-        .map_err(|error| ProviderLeaseError::Other(error.to_string()))?;
+    let budget = provenant_core::WaitBudget::up_to(
+        clock.mono_now(),
+        provenant_core::DurationMicros::from_micros(wait.unwrap_or(30).min(30) * 1_000_000),
+    );
     loop {
         if cancel.is_cancelled() {
             return Err(ProviderLeaseError::Cancelled);

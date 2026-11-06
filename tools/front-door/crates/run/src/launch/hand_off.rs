@@ -228,12 +228,12 @@ impl RunStore {
                 }
             };
         }
-        if record.retry_of.is_some()
-            && let Some(writer) = plan
-                .confinement
-                .as_ref()
-                .and_then(|plan| plan.writer.as_ref())
-            && let Err(error) = self.check_writer_lineage(record, &writer.worktree, call)
+        if let Some(writer) = plan
+            .confinement
+            .as_ref()
+            .and_then(|plan| plan.writer.as_ref())
+            && let Err(error) =
+                self.check_launch_writer_lineage(record, task, &writer.worktree, call)
         {
             let refusal = if matches!(error, RunError::Nonterminal) {
                 HandOff::Boundary {

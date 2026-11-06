@@ -193,6 +193,10 @@ pub struct WorkContext {
     /// Node that admitted the attempt's node through a patch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_node: Option<String>,
+    /// Host-verified graph writer predecessor, checked again under launch custody.
+    /// Graph retry lineage remains independent of run-policy `retry_of`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_predecessor: Option<AttemptId>,
 }
 impl WorkContext {
     /// A new request names only the fixed fields; stored records keep unknown ones for forward compatibility.

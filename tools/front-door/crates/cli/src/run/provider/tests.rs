@@ -1308,6 +1308,17 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
         provenant_core::WallTime::from_micros(0)?,
         provenant_core::MonoTime::from_micros(0),
     );
+    let immediate = available_provider_leases(
+        temp.path(),
+        &["codex", "cursor"],
+        Some(0),
+        &clock,
+        &provenant_core::CancelToken::new(),
+    )?;
+    assert!(immediate.contains_key("cursor"));
+    assert!(!immediate.contains_key("codex"));
+    assert_eq!(clock.mono_now().as_micros(), 0);
+    drop(immediate);
     let leases = available_provider_leases(
         temp.path(),
         &["codex", "cursor"],
@@ -1320,6 +1331,15 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
     assert_eq!(clock.mono_now().as_micros(), 0);
     drop(leases);
     let _b = provenant_os::provider_fence::acquire(temp.path(), "cursor", LockMode::Exclusive)?;
+    let immediate = available_provider_leases(
+        temp.path(),
+        &["codex", "cursor"],
+        Some(0),
+        &clock,
+        &provenant_core::CancelToken::new(),
+    )?;
+    assert!(immediate.is_empty());
+    assert_eq!(clock.mono_now().as_micros(), 0);
     let leases = available_provider_leases(
         temp.path(),
         &["codex", "cursor"],

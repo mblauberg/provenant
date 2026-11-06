@@ -1498,3 +1498,7 @@ successor's brief. The successor is instructed to inspect its files and commits
 and continue the work rather than restart. The original source pin, settled
 predecessor head and worktree ownership must still match. Read-only lanes retry
 the original task.
+Graph writer retries seal `context.writer_predecessor` in their launch request.
+After acquiring writer custody, launch rechecks that predecessor's terminal
+state, released custody, graph and node identity, source pins and ownership.
+This check does not create a run-policy `retry_of` relationship.
