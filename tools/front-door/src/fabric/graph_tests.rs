@@ -724,7 +724,31 @@ mod result_tests {
                 Default::default()
             }
         }
-        let rig = crate::worktree_tests::repository()?;
+        for layout in ["ordinary", "separate-git-dir", "bare-linked", "native-alternates"] {
+        let mut rig = crate::worktree_tests::repository()?;
+        let mut alternate_source = None;
+        let git = |rig: &crate::worktree_tests::support::TestRig, args: &[&str]| crate::worktree_tests::git(rig, args);
+        match layout {
+            "separate-git-dir" => {
+                let metadata = rig.root.join("metadata");
+                git(&rig, &["init", "--separate-git-dir", metadata.to_str().ok_or("metadata path")?])?;
+            }
+            "bare-linked" => {
+                let bare = rig.root.join("bare.git");
+                let selected = rig.root.join("selected");
+                git(&rig, &["clone", "--bare", "-q", rig.project.to_str().ok_or("source path")?, bare.to_str().ok_or("bare path")?])?;
+                git(&rig, &["--git-dir", bare.to_str().ok_or("bare path")?, "worktree", "add", "-b", "selected", selected.to_str().ok_or("selected path")?, "HEAD"])?;
+                rig.project = selected;
+            }
+            "native-alternates" => {
+                let selected = rig.root.join("selected");
+                git(&rig, &["clone", "--shared", "-q", rig.project.to_str().ok_or("source path")?, selected.to_str().ok_or("selected path")?])?;
+                // Alternates are accepted as a read-only source; project
+                // identity discovery still uses the ordinary host checkout.
+                alternate_source = Some(selected);
+            }
+            _ => {}
+        }
         let original = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
         let lane = rig.root.join("lane");
         crate::worktree_tests::git(&rig, &["worktree", "add", "--detach", lane.to_str().ok_or("lane path")?, "HEAD"])?;
@@ -747,7 +771,10 @@ mod result_tests {
             exclude: Vec::new(), budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
             cancel: &cancel, prices: None, tick: false,
         };
-        assert_eq!(owner.resolve_review_base("HEAD", Some(lane.to_str().ok_or("lane path")?))?, Some(original));
+        assert_eq!(owner.resolve_review_base("HEAD", Some(lane.to_str().ok_or("lane path")?))?, Some(original.clone()));
+        if let Some(source) = alternate_source {
+            assert_eq!(owner.resolve_review_base("HEAD", Some(source.to_str().ok_or("alternate source")?))?, Some(original));
+        }
         assert_eq!(owner.resolve_review_base("HEAD", None)?, Some(moved));
         // The graph's selected checkout uses the same command scalar cap.
         owner.repo_facts = provenant_confinement::worktrees::RepoFacts::with_limits(
@@ -764,6 +791,7 @@ mod result_tests {
             Err(FacadeError::Io { operation, .. })
                 if operation == provenant_fabric_runtime::coordination::facade::REPOSITORY_FACT_LIMIT_OPERATION
         ));
+        }
         Ok(())
     }
 

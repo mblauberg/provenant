@@ -436,6 +436,23 @@ pub fn resolve_git_base(git: &Path, cwd: &Path, base: &str) -> Result<String> {
     resolve_fetching(&executor, git, cwd, base, &env)
 }
 
+/// Resolve a graph base with the command's caps while retaining the read-only
+/// resolver's support for native alternates and nonstandard Git directories.
+pub fn resolve_git_base_with_facts(
+    git: &Path,
+    cwd: &Path,
+    base: &str,
+    facts: &provenant_confinement::worktrees::RepoFacts,
+    cancel: &provenant_core::CancelToken,
+) -> Result<String> {
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    facts.with_executor(&executor, cancel, |executor| {
+        let env = repository_environment(executor, git, cwd)
+            .map_err(|_| RunError::InvalidBase(base.to_owned()))?;
+        resolve_fetching(executor, git, cwd, base, &env)
+    })
+}
+
 /// Create the local branch `branch` at `start` (default `HEAD`) when it does
 /// not exist. Returns whether it was created. An existing branch is left
 /// untouched, and the create is atomic against a concurrent creator.

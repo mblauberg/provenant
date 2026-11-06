@@ -63,7 +63,8 @@ pub use controls::{
 };
 pub use delivery::HostDeliveryContext;
 pub use git_context::{
-    GitContext, continuation_history, ensure_local_branch, resolve_git_base, review_merge_base,
+    GitContext, continuation_history, ensure_local_branch, resolve_git_base,
+    resolve_git_base_with_facts, review_merge_base,
 };
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{

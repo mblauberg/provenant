@@ -4232,6 +4232,30 @@ Search is local only; peers are not searched. Only the first match per artifact 
 }
 ```
 
+## `provenant worktree doctor`
+
+| Argument | Contract |
+|---|---|
+| `path` | `{"description": "Checkout path, relative to the selected project when not absolute", "name": "path", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Explain a worktree's state and suggest one repair command",
+  "groups": [
+    {
+      "arguments": [
+        "path"
+      ],
+      "multiple": true,
+      "name": "Doctor",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant worktree remove`
 
 | Argument | Contract |

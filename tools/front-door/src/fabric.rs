@@ -211,47 +211,25 @@ struct Factory {
     workers: &'static dyn WorkerObserver,
 }
 impl Factory {
-    /// Pin a base in the selected checkout while retaining project authority and
-    /// the command's fact caps. `HEAD` belongs to that checkout, including a
-    /// detached linked worktree, rather than the primary context's checkout.
+    /// Resolve against the selected checkout with this command's caps. The
+    /// read-only resolver preserves separate Git directories, bare-linked
+    /// checkouts and native alternates without granting mutation authority.
     fn resolve_base(
         &self,
         directory: &Path,
         reference: &str,
         facts: &provenant_confinement::worktrees::RepoFacts,
         cancel: &CancelToken,
-    ) -> Result<provenant_core::GitOid, provenant_confinement::worktrees::WorktreeError> {
-        use provenant_confinement::worktrees::{self, WorktreeContext, WorktreeError};
-        worktrees::with_context_using_workers_and_facts(
-            &self.context.roots,
-            &self.home,
-            &self.cwd,
-            &self.clock,
-            cancel,
-            self.workers,
-            facts,
-            |context| {
-                let selected = context.utility.open_repo(
-                    context.executor,
-                    directory,
-                    context.utility_budget,
-                    cancel,
-                )?;
-                context.repo.revalidate()?;
-                if selected.common_git_dir() != context.repo.common_git_dir()
-                    || !selected
-                        .common_identity()
-                        .same_identity(&context.repo.common_identity())
-                {
-                    return Err(WorktreeError::IdentityChanged);
-                }
-                let selected_context = WorktreeContext {
-                    repo: &selected,
-                    ..*context
-                };
-                worktrees::resolve_base(&selected_context, reference, cancel)
-            },
-        )
+    ) -> Result<provenant_core::GitOid, FacadeError> {
+        let git = provenant_os::git::git_executable()
+            .ok_or(FacadeError::InvalidInput { detail: None })?;
+        provenant_run::resolve_git_base_with_facts(&git, directory, reference, facts, cancel)
+            .map_err(|error| match error {
+                provenant_run::RunError::Writer(error) => repository_fact_error(error),
+                error => run_error(error),
+            })?
+            .parse()
+            .map_err(|_| FacadeError::StateCorrupt)
     }
 
     /// Reopen a retained graph directory without borrowing the caller's checkout.
@@ -5404,7 +5382,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.factory
             .resolve_base(&directory, reference, &self.repo_facts, self.cancel)
             .map(|base| Some(base.to_string()))
-            .map_err(repository_fact_error)
     }
 
     fn retry_allowance(
@@ -5833,7 +5810,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.factory
             .resolve_base(&self.factory.cwd, &reference, &self.repo_facts, self.cancel)
             .map(|base| Some(base.to_string()))
-            .map_err(repository_fact_error)
     }
     fn ci_status(&mut self) -> Option<&mut dyn provenant_fabric_runtime::graph::CiStatus> {
         Some(self)
@@ -7545,10 +7521,7 @@ impl Factory {
                     )
                     .map_err(run_error)?;
                 }
-                Some(
-                    self.resolve_base(&self.cwd, &reference, &facts, cancel)
-                        .map_err(repository_fact_error)?,
-                )
+                Some(self.resolve_base(&self.cwd, &reference, &facts, cancel)?)
             } else {
                 None
             };
@@ -7561,28 +7534,7 @@ impl Factory {
                 .as_deref()
                 .filter(|base| !base.is_empty())
             {
-                Some(
-                    self.resolve_base(&self.cwd, reference, &facts, cancel)
-                        .map_err(|error| match error {
-                            provenant_confinement::worktrees::WorktreeError::BaseNotFound {
-                                ..
-                            }
-                            | provenant_confinement::worktrees::WorktreeError::BaseUnverified {
-                                ..
-                            }
-                            | provenant_confinement::worktrees::WorktreeError::InvalidRequest => {
-                                FacadeError::DispatchRefused {
-                                    fact: None,
-                                    disk: None,
-                                    reason: provenant_run::RunError::InvalidBase(
-                                        reference.to_owned(),
-                                    )
-                                    .to_string(),
-                                }
-                            }
-                            error => repository_fact_error(error),
-                        })?,
-                )
+                Some(self.resolve_base(&self.cwd, reference, &facts, cancel)?)
             } else {
                 None
             };
