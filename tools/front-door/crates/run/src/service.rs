@@ -891,6 +891,7 @@ impl ErrorKind {
             | Self::WriterLockBusy
             | Self::WriterUnknown
             | Self::WriterProjectMismatch
+            | Self::GuardianIdentity
             | Self::LaneCoordinationRefused => B::Authority,
             _ => B::None,
         }
@@ -944,6 +945,7 @@ impl From<&RunError> for ErrorKind {
             RunError::GitUnavailable => Self::Git,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
             RunError::Validation(_)
+            | RunError::WriterLineage(_)
             | RunError::WriterHeadNotLaneBranch
             | RunError::WriterSourceMismatch { .. }
             | RunError::ReviewAcceptanceRequired

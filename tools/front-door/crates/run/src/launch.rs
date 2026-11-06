@@ -154,9 +154,12 @@ enum WriteGrantError {
     #[error("invalid write grant path")]
     InvalidPath,
     #[error(
-        "encoded write grants exceed domains.run.write_grant_limit_bytes={limit} (source: {origin})"
+        "encoded write grants exceed domains.run.write_grant_limit_bytes={limit} (source: {})", .origin.description()
     )]
-    Limit { limit: u64, origin: &'static str },
+    Limit {
+        limit: u64,
+        origin: provenant_records::diagnostic::SettingSource,
+    },
 }
 
 fn applied_write_grants(
@@ -218,6 +221,10 @@ pub struct Decoded {
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 pub struct PrepareRefusal {
+    /// Boundary established by the original typed preparation failure, if any.
+    pub boundary_class: provenant_records::diagnostic::BoundaryClass,
+    /// A configurable resource threshold that refused this launch, if known.
+    pub resource: Option<provenant_records::diagnostic::ResourceFact>,
     pub terminal_cause: Option<TerminalCause>,
     /// Fixed-form text naming a configured value, never captured output.
     pub terminal_note: Option<String>,
@@ -227,10 +234,22 @@ pub struct PrepareRefusal {
 }
 impl PrepareRefusal {
     fn kind(&self) -> RefusalKind {
-        if self.skipped_routes.iter().any(|route| {
+        if let Some(route) = self.skipped_routes.iter().find(|route| {
             route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
         }) {
-            RefusalKind::PacingReserve
+            match route.extra.get("guard_resource").and_then(|value| {
+                serde_json::from_value::<provenant_records::diagnostic::ResourceFact>(value.clone())
+                    .ok()
+            }) {
+                Some(fact @ provenant_records::diagnostic::ResourceFact::PacingReserve { .. }) => {
+                    RefusalKind::PacingReserveResource(fact)
+                }
+                _ => RefusalKind::PacingReserve,
+            }
+        } else if let Some(fact) = self.resource {
+            RefusalKind::PreparationResource(fact)
+        } else if self.boundary_class != provenant_records::diagnostic::BoundaryClass::None {
+            RefusalKind::PreparationBoundary(self.boundary_class)
         } else {
             RefusalKind::Preparation
         }
@@ -247,6 +266,8 @@ impl PrepareRefusal {
 impl From<String> for PrepareRefusal {
     fn from(message: String) -> Self {
         Self {
+            boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+            resource: None,
             message,
             terminal_cause: Some(TerminalCause::PreparationRefused),
             terminal_note: None,
@@ -260,6 +281,183 @@ impl From<&str> for PrepareRefusal {
         message.to_owned().into()
     }
 }
+
+#[cfg(test)]
+#[test]
+fn preparation_refusal_retains_its_typed_boundary() {
+    use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
+    let mut refusal = PrepareRefusal::from("opaque source");
+    assert_eq!(refusal.kind().boundary_class(), BoundaryClass::None);
+    refusal.boundary_class = BoundaryClass::Credentials;
+    assert_eq!(refusal.kind().boundary_class(), BoundaryClass::Credentials);
+    refusal.boundary_class = BoundaryClass::None;
+    refusal.resource = Some(ResourceFact::ArgvPromptLimit {
+        limit: 3,
+        origin: SettingSource::Configuration,
+    });
+    let diagnostic = refusal.kind().diagnostic().expect("resource diagnostic");
+    assert_eq!(diagnostic.code, "INVALID");
+    let detail = diagnostic.detail.unwrap();
+    assert!(detail.contains("domains.run.argv_prompt_limit_bytes"));
+    assert!(detail.contains("host configuration"));
+    let inventory = include_str!("../assets/launch-guards.toml")
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    assert!(
+        inventory["guard"]
+            .as_array_of_tables()
+            .unwrap()
+            .iter()
+            .any(|row| {
+                row.get("site").and_then(|v| v.as_str())
+                    == Some("providers/src/contract.rs#Prompt::check_argv")
+                    && row.get("code").and_then(|v| v.as_str()) == Some(diagnostic.code.as_str())
+                    && row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
+                    && row
+                        .get("setting")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|setting| detail.contains(setting))
+            })
+    );
+}
+#[test]
+fn write_grant_limit_diagnostic_names_setting_and_source() {
+    use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
+    for source in [SettingSource::Configuration, SettingSource::ShippedDefault] {
+        let kind = RefusalKind::WriteGrantsLimit(ResourceFact::WriteGrantLimit {
+            limit: 1024,
+            origin: source,
+        });
+        assert_eq!(kind.boundary_class(), BoundaryClass::None);
+        let diagnostic = kind.diagnostic().unwrap();
+        assert_eq!(diagnostic.code, "LIMIT");
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains("domains.run.write_grant_limit_bytes"));
+        assert!(detail.contains("1024"));
+        assert!(detail.contains(source.description()));
+        let inventory = include_str!("../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(
+            inventory["guard"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.get("site").and_then(|v| v.as_str())
+                        == Some("run/src/launch.rs#applied_write_grants")
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                        && row.get("boundary").and_then(|v| v.as_str())
+                            == Some("configurable_default")
+                        && row
+                            .get("setting")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|setting| detail.contains(setting))
+                })
+        );
+    }
+}
+
+#[test]
+fn dependency_preparation_diagnostic_names_setting_and_source() {
+    use provenant_records::diagnostic::ResourceFact;
+    for (configured, source) in [(false, "shipped default"), (true, "sealed profile")] {
+        let kind =
+            RefusalKind::PreparationResource(ResourceFact::DependencyPreparation { configured });
+        let diagnostic = kind.diagnostic().unwrap();
+        assert_eq!(diagnostic.code, "REFUSED");
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains("lanes.prepare_deps"));
+        assert!(detail.contains(source));
+        assert!(!detail.contains("TOKEN_SENTINEL"));
+        let inventory = include_str!("../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(
+            inventory["guard"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.get("setting").and_then(|v| v.as_str()) == Some("lanes.prepare_deps")
+                        && row.get("boundary").and_then(|v| v.as_str())
+                            == Some("configurable_default")
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                })
+        );
+    }
+}
+
+#[test]
+fn lane_port_limit_diagnostic_matches_inventory() {
+    use provenant_records::diagnostic::{PortSettingSource, ResourceFact};
+    let inventory = include_str!("../assets/launch-guards.toml")
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    for source in [
+        PortSettingSource::Configuration,
+        PortSettingSource::ShippedDefault,
+        PortSettingSource::RecordedPlan,
+    ] {
+        let fact = ResourceFact::LanePorts {
+            blocks: 2,
+            origin: source,
+        };
+        let diagnostic = RefusalKind::HandoffResource(fact).diagnostic().unwrap();
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains("domains.fabric.lanes.lane_port_blocks"));
+        assert!(detail.contains(source.description()));
+        assert!(
+            inventory["guard"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.get("site").and_then(|v| v.as_str())
+                        == Some("supervisor/src/guardian.rs#Driver::run")
+                        && row.get("boundary").and_then(|v| v.as_str())
+                            == Some("configurable_default")
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                        && row
+                            .get("setting")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|setting| detail.contains(setting))
+                })
+        );
+    }
+}
+
+#[test]
+fn pacing_refusal_retains_the_selected_reserve_fact() {
+    use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
+    let fact = ResourceFact::PacingReserve {
+        percent: 15,
+        setting: PacingReserveSetting::AdapterFiveHour,
+        origin: PacingSettingSource::ShippedDefault,
+    };
+    let mut skipped = SkippedRoute {
+        extra: Default::default(),
+        route: "fixture/model".into(),
+        kind: SkipKind::Unavailable,
+        cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
+        detail: "opaque source".into(),
+    };
+    skipped.set_guard_facts(None, Some(fact)).unwrap();
+    let mut refusal = PrepareRefusal::from("opaque source");
+    refusal.skipped_routes.push(skipped);
+    let kind = refusal.kind();
+    assert!(matches!(kind, RefusalKind::PacingReserveResource(value) if value == fact));
+    let diagnostic = kind.diagnostic().unwrap();
+    assert_eq!(diagnostic.code, "REFUSED");
+    let detail = diagnostic.detail.unwrap();
+    assert!(detail.contains("domains.routing.pacing_reserve"));
+    assert!(detail.contains("shipped default"));
+    assert!(!detail.contains("opaque source"));
+}
+
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
     pub attempt_id: AttemptId,
@@ -466,13 +664,13 @@ impl RunStore {
 #[derive(Clone, Copy, Debug)]
 pub struct WriteGrantLimit {
     pub bytes: u64,
-    pub origin: &'static str,
+    pub origin: provenant_records::diagnostic::SettingSource,
 }
 impl Default for WriteGrantLimit {
     fn default() -> Self {
         Self {
             bytes: provenant_records::run::MAX_WRITE_GRANT_BYTES,
-            origin: "compiled default",
+            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
         }
     }
 }
@@ -490,7 +688,7 @@ impl WriteGrantLimit {
         }
     }
     fn receipt(self) -> serde_json::Value {
-        serde_json::json!({"key": "domains.run.write_grant_limit_bytes", "value": self.bytes, "origin": self.origin})
+        serde_json::json!({"key": "domains.run.write_grant_limit_bytes", "value": self.bytes, "origin": match self.origin { provenant_records::diagnostic::SettingSource::Configuration => "host configuration", provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default" }})
     }
 }
 
@@ -570,6 +768,16 @@ pub trait Providers {
 enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
+    /// A typed boundary refused the prepared handoff.
+    Boundary {
+        message: String,
+        class: provenant_records::diagnostic::BoundaryClass,
+        cause: Option<TerminalCause>,
+    },
+    Resource {
+        message: String,
+        fact: provenant_records::diagnostic::ResourceFact,
+    },
     TypedLocal {
         message: String,
         cause: TerminalCause,
@@ -610,19 +818,95 @@ pub enum Started {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefusalKind {
     Policy,
+    PolicyBoundary(provenant_records::diagnostic::BoundaryClass),
+    PolicyResource(provenant_records::diagnostic::ResourceFact),
     Preparation,
+    PreparationBoundary(provenant_records::diagnostic::BoundaryClass),
+    PreparationResource(provenant_records::diagnostic::ResourceFact),
     PacingReserve,
+    PacingReserveResource(provenant_records::diagnostic::ResourceFact),
     WorktreeBusy,
     PriorityUnavailable,
     StoredPromptUnreadable,
     InvalidWriteGrantPath,
-    WriteGrantsLimit,
+    WriteGrantsLimit(provenant_records::diagnostic::ResourceFact),
     Handoff,
+    HandoffBoundary(provenant_records::diagnostic::BoundaryClass),
+    HandoffResource(provenant_records::diagnostic::ResourceFact),
     RetainedImport {
         run: RunId,
         attempt: AttemptId,
         worktree: std::path::PathBuf,
     },
+}
+
+impl RefusalKind {
+    /// Project an inventoried resource refusal without trusting source text.
+    pub fn diagnostic(&self) -> Option<provenant_records::diagnostic::Diagnostic> {
+        use provenant_records::diagnostic::{Diagnostic, ResourceFact};
+        let fact = match self {
+            Self::HandoffResource(fact)
+            | Self::PolicyResource(fact)
+            | Self::PreparationResource(fact)
+            | Self::WriteGrantsLimit(fact)
+            | Self::PacingReserveResource(fact) => fact,
+            _ => return None,
+        };
+        let kind = match fact {
+            ResourceFact::Disk { .. } => ErrorKind::DiskFloor,
+            ResourceFact::ArgvPromptLimit { .. } => ErrorKind::Invalid,
+            ResourceFact::WriteGrantLimit { .. } => ErrorKind::Limit,
+            ResourceFact::ContinuationCopy { .. }
+            | ResourceFact::DependencyPreparation { .. }
+            | ResourceFact::LanePorts { .. }
+            | ResourceFact::PacingReserve { .. } => ErrorKind::Refused,
+            ResourceFact::GrantLimit { .. } | ResourceFact::ProfileLimit { .. } => {
+                ErrorKind::Confinement
+            }
+            ResourceFact::MemoryPressure { .. } => ErrorKind::MemoryPressure,
+            ResourceFact::Processes { .. } => ErrorKind::Processes,
+            ResourceFact::LaneCap { .. } => ErrorKind::LaneCap,
+        };
+        Some(
+            fact.project(Diagnostic::new(kind.code()).category(kind.category()))
+                .fact(provenant_records::diagnostic::DiagnosticFact::Resource(
+                    *fact,
+                )),
+        )
+    }
+
+    /// Retain only the typed owner's safe detail and corrective action.
+    fn terminal_note(&self) -> Option<String> {
+        let diagnostic = self.diagnostic()?;
+        let fields = [diagnostic.detail, diagnostic.next];
+        Some(provenant_records::diagnostic::safe_text(
+            &fields.into_iter().flatten().collect::<Vec<_>>().join("; "),
+        ))
+    }
+
+    /// The boundary established by this kind alone. Generic preparation and
+    /// handoff errors need their original cause to establish a boundary.
+    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass as B;
+        match self {
+            Self::HandoffBoundary(class)
+            | Self::PreparationBoundary(class)
+            | Self::PolicyBoundary(class) => *class,
+            Self::WorktreeBusy | Self::InvalidWriteGrantPath => B::Authority,
+            Self::RetainedImport { .. } => B::LaneGit,
+            Self::StoredPromptUnreadable => B::Authority,
+            Self::Policy
+            | Self::Preparation
+            | Self::PacingReserve
+            | Self::PacingReserveResource(_)
+            | Self::PriorityUnavailable
+            | Self::WriteGrantsLimit(_)
+            | Self::Handoff
+            | Self::HandoffResource(_)
+            | Self::PreparationResource(_)
+            | Self::PolicyResource(_) => B::None,
+        }
+    }
 }
 
 /// Check a canonical root against state, allowing installed releases for reads.
@@ -1527,7 +1811,9 @@ impl RunStore {
                     started.push(Started::Refused {
                         attempt: id,
                         reason: child_reason.unwrap_or(reason).into(),
-                        kind: RefusalKind::Preparation,
+                        kind: RefusalKind::PreparationBoundary(
+                            provenant_records::diagnostic::BoundaryClass::Authority,
+                        ),
                     });
                     continue;
                 }
@@ -1588,7 +1874,9 @@ impl RunStore {
                 started.push(Started::Refused {
                     attempt: id,
                     reason: reason.into(),
-                    kind: RefusalKind::Preparation,
+                    kind: RefusalKind::PreparationBoundary(
+                        provenant_records::diagnostic::BoundaryClass::Authority,
+                    ),
                 });
                 continue;
             }
@@ -1775,7 +2063,18 @@ impl RunStore {
             let prepared = providers
                 .check_policy(task)
                 .map(|()| priority)
-                .map_err(|refusal| (RefusalKind::Policy, Box::new(refusal)))
+                .map_err(|refusal| {
+                    let kind = if let Some(fact) = refusal.resource {
+                        RefusalKind::PolicyResource(fact)
+                    } else if refusal.boundary_class
+                        != provenant_records::diagnostic::BoundaryClass::None
+                    {
+                        RefusalKind::PolicyBoundary(refusal.boundary_class)
+                    } else {
+                        RefusalKind::Policy
+                    };
+                    (kind, Box::new(refusal))
+                })
                 .and_then(|priority| {
                     providers
                         .prepare(
@@ -1810,16 +2109,17 @@ impl RunStore {
                             } else {
                                 TerminalCause::PreparationRefused
                             }));
-                    let terminal_note = refusal.terminal_note.or_else(|| {
-                        refusal.skipped_routes.first().map(|route| {
-                            let diagnostic = route.diagnostic();
-                            format!(
-                                "first candidate: {}; {}",
-                                diagnostic.detail.unwrap_or_default(),
-                                diagnostic.next.unwrap_or_default()
-                            )
-                        })
-                    });
+                    let terminal_note =
+                        kind.terminal_note().or(refusal.terminal_note).or_else(|| {
+                            refusal.skipped_routes.first().map(|route| {
+                                let diagnostic = route.diagnostic();
+                                format!(
+                                    "first candidate: {}; {}",
+                                    diagnostic.detail.unwrap_or_default(),
+                                    diagnostic.next.unwrap_or_default()
+                                )
+                            })
+                        });
                     let reason = refusal.message;
                     match self.withdraw_with_preparation_failure(
                         id,
@@ -1873,7 +2173,12 @@ impl RunStore {
                 Err(error) => {
                     let kind = match error {
                         WriteGrantError::InvalidPath => RefusalKind::InvalidWriteGrantPath,
-                        WriteGrantError::Limit { .. } => RefusalKind::WriteGrantsLimit,
+                        WriteGrantError::Limit { limit, origin } => RefusalKind::WriteGrantsLimit(
+                            provenant_records::diagnostic::ResourceFact::WriteGrantLimit {
+                                limit,
+                                origin,
+                            },
+                        ),
                     };
                     let reason = error.to_string();
                     match self.withdraw_with_preparation_failure(
@@ -1887,7 +2192,7 @@ impl RunStore {
                             finished_at: now()?,
                             failure: None,
                             terminal_cause: Some(TerminalCause::WriteGrantsRefused),
-                            terminal_note: None,
+                            terminal_note: kind.terminal_note(),
                         },
                         call,
                     ) {
@@ -1911,6 +2216,16 @@ impl RunStore {
             }
             // Capture errors leave the claim available to this or another launcher.
             self.seal_work(&record, &plan, child.map(|_| &request), call)?;
+            // Establish launcher liveness before publishing Starting. Reaping can
+            // then distinguish a live pre-custody handoff from an abandoned one.
+            let _launcher = match attempt.try_lock(
+                std::ffi::OsStr::new("launcher.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            ) {
+                Ok(guard) => guard,
+                Err(provenant_os::fs::FsError::LockTimeout { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            };
             let record = match self.mark_starting_with_priority(
                 &record,
                 &plan.route,
@@ -1947,12 +2262,17 @@ impl RunStore {
                     // Nothing reached a guardian: the attempt ends here.
                     Err(
                         error @ (HandOff::Local(_)
+                        | HandOff::Boundary { .. }
+                        | HandOff::Resource { .. }
                         | HandOff::TypedLocal { .. }
                         | HandOff::Busy
                         | HandOff::RetainedImport { .. }),
                     ) => {
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
+                            HandOff::Boundary { cause, .. } => {
+                                cause.or(Some(TerminalCause::HandoffRefused))
+                            }
                             HandOff::Busy => Some(TerminalCause::WorktreeBusy),
                             HandOff::RetainedImport { .. } => {
                                 Some(TerminalCause::RetainedWriterImport)
@@ -1964,6 +2284,14 @@ impl RunStore {
                             HandOff::Local(error) | HandOff::TypedLocal { message: error, .. } => (
                                 format!("launch preparation failed: {error}"),
                                 RefusalKind::Handoff,
+                            ),
+                            HandOff::Boundary { message, class, .. } => (
+                                format!("launch preparation failed: {message}"),
+                                RefusalKind::HandoffBoundary(class),
+                            ),
+                            HandOff::Resource { message, fact } => (
+                                format!("launch preparation failed: {message}"),
+                                RefusalKind::HandoffResource(fact),
                             ),
                             HandOff::RetainedImport {
                                 run,
@@ -2008,7 +2336,7 @@ impl RunStore {
                                 finished_at: now()?,
                                 failure: None,
                                 terminal_cause,
-                                terminal_note: None,
+                                terminal_note: kind.terminal_note(),
                             },
                             call,
                         ) {
@@ -2244,3 +2572,102 @@ mod retry_pin_tests {
 }
 
 pub(crate) mod hand_off;
+
+#[cfg(test)]
+mod resource_status_tests {
+    use super::*;
+    use crate::tests::{call, clock, context, input};
+    use provenant_core::CancelToken;
+    use provenant_records::diagnostic::{
+        LaneLimit, PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+    };
+    use provenant_records::wire::LaneRow;
+
+    struct Dependencies;
+    impl Providers for Dependencies {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            _: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
+            let mut refusal = PrepareRefusal::from("DEPENDENCY_OUTPUT_SECRET");
+            refusal.resource = Some(ResourceFact::DependencyPreparation { configured: true });
+            Err(refusal)
+        }
+        fn decode(
+            &self,
+            _: &RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &std::path::Path,
+        ) -> std::result::Result<Decoded, String> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn launch_resource_refusals_survive_withdrawal_in_retained_status()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for handoff in [None, Some(false), Some(true)] {
+            let temp = tempfile::tempdir()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let context = context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = input();
+            let id = run.attempts[0].attempt_id;
+            store.create(&run, &call)?;
+            let started = store.start_inner(
+                run.run_id,
+                if handoff.is_some() {
+                    &crate::dispatch_tests::Ready
+                } else {
+                    &Dependencies
+                },
+                &|_, _| Ok(Vec::new()),
+                &|_, _, _| {
+                    Err(custody::CustodyError::Admission(if handoff == Some(true) {
+                        AdmissionError::LaneCap {
+                            active: 2,
+                            limit: 2,
+                            kind: LaneLimit::HostTotal,
+                            origin: SettingSource::Configuration,
+                        }
+                    } else {
+                        AdmissionError::MemoryPressure {
+                            level: PressureLevel::Critical,
+                            threshold: PressureThreshold::Warning,
+                            origin: SettingSource::Configuration,
+                        }
+                    }))
+                },
+                None,
+                None,
+                &call,
+            )?;
+            let [Started::Refused { kind, .. }] = started.as_slice() else {
+                return Err("launch did not refuse".into());
+            };
+            let expected = kind.diagnostic().ok_or("missing resource diagnostic")?;
+            assert_eq!(store.record(id, &call)?.provider_launched, Some(false));
+            drop(store);
+            let reopened = RunStore::open(&context, &call)?;
+            let record = reopened.record(id, &call)?;
+            let (state, reason) = LaneRow::state_and_reason(&record.state);
+            assert_eq!(state, "rejected");
+            let reason = reason.ok_or("missing retained status")?;
+            assert!(
+                reason.contains(expected.detail.as_deref().unwrap()),
+                "{reason}"
+            );
+            assert!(
+                reason.contains(expected.next.as_deref().unwrap()),
+                "{reason}"
+            );
+            assert!(!reason.contains("DEPENDENCY_OUTPUT_SECRET"));
+        }
+        Ok(())
+    }
+}

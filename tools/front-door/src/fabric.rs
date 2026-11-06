@@ -6092,6 +6092,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
         body.push_str(&provenant_cli::pr_body::independent_review_rows(&reviews));
         let url = provenant_run::HostDeliveryContext::capture()
+            .with_repo_facts(&self.repo_facts)
             .deliver_graph_pr(
                 &self.factory.cwd,
                 branch,

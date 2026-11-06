@@ -548,9 +548,72 @@ pub(crate) fn private_git_objects(
     }
     let scratch = &input.confined.permissions().scratch.path;
     let private = scratch.join("git-common");
-    // The binding and the lane's commit identity stay out of the ambient
-    // environment, so a fixture's `git init` in a temporary directory neither
-    // reads nor commits to the lane. The Git shim applies them inside the worktree.
+    let config = scratch.join("gitconfig");
+    let identity = provenant_os::sys::git_global_identity(input.provenant.git);
+    let identity = identity
+        .iter()
+        .filter(|(key, _)| matches!(key.to_str(), Some("GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL")))
+        .collect::<Vec<_>>();
+    // Git normally reads the XDG file before ~/.gitconfig. An explicit host
+    // override replaces both, just as it does for Git itself.
+    let globals = if let Some(path) = (input.host_var)("GIT_CONFIG_GLOBAL") {
+        vec![PathBuf::from(path)]
+    } else {
+        let xdg = (input.host_var)("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| input.home.join(".config"));
+        vec![xdg.join("git/config"), input.home.join(".gitconfig")]
+    };
+    let mut config_text = String::new();
+    for path in globals.iter().filter(|path| path.is_file()) {
+        // Both Git's include and the exact sandbox grant must name the same
+        // physical file: anchor validation rejects symlink spellings.
+        let path = std::fs::canonicalize(path).map_err(|_| ProviderError::InvalidPath)?;
+        let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
+        if value.chars().any(char::is_control) {
+            return Err(ProviderError::InvalidPath);
+        }
+        config_text.push_str(&format!(
+            "[include]\n\tpath = {}\n",
+            git_config_quote(value)
+        ));
+        spec.profile.spec.runtime_reads.push(exact(&path));
+    }
+    config_text.push_str("[user]\n\tuseConfigOnly = true\n");
+    for (key, value) in &identity {
+        let name = match key.to_str() {
+            Some("GIT_AUTHOR_NAME") => "name",
+            Some("GIT_AUTHOR_EMAIL") => "email",
+            _ => continue,
+        };
+        let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
+        if value.chars().any(char::is_control) {
+            return Err(ProviderError::InvalidPath);
+        }
+        config_text.push_str(&format!("\t{name} = {}\n", git_config_quote(value)));
+    }
+    spec.setup.push(SetupStep::WriteFile {
+        path: config.clone(),
+        bytes: config_text.into_bytes(),
+    });
+    spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
+    crate::lane::install_token_config(&mut spec.env)?;
+    if let Some((_, current)) = spec
+        .env
+        .iter_mut()
+        .find(|(name, _)| name == "GIT_CONFIG_GLOBAL")
+    {
+        *current = config.as_os_str().to_owned();
+    } else {
+        spec.env
+            .push(("GIT_CONFIG_GLOBAL".into(), config.as_os_str().to_owned()));
+    }
+    // The repository binding and explicit identity variables stay out of the
+    // ambient environment. Git's private global config carries the host
+    // identity to any Git executable, while `useConfigOnly` prevents fallback
+    // to a generated hostname identity. The wrapper keeps the private binding
+    // limited to this worktree.
     let mut bound = vec![
         ("GIT_DIR".into(), private.clone().into()),
         ("GIT_COMMON_DIR".into(), private.into()),
@@ -560,6 +623,7 @@ pub(crate) fn private_git_objects(
             scratch.join("git-objects").into(),
         ),
     ];
+    spec.git_wrapper.identity_config = Some(config);
     spec.env.retain(|(key, value)| {
         let identity = matches!(
             key.to_str(),
@@ -594,6 +658,28 @@ pub(crate) fn private_git_objects(
     Ok(())
 }
 
+/// Quote a value for a Git config file. The config always enables
+/// `user.useConfigOnly`, so an absent or malformed host identity cannot fall
+/// back to Git's generated username and hostname.
+fn git_config_quote(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            '\u{0008}' => quoted.push_str("\\b"),
+            control if control.is_control() => {
+                unreachable!("control characters are rejected before quoting")
+            }
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// Let the lane read and run the helpers (`git-remote-https`) in the exec path
 /// the launcher pins for the selected Git, wherever that host keeps them.
 fn grant_exec_path(git: &Path, spec: &mut LaunchSpec) {
@@ -606,6 +692,13 @@ fn grant_exec_path(git: &Path, spec: &mut LaunchSpec) {
         Some(core) => {
             spec.profile.spec.runtime_reads.push(subtree(&core));
             spec.profile.spec.tool_exec_roots.push(subtree(core));
+            if let Some(git) = crate::lane::developer_git_for_exec_path(&raw) {
+                if let Some(bin) = git.parent() {
+                    spec.profile.spec.runtime_reads.push(subtree(bin));
+                    spec.profile.spec.tool_exec_roots.push(subtree(bin));
+                }
+                spec.profile.spec.process_executables.push(exact(git));
+            }
         }
         None => {
             if !spec
@@ -1342,4 +1435,15 @@ pub(crate) fn uuid_v4(mut bytes: [u8; 16]) -> String {
         &hex[16..20],
         &hex[20..32]
     )
+}
+
+#[cfg(test)]
+mod git_config_quote_tests {
+    #[test]
+    fn quote_preserves_git_metacharacters() {
+        assert_eq!(
+            super::git_config_quote("Ann \"Lee\""),
+            "\"Ann \\\"Lee\\\"\""
+        );
+    }
 }

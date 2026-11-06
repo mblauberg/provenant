@@ -141,6 +141,18 @@ pub enum PlanError {
     Home(#[from] HomeError),
 }
 
+impl PlanError {
+    /// Boundary established by the typed plan failure itself.
+    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass as B;
+        match self {
+            Self::UnconfinedExtensions | Self::InvalidRoots => B::Authority,
+            Self::Permission(error) => error.boundary_class(),
+            Self::Home(_) => B::None,
+        }
+    }
+}
+
 /// No deserialisation, environment values, prompt, credential bytes or mutable
 /// policy escape. This is policy, not proof of an enforcing backend: compile
 /// immediately before handoff, retaining verified anchors and writer exclusion.

@@ -162,6 +162,14 @@ Raise either positive integer when a lane needs more capacity. The profile
 travels in an argument, so the operating system can still impose its own
 transport limit. These settings do not bypass path, credential, or Git checks.
 
+Continuation refusals caused by large retained state name the limiting
+`[domains.run]` setting, its value and its source. Increase
+`continuation_copy_limit_bytes`, `continuation_copy_entries` or
+`continuation_copy_depth` when the retained session needs more capacity, then
+retry the continuation. The byte copy budget also respects available disk
+space. These settings preserve credential, state-root, filesystem, hard-link
+and worktree-overlap guards.
+
 `confinement.census_exclude_ancestors` controls whether run admission excludes the
 invoking process's ancestor chain (such as the invoking shell) from live-writer detection.
 This strict boolean defaults to `true`. When set to `false`, only the invoking process

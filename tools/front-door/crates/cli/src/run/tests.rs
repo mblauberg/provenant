@@ -1,5 +1,72 @@
 use super::*;
 
+#[test]
+fn base_requires_a_writer_branch_or_worktree_target() {
+    let refusal = dispatch::base_target_refusal(Some("main"), None, None, None, None)
+        .expect("base without target should refuse");
+    assert!(refusal.contains("--branch"), "{refusal}");
+    assert!(refusal.contains("--worktree"), "{refusal}");
+    assert!(
+        dispatch::base_target_refusal(Some("main"), Some("feature/review"), None, None, None,)
+            .is_none()
+    );
+    assert!(
+        dispatch::base_target_refusal(
+            Some("main"),
+            None,
+            Some(Path::new(".worktrees/review")),
+            None,
+            None,
+        )
+        .is_none()
+    );
+    // The pinned diff form (`--head` with `--base`) and an explicit worktree
+    // reader are shipped forms; the integration suite proves they launch.
+    assert!(dispatch::base_target_refusal(Some("main"), None, None, None, Some("HEAD")).is_none());
+    assert!(dispatch::base_target_refusal(None, None, None, None, None).is_none());
+}
+
+#[test]
+fn dispatch_refuses_reader_base_without_a_head_or_writer_target()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project)?;
+    let prompt = root.join("prompt");
+    std::fs::write(&prompt, "review")?;
+    with_edge(
+        root,
+        &project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let command = parsed_run(&[
+                "--model",
+                "codex/gpt-6-luna",
+                "--mode",
+                "read-only",
+                "--base",
+                "main",
+                "--prompt-file",
+                prompt.to_str().ok_or("prompt")?,
+            ])?;
+            let reply = dispatch::dispatch(command, edge);
+            let message = reply
+                .result
+                .error
+                .map(|error| error.message)
+                .ok_or("base without a target must refuse")?;
+            assert!(
+                message.contains("--base requires a writer target"),
+                "{message}"
+            );
+            assert!(message.contains("--branch"), "{message}");
+            assert!(message.contains("--worktree"), "{message}");
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
 fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
     if !crate::fabric::in_lane() {
         return Ok(false);
@@ -2566,9 +2633,13 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         .enumerate()
     {
         let operation = format!("protected-integration-{index}");
-        let mut args: Vec<OsString> = ["dispatch", "--operation-id", &operation, "--base", "HEAD"]
+        let mut args: Vec<OsString> = ["dispatch", "--operation-id", &operation]
             .map(OsString::from)
             .into();
+        // A manifest names its own targets; a bare `--base` there is refused as ignored.
+        if placement != "manifest" {
+            args.extend(["--base", "HEAD"].map(OsString::from));
+        }
         let mode = if delivery == "integrate" {
             run::DeliveryMode::Integrate(target.into())
         } else {
@@ -2735,21 +2806,36 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     assert_eq!(output.termination, Termination::Exit(0), "{remedy}");
     let selected = String::from_utf8(output.stdout.bytes)?;
     assert_eq!(std::path::Path::new(&selected), native_path);
+    let remedy_command = || -> Result<_, Box<dyn std::error::Error>> {
+        let mut command = parsed_run(&[
+            "--worktree",
+            &selected,
+            "--model",
+            "codex/gpt-6-luna",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+        ])?;
+        command.wait = None;
+        Ok(command)
+    };
+    // Selecting the printed path cannot bypass custody: the first part of
+    // the remedy says to inspect custody, and Git still marks this tree locked.
+    assert!(remedy.contains("inspect custody"), "{remedy}");
+    let locked_command = remedy_command()?;
+    let still_locked = super::submit::with_deferred_provider_launch(|| {
+        dispatch_with_workers(locked_command, &edge, &Free)
+    });
+    assert_eq!(still_locked.result.status, Status::Refused);
+    assert!(still_locked.result.data.get("run_id").is_none());
     run_git(
         &project,
         &["worktree", "unlock", native_path.to_str().ok_or("path")?],
     )?;
-    let mut worktree_command = parsed_run(&[
-        "--worktree",
-        &selected,
-        "--model",
-        "codex/gpt-6-luna",
-        "--prompt-file",
-        prompt.to_str().ok_or("prompt")?,
-    ])?;
-    worktree_command.wait = None;
+    // Repeat the same printed selection after repairing the observed custody
+    // condition; no additional target or authority is supplied.
+    let repaired_command = remedy_command()?;
     let accepted = super::submit::with_deferred_provider_launch(|| {
-        dispatch_with_workers(worktree_command, &edge, &Free)
+        dispatch_with_workers(repaired_command, &edge, &Free)
     });
     assert_eq!(
         accepted.result.status,
@@ -6477,6 +6563,7 @@ fn quota_reason_uses_safe_fact_without_provider_message() {
         },
         termination: Some(provenant_os::exec::Termination::Exit(1)),
         never_spawned: false,
+        launch_refusal: None,
         stop_reason: None,
         delivered_signals: vec![],
         reaped: vec![],
@@ -6572,6 +6659,7 @@ fn clean_exit() -> ExitObservation {
         },
         termination: Some(provenant_os::exec::Termination::Exit(0)),
         never_spawned: false,
+        launch_refusal: None,
         stop_reason: None,
         delivered_signals: vec![],
         reaped: vec![],
@@ -9194,6 +9282,8 @@ fn lane_detail_and_output_retain_safe_refusal_remedies() -> Result<(), Box<dyn s
             _: Option<&run::AttemptRecord>,
         ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
             Err(run::PrepareRefusal {
+                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                resource: None,
                 terminal_cause: Some(provenant_records::run::TerminalCause::AccessPolicyRefused),
                 terminal_note: Some(self.note.clone()),
                 message: "PROVIDER_SENTINEL must not become a public diagnostic".into(),

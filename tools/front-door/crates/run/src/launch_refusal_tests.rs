@@ -16,6 +16,8 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
             if self.disk {
                 return Err(PrepareRefusal {
+                    boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                    resource: None,
                     terminal_cause: Some(TerminalCause::DiskFloor),
                     terminal_note: Some("99 bytes available; gc.free_floor is 100 bytes (source: host configuration)".into()),
                     message: "HOST_DISK_ERROR_SENTINEL".into(),

@@ -371,6 +371,11 @@ pub enum RunError {
         command: String,
         limit: usize,
     },
+    #[error("host writer delivery failed at {stage:?}: {source}")]
+    DeliveryFact {
+        stage: WriterDeliveryStage,
+        source: provenant_confinement::worktrees::WorktreeError,
+    },
     #[error("Git executable unavailable")]
     GitUnavailable,
     #[error("provider evidence could not be committed: {0}")]
@@ -406,6 +411,8 @@ pub enum RunError {
     AttemptReservationRetained,
     #[error("invalid run record: {0}")]
     Validation(&'static str),
+    #[error("invalid run record: {0}")]
+    WriterLineage(&'static str),
     #[error("invalid run record: writer HEAD is not the lane branch")]
     WriterHeadNotLaneBranch,
     #[error(
@@ -514,12 +521,10 @@ impl RunError {
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
+            Self::WriterHeadNotLaneBranch | Self::WriterSourceMismatch { .. } => B::LaneGit,
+            Self::WriterLineage(_) => B::Authority,
             Self::Confinement(error) => error.boundary_class(),
-            Self::Plan(provenant_confinement::PlanError::Permission(error)) => {
-                error.boundary_class()
-            }
-            Self::Plan(provenant_confinement::PlanError::UnconfinedExtensions) => B::Authority,
-            Self::Plan(_) => B::None,
+            Self::Plan(error) => error.boundary_class(),
             _ => ErrorKind::from(self).boundary_class(),
         }
     }
@@ -570,6 +575,13 @@ impl RunError {
                         "inspect the requested {access} grant and select a permitted root"
                     ))
                     .fact(DiagnosticFact::CredentialGrant { access });
+            }
+            Self::Confinement(error) => {
+                if let Some(fact) = error.resource_fact() {
+                    diagnostic = fact
+                        .project(diagnostic)
+                        .fact(DiagnosticFact::Resource(fact));
+                }
             }
             Self::WriterProjectMismatch {
                 project, selected, ..
@@ -659,6 +671,24 @@ impl RunError {
                     .detail(format!("host writer delivery failed at {stage:?}"))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
+            Self::DeliveryFact { stage, source } => {
+                use provenant_confinement::utility::UtilityError;
+                let detail = match source {
+                    WorktreeError::Utility(UtilityError::Truncated { .. }) => {
+                        "repository fact output exceeded the session cap"
+                    }
+                    WorktreeError::Utility(UtilityError::Cancelled) => {
+                        "repository fact was cancelled"
+                    }
+                    WorktreeError::Utility(UtilityError::TimedOut) => "repository fact timed out",
+                    _ => "repository fact output was incomplete",
+                };
+                diagnostic = diagnostic
+                    .detail(format!(
+                        "host writer delivery failed at {stage:?}: {detail}"
+                    ))
+                    .fact(DiagnosticFact::DeliveryStage(*stage));
+            }
             Self::DeliveryReconciliation { reason, next } => {
                 diagnostic = diagnostic.detail(reason.clone()).next(next.clone()).fact(
                     DiagnosticFact::DeliveryStage(WriterDeliveryStage::PullRequest),
@@ -712,60 +742,12 @@ impl RunError {
                 };
                 diagnostic = diagnostic.fact(DiagnosticFact::Filesystem { operation });
             }
-            Self::Admission(AdmissionError::Disk {
-                free,
-                floor,
-                origin,
-            }) => {
-                diagnostic = diagnostic
-                    .detail(format!(
-                        "disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {})", origin.description()
-                    ))
-                    .next("free disk space above gc.free_floor before retrying");
-            }
-            Self::Admission(AdmissionError::MemoryPressure {
-                level,
-                threshold,
-                origin,
-            }) => {
-                let fact = provenant_records::diagnostic::ResourceFact::MemoryPressure {
-                    level: *level,
-                    threshold: *threshold,
-                    origin: *origin,
-                };
-                diagnostic = fact
-                    .project(diagnostic)
-                    .fact(DiagnosticFact::Resource(fact));
-            }
-            Self::Admission(AdmissionError::Processes { used, limit }) => {
-                let fact = provenant_records::diagnostic::ResourceFact::Processes {
-                    used: *used,
-                    limit: *limit,
-                    reserved: provenant_os::sys::resources::ProcessBudget {
-                        used: *used,
-                        limit: *limit,
-                    }
-                    .headroom(),
-                };
-                diagnostic = fact
-                    .project(diagnostic)
-                    .fact(DiagnosticFact::Resource(fact));
-            }
-            Self::Admission(AdmissionError::LaneCap {
-                active,
-                limit,
-                kind,
-                origin,
-            }) => {
-                let fact = provenant_records::diagnostic::ResourceFact::LaneCap {
-                    active: *active,
-                    limit: *limit,
-                    lane_limit: *kind,
-                    origin: *origin,
-                };
-                diagnostic = fact
-                    .project(diagnostic)
-                    .fact(DiagnosticFact::Resource(fact));
+            Self::Admission(error) => {
+                if let Some(fact) = error.resource_fact() {
+                    diagnostic = fact
+                        .project(diagnostic)
+                        .fact(DiagnosticFact::Resource(fact));
+                }
             }
             Self::RetainedWriterImport {
                 run,
@@ -863,7 +845,287 @@ mod diagnostic_projection_tests {
     use std::path::{Path, PathBuf};
 
     #[test]
+    fn launch_guard_inventory_has_valid_classifications() {
+        let inventory = include_str!("../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("launch guard inventory must be valid TOML");
+        assert_eq!(inventory["schema_version"].as_integer(), Some(1));
+        let complete = inventory["complete"].as_bool().expect("completion flag");
+        let guards = inventory["guard"].as_array_of_tables().expect("guard rows");
+        assert!(!guards.is_empty());
+        for guard in guards {
+            let site = guard
+                .get("site")
+                .and_then(|v| v.as_str())
+                .expect("guard site");
+            assert!(site.contains('#'), "invalid guard site: {site}");
+            let reason = guard
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .expect("guard reason");
+            assert!(!reason.trim().is_empty(), "missing reason for {site}");
+            let boundary = guard
+                .get("boundary")
+                .and_then(|v| v.as_str())
+                .expect("guard classification");
+            match boundary {
+                "lane_git" | "credentials" | "object_integrity" | "authority" | "warning" => {}
+                "configurable_default" => {
+                    assert!(
+                        guard
+                            .get("setting")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| !s.trim().is_empty()),
+                        "missing setting for {site}"
+                    );
+                    let code = guard
+                        .get("code")
+                        .and_then(|value| value.as_str())
+                        .expect("configurable refusal code");
+                    assert!(
+                        ErrorKind::ALL.iter().any(|kind| kind.code() == code),
+                        "unknown code {code} at {site}"
+                    );
+                }
+                "unclassified" if !complete => {}
+                _ => panic!("invalid or incomplete classification {boundary} at {site}"),
+            }
+        }
+        let guardian = RunError::Admission(AdmissionError::GuardianIdentity);
+        assert_eq!(guardian.boundary_class(), BoundaryClass::Authority);
+        let code = ErrorKind::from(&guardian).code();
+        assert!(guards.iter().any(|guard| {
+            guard.get("code").and_then(|value| value.as_str()) == Some(code)
+                && guard.get("boundary").and_then(|value| value.as_str()) == Some("authority")
+        }));
+        let invalid_roots = RunError::Plan(provenant_confinement::PlanError::InvalidRoots);
+        assert_eq!(invalid_roots.boundary_class(), BoundaryClass::Authority);
+        assert_eq!(
+            RunError::WriterHeadNotLaneBranch.boundary_class(),
+            BoundaryClass::LaneGit
+        );
+        let lineage = RunError::WriterLineage("continuation worktree belongs to another lane");
+        assert_eq!(lineage.boundary_class(), BoundaryClass::Authority);
+        assert_eq!(ErrorKind::from(&lineage), ErrorKind::Invalid);
+        assert_eq!(
+            lineage.to_string(),
+            "invalid run record: continuation worktree belongs to another lane"
+        );
+        assert_eq!(
+            RefusalKind::HandoffBoundary(BoundaryClass::Authority).boundary_class(),
+            BoundaryClass::Authority
+        );
+        assert!(guards.iter().any(|guard| {
+            guard.get("site").and_then(|value| value.as_str())
+                == Some("run/src/launch/hand_off.rs#RunStore::hand_off")
+                && guard.get("boundary").and_then(|value| value.as_str()) == Some("authority")
+        }));
+    }
+
+    #[test]
+    fn every_inventoried_configurable_refusal_has_a_safe_setting_and_source() {
+        use provenant_records::diagnostic::{
+            LaneLimit, PacingReserveSetting, PacingSettingSource, PortSettingSource, PressureLevel,
+            PressureThreshold, ResourceFact, SettingSource,
+        };
+        let configured = SettingSource::Configuration;
+        let mut examples = vec![
+            (
+                ResourceFact::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::ArgvPromptLimit {
+                    limit: 2,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::WriteGrantLimit {
+                    limit: 2,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::GrantLimit {
+                    limit: 2,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::ProfileLimit {
+                    bytes: 3,
+                    limit: 2,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::DependencyPreparation { configured: true },
+                "sealed profile",
+            ),
+            (
+                ResourceFact::LanePorts {
+                    blocks: 2,
+                    origin: PortSettingSource::Configuration,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::MemoryPressure {
+                    level: PressureLevel::Critical,
+                    threshold: PressureThreshold::Warning,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::Processes {
+                    used: 3,
+                    limit: 4,
+                    reserved: 1,
+                },
+                "operating system",
+            ),
+        ];
+        for setting in [
+            PacingReserveSetting::AdapterFiveHour,
+            PacingReserveSetting::AdapterSevenDay,
+            PacingReserveSetting::Account,
+            PacingReserveSetting::Free,
+        ] {
+            examples.push((
+                ResourceFact::PacingReserve {
+                    percent: 15,
+                    setting,
+                    origin: PacingSettingSource::Configuration,
+                },
+                "host configuration",
+            ));
+        }
+        for lane_limit in [
+            LaneLimit::HostWriters,
+            LaneLimit::ProjectWriters,
+            LaneLimit::HostTotal,
+            LaneLimit::ProjectTotal,
+        ] {
+            examples.push((
+                ResourceFact::LaneCap {
+                    active: 2,
+                    limit: 2,
+                    lane_limit,
+                    origin: configured,
+                },
+                "host configuration",
+            ));
+        }
+        for setting in [
+            provenant_records::diagnostic::ContinuationCopyLimit::Bytes,
+            provenant_records::diagnostic::ContinuationCopyLimit::Entries,
+            provenant_records::diagnostic::ContinuationCopyLimit::Depth,
+        ] {
+            examples.push((
+                ResourceFact::ContinuationCopy {
+                    limit: 2,
+                    setting,
+                    origin: configured,
+                    available_bytes: None,
+                },
+                "host configuration",
+            ));
+        }
+        let inventory = include_str!("../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        // Inverse coverage: deleting a row must fail even when every remaining
+        // inventory row still has a valid projection.
+        let guards = inventory["guard"].as_array_of_tables().unwrap();
+        for (fact, source) in &examples {
+            let diagnostic = RefusalKind::HandoffResource(*fact).diagnostic().unwrap();
+            let detail = diagnostic.detail.as_deref().unwrap();
+            assert!(detail.contains(source));
+            assert!(
+                guards.iter().any(|row| {
+                    row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                        && row
+                            .get("setting")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|setting| detail.contains(setting))
+                }),
+                "resource refusal is omitted from inventory: {fact:?}"
+            );
+        }
+        for row in inventory["guard"]
+            .as_array_of_tables()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
+            })
+        {
+            let site = row.get("site").and_then(|v| v.as_str()).unwrap();
+            let setting = row.get("setting").and_then(|v| v.as_str()).unwrap();
+            let code = row.get("code").and_then(|v| v.as_str()).unwrap();
+            assert!(
+                examples.iter().any(|(fact, source)| {
+                    let Some(diagnostic) = RefusalKind::HandoffResource(*fact).diagnostic() else {
+                        return false;
+                    };
+                    diagnostic.code == code
+                        && diagnostic.detail.as_deref().is_some_and(|detail| {
+                            detail.contains(setting) && detail.contains(source)
+                        })
+                        && diagnostic.next.is_some()
+                }),
+                "no safe resource projection for {site} ({code}, {setting})"
+            );
+        }
+    }
+
+    #[test]
+    fn confinement_resource_diagnostic_keeps_code_and_excludes_source_text() {
+        use provenant_confinement::permissions::PermissionError;
+        use provenant_records::diagnostic::{DiagnosticFact, ResourceFact, SettingSource};
+        let error = RunError::Confinement(PermissionError::ConfigOrigin {
+            source: Box::new(PermissionError::GrantLimitExceeded {
+                family: "TOKEN_SENTINEL",
+                limit: 17,
+            }),
+            origin: SettingSource::Configuration,
+        });
+        let diagnostic = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert_eq!(diagnostic.code, ErrorKind::Confinement.code());
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains("domains.run.grant_limit"));
+        assert!(detail.contains("host configuration"));
+        assert!(!detail.contains("TOKEN_SENTINEL"));
+        assert!(matches!(
+            diagnostic.fact,
+            Some(DiagnosticFact::Resource(ResourceFact::GrantLimit {
+                limit: 17,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn resource_refusals_name_limits_and_corrective_actions() {
+        let inventory = include_str!("../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("launch guard inventory must be valid TOML");
+        let guards = inventory["guard"].as_array_of_tables().unwrap();
         let cases = [
             (
                 AdmissionError::Disk {
@@ -898,13 +1160,71 @@ mod diagnostic_projection_tests {
                 "max_project_writer_lanes",
                 "writer",
             ),
+            (
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: provenant_records::diagnostic::LaneLimit::HostWriters,
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
+                },
+                "max_writer_lanes",
+                "writer",
+            ),
+            (
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: provenant_records::diagnostic::LaneLimit::HostTotal,
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
+                },
+                "max_lanes",
+                "lane",
+            ),
+            (
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: provenant_records::diagnostic::LaneLimit::ProjectTotal,
+                    origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                },
+                "max_project_lanes",
+                "lane",
+            ),
         ];
         for (cause, limit, corrective) in cases {
-            let diagnostic = RunError::Admission(cause).diagnostic(Destination::Remote {
+            let error = RunError::Admission(cause);
+            let code = ErrorKind::from(&error).code();
+            assert_eq!(error.boundary_class(), BoundaryClass::None);
+            let guard = guards
+                .iter()
+                .find(|row| {
+                    row.get("code").and_then(|v| v.as_str()) == Some(code)
+                        && row
+                            .get("setting")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| s.contains(limit))
+                })
+                .expect("resource refusal must be inventoried");
+            assert_eq!(guard["boundary"].as_str(), Some("configurable_default"));
+            let setting = guard["setting"].as_str().unwrap();
+            let diagnostic = error.diagnostic(Destination::Remote {
                 repository: None,
                 home: None,
             });
+            assert_eq!(diagnostic.code, code);
             assert!(diagnostic.detail.as_deref().unwrap().contains(limit));
+            assert!(diagnostic.detail.as_deref().unwrap().contains(setting));
+            assert!(
+                diagnostic
+                    .detail
+                    .as_deref()
+                    .unwrap()
+                    .contains(if code == "HOST_PROCESSES" {
+                        "shipped"
+                    } else {
+                        "source:"
+                    })
+            );
             assert!(diagnostic.next.as_deref().unwrap().contains(corrective));
             assert!(
                 !serde_json::to_string(&diagnostic)

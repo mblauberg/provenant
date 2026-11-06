@@ -1,5 +1,139 @@
 use super::*;
 
+fn typed_local(phase: &str, error: &RunError) -> HandOff {
+    if let RunError::Admission(error) = error
+        && let Some(fact) = error.resource_fact()
+    {
+        return HandOff::Resource {
+            message: format!("{phase}: {error}"),
+            fact,
+        };
+    }
+    if let RunError::Confinement(permission) = error
+        && let Some(fact) = permission.resource_fact()
+    {
+        return HandOff::Resource {
+            message: format!("{phase}: {error}"),
+            fact,
+        };
+    }
+    let cause = match error {
+        RunError::Confinement(
+            provenant_confinement::permissions::PermissionError::BackendNotAvailable(
+                provenant_confinement::permissions::AvailabilityReason::UnsupportedPlatform,
+            ),
+        ) => Some(TerminalCause::UnsupportedPlatform),
+        RunError::DeliveryPrepare {
+            step: "credential helper",
+            ..
+        } => Some(TerminalCause::DeliveryPrepareCredentialHelper),
+        _ => None,
+    };
+    let message = format!("{phase}: {error}");
+    let class = error.boundary_class();
+    if class != provenant_records::diagnostic::BoundaryClass::None {
+        HandOff::Boundary {
+            message,
+            class,
+            cause,
+        }
+    } else if let Some(cause) = cause {
+        HandOff::TypedLocal { message, cause }
+    } else {
+        HandOff::Local(message)
+    }
+}
+
+#[test]
+fn confinement_limit_handoffs_project_setting_and_source() {
+    use provenant_confinement::permissions::PermissionError;
+    use provenant_records::diagnostic::SettingSource;
+    for (error, setting) in [
+        (
+            PermissionError::GrantLimitExceeded {
+                family: "fixture",
+                limit: 3,
+            },
+            "domains.run.grant_limit",
+        ),
+        (
+            PermissionError::ProfileTooLarge { bytes: 5, limit: 4 },
+            "domains.run.profile_limit_bytes",
+        ),
+    ] {
+        let error = RunError::Confinement(PermissionError::ConfigOrigin {
+            source: Box::new(error),
+            origin: SettingSource::Configuration,
+        });
+        let HandOff::Resource { fact, .. } = typed_local("confinement", &error) else {
+            panic!("missing typed resource fact")
+        };
+        let kind = RefusalKind::HandoffResource(fact);
+        let diagnostic = kind.diagnostic().expect("diagnostic");
+        assert_eq!(diagnostic.code, ErrorKind::from(&error).code());
+        let detail = diagnostic.detail.expect("detail");
+        assert!(detail.contains(setting));
+        assert!(detail.contains("host configuration"));
+        let inventory = include_str!("../../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(
+            inventory["guard"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
+                        && row.get("setting").and_then(|v| v.as_str()) == Some(setting)
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                })
+        );
+    }
+}
+
+fn custody_local(phase: &str, error: &custody::CustodyError) -> HandOff {
+    let message = format!("{phase}: {error}");
+    match error {
+        custody::CustodyError::Fenced
+        | custody::CustodyError::UnknownIdentity
+        | custody::CustodyError::InvalidRecord
+        | custody::CustodyError::HandoffUnknown => HandOff::Boundary {
+            message,
+            class: provenant_records::diagnostic::BoundaryClass::Authority,
+            cause: None,
+        },
+        _ => HandOff::Local(message),
+    }
+}
+
+fn custody_refusal(
+    e: crate::writer::WriterCustodyError,
+    writer_path: Option<std::path::PathBuf>,
+) -> HandOff {
+    match e {
+        crate::writer::WriterCustodyError::Admission(custody::CustodyError::Busy) => HandOff::Busy,
+        crate::writer::WriterCustodyError::Admission(
+            custody::CustodyError::ReservationRetained(error),
+        ) => HandOff::Protected(format!("custody reservation: {error}")),
+        crate::writer::WriterCustodyError::Admission(custody::CustodyError::ImportRetained {
+            run,
+            attempt,
+        }) => HandOff::RetainedImport {
+            run,
+            attempt,
+            worktree: writer_path.unwrap_or_default(),
+        },
+        crate::writer::WriterCustodyError::Admission(custody::CustodyError::Admission(error)) => {
+            typed_local("custody", &RunError::Admission(error))
+        }
+        crate::writer::WriterCustodyError::Admission(error) => custody_local("custody", &error),
+        crate::writer::WriterCustodyError::Withdrawal { admission, release } => HandOff::Protected(
+            format!("custody admission: {admission}; custody withdrawal: {release}"),
+        ),
+    }
+}
+
 impl RunStore {
     #[expect(
         clippy::too_many_arguments,
@@ -24,27 +158,6 @@ impl RunStore {
         let local = |phase: &str, error: &dyn std::fmt::Display| {
             HandOff::Local(format!("{phase}: {error}"))
         };
-        let typed_local = |phase: &str, error: &RunError| {
-            let cause = match error {
-                RunError::Confinement(
-                    provenant_confinement::permissions::PermissionError::BackendNotAvailable(
-                        provenant_confinement::permissions::AvailabilityReason::UnsupportedPlatform,
-                    ),
-                ) => Some(TerminalCause::UnsupportedPlatform),
-                RunError::DeliveryPrepare {
-                    step: "credential helper",
-                    ..
-                } => Some(TerminalCause::DeliveryPrepareCredentialHelper),
-                _ => None,
-            };
-            match cause {
-                Some(cause) => HandOff::TypedLocal {
-                    message: format!("{phase}: {error}"),
-                    cause,
-                },
-                None => local(phase, error),
-            }
-        };
         let id = record.attempt_id;
         let scope = Scope {
             run: record.run_id,
@@ -53,17 +166,17 @@ impl RunStore {
         };
         let directory = || {
             self.attempt_dir(record.run_id, id, false)
-                .map_err(|e| local("attempt directory", &e))
+                .map_err(|e| typed_local("attempt directory", &e))
         };
         let mut holder_context =
-            context(record, requester).map_err(|e| local("launch context", &e))?;
+            context(record, requester).map_err(|e| typed_local("launch context", &e))?;
         let reservation = PublicationReservation::prepare(
             directory()?,
             call.lock_budget(),
             call.cancel,
             call.clock,
         )
-        .map_err(|e| local("publication reservation", &e))?;
+        .map_err(|e| custody_local("publication reservation", &e))?;
         // Clone before acquiring custody: failure leaves no writer reservation.
         let held = if self.sealed_requester.is_some() {
             Some((
@@ -86,17 +199,23 @@ impl RunStore {
         if task.writer.as_ref().map(|w| w.worktree.as_path())
             != writer.as_ref().map(|w| w.worktree.path())
         {
-            return Err(local("writer confinement", &"does not match the task"));
+            return Err(HandOff::Boundary {
+                message: "writer confinement: does not match the task".into(),
+                class: provenant_records::diagnostic::BoundaryClass::Authority,
+                cause: None,
+            });
         }
         let writer_path = writer
             .as_ref()
             .map(|writer| writer.worktree.path().to_path_buf());
         let mut lease = match writer {
             Some(writer) => {
-                let (directory, binding) = writer
-                    .custody
-                    .take()
-                    .ok_or_else(|| local("writer custody", &"missing"))?;
+                let (directory, binding) =
+                    writer.custody.take().ok_or_else(|| HandOff::Boundary {
+                        message: "writer custody: missing".into(),
+                        class: provenant_records::diagnostic::BoundaryClass::Authority,
+                        cause: None,
+                    })?;
                 self.acquire_writer_fenced(directory, scope, binding, acquire_writer, call)
             }
             // Readers take the same injected acquisition as writers, so a
@@ -104,27 +223,7 @@ impl RunStore {
             None => acquire_writer(directory()?, scope, custody::WriterBinding::read_only())
                 .map_err(crate::writer::WriterCustodyError::Admission),
         }
-        .map_err(|e| match e {
-            crate::writer::WriterCustodyError::Admission(custody::CustodyError::Busy) => {
-                HandOff::Busy
-            }
-            crate::writer::WriterCustodyError::Admission(
-                custody::CustodyError::ReservationRetained(error),
-            ) => HandOff::Protected(format!("custody reservation: {error}")),
-            crate::writer::WriterCustodyError::Admission(
-                custody::CustodyError::ImportRetained { run, attempt },
-            ) => HandOff::RetainedImport {
-                run,
-                attempt,
-                worktree: writer_path.clone().unwrap_or_default(),
-            },
-            crate::writer::WriterCustodyError::Admission(error) => local("custody", &error),
-            crate::writer::WriterCustodyError::Withdrawal { admission, release } => {
-                HandOff::Protected(format!(
-                    "custody admission: {admission}; custody withdrawal: {release}"
-                ))
-            }
-        })?;
+        .map_err(|error| custody_refusal(error, writer_path))?;
         // Once custody is acquired, every local preparation failure must
         // withdraw it before fallback can consider another candidate.
         macro_rules! local_or_withdraw {
@@ -135,6 +234,8 @@ impl RunStore {
                         lease.withdraw_unlaunched().map_err(|release| {
                             let cause = match &error {
                                 HandOff::Local(cause)
+                                | HandOff::Boundary { message: cause, .. }
+                                | HandOff::Resource { message: cause, .. }
                                 | HandOff::TypedLocal { message: cause, .. } => cause.as_str(),
                                 _ => "launch preparation failed",
                             };
@@ -152,7 +253,16 @@ impl RunStore {
                 .and_then(|plan| plan.writer.as_ref())
             && let Err(error) = self.check_writer_lineage(record, &writer.worktree, call)
         {
-            local_or_withdraw!(Err::<(), _>(local("writer lineage", &error)));
+            let refusal = if matches!(error, RunError::Nonterminal) {
+                HandOff::Boundary {
+                    message: format!("writer lineage: {error}"),
+                    class: provenant_records::diagnostic::BoundaryClass::Authority,
+                    cause: None,
+                }
+            } else {
+                typed_local("writer lineage", &error)
+            };
+            local_or_withdraw!(Err::<(), _>(refusal));
         }
         if task.source_head.is_some()
             && let Some(writer) = plan
@@ -167,13 +277,17 @@ impl RunStore {
             let paths = local_or_withdraw!(
                 writer
                     .uncommitted_paths(&git)
-                    .map_err(|error| local("writer status", &error))
+                    .map_err(|error| typed_local("writer status", &error))
             );
             if !paths.is_empty() {
-                local_or_withdraw!(Err::<(), _>(local(
-                    "writer continuation",
-                    &format!("uncommitted predecessor edits: {}", paths.join(", ")),
-                )));
+                local_or_withdraw!(Err::<(), _>(HandOff::Boundary {
+                    message: format!(
+                        "writer continuation: uncommitted predecessor edits: {}",
+                        paths.join(", ")
+                    ),
+                    class: provenant_records::diagnostic::BoundaryClass::Authority,
+                    cause: None,
+                }));
             }
         }
         // Reconcile may have withdrawn this attempt before the lease existed.
@@ -183,12 +297,23 @@ impl RunStore {
                     && now.run_id == record.run_id
                     && now.task_id == record.task_id => {}
             Ok(_) => {
-                local_or_withdraw!(Err::<(), _>(local("attempt", &"changed before handoff")));
+                local_or_withdraw!(Err::<(), _>(HandOff::Boundary {
+                    message: "attempt: changed before handoff".into(),
+                    class: provenant_records::diagnostic::BoundaryClass::Authority,
+                    cause: None,
+                }));
             }
             Err(error) => {
-                local_or_withdraw!(Err::<(), _>(local("attempt record", &error)));
+                local_or_withdraw!(Err::<(), _>(typed_local("attempt record", &error)));
             }
         }
+        let setup_cancel = provenant_core::CancelToken::new();
+        let _watch = CancelWatch::start(
+            local_or_withdraw!(directory()),
+            scope,
+            &setup_cancel,
+            call.cancel,
+        );
         if let Some(deliver) = &task.deliver {
             let prepare = || -> Result<Vec<u8>> {
                 let mut holder: HolderContext = decode(&holder_context)?;
@@ -200,7 +325,10 @@ impl RunStore {
                     .host_delivery
                     .take()
                     .ok_or(RunError::Validation("delivery lacks host context"))?;
-                let host = host.prepare(writer, deliver)?;
+                let host = host
+                    .with_repo_facts(self.repo_facts())
+                    .cancellable(&setup_cancel)
+                    .prepare(writer, deliver)?;
                 host.seal_launch_binding(&self.attempt_dir(record.run_id, id, false)?, scope)?;
                 holder.host_delivery = Some(host);
                 holder.encode()
@@ -220,20 +348,12 @@ impl RunStore {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }
         if let Some(confinement) = &mut plan.confinement {
-            let setup_cancel = provenant_core::CancelToken::new();
-            let watch = CancelWatch::start(
-                local_or_withdraw!(directory()),
-                scope,
-                &setup_cancel,
-                call.cancel,
-            );
             let prepared = confinement.prepare_git(&setup_cancel);
-            drop(watch);
             if let Err(error) = prepared {
                 lease.withdraw_unlaunched().map_err(|release| {
                     HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))
                 })?;
-                return Err(local("Git setup", &error));
+                return Err(typed_local("Git setup", &error));
             }
             // Git setup has finished; cache seeding needs no repository lock.
             let seed_attempt = local_or_withdraw!(directory());
@@ -244,14 +364,17 @@ impl RunStore {
                     std::ffi::OsStr::new(crate::writer::SEED_WAIT_LOCK),
                     provenant_os::fs::LockMode::Exclusive,
                     call.lock_budget(),
-                    call.cancel,
+                    &setup_cancel,
                     call.clock,
                 )
                 .ok();
             #[cfg(feature = "fixture")]
-            hold_seed_for_fixture();
-            confinement.seed_cargo(&plan.environment, &seed_attempt);
+            hold_seed_for_fixture(&setup_cancel);
+            confinement.seed_cargo(&plan.environment, &seed_attempt, &setup_cancel);
             drop(seeding);
+            if setup_cancel.is_cancelled() || local_or_withdraw!(cancel_requested()) {
+                local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
+            }
             let writer_attempt = local_or_withdraw!(directory());
             if let Some(writer) = &confinement.writer
                 && let Err(error) = crate::objects::prepare_bound(
@@ -269,7 +392,7 @@ impl RunStore {
                     writer.snapshot(self.context.state_root.as_path(), &writer_attempt, scope)
                 })
             {
-                local_or_withdraw!(Err::<(), _>(local("lane Git objects", &error)));
+                local_or_withdraw!(Err::<(), _>(typed_local("lane Git objects", &error)));
             }
             match confinement.command(&plan.argv, &id, call.cancel) {
                 Ok(argv) => plan.argv = argv,
@@ -355,7 +478,7 @@ impl RunStore {
 /// Integration fixtures can hold the actual handoff at the seed boundary.
 #[cfg(feature = "fixture")]
 #[allow(clippy::disallowed_methods)]
-fn hold_seed_for_fixture() {
+fn hold_seed_for_fixture(cancel: &provenant_core::CancelToken) {
     let Some(directory) = std::env::var_os("PROVENANT_FIXTURE_HOLD_SEED") else {
         return;
     };
@@ -366,7 +489,7 @@ fn hold_seed_for_fixture() {
     let _ = provenant_test_support::wait_for(
         "seed preparation release",
         std::time::Duration::from_secs(30),
-        || !directory.join("hold").exists(),
+        || cancel.is_cancelled() || !directory.join("hold").exists(),
         |released| *released,
     );
 }
@@ -428,6 +551,330 @@ mod tests {
     use provenant_core::CancelToken;
 
     #[test]
+    fn custody_resource_refusals_keep_typed_facts_and_inventoried_sources() {
+        use provenant_records::diagnostic::{
+            LaneLimit, PressureLevel, PressureThreshold, SettingSource,
+        };
+        let inventory = include_str!("../../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        let guards = inventory["guard"].as_array_of_tables().unwrap();
+        let cases = [
+            (
+                "DISK_FLOOR",
+                AdmissionError::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: SettingSource::Configuration,
+                },
+            ),
+            (
+                "MEMORY_PRESSURE",
+                AdmissionError::MemoryPressure {
+                    level: PressureLevel::Critical,
+                    threshold: PressureThreshold::Warning,
+                    origin: SettingSource::ShippedDefault,
+                },
+            ),
+            (
+                "HOST_PROCESSES",
+                AdmissionError::Processes { used: 3, limit: 4 },
+            ),
+            (
+                "LANE_CAP",
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: LaneLimit::ProjectWriters,
+                    origin: SettingSource::Configuration,
+                },
+            ),
+            (
+                "LANE_CAP",
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: LaneLimit::HostWriters,
+                    origin: SettingSource::ShippedDefault,
+                },
+            ),
+            (
+                "LANE_CAP",
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: LaneLimit::HostTotal,
+                    origin: SettingSource::Configuration,
+                },
+            ),
+            (
+                "LANE_CAP",
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: LaneLimit::ProjectTotal,
+                    origin: SettingSource::ShippedDefault,
+                },
+            ),
+        ];
+        for (code, cause) in cases {
+            let handoff = custody_refusal(
+                crate::writer::WriterCustodyError::Admission(custody::CustodyError::Admission(
+                    cause,
+                )),
+                None,
+            );
+            let HandOff::Resource { fact, .. } = handoff else {
+                panic!("resource refusal lost its fact")
+            };
+            let kind = RefusalKind::HandoffResource(fact);
+            let diagnostic = kind.diagnostic().expect("resource diagnostic");
+            assert_eq!(diagnostic.code, code);
+            let detail = diagnostic.detail.as_deref().unwrap();
+            assert!(diagnostic.next.is_some());
+            assert!(detail.contains("source:") || detail.contains("shipped"));
+            assert!(guards.iter().any(|guard| {
+                guard.get("site").and_then(|value| value.as_str())
+                    == Some("run/src/launch/hand_off.rs#custody_refusal")
+                    && guard.get("code").and_then(|value| value.as_str()) == Some(code)
+                    && guard.get("boundary").and_then(|value| value.as_str())
+                        == Some("configurable_default")
+                    && guard
+                        .get("setting")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|setting| detail.contains(setting))
+            }));
+            assert_eq!(
+                serde_json::from_value::<RefusalKind>(serde_json::to_value(&kind).unwrap())
+                    .unwrap(),
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn custody_refusals_distinguish_authority_from_operational_failures() {
+        use crate::writer::WriterCustodyError;
+        use provenant_records::diagnostic::BoundaryClass;
+        for error in [
+            custody::CustodyError::Fenced,
+            custody::CustodyError::UnknownIdentity,
+            custody::CustodyError::InvalidRecord,
+            custody::CustodyError::HandoffUnknown,
+        ] {
+            assert!(matches!(
+                custody_local("publication reservation", &error),
+                HandOff::Boundary {
+                    class: BoundaryClass::Authority,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                custody_refusal(WriterCustodyError::Admission(error), None),
+                HandOff::Boundary {
+                    class: BoundaryClass::Authority,
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            custody_refusal(
+                WriterCustodyError::Admission(custody::CustodyError::Busy),
+                None
+            ),
+            HandOff::Busy
+        ));
+        assert!(matches!(
+            custody_refusal(
+                WriterCustodyError::Admission(custody::CustodyError::Cancelled),
+                None
+            ),
+            HandOff::Local(_)
+        ));
+    }
+
+    #[test]
+    fn existing_launch_evidence_refuses_publication_with_authority_boundary()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(temp.path().join("launch.json"), b"fixture")?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let directory = provenant_os::fs::Directory::open_anchor(temp.path())?;
+        let error = match PublicationReservation::prepare(
+            directory,
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        ) {
+            Ok(_) => panic!("existing launch evidence must fence publication"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, custody::CustodyError::Fenced));
+        assert!(matches!(
+            custody_local("publication reservation", &error),
+            HandOff::Boundary {
+                class: provenant_records::diagnostic::BoundaryClass::Authority,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn typed_handoff_preserves_boundary_and_terminal_cause() {
+        use provenant_confinement::permissions::{AvailabilityReason, PermissionError};
+        use provenant_records::diagnostic::BoundaryClass;
+        let error = RunError::Confinement(PermissionError::BackendNotAvailable(
+            AvailabilityReason::UnsupportedPlatform,
+        ));
+        assert!(matches!(
+            typed_local("confinement command", &error),
+            HandOff::Boundary {
+                class: BoundaryClass::Authority,
+                cause: Some(TerminalCause::UnsupportedPlatform),
+                ..
+            }
+        ));
+        assert!(matches!(
+            typed_local("Git", &RunError::GitUnavailable),
+            HandOff::Local(_)
+        ));
+        let credential = RunError::Confinement(PermissionError::CredentialRoot);
+        assert!(matches!(
+            typed_local("Git setup", &credential),
+            HandOff::Boundary {
+                class: BoundaryClass::Credentials,
+                cause: None,
+                ..
+            }
+        ));
+        let retained = RunError::RetainedWriterImport {
+            run: provenant_core::RunId::from_bytes([3; 16]),
+            attempt: provenant_core::AttemptId::from_bytes([4; 16]),
+            worktree: "/tmp/writer".into(),
+        };
+        assert!(matches!(
+            typed_local("lane Git objects", &retained),
+            HandOff::Boundary {
+                class: BoundaryClass::LaneGit,
+                cause: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            typed_local("lane Git objects", &RunError::WriterHeadNotLaneBranch),
+            HandOff::Boundary {
+                class: BoundaryClass::LaneGit,
+                cause: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn writer_plan_mismatch_is_an_authority_refusal()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+        let record = store.record(request.attempts[0].attempt_id, &call)?;
+        let mut task = request.request.tasks[0].clone();
+        task.writer = Some(provenant_records::run::WriterRequest {
+            extra: Default::default(),
+            project: temp.path().into(),
+            worktree: temp.path().join("writer"),
+        });
+        let plan = PreparedLaunch {
+            argv: vec!["fixture".into()],
+            environment: Vec::new(),
+            stdin: Vec::new(),
+            secret_input: None,
+            cwd: temp.path().into(),
+            route: route(),
+            skipped_routes: Vec::new(),
+            observed_head: None,
+            repository: None,
+            confinement: None,
+        };
+        let result = store.hand_off(
+            &task,
+            plan,
+            provenant_core::ActorId::from_bytes([2; 16]),
+            &|_, _| Ok(Vec::new()),
+            &|_, _, _| panic!("must not acquire custody"),
+            &record,
+            60,
+            &call,
+        );
+        assert!(
+            matches!(result, Err(HandOff::Boundary { message, class: provenant_records::diagnostic::BoundaryClass::Authority, .. }) if message.contains("writer confinement"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancel_watch_forwards_a_stop_request_to_setup_within_a_fraction_of_a_second()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+        let id = request.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.record(id, &call)?;
+        let scope = RunStore::scope(&record);
+        let directory = store.attempt_dir(request.run_id, id, false)?;
+        // The launcher's setup token must not fire without a request.
+        let setup = CancelToken::new();
+        let watch = CancelWatch::start(directory.try_clone()?, scope, &setup, &cancel);
+        let real = provenant_core::ThreadPause;
+        let never = CancelToken::new();
+        provenant_core::Pause::wait(
+            &real,
+            provenant_core::DurationMicros::from_micros(250_000),
+            &never,
+        );
+        assert!(!setup.is_cancelled(), "no request, no setup cancel");
+        custody::request_stop(
+            directory,
+            scope,
+            provenant_core::ActorId::from_bytes([2; 16]),
+            provenant_supervisor::machine::StopReason::ExplicitCancellation,
+        )?;
+        // Two seconds at 10 ms steps: the watch polls every 100 ms.
+        for _ in 0..200 {
+            if setup.is_cancelled() {
+                break;
+            }
+            provenant_core::Pause::wait(
+                &real,
+                provenant_core::DurationMicros::from_micros(10_000),
+                &never,
+            );
+        }
+        assert!(setup.is_cancelled(), "setup was not cancelled");
+        assert!(
+            !cancel.is_cancelled(),
+            "the caller's own token is untouched"
+        );
+        drop(watch);
+        Ok(())
+    }
+
+    #[test]
     fn missing_priority_withdraws_acquired_custody()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -481,6 +928,12 @@ mod tests {
         );
         match result {
             Err(HandOff::Local(reason)) => assert!(reason.contains("lane priority"), "{reason}"),
+            Err(HandOff::Boundary { message, class, .. }) => {
+                panic!("unexpected {class:?} boundary: {message}")
+            }
+            Err(HandOff::Resource { message, fact }) => {
+                panic!("unexpected resource refusal {fact:?}: {message}")
+            }
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
@@ -520,6 +973,12 @@ mod tests {
             Err(HandOff::Protected(reason)) => assert!(reason.contains("fixture"), "{reason}"),
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
+            Err(HandOff::Boundary { message, class, .. }) => {
+                panic!("unexpected {class:?} boundary: {message}")
+            }
+            Err(HandOff::Resource { message, fact }) => {
+                panic!("unexpected resource refusal {fact:?}: {message}")
+            }
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
@@ -556,6 +1015,12 @@ mod tests {
             }
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
+            Err(HandOff::Boundary { message, class, .. }) => {
+                panic!("unexpected {class:?} boundary: {message}")
+            }
+            Err(HandOff::Resource { message, fact }) => {
+                panic!("unexpected resource refusal {fact:?}: {message}")
+            }
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }

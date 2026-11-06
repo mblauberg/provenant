@@ -660,6 +660,24 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
         "effect": "Maximum prompt bytes passed directly to argv adapters. Larger top-level prompts spill to an attempt-owned file; nested attempts refuse rather than use a parent-writable spill. The overall 1 MiB prompt bound and operating-system argument limits still apply.",
         "type": "int"
       },
+      "continuation_copy_depth": {
+        "allowed": "1 to 4294967295 directories",
+        "default": "32",
+        "effect": "Maximum directory depth searched or copied from retained provider state for a continuation. Raising it does not relax credential, hard-link, filesystem or worktree-overlap guards.",
+        "type": "int"
+      },
+      "continuation_copy_entries": {
+        "allowed": "1 to 4294967295 entries",
+        "default": "100000",
+        "effect": "Maximum entries searched or copied from retained provider state for a continuation. Refusals report the setting and source; raise it or reduce state before retrying.",
+        "type": "int"
+      },
+      "continuation_copy_limit_bytes": {
+        "allowed": "1 or more bytes",
+        "default": "4294967296",
+        "effect": "Maximum retained provider state bytes copied into a continuation. Available disk space may lower the effective copy budget. Refusals report the setting and source; raise it or reduce state before retrying.",
+        "type": "int"
+      },
       "grant_limit": {
         "allowed": "1 or more",
         "default": "128",

@@ -15,6 +15,11 @@ boundary = "lane_git"
 reason = "A second link to a Git control file could permit writes through another name."
 
 [[guard]]
+site = "confinement/src/permissions/validation.rs#verify_git_control_links"
+boundary = "object_integrity"
+reason = "An incomplete control-directory scan cannot establish that protected Git files have no extra hard links."
+
+[[guard]]
 site = "confinement/src/permissions/validation.rs#refuses_lane_root"
 boundary = "credentials"
 reason = "A lane root must not expose credential stores."
@@ -28,17 +33,20 @@ reason = "Unreadable or invalid resource settings warn and use the compiled doma
 site = "confinement/src/permissions/validation.rs#validate_plan_grant_limit"
 boundary = "configurable_default"
 setting = "domains.run.grant_limit"
+code = "CONFINEMENT"
 reason = "Bounds plan grant counts; the refusal names the effective setting, limit and host or compiled origin."
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#render_with_limit"
 boundary = "configurable_default"
 setting = "domains.run.profile_limit_bytes"
+code = "CONFINEMENT"
 reason = "Bounds rendered sandbox profile size; the refusal identifies the effective setting and its host or compiled origin."
 
 [[guard]]
 site = "providers/src/contract.rs#Prompt::check_argv"
 boundary = "configurable_default"
+code = "INVALID"
 setting = "domains.run.argv_prompt_limit_bytes"
 reason = "The argv prompt byte threshold defaults to 65536 and can be overridden; top-level launches spill above it."
 
@@ -51,6 +59,26 @@ reason = "Nested argv prompts above the threshold cannot spill to a parent-writa
 site = "providers/src/contract.rs#Continuation::validate"
 boundary = "authority"
 reason = "A continuation must match its recorded route and grant identity."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#continuation_request"
+boundary = "authority"
+reason = "A continuation must resolve the provider and model actually applied to its prior attempt."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#continuation_for"
+boundary = "authority"
+reason = "A continuation requires its recorded session, applied route and account identity and must match the selected route."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "object_integrity"
+reason = "Hard-linked retained state cannot be copied as an independent history object."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "authority"
+reason = "Retained state copying must remain on the anchored filesystem."
 
 [[guard]]
 site = "run/src/launch.rs#child_access_within_impl"
@@ -71,6 +99,7 @@ reason = "Applied write grant paths must be representable so continuation and ha
 site = "run/src/launch.rs#applied_write_grants"
 boundary = "configurable_default"
 setting = "domains.run.write_grant_limit_bytes"
+code = "LIMIT"
 reason = "The encoded applied write-grant ledger has a configurable default; refusal and receipt report the effective value and origin."
 
 [[guard]]
@@ -95,6 +124,16 @@ boundary = "object_integrity"
 reason = "Applied write grants cannot overlap the host-owned target seed store."
 
 [[guard]]
+site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+boundary = "authority"
+reason = "An adapter cannot be launched with capabilities or write access its declared model policy does not permit."
+
+[[guard]]
+site = "providers/src/lane.rs#LaunchSpec::configure_publishing"
+boundary = "authority"
+reason = "Publishing requires valid absolute paths before constructing its selected credential and Git wrappers."
+
+[[guard]]
 site = "cli/src/run/provider/preparation.rs#prepare_with"
 boundary = "credentials"
 reason = "Publishing policy must be read and its selected GitHub credential restrictions applied before publishing is enabled."
@@ -103,6 +142,7 @@ reason = "Publishing policy must be read and its selected GitHub credential rest
 site = "cli/src/run/provider/preparation.rs#prepare_writer_dependencies"
 boundary = "configurable_default"
 setting = "lanes.prepare_deps"
+code = "REFUSED"
 reason = "Automatic writer dependency preparation defaults on; a refusal reports the sealed profile or compiled default and can be disabled with this setting."
 
 [[guard]]
@@ -114,6 +154,7 @@ reason = "Unreadable or unrepresentable lane-port settings warn and leave the la
 site = "supervisor/src/guardian.rs#Driver::run"
 boundary = "configurable_default"
 setting = "domains.fabric.lanes.lane_port_blocks"
+code = "REFUSED"
 reason = "An exhausted port-block pool refuses the writer and reports the effective count, its host or compiled origin, and the setting that can raise the pool or disable allocation."
 
 [[guard]]
@@ -122,8 +163,30 @@ boundary = "warning"
 reason = "A port-block allocation I/O failure warns and continues without a block; stale port-block environment variables are removed."
 
 [[guard]]
+site = "routing/src/resolve.rs#pacing_reserve_window"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.routing.pacing_reserve"
+reason = "An adapter reserve defaults to shipped values and can be configured; the refusal reports its effective percentage and source."
+
+[[guard]]
+site = "routing/src/resolve.rs#pacing_reserve_window"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.routing.pacing.accounts"
+reason = "An account pacing profile can override the reserve for its selected window."
+
+[[guard]]
+site = "routing/src/resolve.rs#pacing_reserve_window"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.routing.pacing.free"
+reason = "A free-pool pacing profile can override the reserve for its selected window."
+
+[[guard]]
 site = "run/src/launch.rs#Providers::check_policy"
 boundary = "configurable_default"
+code = "DISK_FLOOR"
 setting = "gc.free_floor"
 reason = "Writer launch may refuse when available storage remains below the configured free-space floor after collection."
 
@@ -159,9 +222,94 @@ boundary = "authority"
 reason = "If the stored prompt cannot be reopened, its bytes cannot be verified against the authorised task and no substitute prompt is launched."
 
 [[guard]]
-site = "run/src/launch.rs#start_inner"
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "authority"
+reason = "A child attempt must still belong to the validated request and cannot duplicate a child task when the host reads it for launch."
+
+[[guard]]
+site = "cli/src/run/provider/preparation.rs#check_graph_inputs_root"
+boundary = "authority"
+reason = "A graph-bound task may receive only its own node's input directory, without a redirected path."
+
+[[guard]]
+site = "cli/src/run/provider/confinement.rs#source_cwd"
+boundary = "authority"
+reason = "The selected graph source must remain a permitted registered checkout with the recorded identity."
+
+[[guard]]
+site = "cli/src/run/provider/confinement.rs#require_source_head"
+boundary = "authority"
+reason = "A pinned graph source must have a valid recorded head and must not move before preparation."
+
+[[guard]]
+site = "cli/src/run/provider/confinement.rs#read_only_plan"
+boundary = "authority"
+reason = "Read-only plans require the selected project binding and a Git repository when the source is pinned."
+
+[[guard]]
+site = "cli/src/run/provider/source_tree.rs#ensure_source_roots"
+boundary = "authority"
+reason = "Access and asset grants cannot reopen the live checkout beside the selected pinned source view."
+
+[[guard]]
+site = "cli/src/run/provider/source_tree.rs#ensure_profile_isolated"
+boundary = "authority"
+reason = "Provider grants cannot reopen the live checkout beside the selected pinned source view."
+
+[[guard]]
+site = "cli/src/run/provider/source_tree.rs#ensure_view_read_only"
+boundary = "authority"
+reason = "Provider writes cannot modify the immutable source view supplied to the task."
+
+[[guard]]
+site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+boundary = "authority"
+reason = "A writer continuation cannot take over a predecessor's worktree while its edits are uncommitted."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "lane_git"
+reason = "A retained writer import keeps its worktree fenced until the protected Git state is reconciled."
+
+[[guard]]
+site = "run/src/writer.rs#WriterLaunch::snapshot"
+boundary = "lane_git"
+reason = "The writer HEAD must match the selected lane branch before protected Git state is captured."
+
+[[guard]]
+site = "run/src/writer.rs#WriterLaunch::require_continuation_source"
+boundary = "lane_git"
+reason = "The selected source and continuation head must match the pinned commit and its ancestry before the writer is launched."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "authority"
+reason = "A handoff must use the selected worktree and held custody binding; fenced, unknown, invalid or unconfirmed custody cannot be granted to another attempt."
+
+[[guard]]
+site = "supervisor/src/custody.rs#PublicationReservation::prepare"
+boundary = "authority"
+reason = "Existing launch or exit evidence fences an attempt against a second execution."
+
+[[guard]]
+site = "run/src/controls.rs#RunStore::check_writer_lineage"
+boundary = "authority"
+reason = "A continuation must retain its recorded worktree ownership and cannot take custody from a nonterminal predecessor."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "authority"
+reason = "A writer continuation cannot discard uncommitted predecessor edits, and an attempt changed after custody acquisition cannot be handed off."
+
+[[guard]]
+site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "unclassified"
-reason = "Remaining policy, provider preparation and handoff refusals need caller-specific classification."
+reason = "Untyped candidate failures remain combined in RefusalKind::Preparation. Typed per-candidate guard facts survive mixed fallback, but operational and other untyped failures still need classification."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "unclassified"
+reason = "HandOff::Local still combines operational setup failures with custody and Git checks that do not yet carry a boundary cause. Typed confinement command failures preserve their boundary."
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"
@@ -185,8 +333,8 @@ reason = "Agy's selected home source and private destinations must not overlap s
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"
-boundary = "unclassified"
-reason = "Invalid path shapes and remaining overlapping roots need classification or a tolerant fallback."
+boundary = "authority"
+reason = "Required roots must be representable and disjoint so the selected grant and private state can be enforced."
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#compile_sbpl"
@@ -210,8 +358,8 @@ reason = "Held grant anchors are verified before and after rendering so replaced
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#compile_sbpl"
-boundary = "unclassified"
-reason = "Remaining missing anchors and path failures need classification or a tolerant fallback."
+boundary = "authority"
+reason = "Required anchors must be present and resolvable to enforce the selected grants."
 
 [[guard]]
 site = "providers/src/launch.rs#filter_optional_grants"
@@ -230,8 +378,8 @@ reason = "A configured optional project path whose canonical target cannot be re
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#sbpl_path"
-boundary = "unclassified"
-reason = "Non-UTF-8 paths and unsupported control characters cannot be encoded in SBPL; remaining required path cases need classification while optional discoveries warn and are omitted."
+boundary = "authority"
+reason = "Required paths must be encoded losslessly to enforce the requested permissions; optional discoveries warn and are omitted."
 
 [[guard]]
 site = "confinement/src/permissions/probe.rs#system_backend"
@@ -275,8 +423,8 @@ reason = "The complete alternates declaration must be inspected before protected
 
 [[guard]]
 site = "confinement/src/repo.rs#RepoError"
-boundary = "unclassified"
-reason = "Remaining repository opening, metadata bounds and filesystem failures require caller-specific classification."
+boundary = "lane_git"
+reason = "Repository opening and complete metadata reads are prerequisites for establishing the selected worktree and its Git authority."
 
 [[guard]]
 site = "providers/src/opencode.rs#prepare"
@@ -325,8 +473,8 @@ reason = "A configured command must have non-empty argv and an absolute host-res
 
 [[guard]]
 site = "providers/src/command.rs#prepare"
-boundary = "unclassified"
-reason = "Writer capability still refuses preparation; capability eligibility is tracked separately."
+boundary = "authority"
+reason = "The command adapter only implements read-only access and cannot claim writer authority."
 
 [[guard]]
 site = "providers/src/cursor.rs#prepare"
@@ -397,6 +545,7 @@ reason = "Request digest and host-owned retry checks bind launch to the validate
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
 boundary = "configurable_default"
 setting = "domains.run.grant_limit"
+code = "CONFINEMENT"
 reason = "Profile family counts use the configured grant limit and name its origin in a refusal; authentication and native controls preserve historical minimum caps of 16 and 64."
 
 [[guard]]
@@ -431,8 +580,8 @@ reason = "Malformed or unrepresentable discovery-only reads are omitted before a
 
 [[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
-boundary = "unclassified"
-reason = "Remaining malformed profile paths require caller-specific classification or a tolerant fallback."
+boundary = "authority"
+reason = "Required profile paths must be representable and valid to enforce the selected permission policy."
 
 [[guard]]
 site = "providers/src/launch.rs#admit"
@@ -513,3 +662,166 @@ reason = "Child attempts must be host-derived members of the validated request."
 site = "run/src/launch.rs#RunStore::validate_child"
 boundary = "authority"
 reason = "Child parent, depth, attempts and permitted delegation must match host authority."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "authority"
+code = "GUARDIAN_IDENTITY"
+reason = "A guardian and store identity are required to bind a lease to its owner and preserve custody when the host later recovers it."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "DISK_FLOOR"
+setting = "gc.free_floor"
+reason = "The effective disk floor is configured or shipped; its source and value accompany the refusal."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "MEMORY_PRESSURE"
+setting = "domains.fabric.lanes.memory_pressure_threshold"
+reason = "The effective pressure threshold is configured or shipped; its source and value accompany the refusal."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_project_writer_lanes"
+reason = "The applicable host or project cap is configured or shipped; the refusal names its setting, source and value."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_writer_lanes"
+reason = "The host writer cap is configured or shipped and its source and value accompany the refusal."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_lanes"
+reason = "The host lane cap is configured or shipped and its source and value accompany the refusal."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_project_lanes"
+reason = "The project lane cap is configured or shipped and its source and value accompany the refusal."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "HOST_PROCESSES"
+setting = "operating system RLIMIT_NPROC"
+reason = "The operating system's per-user soft process limit is adjustable; the refusal identifies the limit and shipped reserved headroom."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "DISK_FLOOR"
+setting = "gc.free_floor"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "MEMORY_PRESSURE"
+setting = "domains.fabric.lanes.memory_pressure_threshold"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_project_writer_lanes"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_writer_lanes"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_lanes"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_project_lanes"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "HOST_PROCESSES"
+setting = "operating system RLIMIT_NPROC"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+# The three copy budgets are resource policy. They do not relax the anchored
+# filesystem, hard-link, credential, state-root or worktree-overlap guards.
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.run.continuation_copy_limit_bytes"
+reason = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.run.continuation_copy_entries"
+reason = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.run.continuation_copy_depth"
+reason = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#StateCopyPolicy::read"
+boundary = "warning"
+reason = "Unavailable or invalid copy budget settings warn and use compiled defaults."
+
+[[guard]]
+site = "cli/src/run/provider/observation.rs#launch_prompt"
+boundary = "warning"
+code = "INVALID"
+reason = "Host-added preambles and graph inputs exceeding 1 MiB warn with the safe shortening action; raw caller prompts retain their admission bound."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#find_session_state_within"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.run.continuation_copy_entries"
+reason = "An unfinished session search reports its exhausted configurable budget and host source rather than claiming the session is missing."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#find_session_state_within"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.run.continuation_copy_depth"
+reason = "An unfinished session search reports its exhausted configurable budget and host source rather than claiming the session is missing."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "authority"
+reason = "The retained state root must remain an anchored directory; symlinks, non-directories and changed roots remain refused at every copy budget."
+
+[[guard]]
+site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+boundary = "object_integrity"
+reason = "The raw prompt must fit RECORD_LIMIT, the same bound reader::validate_attempt applies to its recorded prompt artifact, before host preambles are added."

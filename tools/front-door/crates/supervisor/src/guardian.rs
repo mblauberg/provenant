@@ -671,14 +671,21 @@ impl provenant_os::capture::DecodedEventSink for Events {
         Ok(())
     }
 }
-/// Only typed numeric disk observations and the fixed clock failure are
-/// published. Arbitrary admission errors never expose paths or source text.
-fn admission_refusal(error: &CustodyError) -> String {
-    match error {
-        CustodyError::Admission(_) => error.to_string(),
-        _ => "admission refused".into(),
+#[derive(Debug, thiserror::Error)]
+#[error("no free lane port block; domains.fabric.lanes.lane_port_blocks={blocks} ({}); raise or disable this setting", match origin { provenant_records::diagnostic::PortSettingSource::Configuration => "host configuration", provenant_records::diagnostic::PortSettingSource::ShippedDefault => "compiled default", provenant_records::diagnostic::PortSettingSource::RecordedPlan => "recorded plan" })]
+struct LanePortRefusal {
+    blocks: u32,
+    origin: provenant_records::diagnostic::PortSettingSource,
+}
+impl LanePortRefusal {
+    fn fact(&self) -> provenant_records::diagnostic::ResourceFact {
+        provenant_records::diagnostic::ResourceFact::LanePorts {
+            blocks: self.blocks,
+            origin: self.origin,
+        }
     }
 }
+
 fn lane_port_allocation(
     plan: Option<&provenant_os::lane_ports::Plan>,
 ) -> std::result::Result<
@@ -686,7 +693,7 @@ fn lane_port_allocation(
         Option<provenant_os::lane_ports::Lease>,
         Option<&'static str>,
     ),
-    String,
+    LanePortRefusal,
 > {
     let Some(plan) = plan else {
         return Ok((None, None));
@@ -694,15 +701,20 @@ fn lane_port_allocation(
     match plan.try_acquire() {
         Ok(Some(lease)) => Ok((Some(lease), None)),
         Ok(None) => {
+            use provenant_records::diagnostic::PortSettingSource;
             let origin = match plan.blocks_origin {
-                Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => "compiled default",
-                Some(provenant_os::lane_ports::BlocksOrigin::HostConfig) => "host configuration",
-                None => "recorded plan",
+                Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => {
+                    PortSettingSource::ShippedDefault
+                }
+                Some(provenant_os::lane_ports::BlocksOrigin::HostConfig) => {
+                    PortSettingSource::Configuration
+                }
+                None => PortSettingSource::RecordedPlan,
             };
-            Err(format!(
-                "no free lane port block; domains.fabric.lanes.lane_port_blocks={} ({origin}); raise or disable this setting",
-                plan.blocks
-            ))
+            Err(LanePortRefusal {
+                blocks: plan.blocks,
+                origin,
+            })
         }
         Err(_) => Ok((
             None,
@@ -780,13 +792,16 @@ impl Driver<'_> {
         if let Some(holder) = self.holder
             && let Err(error) = holder.admit(&self.holder_context, &self.attempt)
         {
-            return self.never_spawned(&admission_refusal(&error));
+            return self.publish_never_spawned(ProcessExit::admission_refused(
+                self.reservation.scope,
+                &error,
+            ));
         }
         // Held until this function returns, which is after the provider and
         // its descendants are settled; the kernel drops it if we die first.
         let (ports, port_warning) = match lane_port_allocation(self.lane_ports.as_ref()) {
             Ok(result) => result,
-            Err(reason) => return self.never_spawned(&reason),
+            Err(reason) => return self.never_spawned(&reason.to_string(), Some(reason.fact())),
         };
         if let Some(warning) = port_warning {
             warn(&mut warnings, &mut omitted_warnings, warning);
@@ -838,11 +853,14 @@ impl Driver<'_> {
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(error) => {
-                return self.never_spawned(if error.kind() == io::ErrorKind::InvalidData {
-                    "provider executable snapshot changed"
-                } else {
-                    "provider spawn failed"
-                });
+                return self.never_spawned(
+                    if error.kind() == io::ErrorKind::InvalidData {
+                        "provider executable snapshot changed"
+                    } else {
+                        "provider spawn failed"
+                    },
+                    None,
+                );
             }
         };
         if let Some(error) = child.priority_error {
@@ -1674,6 +1692,7 @@ impl Driver<'_> {
             scope: self.reservation.scope,
             termination: exit,
             never_spawned: false,
+            launch_refusal: None,
             priority: child.priority,
             stop_reason,
             cancel_delivered_before_exit: Some(cancel_delivered_before_exit),
@@ -1860,7 +1879,17 @@ impl Driver<'_> {
     /// the attempt directory is provably removed there is no exit to publish
     /// and no terminal settlement to attempt; the refusal stays in the writer
     /// reservation for recovery.
-    fn never_spawned(&mut self, warning: &str) -> Result<()> {
+    fn never_spawned(
+        &mut self,
+        warning: &str,
+        launch_refusal: Option<provenant_records::diagnostic::ResourceFact>,
+    ) -> Result<()> {
+        let mut record =
+            ProcessExit::never_spawned(self.reservation.scope, None, vec![warning.into()]);
+        record.launch_refusal = launch_refusal;
+        self.publish_never_spawned(record)
+    }
+    fn publish_never_spawned(&mut self, record: ProcessExit) -> Result<()> {
         self.reservation.launch_state = LaunchState::NeverSpawned;
         self.reservation.unresolved_cleanup = false;
         self.reservation.census_incomplete = false;
@@ -1872,7 +1901,6 @@ impl Driver<'_> {
             &self.reservation,
             PublishMode::Replace,
         )?)?;
-        let record = ProcessExit::never_spawned(self.reservation.scope, None, vec![warning.into()]);
         // A provably removed attempt has nowhere to publish the refusal, so
         // skip release too: the durable reservation above is the evidence.
         if self.publish_until_durable(&record, &mut State::never_spawned())? {

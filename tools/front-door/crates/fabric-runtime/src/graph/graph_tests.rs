@@ -10217,7 +10217,7 @@ fn an_unobserved_writer_disk_check_is_a_retryable_launch_error() {
 }
 
 #[test]
-fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
+fn host_delivery_limit_reaches_graph_status_without_exposing_io_sources() {
     let fact = provenant_records::diagnostic::DeliveryLimit::new(
         provenant_records::run::WriterDeliveryStage::Prepare,
         "git",
@@ -10226,13 +10226,22 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     )
     .unwrap();
     let reason = fact.detail();
-    let error = || crate::coordination::facade::FacadeError::Io {
-        operation: "TOKEN_SENTINEL".into(),
-        path: Some("/private/host".into()),
-        delivery_stage: Some(provenant_records::run::WriterDeliveryStage::Prepare),
-        resource: None,
-        input_failure: None,
-        delivery_limit: Some(fact.clone()),
+    let error = || {
+        // Exercise the envelope consumed by a peer launch owner, including
+        // source text that is not an approved diagnostic fact.
+        let mut wire = serde_json::to_value(crate::coordination::facade::FacadeError::Io {
+            operation: "host delivery".into(),
+            path: None,
+            delivery_limit: Some(fact.clone()),
+            delivery_stage: None,
+            resource: None,
+            input_failure: None,
+        })
+        .unwrap();
+        assert_eq!(wire["code"], "io");
+        wire["operation"] = "TOKEN_SENTINEL\u{1b}".into();
+        wire["path"] = "/private/host".into();
+        serde_json::from_value::<crate::coordination::facade::FacadeError>(wire).unwrap()
     };
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
@@ -10270,6 +10279,42 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     assert!(!text.contains("host capacity"));
     assert!(!text.contains("TOKEN_SENTINEL"));
     assert!(!text.contains("/private/host"));
+    let stored = serde_json::to_string(journal.0.as_ref().unwrap()).unwrap();
+    let restored: GraphCheckpoint = serde_json::from_str(&stored).unwrap();
+    assert_eq!(restored.nodes[0].advance_error.as_deref(), Some(text));
+    assert!(!stored.contains("TOKEN_SENTINEL"));
+    assert!(!stored.contains("/private/host"));
+
+    // Generic I/O retains its established code without inheriting the safe
+    // command exception merely because its untrusted source mentions a limit.
+    let generic = crate::coordination::facade::FacadeError::Io {
+        operation: format!("TOKEN_SENTINEL\u{1b} {reason}"),
+        path: Some("/private/host".into()),
+        delivery_stage: None,
+        resource: None,
+        input_failure: None,
+        delivery_limit: None,
+    };
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, generic)].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let reason = retry_of(journal.0.as_ref().unwrap())
+        .reason
+        .as_deref()
+        .unwrap();
+    assert!(reason.contains("[io]"));
+    for unsafe_detail in [
+        "TOKEN_SENTINEL",
+        "/private/host",
+        "git worktree list",
+        "8388608",
+    ] {
+        assert!(!reason.contains(unsafe_detail), "{reason}");
+    }
 }
 
 #[test]
@@ -10390,6 +10435,40 @@ fn launch_wake_is_capped_by_the_original_deadline() {
     let ended = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(ended.checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+fn nonterminal_observation_transitions_need_no_owner_or_journal() {
+    let mut attempt = GraphAttempt {
+        extra: Default::default(),
+        review_substitution: false,
+        key: AttemptKey {
+            extra: Default::default(),
+            graph_id: "g".into(),
+            node_id: "n".into(),
+            route_index: 0,
+        },
+        route: route("first"),
+        state: AttemptState::Starting,
+        attempt_ref: None,
+        outcome: None,
+        launched: true,
+        launch_actor: "actor".into(),
+        settled: 0,
+        input_cap: None,
+        input_cap_source: None,
+        input_manifest: None,
+        usage: None,
+    };
+    let mut state = NodeState::Pending;
+    apply_unknown_observation(&mut attempt, &mut state, None);
+    assert_eq!(attempt.state, AttemptState::Unresolved);
+    assert_eq!(state, NodeState::Running);
+    apply_pending_observation(&mut attempt, &mut state, Some("host/1".into()));
+    assert_eq!(attempt.state, AttemptState::Running);
+    assert_eq!(attempt.attempt_ref.as_deref(), Some("host/1"));
+    assert_eq!(state, NodeState::Running);
+    assert_eq!(attempt.key.route_index, 0);
 }
 
 #[test]

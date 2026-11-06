@@ -2512,6 +2512,7 @@ fn past_deadline_account_stands_by_for_an_available_account()
 #[test]
 fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::{QuotaStatus, QuotaWindow};
+    use provenant_records::diagnostic::PacingReserveSetting;
     let catalogue = Catalogue::bundled()?;
     let registry = [provenant_providers::codex::REGISTRATION];
     let availability = [availability()];
@@ -2526,16 +2527,19 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
         used_basis_points: used,
         resets_unix_seconds: Some(100 + remaining),
     };
-    for (windows, excluded) in [
-        (vec![window(18_000, 9_000, 9_000)], true),
+    for (windows, expected_setting) in [
+        (
+            vec![window(18_000, 9_000, 9_000)],
+            Some(PacingReserveSetting::AdapterFiveHour),
+        ),
         (
             vec![
                 window(18_000, 1_000, 9_000),
                 window(604_800, 9_500, 302_400),
             ],
-            true,
+            Some(PacingReserveSetting::AdapterSevenDay),
         ),
-        (vec![window(18_000, 5_000, 9_000)], false),
+        (vec![window(18_000, 5_000, 9_000)], None),
     ] {
         for policy in ["pace", "spend", "max"] {
             let config: RoutingConfig =
@@ -2558,14 +2562,24 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
             let route = resolve(&request("codex/test")?, &ctx)?;
             assert_eq!(
                 reason(&route) == Some(&RouteExclusionReason::PacingReserve),
-                excluded && policy == "pace"
+                expected_setting.is_some() && policy == "pace"
             );
-            if excluded && policy == "pace" {
+            if expected_setting.is_some() && policy == "pace" {
                 assert_eq!(
                     route.exclusions[0].reason,
                     RouteExclusionReason::PacingReserve
                 );
                 assert!(serde_json::to_string(&route)?.contains("pacing_reserve"));
+                let fact: provenant_records::diagnostic::ResourceFact =
+                    serde_json::from_value(route.extra["pacing_reserve_fact"].clone())?;
+                assert!(matches!(
+                    fact,
+                    provenant_records::diagnostic::ResourceFact::PacingReserve {
+                        setting,
+                        origin: provenant_records::diagnostic::PacingSettingSource::ShippedDefault,
+                        ..
+                    } if Some(setting) == expected_setting
+                ));
             }
         }
     }
@@ -2589,6 +2603,38 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
     ctx.access = &access;
     ctx.quota = &observations;
     assert!(reason(&resolve(&request("codex/test")?, &ctx)?).is_none());
+    for (configuration, expected_setting, expected_origin, expected_percent) in [
+        (
+            serde_json::json!({"pacing": {"codex": "pace"}, "pacing_reserve": {"codex": {"five_hour_percent": 20}}}),
+            provenant_records::diagnostic::PacingReserveSetting::AdapterFiveHour,
+            provenant_records::diagnostic::PacingSettingSource::Unresolved,
+            20,
+        ),
+        (
+            serde_json::json!({"pacing": {"accounts": {"opaque-account": {"policy": "pace", "reserve": {"five_hour": 25}}}}}),
+            provenant_records::diagnostic::PacingReserveSetting::Account,
+            provenant_records::diagnostic::PacingSettingSource::Configuration,
+            25,
+        ),
+    ] {
+        let config: RoutingConfig = serde_json::from_value(configuration)?;
+        let mut ctx = context(&catalogue, &config, now()?);
+        ctx.registry = &registry;
+        ctx.availability = &availability;
+        ctx.access = &access;
+        ctx.quota = &observations;
+        let route = resolve(&request("codex/test")?, &ctx)?;
+        let fact: provenant_records::diagnostic::ResourceFact =
+            serde_json::from_value(route.extra["pacing_reserve_fact"].clone())?;
+        assert_eq!(
+            fact,
+            provenant_records::diagnostic::ResourceFact::PacingReserve {
+                percent: expected_percent,
+                setting: expected_setting,
+                origin: expected_origin
+            }
+        );
+    }
     let invalid: RoutingConfig = serde_json::from_value(serde_json::json!({
         "pacing_reserve": {"codex": {"five_hour_percent": 101}}
     }))?;

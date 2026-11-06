@@ -1746,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn git_discovery_ignores_host_config_in_both_access_modes() {
+    fn git_discovery_preserves_writer_config_and_isolates_reader() {
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
@@ -1760,17 +1760,25 @@ mod tests {
                     None,
                 ))
                 .unwrap();
-            for (key, value) in [
-                ("GIT_CONFIG_GLOBAL", "/dev/null"),
-                ("GIT_CONFIG_NOSYSTEM", "1"),
-            ] {
-                let actual = spec.env.iter().find(|(name, _)| name == key);
-                assert_eq!(
-                    actual.map(|(_, value)| value.as_os_str()),
-                    Some(value.as_ref()),
-                    "{access:?} {key}"
-                );
-            }
+            let global = spec
+                .env
+                .iter()
+                .find(|(name, _)| name == "GIT_CONFIG_GLOBAL");
+            let expected = if access == Access::WorktreeWrite {
+                "/fixture/scratch/gitconfig"
+            } else {
+                "/dev/null"
+            };
+            assert_eq!(
+                global.map(|(_, value)| value.as_os_str()),
+                Some(expected.as_ref())
+            );
+            assert_eq!(
+                spec.env
+                    .iter()
+                    .any(|(name, _)| name == "GIT_CONFIG_NOSYSTEM"),
+                access == Access::ReadOnly
+            );
         }
     }
 

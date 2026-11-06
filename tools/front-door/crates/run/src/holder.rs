@@ -960,7 +960,8 @@ impl RunStore {
                         ..
                     } => Ok((*host).clone()),
                     _ => {
-                        let host = crate::HostDeliveryContext::capture();
+                        let host = crate::HostDeliveryContext::capture()
+                            .with_repo_facts(self.repo_facts());
                         let evidence = [
                             "delivery.json",
                             "delivery-started.json",
@@ -1004,7 +1005,7 @@ impl RunStore {
                         &cancel,
                         || {
                             crate::delivery::deliver_once(
-                                &host.cancellable(&cancel),
+                                &host.with_repo_facts(self.repo_facts()).cancellable(&cancel),
                                 writer,
                                 delivery,
                                 attempt,
@@ -1765,7 +1766,21 @@ impl RunStore {
                 });
             }
         }
-        let mut terminal_note = None;
+        let mut terminal_note = if exit.never_spawned && !cancelled {
+            exit.launch_refusal.map(|fact| {
+                let diagnostic = fact.project(provenant_records::diagnostic::Diagnostic::new(
+                    ErrorKind::Refused.code(),
+                ));
+                match (diagnostic.detail, diagnostic.next) {
+                    (Some(detail), Some(next)) => format!("{detail}; {next}"),
+                    (Some(detail), None) => detail,
+                    (None, Some(next)) => next,
+                    (None, None) => String::new(),
+                }
+            })
+        } else {
+            None
+        };
         let frozen_policy = self.staged_policy_retry(&record)?;
         let frozen_policy_retry = frozen_policy
             .as_ref()

@@ -8,7 +8,7 @@ use provenant_confinement::redact::Redactor;
 use provenant_confinement::repo::GitRefName;
 use provenant_core::GitOid;
 use provenant_os::{
-    exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
+    exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,8 @@ pub struct HostDeliveryContext {
     lane_roots: Vec<PathBuf>,
     #[serde(skip)]
     cancellation: Option<provenant_core::CancelToken>,
+    #[serde(skip)]
+    facts: provenant_confinement::worktrees::RepoFacts,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BoundDelivery {
@@ -122,6 +124,7 @@ impl Clone for HostDeliveryContext {
             bound: self.bound.clone(),
             lane_roots: self.lane_roots.clone(),
             cancellation: self.cancellation.clone(),
+            facts: self.facts.clone(),
         }
     }
 }
@@ -205,6 +208,11 @@ impl HostDeliveryContext {
         context.cancellation = Some(cancel.clone());
         context
     }
+    /// Share the command-scoped repository fact limits with host delivery.
+    pub fn with_repo_facts(mut self, facts: &provenant_confinement::worktrees::RepoFacts) -> Self {
+        self.facts = facts.clone();
+        self
+    }
     /// Integration authority never includes the default or primary checkout ref.
     pub fn validate_integration_target(project: &Path, target: &str) -> Result<()> {
         let branch = target.strip_prefix("origin/").unwrap_or(target);
@@ -212,27 +220,36 @@ impl HostDeliveryContext {
     }
     /// A publication ref is distinct from a PR's base, which may be protected.
     pub fn check_delivery_branch(project: &Path, target: &str) -> Result<()> {
+        Self::capture().check_delivery_branch_with_facts(project, target)
+    }
+
+    pub fn check_delivery_branch_with_facts(&self, project: &Path, target: &str) -> Result<()> {
         let writer = WriterRequest {
             extra: Default::default(),
             project: project.into(),
             worktree: project.into(),
         };
-        let mut host = Self::capture();
+        let mut host = self.clone();
         host.host_environment(&writer)?;
         host.tools = Some(HostTools {
             git: host.executable("git", &writer)?,
             gh: None,
         });
-        host.refuse_protected_target(&writer, target)
+        host.refuse_protected_target(&writer, target, Stage::Prepare)
     }
 
-    fn refuse_protected_target(&self, writer: &WriterRequest, target: &str) -> Result<()> {
+    fn refuse_protected_target(
+        &self,
+        writer: &WriterRequest,
+        target: &str,
+        stage: Stage,
+    ) -> Result<()> {
         if !self
             .command(
                 &writer.worktree,
                 "git",
                 &["symbolic-ref", "--quiet", &format!("refs/heads/{target}")],
-                Stage::Prepare,
+                stage,
             )?
             .is_empty()
         {
@@ -241,7 +258,7 @@ impl HostDeliveryContext {
                 "symbolic branch targets are refused",
             ));
         }
-        let remotes = self.command(&writer.worktree, "git", &["remote"], Stage::Prepare)?;
+        let remotes = self.command(&writer.worktree, "git", &["remote"], stage)?;
         let mut has_default = false;
         let mut protected_default = false;
         for remote in remotes.lines() {
@@ -253,7 +270,7 @@ impl HostDeliveryContext {
                     "--quiet",
                     &format!("refs/remotes/{remote}/HEAD"),
                 ],
-                Stage::Prepare,
+                stage,
             )?;
             if let Some(branch) = default.strip_prefix(&format!("refs/remotes/{remote}/")) {
                 has_default = true;
@@ -265,7 +282,7 @@ impl HostDeliveryContext {
             &writer.worktree,
             "git",
             &["worktree", "list", "--porcelain"],
-            Stage::Prepare,
+            stage,
         )?;
         let primary_branch = trees
             .split("\n\n")
@@ -312,7 +329,8 @@ impl HostDeliveryContext {
         base: GitOid,
         body: &str,
     ) -> Result<String> {
-        Self::validate_integration_target(project, branch)?;
+        let target = branch.strip_prefix("origin/").unwrap_or(branch);
+        self.check_delivery_branch_with_facts(project, target)?;
         let local = !branch.starts_with("origin/");
         let source = if let Some(branch) = branch.strip_prefix("origin/") {
             format!("refs/remotes/origin/{branch}")
@@ -353,7 +371,7 @@ impl HostDeliveryContext {
             None
         };
         let branch = publication.as_deref().unwrap_or(branch);
-        host.refuse_protected_target(&writer, branch)?;
+        host.refuse_protected_target(&writer, branch, Stage::Push)?;
         let reference = format!("refs/heads/{branch}");
         if local {
             host.refuse_remote_symbolic_target(project, &bound.push_url, branch, Stage::Push)?;
@@ -524,6 +542,7 @@ impl HostDeliveryContext {
             tools: None,
             lane_roots: Vec::new(),
             cancellation: None,
+            facts: Default::default(),
         }
     }
     /// Preserve normal host credential/config discovery without Git's ambient
@@ -600,7 +619,7 @@ impl HostDeliveryContext {
         };
         self.tools = Some(HostTools { git, gh });
         let common_git_dir = self.trusted_common_git_dir(writer, stage)?;
-        self.refuse_protected_target(writer, &request.branch)?;
+        self.refuse_protected_target(writer, &request.branch, stage)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
                 &writer.worktree,
@@ -717,8 +736,9 @@ impl HostDeliveryContext {
         writer: &WriterRequest,
         git_dir: &Path,
         cancel: &provenant_core::CancelToken,
+        facts: &provenant_confinement::worktrees::RepoFacts,
     ) -> Result<()> {
-        let mut host = Self::capture();
+        let mut host = Self::capture().with_repo_facts(facts);
         host.cancellation = Some(cancel.clone());
         host.refresh_origin_with(writer, git_dir)
     }
@@ -1144,6 +1164,29 @@ impl HostDeliveryContext {
         stage: Stage,
         input: &[u8],
     ) -> Result<String> {
+        // Delivery may run after another worktree checks out the destination.
+        // Reuse listings only for preparation; mutation checks need fresh facts.
+        if stage == Stage::Prepare && tool == "git" && git_subcommand(args) == "worktree list" {
+            let bytes = self.facts.cached_worktree_listing(cwd, || {
+                self.command_with_input_uncached(cwd, tool, args, stage, input)
+                    .map(String::into_bytes)
+            })?;
+            return String::from_utf8(bytes).map_err(|_| RunError::DeliveryFact {
+                stage,
+                source: provenant_confinement::worktrees::WorktreeError::InvalidOutput,
+            });
+        }
+        self.command_with_input_uncached(cwd, tool, args, stage, input)
+    }
+
+    fn command_with_input_uncached(
+        &self,
+        cwd: &Path,
+        tool: &str,
+        args: &[&str],
+        stage: Stage,
+        input: &[u8],
+    ) -> Result<String> {
         let failure = |reason: String| {
             if stage == Stage::Prepare {
                 let step = match args.first().copied() {
@@ -1238,7 +1281,11 @@ impl HostDeliveryContext {
         options.env = Some(&environment);
         options.stdin = Some(input);
         let commit_log = tool == "git" && args.first() == Some(&"log");
-        let limit = stdout_limit(commit_log, args);
+        let limit = if tool == "git" && provenant_os::git::fact_capture_limit(args, 0) != 0 {
+            provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+        } else {
+            stdout_limit(commit_log, args)
+        };
         options.stdout = StreamPolicy::Capture { limit };
         options.stop_on_output_limit = commit_log;
         options.stderr = if stage == Stage::Prepare {
@@ -1249,9 +1296,32 @@ impl HostDeliveryContext {
         options.stderr_filter = redactor
             .as_mut()
             .map(|redactor| redactor as &mut dyn provenant_os::exec::CaptureFilter);
-        let output = executor
-            .execute(options)
-            .map_err(|error| failure(format!("{}: {error}", executable.display())))?;
+        let cancel = provenant_core::CancelToken::new();
+        let output = self
+            .facts
+            .with_executor(
+                &executor,
+                self.cancellation.as_ref().unwrap_or(&cancel),
+                |executor| {
+                    executor
+                        .execute(options)
+                        .map_err(|error| failure(format!("{}: {error}", executable.display())))
+                },
+            )
+            .map_err(|error: RunError| match error {
+                RunError::Writer(provenant_confinement::worktrees::WorktreeError::Utility(
+                    provenant_confinement::utility::UtilityError::Truncated { stream: "stdout" },
+                )) if tool == "git" && git_subcommand(args) == "worktree list" => {
+                    RunError::DeliveryLimit {
+                        stage,
+                        tool: "git",
+                        command: "worktree list".into(),
+                        limit: self.facts.inventory_limit(),
+                    }
+                }
+                RunError::Writer(source) => RunError::DeliveryFact { stage, source },
+                other => other,
+            })?;
         let absent_helpers = args.starts_with(&["config", "--get-regexp"])
             && output.termination == Termination::Exit(1)
             && output.stdout.bytes.is_empty();
@@ -1427,14 +1497,26 @@ impl HostDeliveryContext {
             .ok_or_else(|| failure("host tools are unavailable".into()))?
             .git;
         let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
-        provenant_os::git::repository_path_with_cancel(
-            &executor,
-            git,
-            project,
-            provenant_os::git::RepositoryPath::CommonDir,
-            self.cancellation.as_ref(),
-        )
-        .map_err(|error| failure(error.to_string()))
+        let cancel = provenant_core::CancelToken::new();
+        self.facts
+            .with_executor(
+                &executor,
+                self.cancellation.as_ref().unwrap_or(&cancel),
+                |executor| {
+                    provenant_os::git::repository_path_with_cancel(
+                        executor,
+                        git,
+                        project,
+                        provenant_os::git::RepositoryPath::CommonDir,
+                        self.cancellation.as_ref(),
+                    )
+                    .map_err(|error| failure(error.to_string()))
+                },
+            )
+            .map_err(|error: RunError| match error {
+                RunError::Writer(source) => RunError::DeliveryFact { stage, source },
+                other => other,
+            })
     }
     fn clean(&self, writer: &WriterRequest) -> Result<()> {
         let path = writer.worktree.to_str().ok_or_else(|| {
@@ -1507,11 +1589,11 @@ impl HostDeliveryContext {
         head: GitOid,
     ) -> Result<()> {
         let stage = Stage::Integrate;
-        self.refuse_protected_target(writer, &request.branch)
-            .map_err(|_| RunError::Delivery(stage))?;
+        self.refuse_protected_target(writer, &request.branch, stage)
+            .map_err(|error| delivery_stage_error(error, stage))?;
         let bound = self.bound.as_ref().ok_or(RunError::Delivery(stage))?;
-        self.refuse_protected_target(writer, &request.branch)
-            .map_err(|_| RunError::Delivery(stage))?;
+        self.refuse_protected_target(writer, &request.branch, stage)
+            .map_err(|error| delivery_stage_error(error, stage))?;
         self.verify_objects(writer, head, stage)?;
         self.clean(writer)?;
         if self.head(writer)? != head {
@@ -1633,8 +1715,8 @@ impl HostDeliveryContext {
             )?;
             GitOid::parse(&commit).map_err(|_| RunError::Delivery(stage))?
         };
-        self.refuse_protected_target(writer, &request.branch)
-            .map_err(|_| RunError::Delivery(stage))?;
+        self.refuse_protected_target(writer, &request.branch, stage)
+            .map_err(|error| delivery_stage_error(error, stage))?;
         if remote {
             self.refuse_remote_symbolic_target(
                 &writer.worktree,
@@ -1800,9 +1882,9 @@ impl HostDeliveryContext {
         if self.head(writer)? != head {
             return Err(RunError::Delivery(Stage::Head));
         }
-        self.refuse_protected_target(writer, &request.branch)
+        self.refuse_protected_target(writer, &request.branch, Stage::Push)
             .map_err(|error| match error {
-                RunError::DeliveryLimit { .. } => error,
+                RunError::DeliveryLimit { .. } | RunError::DeliveryFact { .. } => error,
                 _ => RunError::Delivery(Stage::Prepare),
             })?;
         self.clean(writer)?;
@@ -2130,9 +2212,8 @@ fn pr_lookup_error(error: RunError) -> RunError {
     }
 }
 
-/// The stdout limit for one host Git or forge call, chosen from its argv.
-/// Worktree and ref listings grow with the repository, so they get the crate's
-/// capture default; every other call keeps its bound.
+/// The stdout limit for non-fact host Git and forge calls. Ref listings grow
+/// with the repository; other calls keep their own bounds.
 pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
     if commit_log {
         56_000
@@ -2142,7 +2223,7 @@ pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
     } else if matches!(git_subcommand(args).as_str(), "for-each-ref" | "ls-remote") {
         provenant_os::exec::DEFAULT_CAPTURE_LIMIT
     } else {
-        provenant_os::git::fact_capture_limit(args, 16 * 1024)
+        16 * 1024
     }
 }
 
@@ -2157,7 +2238,9 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
             (Stage::PullRequest, Some(prepare_reason(error)))
         }
         RunError::IntegrationHeadMoved => (Stage::Integrate, None),
-        RunError::DeliveryLimit { stage, .. } => (*stage, Some(prepare_reason(error))),
+        RunError::DeliveryLimit { stage, .. } | RunError::DeliveryFact { stage, .. } => {
+            (*stage, Some(prepare_reason(error)))
+        }
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),
     };
@@ -2188,6 +2271,24 @@ pub(super) fn git_subcommand(args: &[&str]) -> String {
     match (verb, words.next()) {
         ("worktree", Some(sub)) => format!("worktree {sub}"),
         _ => verb.to_owned(),
+    }
+}
+
+fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
+    match error {
+        RunError::DeliveryLimit {
+            tool,
+            command,
+            limit,
+            ..
+        } => RunError::DeliveryLimit {
+            stage,
+            tool,
+            command,
+            limit,
+        },
+        RunError::DeliveryFact { source, .. } => RunError::DeliveryFact { stage, source },
+        _ => RunError::Delivery(stage),
     }
 }
 
@@ -2529,7 +2630,9 @@ impl crate::RunStore {
             }
             other => RunError::Io(std::io::Error::other(other.to_string())),
         })?;
-        let host = host.prepare(&writer, &request)?;
+        let host = host
+            .with_repo_facts(self.repo_facts())
+            .prepare(&writer, &request)?;
         host.clean(&writer)?;
         if host.head(&writer)? != head {
             return Err(RunError::Validation(

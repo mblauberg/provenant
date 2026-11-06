@@ -1039,12 +1039,38 @@ impl SkippedRoute {
         );
     }
 
+    /// Preserve an individual candidate's safe guard facts across fallback.
+    pub fn set_guard_facts(
+        &mut self,
+        boundary: Option<crate::diagnostic::BoundaryClass>,
+        resource: Option<crate::diagnostic::ResourceFact>,
+    ) -> Result<(), serde_json::Error> {
+        if let Some(boundary) = boundary {
+            self.extra
+                .insert("guard_boundary".into(), serde_json::to_value(boundary)?);
+        }
+        if let Some(resource) = resource {
+            self.extra
+                .insert("guard_resource".into(), serde_json::to_value(resource)?);
+        }
+        Ok(())
+    }
+
     /// Project typed facts only; `detail` may contain provider or OS text.
     pub fn diagnostic(&self) -> crate::diagnostic::Diagnostic {
-        self.cause
+        let diagnostic = self
+            .cause
             .as_ref()
             .map(|cause| cause.diagnostic("REFUSED"))
-            .unwrap_or_else(|| self.kind.diagnostic())
+            .unwrap_or_else(|| self.kind.diagnostic());
+        match self.extra.get("guard_resource").and_then(|value| {
+            serde_json::from_value::<crate::diagnostic::ResourceFact>(value.clone()).ok()
+        }) {
+            Some(fact) => fact
+                .project(diagnostic)
+                .fact(crate::diagnostic::DiagnosticFact::Resource(fact)),
+            None => diagnostic,
+        }
     }
 }
 

@@ -72,18 +72,14 @@ pub enum PermissionError {
         "{family} exceeds its effective limit of {limit}; raise domains.run.grant_limit to allow more"
     )]
     GrantLimitExceeded { family: &'static str, limit: usize },
-    #[error("{source} (source: {origin})")]
+    #[error("{source} (source: {})", match origin { provenant_records::diagnostic::SettingSource::Configuration => "host configuration", provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default" })]
     ConfigOrigin {
         #[source]
         source: Box<PermissionError>,
-        origin: &'static str,
+        origin: provenant_records::diagnostic::SettingSource,
     },
-    #[error("{family} exceeds its bound of {limit}: {path:?}")]
-    BoundExceeded {
-        family: &'static str,
-        limit: usize,
-        path: PathBuf,
-    },
+    #[error("Git control directory entry count exceeds its bound of {limit}: {path:?}")]
+    GitControlEntriesExceeded { limit: usize, path: PathBuf },
     #[error("sandbox backend is unavailable on this platform")]
     BackendUnavailable,
     #[error("sandbox backend probe reported unavailable: {0:?}")]
@@ -121,9 +117,12 @@ impl PermissionError {
             Self::CredentialRoot | Self::CredentialRootAt { .. } | Self::CredentialGrant { .. } => {
                 B::Credentials
             }
+            Self::GitControlEntriesExceeded { .. } => B::Integrity,
             Self::GitControlHardLinked(_)
             | Self::GitWriteAuthorityMissing
             | Self::Repository(_) => B::LaneGit,
+            // A required path that cannot be encoded cannot be enforced in
+            // SBPL. Optional discoveries are filtered before compilation.
             Self::AnchorMismatch
             | Self::AnchorMismatchAt { .. }
             | Self::InvalidFixture
@@ -131,8 +130,31 @@ impl PermissionError {
             | Self::ProtectedOverlap
             | Self::InvalidReadOnlyPolicy
             | Self::ProcessPolicyMissing
+            | Self::NonUtf8Path
+            | Self::BackendUnavailable
+            | Self::BackendNotAvailable(_)
             | Self::NestedConfinementUnsupported => B::Authority,
             _ => B::None,
+        }
+    }
+
+    /// Project configurable sandbox limits only when the effective source is known.
+    pub fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
+        use provenant_records::diagnostic::ResourceFact;
+        let Self::ConfigOrigin { source, origin } = self else {
+            return None;
+        };
+        match source.as_ref() {
+            Self::GrantLimitExceeded { limit, .. } => Some(ResourceFact::GrantLimit {
+                limit: *limit as u64,
+                origin: *origin,
+            }),
+            Self::ProfileTooLarge { bytes, limit } => Some(ResourceFact::ProfileLimit {
+                bytes: *bytes as u64,
+                limit: *limit as u64,
+                origin: *origin,
+            }),
+            _ => None,
         }
     }
 
@@ -178,17 +200,29 @@ mod repository_error_tests {
             (
                 PermissionError::ConfigOrigin {
                     source: Box::new(PermissionError::CredentialRoot),
-                    origin: "fixture",
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
                 },
                 B::Credentials,
             ),
             (PermissionError::GitWriteAuthorityMissing, B::LaneGit),
+            (
+                PermissionError::GitControlEntriesExceeded {
+                    limit: 1,
+                    path: "/fixture".into(),
+                },
+                B::Integrity,
+            ),
             (PermissionError::AnchorMismatch, B::Authority),
+            (PermissionError::NonUtf8Path, B::Authority),
             (
                 PermissionError::ProfileTooLarge { bytes: 2, limit: 1 },
                 B::None,
             ),
-            (PermissionError::BackendUnavailable, B::None),
+            (PermissionError::BackendUnavailable, B::Authority),
+            (
+                PermissionError::BackendNotAvailable(super::AvailabilityReason::ProbeFailed),
+                B::Authority,
+            ),
         ] {
             assert_eq!(error.boundary_class(), expected, "{error:?}");
         }

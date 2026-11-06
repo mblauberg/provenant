@@ -2134,6 +2134,206 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
     Ok(())
 }
 
+/// Bind `codex` to this test binary and register one account, so a read-only
+/// lane launches against the rig's Git checkout. Launch is macOS-only.
+fn install_codex_fixture(rig: &mut TestRig) -> Result {
+    // The production read-only profile anchors the host Rust runtime roots.
+    for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("codex"))?;
+    fs::write(
+        rig.root.join("codex").join("auth.json"),
+        br#"{"tokens":{"account_id":"fixture-one"}}"#,
+    )?;
+    rig.env.retain(|(k, _)| k != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    Ok(())
+}
+
+/// Two commits on the rig's checkout: `HEAD~1` is the old commit, `HEAD` the
+/// new one. `origin/HEAD` names `origin/main`, which points at the new commit.
+fn commit_stale_default_history(rig: &TestRig) -> Result<(String, String)> {
+    let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    for args in [
+        vec!["commit", "--allow-empty", "-qm", "old"],
+        vec!["commit", "--allow-empty", "-qm", "new"],
+        vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+        vec![
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    ] {
+        assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+    }
+    let rev = |spec: &str| -> Result<String> {
+        let out = rig.execute(&git, &["rev-parse", spec], None)?;
+        Ok(String::from_utf8(out.stdout.bytes)?.trim().to_owned())
+    };
+    Ok((rev("HEAD~1")?, rev("HEAD")?))
+}
+
+/// The shipped pinned diff form (`--head` with `--base`) must launch its
+/// reader on the pinned commit and settle with the lane's output.
+fn codex_pinned_reader_launches_from_head_and_base() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let (base, head) = commit_stale_default_history(&rig)?;
+    install_codex_fixture(&mut rig)?;
+    let prompt_file = rig.root.join("prompt.txt");
+    fs::write(&prompt_file, "reply OK")?;
+    let out = rig.command(&[
+        "dispatch",
+        "--model",
+        "codex/gpt-6-luna",
+        "--effort",
+        "low",
+        "--mode",
+        "read-only",
+        "--base",
+        &base,
+        "--head",
+        &head,
+        "--operation-id",
+        &format!("{:032x}", 0x3002_u32),
+        "--prompt-file",
+        prompt_file.to_str().ok_or("prompt")?,
+        "--wait",
+        "5",
+        "--json",
+    ])?;
+    if !cfg!(target_os = "macos") {
+        // Off macOS preparation refuses the unavailable sandbox before launch.
+        assert_eq!(
+            code(&out),
+            1,
+            "{}",
+            String::from_utf8_lossy(&out.stdout.bytes)
+        );
+        let lanes = rig.command(&["lanes", "--all", "--json"])?;
+        let value: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+        let lane = value["data"]["lanes"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .ok_or_else(|| format!("lanes: {value}"))?;
+        assert_eq!(lane["state"], "rejected", "{lane}");
+        assert_eq!(lane["terminal_cause"], "unsupported_platform", "{lane}");
+        cleanup.disarm();
+        return Ok(());
+    }
+    assert_eq!(
+        code(&out),
+        0,
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout.bytes),
+        String::from_utf8_lossy(&out.stderr.bytes)
+    );
+    let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(reply["status"], "ok", "{reply}");
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    let value: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let lane = value["data"]["lanes"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .ok_or_else(|| format!("lane: {value}"))?;
+    assert_eq!(lane["state"], "succeeded", "{lane}");
+    let id = lane["attempt_id"].as_str().ok_or("attempt")?;
+    let output = rig.command(&["output", id, "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(output["data"]["bytes"]["data"], format!("OK{DONE_FENCE}"));
+    cleanup.disarm();
+    Ok(())
+}
+
+/// The staleness warning belongs to the checkout the lane reads: the
+/// `--worktree` named, or the caller's checkout when none is named.
+fn codex_read_only_warning_names_the_checkout_the_lane_reads() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    let (old, new) = commit_stale_default_history(&rig)?;
+    let fresh = rig.root.join("fresh");
+    let stale = rig.root.join("stale");
+    for (path, commit) in [(&fresh, &new), (&stale, &old)] {
+        let path = path.to_str().ok_or("worktree path")?;
+        assert_eq!(
+            code(&rig.execute(
+                &git,
+                &["worktree", "add", "-q", "--detach", path, commit],
+                None
+            )?),
+            0
+        );
+    }
+    install_codex_fixture(&mut rig)?;
+    let prompt_file = rig.root.join("prompt.txt");
+    fs::write(&prompt_file, "reply OK")?;
+    let warnings_of = |out: &provenant_os::exec::ExecOutcome| -> Result<String> {
+        let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        Ok(reply["data"]["warnings"].to_string())
+    };
+    let launch = |rig: &TestRig, worktree: &std::path::Path, operation: u32| -> Result<String> {
+        let out = rig.command(&[
+            "dispatch",
+            "--model",
+            "codex/gpt-6-luna",
+            "--effort",
+            "low",
+            "--mode",
+            "read-only",
+            "--worktree",
+            worktree.to_str().ok_or("worktree")?,
+            "--operation-id",
+            &format!("{operation:032x}"),
+            "--prompt-file",
+            prompt_file.to_str().ok_or("prompt")?,
+            "--wait",
+            "5",
+            "--json",
+        ])?;
+        if !cfg!(target_os = "macos") {
+            return Ok(String::new());
+        }
+        assert_eq!(
+            code(&out),
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout.bytes),
+            String::from_utf8_lossy(&out.stderr.bytes)
+        );
+        warnings_of(&out)
+    };
+
+    // A stale caller reading an up-to-date worktree: no staleness warning.
+    rig.execute(&git, &["reset", "-q", "--hard", &old], None)?;
+    let warnings = launch(&rig, &fresh, 0x0003_0021)?;
+    if cfg!(target_os = "macos") {
+        assert!(!warnings.contains("behind"), "{warnings}");
+    }
+
+    // An up-to-date caller reading a stale worktree: the warning names that worktree.
+    rig.execute(&git, &["reset", "-q", "--hard", &new], None)?;
+    let warnings = launch(&rig, &stale, 0x0003_0022)?;
+    if cfg!(target_os = "macos") {
+        assert!(warnings.contains("1 commit behind"), "{warnings}");
+        assert!(warnings.contains(&old), "{warnings}");
+        assert!(
+            warnings.contains(&stale.display().to_string()),
+            "{warnings}"
+        );
+    }
+    cleanup.disarm();
+    Ok(())
+}
+
 fn codex_dispatch_observes_rollout() -> Result {
     for (index, prompt) in ["reply OK", "fixture missing rollout", "mismatch"]
         .iter()
@@ -2141,6 +2341,22 @@ fn codex_dispatch_observes_rollout() -> Result {
     {
         let mut rig = TestRig::new()?;
         let cleanup = rig.process_cleanup();
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+        if index == 0 {
+            for args in [
+                vec!["commit", "--allow-empty", "-qm", "old"],
+                vec!["commit", "--allow-empty", "-qm", "new"],
+                vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+                vec![
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/main",
+                ],
+                vec!["reset", "--hard", "HEAD~1"],
+            ] {
+                assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+            }
+        }
         // The production read-only profile anchors the host Rust runtime roots.
         for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
             fs::create_dir_all(rig.home.join(path))?;
@@ -2180,6 +2396,10 @@ fn codex_dispatch_observes_rollout() -> Result {
             "5",
             "--json",
         ])?;
+        if index == 0 && cfg!(target_os = "macos") {
+            let output = String::from_utf8_lossy(&out.stdout.bytes);
+            assert!(output.contains("1 commit behind"), "{output}");
+        }
         assert_eq!(
             code(&out),
             if index == 0 && !cfg!(target_os = "macos") {
@@ -3384,6 +3604,151 @@ fn local_wait_returns_while_writer_seed_is_held() -> Result {
     let replay: Value = serde_json::from_slice(&replay.stdout.bytes)?;
     assert_writer_pool_peer_launched(&replay)?;
     cleanup.disarm();
+    Ok(())
+}
+
+fn cancel_live_preparation_releases_writer_for_the_next_run() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    for phase in ["delivery", "seed"] {
+        let mut rig = writer_pool_redraw_fixture()?;
+        let _cleanup = rig.process_cleanup();
+        let gate = rig.root.join("preparation-gate");
+        fs::create_dir(&gate)?;
+        fs::write(gate.join("hold"), b"hold")?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        if phase == "delivery" {
+            // Intercept the actual host delivery fetch, leaving all preceding
+            // Git commands and the process-group executor on their real paths.
+            let remote = rig.root.join("remote.git");
+            let init = rig.execute(
+                &git,
+                &["init", "--bare", remote.to_str().ok_or("remote")?],
+                None,
+            )?;
+            assert_eq!(code(&init), 0, "{init:?}");
+            let add = rig.execute(
+                &git,
+                &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+                None,
+            )?;
+            assert_eq!(code(&add), 0, "{add:?}");
+            let push = rig.execute(&git, &["push", "origin", "HEAD:refs/heads/main"], None)?;
+            assert_eq!(code(&push), 0, "{push:?}");
+            let wrapper_dir = rig.root.join("slow-git");
+            fs::create_dir(&wrapper_dir)?;
+            let wrapper = wrapper_dir.join("git");
+            fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\ncase \" $* \" in *' fetch '*) if [ -f '{}/hold' ]; then : > '{}/entered'; exec /bin/sleep 30; fi;; esac\nexec '{}' \"$@\"\n",
+                    gate.display(),
+                    gate.display(),
+                    git.display()
+                ),
+            )?;
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+            rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
+            rig.env
+                .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+        } else {
+            rig.env.push((
+                "PROVENANT_FIXTURE_HOLD_SEED".into(),
+                gate.clone().into_os_string(),
+            ));
+        }
+        let prompt = rig.root.join("cancel-prompt.txt");
+        fs::write(&prompt, "reply OK")?;
+        let first = rig.command(&[
+            "dispatch",
+            "--operation-id",
+            "cancel-preparation",
+            "--route",
+            "writer-redraw",
+            "--mode",
+            "worktree-write",
+            "--worktree-branch",
+            "fixture/cancel-preparation",
+            "--base",
+            "HEAD",
+            "--deliver",
+            if phase == "delivery" { "push" } else { "none" },
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "1s",
+            "--json",
+        ])?;
+        assert!(matches!(code(&first), 0 | 124), "{phase}: {first:?}");
+        let first: Value = serde_json::from_slice(&first.stdout.bytes)?;
+        let run = first["data"]["run_id"].as_str().ok_or("run id")?;
+        let worktree = first["data"]["worktree"]["path"]
+            .as_str()
+            .ok_or("worktree")?;
+        provenant_test_support::wait_for(
+            "preparation entered",
+            std::time::Duration::from_secs(20),
+            || gate.join("entered").exists(),
+            |ready| *ready,
+        )?;
+        let before = std::time::Instant::now();
+        let stopped = rig.command(&["cancel", run, "--json"])?;
+        let elapsed = before.elapsed();
+        let stopped: Value = serde_json::from_slice(&stopped.stdout.bytes)?;
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "{phase}: {elapsed:?}: {stopped}"
+        );
+        assert_eq!(
+            stopped["data"]["receipts"][0]["receipt"]["state"], "cancelled",
+            "{phase}: {stopped}"
+        );
+        assert_eq!(
+            stopped["data"]["lanes"][0]["state"], "cancelled",
+            "{phase}: {stopped}"
+        );
+        // Keep the launcher blocked until cancellation has returned. The next
+        // real dispatch must acquire this same worktree's writer immediately.
+        fs::remove_file(gate.join("hold"))?;
+        let next = rig.command(&[
+            "dispatch",
+            "--operation-id",
+            "after-cancel",
+            "--route",
+            "writer-redraw",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            worktree,
+            "--base",
+            "HEAD",
+            "--deliver",
+            "none",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "30s",
+            "--json",
+        ])?;
+        assert_eq!(code(&next), 0, "{phase}: {next:?}");
+        let next: Value = serde_json::from_slice(&next.stdout.bytes)?;
+        assert!(next["data"]["run_id"].is_string(), "{phase}: {next}");
+        let lanes = rig.command(&[
+            "lanes",
+            "--id",
+            next["data"]["run_id"].as_str().ok_or("next run")?,
+            "--all",
+            "--json",
+        ])?;
+        let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+        assert!(
+            lanes["data"]["lanes"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row["state"] == "succeeded")),
+            "{phase}: {lanes}"
+        );
+    }
     Ok(())
 }
 
@@ -4632,6 +4997,7 @@ fn persisted_attempt_with(
         },
         termination: Some(Termination::Exit(exit_code)),
         never_spawned: false,
+        launch_refusal: None,
         stop_reason: options.stop_reason,
         delivered_signals: vec![],
         reaped: vec![],
@@ -5892,8 +6258,11 @@ fn main() -> ExitCode {
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "local_wait_returns_while_writer_seed_is_held",
+                "cancel_live_preparation_releases_writer_for_the_next_run",
                 "printed_credentials_leave_no_plaintext_in_run_files",
                 "codex_dispatch_observes_rollout",
+                "codex_pinned_reader_launches_from_head_and_base",
+                "codex_read_only_warning_names_the_checkout_the_lane_reads",
                 "policy_empty_result_falls_back_without_a_chair_turn",
                 "policy_incomplete_result_continues_the_retained_session",
                 "stats_reports_partial_signals_outside_graph_groups",
@@ -5958,8 +6327,11 @@ fn main() -> ExitCode {
                         owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
                     }
                     "local_wait_returns_while_writer_seed_is_held" => local_wait_returns_while_writer_seed_is_held(),
+                    "cancel_live_preparation_releases_writer_for_the_next_run" => cancel_live_preparation_releases_writer_for_the_next_run(),
                     "printed_credentials_leave_no_plaintext_in_run_files" => printed_credentials_leave_no_plaintext_in_run_files(),
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
+                    "codex_pinned_reader_launches_from_head_and_base" => codex_pinned_reader_launches_from_head_and_base(),
+                    "codex_read_only_warning_names_the_checkout_the_lane_reads" => codex_read_only_warning_names_the_checkout_the_lane_reads(),
                     "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),
                     "policy_incomplete_result_continues_the_retained_session" => policy_incomplete_result_continues_the_retained_session(),
                     "stats_reports_partial_signals_outside_graph_groups" => stats_reports_partial_signals_outside_graph_groups(),

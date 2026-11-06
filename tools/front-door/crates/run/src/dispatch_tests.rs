@@ -824,7 +824,7 @@ fn host_launches_one_attempt_per_child_task() -> TestResult {
     assert_eq!(started.len(), 2);
     for id in [nested.attempts[0].attempt_id, extra.attempt_id] {
         assert!(started.iter().any(|result| matches!(result,
-            Started::Refused { attempt, reason, kind: RefusalKind::Preparation }
+            Started::Refused { attempt, reason, kind: RefusalKind::PreparationBoundary(provenant_records::diagnostic::BoundaryClass::Authority) }
             if *attempt == id && reason == "child task has more than one attempt"
         )));
         assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
@@ -882,7 +882,7 @@ fn host_refuses_extra_child_attempt_without_touching_held_attempt() -> TestResul
         &call,
     )?;
     assert!(matches!(started.as_slice(), [Started::Refused {
-        attempt, kind: RefusalKind::Preparation, ..
+        attempt, kind: RefusalKind::PreparationBoundary(provenant_records::diagnostic::BoundaryClass::Authority), ..
     }] if *attempt == extra.attempt_id));
     assert_eq!(fake.prepared.get(), 0);
     assert_eq!(store.record(id, &call)?, held);
@@ -1162,7 +1162,7 @@ fn host_refuses_invalid_child_rows_added_after_validation_without_aborting_scan(
             "child attempt task missing from request"
         };
         assert!(started.iter().any(|result| matches!(result,
-            Started::Refused { attempt, reason, kind: RefusalKind::Preparation }
+            Started::Refused { attempt, reason, kind: RefusalKind::PreparationBoundary(provenant_records::diagnostic::BoundaryClass::Authority) }
                 if *attempt == extra.attempt_id && reason == expected
         )));
         for attempt in &nested.attempts {
@@ -1799,7 +1799,7 @@ fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
     assert!(matches!(
         started.as_slice(),
         [
-            Started::Refused { attempt: first, kind: RefusalKind::WriteGrantsLimit, .. },
+            Started::Refused { attempt: first, kind: RefusalKind::WriteGrantsLimit(_), .. },
             Started::Refused { attempt: second, kind: RefusalKind::Handoff, .. },
         ] if *first == id && *second == sibling
     ));
@@ -3084,6 +3084,7 @@ pub(super) struct Fake {
     network: Cell<Option<NetworkAccess>>,
     refuse: bool,
     policy_task: Option<TaskId>,
+    policy_resource: Option<provenant_records::diagnostic::ResourceFact>,
     pub(super) observed: Option<RouteRecord>,
     pub(super) decoded: Cell<usize>,
     prepared: Cell<usize>,
@@ -3139,6 +3140,56 @@ fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() ->
     Ok(())
 }
 
+#[test]
+fn policy_resource_refusal_retains_fact_and_skips_preparation() -> TestResult {
+    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let request = input();
+    store.create(&request, &call)?;
+    let fact = ResourceFact::Disk {
+        free: 1,
+        floor: 2,
+        origin: SettingSource::Configuration,
+    };
+    let provider = Fake {
+        policy_task: Some(request.request.tasks[0].task_id),
+        policy_resource: Some(fact),
+        ..Default::default()
+    };
+    let started = store.start(request.run_id, &provider, &|_, _| unreachable!(), &call)?;
+    assert!(
+        matches!(started.as_slice(), [Started::Refused { kind: RefusalKind::PolicyResource(actual), .. }] if *actual == fact)
+    );
+    assert_eq!(provider.prepared.get(), 0);
+    let diagnostic = RefusalKind::PolicyResource(fact).diagnostic().unwrap();
+    assert_eq!(diagnostic.code, "DISK_FLOOR");
+    let detail = diagnostic.detail.unwrap();
+    assert!(detail.contains("gc.free_floor"));
+    assert!(detail.contains("host configuration"));
+    let inventory =
+        include_str!("../assets/launch-guards.toml").parse::<toml_edit::DocumentMut>()?;
+    assert!(
+        inventory["guard"]
+            .as_array_of_tables()
+            .unwrap()
+            .iter()
+            .any(|row| {
+                row.get("site").and_then(|v| v.as_str())
+                    == Some("run/src/launch.rs#Providers::check_policy")
+                    && row.get("code").and_then(|v| v.as_str()) == Some(diagnostic.code.as_str())
+                    && row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
+                    && row
+                        .get("setting")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|setting| detail.contains(setting))
+            })
+    );
+    Ok(())
+}
+
 impl Providers for Fake {
     fn failure_diagnostic(&self, _: &RouteRecord, _: &[u8]) -> Option<String> {
         self.failure_note.clone()
@@ -3176,9 +3227,12 @@ impl Providers for Fake {
         }
         Ok(Default::default())
     }
-    fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
+    fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), crate::PrepareRefusal> {
         if self.policy_task == Some(task.task_id) {
-            return Err("insufficient disk space; run `provenant gc`".into());
+            let mut refusal =
+                crate::PrepareRefusal::from("insufficient disk space; run `provenant gc`");
+            refusal.resource = self.policy_resource;
+            return Err(refusal);
         }
         Ok(())
     }
@@ -5546,6 +5600,10 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     observed.termination = None;
     observed.terminal_observed = false;
     observed.warnings = vec!["admission refused".into()];
+    observed.launch_refusal = Some(provenant_records::diagnostic::ResourceFact::LanePorts {
+        blocks: 1,
+        origin: provenant_records::diagnostic::PortSettingSource::Configuration,
+    });
     observed.settlement_evidence = provenant_supervisor::custody::SettlementEvidence::NeverSpawned;
     seal_exit(&store, &observed)?;
     let dir = store.attempt_dir(run.run_id, id, false)?;
@@ -5561,6 +5619,11 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
         provenant_records::AttemptOutcome::Rejected
     );
     assert_eq!(fact.reason.as_deref(), Some("admission refused"));
+    let record = store.record(id, &call)?;
+    let (_, reason) = provenant_records::wire::lane::LaneRow::state_and_reason(&record.state);
+    let reason = reason.ok_or("missing projected refusal")?;
+    assert!(reason.contains("domains.fabric.lanes.lane_port_blocks"));
+    assert!(reason.contains("host configuration"));
     assert_eq!(fake.decoded.get(), 0);
     Ok(())
 }
@@ -6961,6 +7024,86 @@ fn reconcile_recovers_writer_when_device_numbers_change_after_reboot() -> TestRe
 }
 
 #[test]
+fn reconcile_rebooted_slot_handoff_after_device_numbers_change() -> TestResult {
+    let observer = RebootObserver(NEW_BOOT);
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = input();
+    let worktree = temp.path().join("lane");
+    std::fs::create_dir(&worktree)?;
+    std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
+    run.request.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
+        project: temp.path().to_path_buf(),
+        worktree: worktree.clone(),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store
+        .claim(id, &at_micros(100), &call)?
+        .ok_or("not admitted")?;
+    let scope = RunStore::scope(&store.record(id, &call)?);
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let custody = store
+        .writer_registry
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(&worktree));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&custody)?;
+    let slot = Directory::open_anchor(&custody)?;
+    drop(provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?);
+    let child_reservation = custody.join(id.to_string()).join("reservation.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&child_reservation)?)?;
+    let old_device = slot.metadata()?.device + 1;
+    value["boot"] = OLD_BOOT.into();
+    value["launch_state"] = "handing_off".into();
+    value["reservation_device"] = old_device.into();
+    value["reservation_inode"] = slot.metadata()?.inode.into();
+    value["attempt_device"] = old_device.into();
+    value["attempt_inode"] = attempt.metadata()?.inode.into();
+    std::fs::write(
+        custody.join("reservation.json"),
+        serde_json::to_vec(&value)?,
+    )?;
+    std::fs::remove_file(&child_reservation)?;
+
+    assert_eq!(
+        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
+        vec![(id, Reconciled::Finished)]
+    );
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
+    assert!(store.writer_fences()?.is_empty());
+    assert!(!custody.join("reservation.json").exists());
+    assert!(!child_reservation.exists());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("unfinished.rs"))?,
+        "keep my work"
+    );
+    assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
+    Ok(())
+}
+
+#[test]
 fn changed_device_numbers_on_same_boot_keep_writer_custody() -> TestResult {
     recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, true, false)
 }
@@ -7975,6 +8118,159 @@ fn cancelling_a_start_that_holds_only_a_writer_fence_frees_the_writer() -> TestR
     );
     assert_eq!(terminal(&store, id, &call)?, Outcome::Cancelled);
     assert!(store.writer_fences()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn repeat_cancel_while_the_launcher_holds_keeps_one_request_and_settles_on_release() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let slot = context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join("lane");
+    std::fs::create_dir_all(&slot)?;
+    // The launcher holds the worktree writer while it prepares the lane.
+    let held = provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(&slot)?,
+        RunStore::scope(&store.record(id, &call)?),
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+    assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let first = artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+        .ok_or("cancel request missing")?;
+    // A repeat while the launcher still holds the writer neither settles the
+    // lane nor writes a second request.
+    assert_eq!(
+        store.cancel(id, "stop", &call)?,
+        CancelReceipt::AlreadyRequested
+    );
+    assert_eq!(
+        artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?.as_deref(),
+        Some(first.as_slice())
+    );
+    assert!(matches!(
+        store.record(id, &call)?.state,
+        AttemptState::Starting { .. }
+    ));
+    assert_eq!(store.writer_fences()?.len(), 1);
+    // Once the launcher has let go, the next repeat settles and frees the writer.
+    drop(held);
+    assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Cancelled);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Cancelled);
+    assert!(store.writer_fences()?.is_empty());
+    assert_eq!(
+        store.cancel(id, "stop", &call)?,
+        CancelReceipt::AlreadyTerminal
+    );
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_unlaunched_start_frees_the_worktree_writer_for_the_next_run() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let first = input();
+    let first_id = first.attempts[0].attempt_id;
+    store.create(&first, &call)?;
+    store.mark_starting(
+        &store.record(first_id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let slot = context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join("lane");
+    std::fs::create_dir_all(&slot)?;
+    let first_scope = RunStore::scope(&store.record(first_id, &call)?);
+    let held = provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(&slot)?,
+        first_scope,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+
+    let mut next = input();
+    next.run_id = RunId::from_bytes([9; 16]);
+    next.operation_id = provenant_core::OperationId::parse("run-test-next")?;
+    next.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
+    store.create(&next, &call)?;
+    let next_id = next.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(next_id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let next_scope = RunStore::scope(&store.record(next_id, &call)?);
+    // The next run takes the writer the way a launch does: fenced, without waiting.
+    let take_writer = |directory: Directory| {
+        store.acquire_writer_fenced(
+            directory,
+            next_scope,
+            provenant_supervisor::custody::WriterBinding::read_only(),
+            &|directory, scope, binding| {
+                provenant_supervisor::custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            &call,
+        )
+    };
+    assert!(
+        take_writer(Directory::open_anchor(&slot)?).is_err(),
+        "a live launcher still holds the writer"
+    );
+    // The first launcher dies before the provider launches; cancel settles
+    // the attempt and frees its writer and fence before returning.
+    drop(held);
+    assert_eq!(
+        store.cancel(first_id, "stop", &call)?,
+        CancelReceipt::Cancelled
+    );
+    assert_eq!(terminal(&store, first_id, &call)?, Outcome::Cancelled);
+    assert!(store.writer_fences()?.is_empty());
+    let lease = match take_writer(Directory::open_anchor(&slot)?) {
+        Ok(lease) => lease,
+        Err(_) => return Err("the next run was refused after the cancel".into()),
+    };
+    drop(lease);
     Ok(())
 }
 
@@ -9054,6 +9350,8 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
+                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                resource: None,
                 terminal_cause: None,
                 terminal_note: None,
                 message: self.message.into(),
@@ -9146,6 +9444,8 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
+                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                resource: None,
                 terminal_cause: None,
                 terminal_note: None,
                 message: "all candidates require sign-in; run provenant accounts".into(),
@@ -9619,7 +9919,7 @@ fn raised_write_grant_limit_preserves_large_terminal_ledger() -> TestResult {
         fn write_grant_limit(&self) -> WriteGrantLimit {
             WriteGrantLimit {
                 bytes: 2 * 1024 * 1024,
-                origin: "host configuration",
+                origin: provenant_records::diagnostic::SettingSource::Configuration,
             }
         }
         fn prepare(
@@ -9923,6 +10223,124 @@ fn prepared_write_grants_hold_admission_on_the_disk_floor() -> TestResult {
                 "{source:?}"
             );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn guardian_admission_resource_refusals_survive_durable_exit_and_retained_status() -> TestResult {
+    use provenant_records::diagnostic::{
+        LaneLimit, PressureLevel, PressureThreshold, SettingSource,
+    };
+    use provenant_supervisor::custody::{
+        self, AdmissionError, CustodyError, Observation, ProcessExit,
+    };
+    for (error, setting, source, action) in [
+        (
+            CustodyError::Admission(AdmissionError::Disk {
+                free: 1,
+                floor: 2,
+                origin: SettingSource::Configuration,
+            }),
+            "gc.free_floor",
+            "host configuration",
+            "free disk space",
+        ),
+        (
+            CustodyError::Admission(AdmissionError::MemoryPressure {
+                level: PressureLevel::Critical,
+                threshold: PressureThreshold::Warning,
+                origin: SettingSource::Configuration,
+            }),
+            "domains.fabric.lanes.memory_pressure_threshold",
+            "host configuration",
+            "reduce host memory pressure",
+        ),
+        (
+            CustodyError::Admission(AdmissionError::LaneCap {
+                active: 2,
+                limit: 2,
+                kind: LaneLimit::ProjectTotal,
+                origin: SettingSource::ShippedDefault,
+            }),
+            "domains.fabric.lanes.max_project_lanes",
+            "shipped default",
+            "wait for an active lane",
+        ),
+        (
+            CustodyError::Admission(AdmissionError::Processes { used: 2, limit: 3 }),
+            "RLIMIT_NPROC",
+            "operating system",
+            "reduce host process use",
+        ),
+        (
+            CustodyError::Io(std::io::Error::other("TOKEN_SENTINEL /private/host/path")),
+            "",
+            "",
+            "inspect",
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        let record = store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        // This is the same constructor Driver::run uses after holder.admit
+        // refuses. Persist and reread it through normal custody observation.
+        let process = ProcessExit::admission_refused(RunStore::scope(&record), &error);
+        assert_eq!(process.launch_refusal.is_some(), !setting.is_empty());
+        let dir = store.attempt_dir(run.run_id, id, false)?;
+        artifacts::seal(
+            &dir,
+            "process-exit.json",
+            &serde_json::to_vec(&process)?,
+            RECORD_LIMIT,
+        )?;
+        let handle = custody::hold(dir, process.scope, store.context.actor_id);
+        let Observation::Exited(observed) = custody::observe(
+            &handle,
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?
+        else {
+            return Err("guardian refusal did not produce durable exit evidence".into());
+        };
+        assert_eq!(observed.launch_refusal, process.launch_refusal);
+        let fake = Fake::default();
+        store.finish(
+            id,
+            &store.attempt_dir(run.run_id, id, false)?,
+            &observed,
+            &fake,
+            &call,
+        )?;
+        let record = store.record(id, &call)?;
+        assert!(matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Rejected,
+                ..
+            }
+        ));
+        let (_, reason) = provenant_records::wire::lane::LaneRow::state_and_reason(&record.state);
+        let reason = reason.ok_or("missing retained refusal reason")?;
+        assert!(reason.contains(setting), "{reason}");
+        assert!(reason.contains(source), "{reason}");
+        assert!(reason.contains(action), "{reason}");
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        assert!(!reason.contains("/private/host/path"));
+        assert_eq!(fake.decoded.get(), 0);
     }
     Ok(())
 }

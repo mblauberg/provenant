@@ -381,6 +381,20 @@ pub(super) fn dispatch_with_workers(
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Reply {
     let operation_id = command.operation_id.clone();
+    if let Some(message) = base_target_refusal(
+        command.base.as_deref(),
+        command.branch.as_deref(),
+        command.access.worktree.as_deref(),
+        command.worktree_branch.as_deref(),
+        command.head.as_deref(),
+    ) {
+        let mut out = reply(
+            "dispatch",
+            Err(Fail::new(Status::Invalid, ErrorKind::Invalid, message)),
+        );
+        operation_reply(&mut out, &operation_id);
+        return out;
+    }
     let mut created = None;
     let facts = provenant_confinement::worktrees::RepoFacts::default();
     let mut result = dispatch_inner(command, edge, &mut created, workers, &facts);
@@ -460,6 +474,17 @@ pub(super) fn dispatch_with_workers(
     out
 }
 
+pub(super) fn base_target_refusal(
+    base: Option<&str>,
+    branch: Option<&str>,
+    worktree: Option<&Path>,
+    worktree_branch: Option<&str>,
+    head: Option<&str>,
+) -> Option<&'static str> {
+    (base.is_some() && branch.is_none() && worktree.is_none() && worktree_branch.is_none() && head.is_none())
+        .then_some("--base requires a writer target; use --branch with --host or --worktree, or use --head to set the reader's commit and --base as its diff base")
+}
+
 pub(super) fn created_tree_state(
     condition: provenant_confinement::worktrees::WorktreeCondition,
     occupancy: &provenant_confinement::worktrees::Occupancy,
@@ -515,8 +540,20 @@ pub(super) fn operation_reply(reply: &mut Reply, id: &OperationId) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn check_delivery_branch(project: &Path, branch: &str) -> Result<(), Fail> {
     run::HostDeliveryContext::check_delivery_branch(project, branch)
+        .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))
+}
+
+fn check_delivery_branch_with_facts(
+    project: &Path,
+    branch: &str,
+    facts: &provenant_confinement::worktrees::RepoFacts,
+) -> Result<(), Fail> {
+    run::HostDeliveryContext::capture()
+        .with_repo_facts(facts)
+        .check_delivery_branch_with_facts(project, branch)
         .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))
 }
 
@@ -1130,7 +1167,7 @@ pub(super) fn dispatch_inner(
         if let Some(mode) = &command.deliver
             && let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), &branch)?
         {
-            check_delivery_branch(edge.cwd, &delivery.branch)?;
+            check_delivery_branch_with_facts(edge.cwd, &delivery.branch, facts)?;
         }
         let host = provenant_config::bind_host(edge.roots)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
@@ -1465,7 +1502,7 @@ pub(super) fn dispatch_inner(
     {
         for (_, _, _, _, _, _, _, delivery, _, _, _, _, _) in &tasks {
             if let Some(delivery) = delivery {
-                check_delivery_branch(edge.cwd, &delivery.branch)?;
+                check_delivery_branch_with_facts(edge.cwd, &delivery.branch, facts)?;
             }
         }
     }
@@ -1899,6 +1936,20 @@ pub(super) fn dispatch_inner(
         .collect();
     brief_warnings.extend(worktree_warnings);
     brief_warnings.extend(capability_warnings);
+    // A pinned `--head` names its commit; otherwise the lane reads the checkout
+    // selected by `--worktree`, or the caller's checkout when none is named.
+    if command.head.is_none() && matches!(command.access.mode(), Mode::ReadOnly) {
+        let source = lane_access
+            .source_root
+            .clone()
+            .unwrap_or_else(|| edge.cwd.to_path_buf());
+        if let Some(warning) = super::provider::confinement::read_only_checkout_warning(
+            edge.roots.state.as_path(),
+            &source,
+        ) {
+            brief_warnings.push(warning);
+        }
+    }
     if matches!(command.access.mode(), Mode::WorktreeWrite) {
         let budget = config
             .domains
@@ -2664,7 +2715,9 @@ impl run::Providers for PreparedProvider<'_> {
     fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
         if let Some(ready) = self.ready {
             if ready.task != *task {
-                return Err("prepared continuation task changed".into());
+                let mut refusal = run::PrepareRefusal::from("prepared continuation task changed");
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                return Err(refusal);
             }
             return Ok(());
         }
@@ -3278,18 +3331,25 @@ pub fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
         }
         .into());
     }
-    // Report any all-refused batch, preserving the per-attempt reason.
-    if let Some((attempt, reason)) = started.iter().find_map(|started| match started {
+    // Report any all-refused batch using its typed diagnostic where available.
+    if let Some((attempt, reason, kind)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
-            attempt, reason, ..
-        } => Some((attempt, reason)),
+            attempt,
+            reason,
+            kind,
+        } => Some((attempt, reason, kind)),
         _ => None,
     }) {
-        return Err(Fail::new(
+        let mut fail = Fail::new(
             Status::Refused,
             ErrorKind::Refused,
             format!("{attempt}: {reason}"),
-        ));
+        );
+        if let Some(mut projection) = kind.diagnostic() {
+            projection.code = ErrorKind::Refused.code().into();
+            fail.projection = Some(Box::new(projection));
+        }
+        return Err(fail);
     }
     Ok(())
 }

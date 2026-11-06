@@ -4,6 +4,8 @@ fn unavailable(message: String) -> PrepareError {
     PrepareError::Candidates {
         message,
         plans: Vec::new(),
+        candidate_boundary: None,
+        candidate_resource: None,
         skipped_routes: Vec::new(),
         fallback_outcome: Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
     }
@@ -52,8 +54,7 @@ pub(super) fn prepare_command(
             network: task.access.network,
             skill_location: task.profile.require_skill_location,
             ..Default::default()
-        })
-        .map_err(|error| error.to_string())?;
+        })?;
     let adapter = REGISTRY
         .iter()
         .find(|entry| entry.adapter.id() == provider)
@@ -141,13 +142,7 @@ pub(super) fn prepare_command(
         task.access.source_live,
     )?;
     if isolated {
-        observed_head = Some(
-            task.head
-                .as_deref()
-                .ok_or("graph source head missing")?
-                .parse()
-                .map_err(|_| "invalid graph source head")?,
-        );
+        observed_head = Some(source_head(task)?);
         worktree_gitdir = Some(cwd.join(".git"));
     } else {
         require_source_head(task, observed_head)?;

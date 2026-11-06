@@ -188,7 +188,8 @@ pub enum DispatchRefusalFact {
 }
 
 /// Facts the input owner has explicitly approved for disclosure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum InvalidInputDetail {
     Schema,
     LandingLock,
@@ -237,12 +238,7 @@ pub enum FacadeError {
     /// has one. Absent on the wire when empty, so older readers still decode it.
     #[error("invalid input{}", invalid_detail(.detail))]
     InvalidInput {
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            serialize_with = "serialise_invalid_detail",
-            deserialize_with = "deserialise_invalid_detail"
-        )]
+        #[serde(flatten, with = "invalid_detail_wire")]
         detail: Option<InvalidInputDetail>,
     },
     #[error("record not found")]
@@ -776,58 +772,36 @@ pub(super) fn safe_input_field(field: &str) -> Option<&str> {
     None
 }
 
-fn serialise_invalid_detail<S: serde::Serializer>(
-    detail: &Option<InvalidInputDetail>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    detail
-        .as_ref()
-        .and_then(InvalidInputDetail::safe_text)
-        .serialize(serializer)
-}
+// Keep the human-readable wire field while carrying the independently typed
+// fact used for disclosure decisions. Peer-supplied prose is never a fact.
+mod invalid_detail_wire {
+    use super::InvalidInputDetail;
+    use serde::{Deserialize, Deserializer, Serializer, ser::SerializeMap};
 
-fn deserialise_invalid_detail<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<InvalidInputDetail>, D::Error> {
-    let detail = Option::<String>::deserialize(deserializer)?;
-    Ok(detail.and_then(|detail| match detail.as_str() {
-        "graph document schema_version is invalid" => Some(InvalidInputDetail::Schema),
-        "landing lock required" => Some(InvalidInputDetail::LandingLock),
-        "input file is unreadable or is not a regular file" => {
-            Some(InvalidInputDetail::InputUnreadable)
-        }
-        "input exceeds the 1 MiB limit" => Some(InvalidInputDetail::InputTooLarge),
-        "input is not UTF-8" => Some(InvalidInputDetail::InputInvalidUtf8),
-        _ if Some(detail.as_str())
-            == InvalidInputDetail::GraphDocumentTooLarge
-                .safe_text()
-                .as_deref() =>
+    pub fn serialize<S: Serializer>(
+        detail: &Option<InvalidInputDetail>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        if let Some(fact) = detail
+            && let Some(text) = fact.safe_text()
         {
-            Some(InvalidInputDetail::GraphDocumentTooLarge)
+            map.serialize_entry("detail", &text)?;
+            map.serialize_entry("detail_fact", fact)?;
         }
-        _ if detail.starts_with("unresolvable base `") => detail
-            .strip_prefix("unresolvable base `")
-            .and_then(|name| name.strip_suffix('`'))
-            .and_then(safe_base_ref)
-            .map(|name| InvalidInputDetail::UnresolvableBase(name.to_owned())),
-        _ => detail
-            .strip_prefix("invalid input field `")
-            .and_then(|rest| {
-                let (field, reason) = rest.split_once('`')?;
-                let field = safe_input_field(field)?.to_owned();
-                match reason {
-                    "" => Some(InvalidInputDetail::Field(field)),
-                    ": task title must be 1 to 256 bytes and contain no control characters" => {
-                        Some(InvalidInputDetail::FieldTitle(field))
-                    }
-                    _ => reason
-                        .strip_prefix(": exceeds ")
-                        .and_then(|value| value.strip_suffix(" bytes"))
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .map(|limit| InvalidInputDetail::FieldTooLarge { field, limit }),
-                }
-            }),
-    }))
+        map.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<InvalidInputDetail>, D::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            detail_fact: Option<InvalidInputDetail>,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        Ok(fields.detail_fact.filter(|fact| fact.safe_text().is_some()))
+    }
 }
 
 impl FacadeError {
@@ -1367,6 +1341,7 @@ mod diagnostic_tests {
         );
         let wire = serde_json::to_value(&detailed).unwrap();
         assert_eq!(wire["detail"], "graph document schema_version is invalid");
+        assert_eq!(wire["detail_fact"]["kind"], "schema");
         assert!(!wire.to_string().contains("31m"));
         let oversized = FacadeError::invalid(super::InvalidInputDetail::GraphDocumentTooLarge);
         let received: FacadeError =
@@ -1384,6 +1359,12 @@ mod diagnostic_tests {
                 .contains("TOKEN_SENTINEL")
         );
         assert!(!untrusted.to_string().contains("TOKEN_SENTINEL"));
+        let forged: FacadeError = serde_json::from_value(serde_json::json!({
+            "code": "invalid_input", "detail": "safe-looking text",
+            "detail_fact": {"kind": "field", "value": "TOKEN_SENTINEL"}
+        }))
+        .unwrap();
+        assert_eq!(forged.diagnostic().detail.as_deref(), Some("invalid input"));
         for input in [
             format!("schema version TOKEN_SENTINEL\u{1b}{}", "é".repeat(2048)),
             "invalid input field `scope.paths` TOKEN_SENTINEL".to_owned(),

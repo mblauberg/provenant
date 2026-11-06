@@ -572,8 +572,8 @@ pub struct LaunchConfinement {
 }
 struct ResolvedLaunchLimits {
     limits: ProfileLimits,
-    grant_origin: &'static str,
-    profile_origin: &'static str,
+    grant_origin: provenant_records::diagnostic::SettingSource,
+    profile_origin: provenant_records::diagnostic::SettingSource,
 }
 
 impl ResolvedLaunchLimits {
@@ -599,9 +599,9 @@ fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
         Ok((config, keys)) => {
             let origin = |key: &str| {
                 if keys.contains(key) {
-                    "host configuration"
+                    provenant_records::diagnostic::SettingSource::Configuration
                 } else {
-                    "compiled default"
+                    provenant_records::diagnostic::SettingSource::ShippedDefault
                 }
             };
             ResolvedLaunchLimits {
@@ -623,8 +623,8 @@ fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
             );
             ResolvedLaunchLimits {
                 limits: defaults,
-                grant_origin: "compiled default",
-                profile_origin: "compiled default",
+                grant_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                profile_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
             }
         }
     }
@@ -658,13 +658,22 @@ impl LaunchConfinement {
         )
     }
     /// Prepare the private Cargo caches while writer custody is held.
-    pub(crate) fn seed_cargo(&self, environment: &[(OsString, OsString)], attempt_dir: &Directory) {
+    pub(crate) fn seed_cargo(
+        &self,
+        environment: &[(OsString, OsString)],
+        attempt_dir: &Directory,
+        cancel: &CancelToken,
+    ) {
+        if cancel.is_cancelled() {
+            return;
+        }
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         let outcome = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_registry(
                 self.cargo_registry_seed,
                 &self.home,
                 &authority.cargo_cache().path,
+                cancel,
             ),
             AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
@@ -676,11 +685,15 @@ impl LaunchConfinement {
                 "warning: could not record Cargo setup: {error}"
             );
         }
+        if cancel.is_cancelled() {
+            return;
+        }
         let git_outcome = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_git(
                 self.cargo_registry_seed,
                 &self.home,
                 &authority.cargo_cache().path,
+                cancel,
             ),
             AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
@@ -692,6 +705,9 @@ impl LaunchConfinement {
                 std::io::stderr().lock(),
                 "warning: could not record Cargo Git setup: {error}"
             );
+        }
+        if cancel.is_cancelled() {
+            return;
         }
         let target_outcome = match (&self.plan.permissions().mode, writer) {
             (AccessMode::WorktreeWrite(authority), Some((worktree, _)))
@@ -724,6 +740,7 @@ impl LaunchConfinement {
                     worktree.path(),
                     &self.home,
                     environment,
+                    cancel,
                 )
             }
             _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
@@ -838,6 +855,7 @@ fn prepare_writer_git(
         },
         repo.private_git_dir(),
         cancel,
+        &writer.facts,
     )?;
     repo.revalidate()
         .map_err(error("verify writer repository after fetch", Some(&path)))?;
@@ -1958,6 +1976,24 @@ impl crate::RunStore {
     pub fn writer_fences(&self) -> Result<Vec<WriterFence>> {
         Ok(self.writer_fence_listing()?.reservations)
     }
+    /// Perform the one-way custody cutover before a recovery scan.
+    pub(crate) fn cutover_writer_reservations(&self, call: &crate::Request<'_>) -> Result<()> {
+        let path = self
+            .writer_registry
+            .join("worktrees")
+            .join(self.context.project_id.to_string());
+        let directory = match Directory::open_anchor(&path) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        provenant_supervisor::custody::cutover_writer_reservations(
+            &directory,
+            call.cancel,
+            call.clock,
+        )
+        .map_err(error("cut over writer reservations", Some(&path)))
+    }
     pub fn writer_fence_listing(
         &self,
     ) -> Result<provenant_supervisor::custody::ReservationListing> {
@@ -2509,12 +2545,18 @@ mod launch_resource_limit_tests {
         let limits = launch_resource_limits(state.path());
         let defaults = ProfileLimits::default();
         assert_eq!(limits.limits.grant_limit, defaults.grant_limit);
-        assert_eq!(limits.grant_origin, "compiled default");
+        assert_eq!(
+            limits.grant_origin,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
         assert_eq!(
             limits.limits.profile_limit_bytes,
             defaults.profile_limit_bytes
         );
-        assert_eq!(limits.profile_origin, "compiled default");
+        assert_eq!(
+            limits.profile_origin,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
         let default_error = limits.annotate(
             provenant_confinement::permissions::PermissionError::GrantLimitExceeded {
                 family: "fixture",
@@ -2531,17 +2573,29 @@ mod launch_resource_limit_tests {
             "schema_version=1\n[domains.run]\ngrant_limit=128\n",
         )?;
         let explicit_default = launch_resource_limits(state.path());
-        assert_eq!(explicit_default.grant_origin, "host configuration");
-        assert_eq!(explicit_default.profile_origin, "compiled default");
+        assert_eq!(
+            explicit_default.grant_origin,
+            provenant_records::diagnostic::SettingSource::Configuration
+        );
+        assert_eq!(
+            explicit_default.profile_origin,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
         std::fs::write(
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=256\nprofile_limit_bytes=1048576\n",
         )?;
         let configured = launch_resource_limits(state.path());
         assert_eq!(configured.limits.grant_limit, 256);
-        assert_eq!(configured.grant_origin, "host configuration");
+        assert_eq!(
+            configured.grant_origin,
+            provenant_records::diagnostic::SettingSource::Configuration
+        );
         assert_eq!(configured.limits.profile_limit_bytes, 1048576);
-        assert_eq!(configured.profile_origin, "host configuration");
+        assert_eq!(
+            configured.profile_origin,
+            provenant_records::diagnostic::SettingSource::Configuration
+        );
         let configured_error = configured.annotate(
             provenant_confinement::permissions::PermissionError::ProfileTooLarge {
                 bytes: 2,

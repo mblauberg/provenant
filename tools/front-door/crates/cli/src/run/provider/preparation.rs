@@ -3,6 +3,81 @@ use super::*;
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const DEPENDENCY_STDERR_TAIL: usize = 4096;
 
+fn uniform_candidate_boundary(
+    count: usize,
+    boundaries: &std::collections::BTreeMap<usize, provenant_records::diagnostic::BoundaryClass>,
+) -> Option<provenant_records::diagnostic::BoundaryClass> {
+    if count == 0 || boundaries.len() != count {
+        return None;
+    }
+    let mut classes = boundaries.values().copied();
+    let first = classes.next()?;
+    classes.all(|class| class == first).then_some(first)
+}
+
+fn uniform_candidate_resource(
+    count: usize,
+    resources: &std::collections::BTreeMap<usize, provenant_records::diagnostic::ResourceFact>,
+) -> Option<provenant_records::diagnostic::ResourceFact> {
+    if count == 0 || resources.len() != count {
+        return None;
+    }
+    let mut facts = resources.values().copied();
+    let first = facts.next()?;
+    facts.all(|fact| fact == first).then_some(first)
+}
+
+fn attach_candidate_guard_facts(
+    reasons: &mut [SkippedRoute],
+    boundaries: &std::collections::BTreeMap<usize, provenant_records::diagnostic::BoundaryClass>,
+    resources: &std::collections::BTreeMap<usize, provenant_records::diagnostic::ResourceFact>,
+) -> Result<(), PrepareError> {
+    for (index, reason) in reasons.iter_mut().enumerate() {
+        reason
+            .set_guard_facts(
+                boundaries.get(&index).copied(),
+                resources.get(&index).copied(),
+            )
+            .map_err(|error| PrepareError::Other(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn resolve_pacing_source(
+    fact: provenant_records::diagnostic::ResourceFact,
+    adapter: &str,
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+) -> provenant_records::diagnostic::ResourceFact {
+    use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
+    let ResourceFact::PacingReserve {
+        percent,
+        setting,
+        origin: PacingSettingSource::Unresolved,
+    } = fact
+    else {
+        return fact;
+    };
+    let field = match setting {
+        PacingReserveSetting::AdapterFiveHour => "five_hour_percent",
+        PacingReserveSetting::AdapterSevenDay => "seven_day_percent",
+        _ => return fact,
+    };
+    let key = format!("domains.routing.pacing_reserve.{adapter}.{field}");
+    let origin = if matches!(
+        origins.get(&key),
+        Some(provenant_config::Origin::User { .. })
+    ) {
+        PacingSettingSource::Configuration
+    } else {
+        PacingSettingSource::ShippedDefault
+    };
+    ResourceFact::PacingReserve {
+        percent,
+        setting,
+        origin,
+    }
+}
+
 pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
     (!attachments.is_empty()
         && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
@@ -156,7 +231,12 @@ pub(super) fn dependency_preparation_refusal(
     enabled: bool,
     profile: &provenant_records::run::HarnessProfile,
 ) -> String {
-    let origin = if profile.knobs.contains_key("lanes.prepare_deps") {
+    let origin = if profile
+        .knobs
+        .get("lanes.prepare_deps")
+        .and_then(serde_json::Value::as_bool)
+        .is_some()
+    {
         format!("sealed profile {}", profile.name)
     } else {
         "compiled default".to_owned()
@@ -370,11 +450,37 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     Prompt(#[from] LaunchPromptError),
     #[error(transparent)]
+    Unsupported(#[from] provenant_records::UnsupportedLaunch),
+    #[error(transparent)]
+    Permission(#[from] provenant_confinement::permissions::PermissionError),
+    #[error(transparent)]
     Run(#[from] run::RunError),
+    #[error(transparent)]
+    ReadOnly(#[from] ReadOnlyPlanError),
+    #[error("write grants overlap a host index")]
+    HostIndexOverlap,
+    #[error("write grants overlap the host target seed store")]
+    TargetSeedOverlap,
+    #[error("{0}")]
+    GraphInputsAuthority(String),
+    #[error("{0}")]
+    SourceAuthority(String),
+    #[error("{0}")]
+    DirtyWriter(String),
+    #[error(transparent)]
+    SourceHead(#[from] SourceHeadError),
+    #[error(transparent)]
+    SourceCwd(#[from] SourceCwdError),
+    #[error(transparent)]
+    ContinuationRequest(#[from] ContinuationRequestError),
+    #[error("{message}")]
+    DependencyPreparation { message: String, configured: bool },
     #[error("{message}")]
     Candidates {
         message: String,
         plans: Vec<provenant_confinement::PlanError>,
+        candidate_boundary: Option<provenant_records::diagnostic::BoundaryClass>,
+        candidate_resource: Option<provenant_records::diagnostic::ResourceFact>,
         skipped_routes: Vec<SkippedRoute>,
         fallback_outcome: Option<provenant_records::run::PreparationFailure>,
     },
@@ -389,6 +495,8 @@ impl PrepareError {
                 cause,
                 note,
             } => run::PrepareRefusal {
+                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                resource: None,
                 terminal_cause: Some(cause),
                 terminal_note: note,
                 message,
@@ -405,17 +513,239 @@ impl PrepareError {
                 message,
                 skipped_routes,
                 fallback_outcome,
-                ..
-            } => run::PrepareRefusal {
-                terminal_cause: None,
-                terminal_note: None,
+                plans,
+                candidate_boundary,
+                candidate_resource,
+            } => {
+                // Only classify the aggregate when every refused candidate
+                // has a typed plan failure and all establish the same boundary.
+                let boundary_class = if let Some(class) = candidate_boundary {
+                    class
+                } else if !plans.is_empty()
+                    && plans.len() == skipped_routes.len()
+                    && skipped_routes.iter().all(|route| {
+                        route.cause
+                            == Some(provenant_records::RouteExclusionReason::DisclosureDenied)
+                    })
+                {
+                    let mut classes = plans.iter().map(|error| error.boundary_class());
+                    match classes.next() {
+                        Some(first) if classes.all(|class| class == first) => first,
+                        _ => provenant_records::diagnostic::BoundaryClass::None,
+                    }
+                } else {
+                    provenant_records::diagnostic::BoundaryClass::None
+                };
+                run::PrepareRefusal {
+                    boundary_class,
+                    resource: candidate_resource,
+                    terminal_cause: None,
+                    terminal_note: None,
+                    message,
+                    skipped_routes,
+                    fallback_outcome,
+                }
+            }
+            Self::SourceCwd(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = error.boundary_class();
+                refusal
+            }
+            Self::Permission(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = error.boundary_class();
+                refusal.resource = error.resource_fact();
+                refusal
+            }
+            Self::Unsupported(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal
+            }
+            Self::ContinuationRequest(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal
+            }
+            Self::SourceHead(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal
+            }
+            Self::DependencyPreparation {
                 message,
-                skipped_routes,
-                fallback_outcome,
-            },
+                configured,
+            } => {
+                let mut refusal = run::PrepareRefusal::from(message);
+                refusal.resource = Some(
+                    provenant_records::diagnostic::ResourceFact::DependencyPreparation {
+                        configured,
+                    },
+                );
+                refusal
+            }
+            Self::ReadOnly(error) => {
+                let boundary_class = error.boundary_class();
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = boundary_class;
+                refusal
+            }
+            Self::Run(error) => {
+                let boundary_class = error.boundary_class();
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = boundary_class;
+                refusal
+            }
+            Self::Prompt(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = match &error {
+                    LaunchPromptError::TooLarge => {
+                        provenant_records::diagnostic::BoundaryClass::Integrity
+                    }
+                    LaunchPromptError::NestedArgvTooLarge { .. } => {
+                        provenant_records::diagnostic::BoundaryClass::Authority
+                    }
+                    _ => provenant_records::diagnostic::BoundaryClass::None,
+                };
+                refusal.resource = error.resource_fact();
+                refusal
+            }
+            error @ (Self::HostIndexOverlap | Self::TargetSeedOverlap) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
+                refusal
+            }
+            error @ (Self::GraphInputsAuthority(_)
+            | Self::SourceAuthority(_)
+            | Self::DirtyWriter(_)) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal
+            }
             other => other.to_string().into(),
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
+    use provenant_records::diagnostic::BoundaryClass;
+    let error = run::RunError::Confinement(
+        provenant_confinement::permissions::PermissionError::CredentialRoot,
+    );
+    let refusal = PrepareError::Run(error).into_refusal();
+    assert_eq!(refusal.boundary_class, BoundaryClass::Credentials);
+    let permission = PrepareError::Permission(
+        provenant_confinement::permissions::PermissionError::GitWriteAuthorityMissing,
+    )
+    .into_refusal();
+    assert_eq!(permission.boundary_class, BoundaryClass::LaneGit);
+    let prompt = PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge {
+        limit: 32,
+        origin: "shipped default",
+    })
+    .into_refusal();
+    assert_eq!(prompt.boundary_class, BoundaryClass::Authority);
+    assert_eq!(
+        PrepareError::Prompt(LaunchPromptError::TooLarge)
+            .into_refusal()
+            .boundary_class,
+        BoundaryClass::Integrity
+    );
+    for error in [SourceHeadError::Missing, SourceHeadError::Invalid] {
+        let refusal = PrepareError::SourceHead(error).into_refusal();
+        assert_eq!(refusal.boundary_class, BoundaryClass::Authority);
+    }
+    for error in [
+        ContinuationRequestError::MissingRoute,
+        ContinuationRequestError::MissingModel,
+        ContinuationRequestError::InvalidModel("invalid".into()),
+        ContinuationRequestError::ProviderMismatch,
+    ] {
+        assert_eq!(
+            PrepareError::ContinuationRequest(error)
+                .into_refusal()
+                .boundary_class,
+            BoundaryClass::Authority
+        );
+    }
+    let source =
+        PrepareError::SourceCwd(SourceCwdError::Authority("source identity changed".into()))
+            .into_refusal();
+    assert_eq!(source.boundary_class, BoundaryClass::Authority);
+    let unavailable =
+        PrepareError::SourceCwd(SourceCwdError::Operational("cwd unavailable".into()))
+            .into_refusal();
+    assert_eq!(unavailable.boundary_class, BoundaryClass::None);
+    let unsupported = PrepareError::Unsupported(provenant_records::UnsupportedLaunch {
+        adapter: "fixture",
+        field: provenant_records::LaunchField::Write,
+    })
+    .into_refusal();
+    assert_eq!(unsupported.boundary_class, BoundaryClass::Authority);
+    let other = PrepareError::Other("TOKEN_SENTINEL".into()).into_refusal();
+    assert_eq!(other.boundary_class, BoundaryClass::None);
+    for error in [
+        PrepareError::GraphInputsAuthority("invalid graph inputs root".into()),
+        PrepareError::SourceAuthority("source grant overlaps".into()),
+        PrepareError::DirtyWriter("uncommitted predecessor edits".into()),
+    ] {
+        assert_eq!(
+            error.into_refusal().boundary_class,
+            BoundaryClass::Authority
+        );
+    }
+    for error in [
+        PrepareError::HostIndexOverlap,
+        PrepareError::TargetSeedOverlap,
+    ] {
+        let refusal = error.into_refusal();
+        assert_eq!(refusal.boundary_class, BoundaryClass::Integrity);
+        assert!(refusal.message.contains("overlap"));
+    }
+    let candidate = || {
+        let mut route = skip("fixture/model", SkipKind::Unavailable, "plan refused");
+        route.set_cause(provenant_records::RouteExclusionReason::DisclosureDenied);
+        route
+    };
+    let aggregate = |skipped_routes| {
+        PrepareError::Candidates {
+            message: "candidate refusal".into(),
+            plans: vec![provenant_confinement::PlanError::InvalidRoots],
+            candidate_boundary: None,
+            candidate_resource: None,
+            skipped_routes,
+            fallback_outcome: None,
+        }
+        .into_refusal()
+    };
+    assert_eq!(
+        aggregate(vec![candidate()]).boundary_class,
+        BoundaryClass::Authority
+    );
+    let unrelated = skip("other/model", SkipKind::Unavailable, "not available");
+    assert_eq!(
+        aggregate(vec![candidate(), unrelated]).boundary_class,
+        BoundaryClass::None
+    );
+    let mut boundaries = std::collections::BTreeMap::new();
+    boundaries.insert(0, BoundaryClass::Authority);
+    assert_eq!(
+        uniform_candidate_boundary(1, &boundaries),
+        Some(BoundaryClass::Authority)
+    );
+    assert_eq!(uniform_candidate_boundary(2, &boundaries), None);
+    boundaries.insert(1, BoundaryClass::Credentials);
+    assert_eq!(uniform_candidate_boundary(2, &boundaries), None);
+    let mut resources = std::collections::BTreeMap::new();
+    let fact = provenant_records::diagnostic::ResourceFact::ArgvPromptLimit {
+        limit: 3,
+        origin: provenant_records::diagnostic::SettingSource::Configuration,
+    };
+    resources.insert(0, fact);
+    assert_eq!(uniform_candidate_resource(1, &resources), Some(fact));
+    assert_eq!(uniform_candidate_resource(2, &resources), None);
 }
 /// Retain a closed resolver classification, never its freely formatted error.
 fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError {
@@ -463,12 +793,72 @@ impl From<&str> for PrepareError {
     }
 }
 
+#[test]
+fn dependency_preparation_retains_setting_source_without_source_error() {
+    use provenant_records::diagnostic::ResourceFact;
+    for configured in [false, true] {
+        let refusal = PrepareError::DependencyPreparation {
+            message: "TOKEN_SENTINEL".into(),
+            configured,
+        }
+        .into_refusal();
+        assert_eq!(
+            refusal.resource,
+            Some(ResourceFact::DependencyPreparation { configured })
+        );
+    }
+}
+
+#[test]
+fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
+    let mut reasons = vec![
+        skip("a", SkipKind::Refused, "TOKEN_SENTINEL"),
+        skip("b", SkipKind::Refused, "TOKEN_SENTINEL"),
+    ];
+    let boundaries = [(0, BoundaryClass::Credentials)].into_iter().collect();
+    let resources = [(
+        1,
+        ResourceFact::ArgvPromptLimit {
+            limit: 3,
+            origin: SettingSource::Configuration,
+        },
+    )]
+    .into_iter()
+    .collect();
+    attach_candidate_guard_facts(&mut reasons, &boundaries, &resources)?;
+    assert_eq!(reasons[0].extra["guard_boundary"], "credentials");
+    assert!(
+        reasons[0]
+            .diagnostic()
+            .detail
+            .as_deref()
+            .is_none_or(|text| !text.contains("TOKEN_SENTINEL"))
+    );
+    let persisted = serde_json::to_vec(&reasons)?;
+    let restored: Vec<SkippedRoute> = serde_json::from_slice(&persisted)?;
+    let projected = restored[1].diagnostic();
+    assert_eq!(projected.code, "REFUSED");
+    let detail = projected.detail.ok_or("missing resource detail")?;
+    assert!(detail.contains("domains.run.argv_prompt_limit_bytes"));
+    assert!(detail.contains("host configuration"));
+    assert!(!detail.contains("TOKEN_SENTINEL"));
+    assert!(uniform_candidate_boundary(2, &boundaries).is_none());
+    assert!(uniform_candidate_resource(2, &resources).is_none());
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum PlanCheckError {
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
-    #[error("{0}")]
-    Other(String),
+    #[error(transparent)]
+    Permission(#[from] provenant_confinement::permissions::PermissionError),
+    #[error(transparent)]
+    ReadOnly(#[from] ReadOnlyPlanError),
+    #[error(transparent)]
+    SourceHead(#[from] SourceHeadError),
 }
 
 #[cfg(any(test, feature = "fixture"))]
@@ -516,8 +906,7 @@ pub(super) fn prepare_with_wait(
                 network: task.access.network,
                 skill_location: task.profile.require_skill_location,
                 ..Default::default()
-            })
-            .map_err(|error| error.to_string())?;
+            })?;
         let roots = registry.roots.ok_or("routing context is unavailable")?;
         let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
             .map_err(|error| error.to_string())?;
@@ -930,8 +1319,19 @@ pub(super) fn prepare_candidates(
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(registry, task, paths, resume, locate, provider, name);
     }
+    // This is the raw, recorded prompt. It must fit the same bound as the
+    // validated prompt artifact, before any host preamble is added.
+    if prompt_text.len() as u64 > super::PROMPT_LIMIT {
+        return Err(PrepareError::Prompt(LaunchPromptError::TooLarge));
+    }
     let default_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
-    check_launch_prompt(prompt_text, paths, None, default_limit, "compiled default")?;
+    check_launch_prompt(
+        prompt_text,
+        paths,
+        None,
+        default_limit,
+        provenant_records::diagnostic::SettingSource::ShippedDefault,
+    )?;
     let loaded_config = registry
         .roots
         .map(|roots| provenant_config::read_with_domains(roots, &crate::domains::SECTIONS));
@@ -940,9 +1340,9 @@ pub(super) fn prepare_candidates(
         Some(Ok(config)) => {
             let origin = config.origins.get(ARGV_LIMIT_KEY);
             let label = if matches!(origin, Some(provenant_config::Origin::User { .. })) {
-                "host configuration"
+                provenant_records::diagnostic::SettingSource::Configuration
             } else {
-                "compiled default"
+                provenant_records::diagnostic::SettingSource::ShippedDefault
             };
             (
                 config.domains.run.argv_prompt_limit_bytes,
@@ -961,13 +1361,13 @@ pub(super) fn prepare_candidates(
             );
             (
                 default_limit,
-                "compiled default",
+                provenant_records::diagnostic::SettingSource::ShippedDefault,
                 serde_json::json!({"kind": "compiled"}),
             )
         }
         None => (
             default_limit,
-            "compiled default",
+            provenant_records::diagnostic::SettingSource::ShippedDefault,
             serde_json::json!({"kind": "compiled"}),
         ),
     };
@@ -1001,17 +1401,15 @@ pub(super) fn prepare_candidates(
         project_id,
         task.context.as_ref(),
         task.access.inputs_root.as_deref(),
-    )?;
+    )
+    .map_err(PrepareError::GraphInputsAuthority)?;
     let writer = match &task.writer {
-        Some(request) => Some(
-            run::prepare_writer_with_facts(
-                request,
-                roots.state.as_path(),
-                project_id,
-                &registry.repo_facts,
-            )
-            .map_err(|error| error.to_string())?,
-        ),
+        Some(request) => Some(run::prepare_writer_with_facts(
+            request,
+            roots.state.as_path(),
+            project_id,
+            &registry.repo_facts,
+        )?),
         None => None,
     };
     let source = match writer.as_ref() {
@@ -1021,7 +1419,8 @@ pub(super) fn prepare_candidates(
     let isolated =
         writer.is_none() && task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
-        super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
+        super::source_tree::ensure_source_roots(&source, &task.access, assets)
+            .map_err(PrepareError::SourceAuthority)?;
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
     } else {
         source.clone()
@@ -1052,17 +1451,14 @@ pub(super) fn prepare_candidates(
                     || format!("writer continuation from {source} to {predecessor}"),
                     |error| error.to_string(),
                 );
-                return Err(format!(
+                return Err(PrepareError::DirtyWriter(format!(
                     "{detail}; uncommitted predecessor edits: {}",
                     uncommitted.join(", ")
-                )
-                .into());
+                )));
             }
-            lineage.map_err(|error| error.to_string())?;
+            lineage?;
         } else if let Some(head) = task.head.as_deref() {
-            writer
-                .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
-                .map_err(|error| error.to_string())?;
+            writer.require_source(head.parse().map_err(|_| "invalid pinned writer source")?)?;
         }
     }
     // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
@@ -1239,6 +1635,8 @@ pub(super) fn prepare_candidates(
     let diagnostic_records = crate::quota::read_cache(roots).unwrap_or_default();
     let mut availability = Vec::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
+    let mut reason_boundaries = std::collections::BTreeMap::new();
+    let mut reason_resources = std::collections::BTreeMap::new();
     let mut auth_failures = std::collections::BTreeMap::new();
     let mut observation_failures = std::collections::BTreeMap::new();
     let probe = Probe {
@@ -1381,7 +1779,7 @@ pub(super) fn prepare_candidates(
             adapter,
             publishing_gh.is_some(),
         )
-        .map_err(PlanCheckError::Other)
+        .map_err(PlanCheckError::from)
         .and_then(|request| ConfinedPlan::new(request).map_err(PlanCheckError::from))
         {
             Ok(_) => access.push(provenant_routing::AccessContext {
@@ -1591,6 +1989,10 @@ pub(super) fn prepare_candidates(
                     .intent
                     .check_launch(spec, &route.model, route.effort.as_deref())
         {
+            reason_boundaries.insert(
+                reasons.len(),
+                provenant_records::diagnostic::BoundaryClass::Authority,
+            );
             reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
             continue;
         }
@@ -1602,6 +2004,10 @@ pub(super) fn prepare_candidates(
         let fallback_dropped = effective.dropped_fallback;
         let model_policy = effective.policy;
         if !model_policy.permits(request.intent) {
+            reason_boundaries.insert(
+                reasons.len(),
+                provenant_records::diagnostic::BoundaryClass::Authority,
+            );
             reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
             continue;
         }
@@ -1873,6 +2279,38 @@ pub(super) fn prepare_candidates(
                         format!("confinement plan: {error}")
                     },
                 );
+            if matches!(
+                reason,
+                provenant_records::RouteExclusionReason::DisclosureDenied
+            ) && let Some(error) = plan_errors.get(route.adapter.as_str())
+            {
+                let class = match error {
+                    PlanCheckError::Plan(error) => error.boundary_class(),
+                    PlanCheckError::Permission(error) => error.boundary_class(),
+                    PlanCheckError::ReadOnly(error) => error.boundary_class(),
+                    PlanCheckError::SourceHead(_) => {
+                        provenant_records::diagnostic::BoundaryClass::Authority
+                    }
+                };
+                if class != provenant_records::diagnostic::BoundaryClass::None {
+                    reason_boundaries.insert(reasons.len(), class);
+                }
+            }
+            if matches!(
+                reason,
+                provenant_records::RouteExclusionReason::PacingReserve
+            ) && let Some(fact) = route.extra.get("pacing_reserve_fact").and_then(|value| {
+                serde_json::from_value::<provenant_records::diagnostic::ResourceFact>(value.clone())
+                    .ok()
+            }) && matches!(
+                fact,
+                provenant_records::diagnostic::ResourceFact::PacingReserve { .. }
+            ) {
+                reason_resources.insert(
+                    reasons.len(),
+                    resolve_pacing_source(fact, &route.adapter, &config.origins),
+                );
+            }
             let mut skipped = skip(&label, SkipKind::Unavailable, detail);
             skipped.set_cause(reason.clone());
             reasons.push(skipped);
@@ -1955,11 +2393,19 @@ pub(super) fn prepare_candidates(
                 &route,
                 &task.authority_digest.to_string(),
                 state_root,
+                roots.state.as_path(),
                 &private_state,
             ) {
                 Ok(continuation) => Some(continuation),
                 Err(error) => {
-                    reasons.push(skip(&label, SkipKind::Refused, error));
+                    let class = error.boundary_class();
+                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                        reason_boundaries.insert(reasons.len(), class);
+                    }
+                    if let Some(fact) = error.resource_fact() {
+                        reason_resources.insert(reasons.len(), fact);
+                    }
+                    reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                     continue;
                 }
             },
@@ -2017,6 +2463,15 @@ pub(super) fn prepare_candidates(
         ) {
             Ok(prompt) => prompt,
             Err(error) => {
+                if matches!(&error, LaunchPromptError::NestedArgvTooLarge { .. }) {
+                    reason_boundaries.insert(
+                        reasons.len(),
+                        provenant_records::diagnostic::BoundaryClass::Authority,
+                    );
+                }
+                if let Some(fact) = error.resource_fact() {
+                    reason_resources.insert(reasons.len(), fact);
+                }
                 reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                 continue;
             }
@@ -2040,6 +2495,7 @@ pub(super) fn prepare_candidates(
             adapter.id(),
             publishing_gh.is_some(),
         )
+        .map_err(PlanCheckError::from)
         .and_then(|request| match writer.as_ref() {
             Some(writer) => ConfinedPlan::new(request)
                 .map(|plan| {
@@ -2053,7 +2509,7 @@ pub(super) fn prepare_candidates(
                         Some(writer.worktree.repo().private_git_dir().to_owned()),
                     )
                 })
-                .map_err(|error| error.to_string()),
+                .map_err(PlanCheckError::from),
             None => read_only_plan(
                 roots,
                 project_id,
@@ -2063,15 +2519,10 @@ pub(super) fn prepare_candidates(
                 isolated,
                 task.access.source_live,
             )
+            .map_err(PlanCheckError::from)
             .and_then(|mut planned| {
                 if isolated {
-                    planned.1 = Some(
-                        task.head
-                            .as_deref()
-                            .ok_or("graph source head missing")?
-                            .parse()
-                            .map_err(|_| "invalid graph source head")?,
-                    );
+                    planned.1 = Some(source_head(task)?);
                     planned.3 = Some(cwd.join(".git"));
                 } else {
                     require_source_head(task, planned.1)?;
@@ -2081,7 +2532,20 @@ pub(super) fn prepare_candidates(
         }) {
             Ok(planned) => planned,
             Err(error) => {
-                reasons.push(skip(&label, SkipKind::Refused, error));
+                let class = match &error {
+                    PlanCheckError::Plan(cause) => cause.boundary_class(),
+                    PlanCheckError::Permission(cause) => cause.boundary_class(),
+                    PlanCheckError::ReadOnly(cause) => cause.boundary_class(),
+                    PlanCheckError::SourceHead(_) => {
+                        provenant_records::diagnostic::BoundaryClass::Authority
+                    }
+                };
+                {
+                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                        reason_boundaries.insert(reasons.len(), class);
+                    }
+                }
+                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                 continue;
             }
         };
@@ -2199,6 +2663,13 @@ pub(super) fn prepare_candidates(
             Ok(spec) => spec,
             Err(error) => {
                 previous_outcome = provider_preparation_fallback(&error);
+                let class = error.boundary_class();
+                if class != provenant_records::diagnostic::BoundaryClass::None {
+                    reason_boundaries.insert(reasons.len(), class);
+                }
+                if let Some(fact) = error.resource_fact() {
+                    reason_resources.insert(reasons.len(), fact);
+                }
                 let kind = if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired {
                     SkipKind::AuthRequired
                 } else {
@@ -2219,6 +2690,13 @@ pub(super) fn prepare_candidates(
                 Ok(spec) => spec,
                 Err(error) => {
                     previous_outcome = provider_preparation_fallback(&error);
+                    let class = error.boundary_class();
+                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                        reason_boundaries.insert(reasons.len(), class);
+                    }
+                    if let Some(fact) = error.resource_fact() {
+                        reason_resources.insert(reasons.len(), fact);
+                    }
                     let kind =
                         if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired {
                             SkipKind::AuthRequired
@@ -2272,13 +2750,13 @@ pub(super) fn prepare_candidates(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err("write grants overlap a host index".into());
+            return Err(PrepareError::HostIndexOverlap);
         }
         if !target_seeds_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err("write grants overlap the host target seed store".into());
+            return Err(PrepareError::TargetSeedOverlap);
         }
         if let Some(head) = &task.head {
             spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
@@ -2306,11 +2784,13 @@ pub(super) fn prepare_candidates(
         if let Some(gh) = publishing_gh.as_ref() {
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
-            let publishing = spec
-                .configure_publishing(scratch, &git, gh, &home, &policy)
-                .map_err(|error| error.to_string());
+            let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
             if let Err(error) = publishing {
-                reasons.push(skip(&label, SkipKind::Setup, error));
+                let class = error.boundary_class();
+                if class != provenant_records::diagnostic::BoundaryClass::None {
+                    reason_boundaries.insert(reasons.len(), class);
+                }
+                reasons.push(skip(&label, SkipKind::Setup, error.to_string()));
                 continue;
             }
         }
@@ -2324,11 +2804,13 @@ pub(super) fn prepare_candidates(
         }
         spec.complete_tool_requirements(&plan, &home, &cwd);
         if isolated {
-            super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)?;
+            super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)
+                .map_err(PrepareError::SourceAuthority)?;
             super::source_tree::ensure_view_read_only(
                 &cwd,
                 &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
-            )?;
+            )
+            .map_err(PrepareError::SourceAuthority)?;
         }
         let transcript_account = account
             .as_ref()
@@ -2415,8 +2897,14 @@ pub(super) fn prepare_candidates(
                         &|| host_dependency_path(cancel),
                         cancel,
                     )
-                    .map_err(|error| {
-                        dependency_preparation_refusal(error, enabled, &task.profile)
+                    .map_err(|error| PrepareError::DependencyPreparation {
+                        message: dependency_preparation_refusal(error, enabled, &task.profile),
+                        configured: task
+                            .profile
+                            .knobs
+                            .get("lanes.prepare_deps")
+                            .and_then(serde_json::Value::as_bool)
+                            .is_some(),
                     })?,
                 )
             }
@@ -2483,10 +2971,12 @@ pub(super) fn prepare_candidates(
         };
         // Resolve gh credentials on the host, where a keychain login is
         // available. The token travels only in the live launch environment.
-        if writer.is_none()
+        let reader_gh = writer.is_none()
             && task.access.network(true) == NetworkAccess::Open
-            && adapter_spec.is_some_and(|spec| spec.github_auth.is_some())
-            && let Ok(gh) = locate("gh")
+            && adapter_spec.is_some_and(|spec| spec.github_auth.is_some());
+        if let Some(gh) = publishing_gh
+            .clone()
+            .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
         {
             super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
             if adapter_spec.is_some_and(|spec| {
@@ -2496,6 +2986,7 @@ pub(super) fn prepare_candidates(
                 super::gh_auth::codex_shell_environment(&spec.env, &mut spec.argv);
             }
         }
+        attach_candidate_guard_facts(&mut reasons, &reason_boundaries, &reason_resources)?;
         return Ok(run::PreparedLaunch {
             skipped_routes: reasons,
             argv: spec.argv,
@@ -2516,6 +3007,9 @@ pub(super) fn prepare_candidates(
             }),
         });
     }
+    attach_candidate_guard_facts(&mut reasons, &reason_boundaries, &reason_resources)?;
+    let candidate_boundary = uniform_candidate_boundary(reasons.len(), &reason_boundaries);
+    let candidate_resource = uniform_candidate_resource(reasons.len(), &reason_resources);
     Err(PrepareError::Candidates {
         fallback_outcome: match previous_outcome {
             provenant_routing::FallbackOutcome::AuthRequired => {
@@ -2539,9 +3033,13 @@ pub(super) fn prepare_candidates(
             .filter(|(adapter, _)| reported_plan_errors.contains(*adapter))
             .filter_map(|(_, error)| match error {
                 PlanCheckError::Plan(error) => Some(error),
-                PlanCheckError::Other(_) => None,
+                PlanCheckError::Permission(_)
+                | PlanCheckError::ReadOnly(_)
+                | PlanCheckError::SourceHead(_) => None,
             })
             .collect(),
+        candidate_boundary,
+        candidate_resource,
         skipped_routes: reasons,
     })
 }
@@ -3145,4 +3643,52 @@ mod refusal_cause_tests {
                 .contains("PROVIDER_SECRET_SENTINEL")
         );
     }
+}
+
+#[test]
+fn argv_spill_refusal_preserves_setting_and_source() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::diagnostic::{Diagnostic, ResourceFact, SettingSource};
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let paths = run::LaunchPaths {
+        attempt_id: provenant_core::AttemptId::from_bytes([1; 16]),
+        operation_id: provenant_core::OperationId::parse("spill-limit")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id: provenant_core::RunId::from_bytes([2; 16]),
+        deadline_unix_ms: u64::MAX,
+        scratch: root.join("scratch"),
+        provider_state: root.join("provider-state"),
+        temporary: root.join("tmp"),
+        temporary_alias: None,
+    };
+    let error = launch_prompt(
+        "PROMPT_SECRET_SENTINEL",
+        &paths,
+        &root,
+        "cursor",
+        1,
+        SettingSource::Configuration,
+    )
+    .err()
+    .ok_or("spill instruction exceeded configured argv budget")?;
+    let refusal = PrepareError::Prompt(error).into_refusal();
+    assert_eq!(
+        refusal.resource,
+        Some(ResourceFact::ArgvPromptLimit {
+            limit: 1,
+            origin: SettingSource::Configuration
+        })
+    );
+    let diagnostic = refusal
+        .resource
+        .unwrap()
+        .project(Diagnostic::new("INVALID"));
+    let encoded = serde_json::to_string(&diagnostic)?;
+    assert!(encoded.contains("domains.run.argv_prompt_limit_bytes"));
+    assert!(encoded.contains("host configuration"));
+    assert!(diagnostic.next.is_some());
+    assert!(!encoded.contains("PROMPT_SECRET_SENTINEL"));
+    assert!(!encoded.contains(root.to_str().unwrap()));
+    Ok(())
 }

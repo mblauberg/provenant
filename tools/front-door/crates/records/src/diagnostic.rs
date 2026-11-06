@@ -97,10 +97,126 @@ impl LaneLimit {
     }
 }
 
+/// The configuration family that supplied a pacing reserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PacingReserveSetting {
+    AdapterFiveHour,
+    AdapterSevenDay,
+    Account,
+    Free,
+}
+impl PacingReserveSetting {
+    pub fn setting(self) -> &'static str {
+        match self {
+            Self::AdapterFiveHour => "domains.routing.pacing_reserve.<adapter>.five_hour_percent",
+            Self::AdapterSevenDay => "domains.routing.pacing_reserve.<adapter>.seven_day_percent",
+            Self::Account => "domains.routing.pacing.accounts",
+            Self::Free => "domains.routing.pacing.free",
+        }
+    }
+}
+
+/// Source of the reserve selected by routing. Adapter overrides need the
+/// configuration loader's per-field origin before they are projected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PacingSettingSource {
+    Configuration,
+    ShippedDefault,
+    Unresolved,
+}
+impl PacingSettingSource {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Configuration => "host configuration",
+            Self::ShippedDefault => "shipped default",
+            Self::Unresolved => "origin unavailable",
+        }
+    }
+}
+
+/// Origin of a lane-port block count in the handed-off plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortSettingSource {
+    Configuration,
+    ShippedDefault,
+    RecordedPlan,
+}
+impl PortSettingSource {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Configuration => "host configuration",
+            Self::ShippedDefault => "shipped default",
+            Self::RecordedPlan => "recorded plan",
+        }
+    }
+}
+
+/// Configurable budgets for copying retained provider state. These never alter
+/// credential, state-root, mount or worktree confinement checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationCopyLimit {
+    Bytes,
+    Entries,
+    Depth,
+}
+impl ContinuationCopyLimit {
+    pub fn setting(self) -> &'static str {
+        match self {
+            Self::Bytes => "domains.run.continuation_copy_limit_bytes",
+            Self::Entries => "domains.run.continuation_copy_entries",
+            Self::Depth => "domains.run.continuation_copy_depth",
+        }
+    }
+}
+
 /// Closed resource facts safe to project across host boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourceFact {
+    Disk {
+        free: u64,
+        floor: u64,
+        origin: SettingSource,
+    },
+    ArgvPromptLimit {
+        limit: u64,
+        origin: SettingSource,
+    },
+    ContinuationCopy {
+        limit: u64,
+        setting: ContinuationCopyLimit,
+        origin: SettingSource,
+        available_bytes: Option<u64>,
+    },
+    WriteGrantLimit {
+        limit: u64,
+        origin: SettingSource,
+    },
+    GrantLimit {
+        limit: u64,
+        origin: SettingSource,
+    },
+    ProfileLimit {
+        bytes: u64,
+        limit: u64,
+        origin: SettingSource,
+    },
+    DependencyPreparation {
+        configured: bool,
+    },
+    LanePorts {
+        blocks: u32,
+        origin: PortSettingSource,
+    },
+    PacingReserve {
+        percent: u8,
+        setting: PacingReserveSetting,
+        origin: PacingSettingSource,
+    },
     MemoryPressure {
         level: PressureLevel,
         threshold: PressureThreshold,
@@ -122,6 +238,37 @@ pub enum ResourceFact {
 impl ResourceFact {
     pub fn project(&self, diagnostic: Diagnostic) -> Diagnostic {
         match self {
+            Self::Disk { free, floor, origin } => diagnostic
+                .detail(format!("disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {})", origin.description()))
+                .next("free disk space above gc.free_floor before retrying"),
+            Self::ArgvPromptLimit { limit, origin } => diagnostic
+                .detail(format!("argv prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes; source: {})", origin.description()))
+                .next("shorten the prompt or adjust domains.run.argv_prompt_limit_bytes"),
+            Self::ContinuationCopy { limit, setting, origin, available_bytes } => {
+                let key = setting.setting();
+                let space = available_bytes.map_or_else(String::new, |bytes| format!("; {bytes} disk bytes available"));
+                diagnostic
+                    .detail(format!("retained provider state exceeds its copy budget; {key} is {limit} (source: {}){space}", origin.description()))
+                    .next(format!("reduce retained provider state, free disk space, or adjust {key} before retrying"))
+            }
+            Self::WriteGrantLimit { limit, origin } => diagnostic
+                .detail(format!("encoded write grants exceed domains.run.write_grant_limit_bytes ({limit} bytes; source: {})", origin.description()))
+                .next("reduce the write grants or adjust domains.run.write_grant_limit_bytes"),
+            Self::GrantLimit { limit, origin } => diagnostic
+                .detail(format!("grants exceed domains.run.grant_limit ({limit}; source: {})", origin.description()))
+                .next("reduce granted roots or adjust domains.run.grant_limit"),
+            Self::ProfileLimit { bytes, limit, origin } => diagnostic
+                .detail(format!("sandbox profile is {bytes} bytes; domains.run.profile_limit_bytes is {limit} bytes (source: {})", origin.description()))
+                .next("reduce granted roots or adjust domains.run.profile_limit_bytes"),
+            Self::DependencyPreparation { configured } => diagnostic
+                .detail(format!("dependency preparation failed; lanes.prepare_deps=true (source: {})", if *configured { "sealed profile" } else { "shipped default" }))
+                .next("repair dependency preparation or set lanes.prepare_deps=false"),
+            Self::LanePorts { blocks, origin } => diagnostic
+                .detail(format!("no free lane port block; domains.fabric.lanes.lane_port_blocks is {blocks} (source: {})", origin.description()))
+                .next("wait for a lane port block or raise or disable domains.fabric.lanes.lane_port_blocks"),
+            Self::PacingReserve { percent, setting, origin } => diagnostic
+                .detail(format!("selected account is held by a {percent}% pacing reserve; {} (source: {})", setting.setting(), origin.description()))
+                .next(format!("wait for the pacing window or adjust {}", setting.setting())),
             Self::MemoryPressure { level, threshold, origin } => diagnostic
                 .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
                 .next("reduce host memory pressure before retrying"),
@@ -489,6 +636,13 @@ mod tests {
         assert!(route.detail.contains("provenant quota tick"));
         assert!(!route.detail.contains("TOKEN_SENTINEL"));
         assert!(route.detail.len() <= 2 * MAX_DIAGNOSTIC_BYTES + 2);
+        route.extra.insert(
+            "guard_resource".into(),
+            serde_json::json!({"kind": "TOKEN_SENTINEL", "detail": "/private/source"}),
+        );
+        let invalid = serde_json::to_string(&route.diagnostic()).unwrap();
+        assert!(!invalid.contains("TOKEN_SENTINEL"));
+        assert!(!invalid.contains("/private/source"));
     }
 
     #[test]

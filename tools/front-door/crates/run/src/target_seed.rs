@@ -86,11 +86,21 @@ pub fn rustc_metadata(worktree: &Path) -> io::Result<(String, String)> {
 /// Rustup overrides and non-release/custom toolchains are deliberately refused.
 /// A refusal is a stable snake_case code: it names the path taken and never
 /// carries an environment value, so it is safe to record.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub(crate) fn lane_rustc_metadata(
     worktree: &Path,
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Result<(String, String), &'static str> {
+    lane_rustc_metadata_cancellable(worktree, home, environment, None)
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn lane_rustc_metadata_cancellable(
+    worktree: &Path,
+    home: &Path,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    cancel: Option<&provenant_core::CancelToken>,
 ) -> Result<(String, String), &'static str> {
     let rustup_home = home.join(".rustup");
     let mut saw_home = false;
@@ -152,6 +162,8 @@ pub(crate) fn lane_rustc_metadata(
     let argv = [resolved.into_os_string(), "-vV".into()];
     let env = [("HOME".into(), home.as_os_str().into())];
     let mut options = ExecOptions::new(&argv, home, std::time::Duration::from_secs(30));
+    options.cancel = cancel;
+    options.process_group = true;
     options.env = Some(&env);
     let output = SystemExecutor::new(1)
         .and_then(|e| e.execute(options))

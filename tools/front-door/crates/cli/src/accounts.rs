@@ -198,7 +198,10 @@ fn execute_inner(
                 *kind = cause;
                 message
             })?;
-            let entry = settings.entries.get_mut(&id).ok_or("unknown account")?;
+            let entry = settings.entries.get_mut(&id).ok_or_else(|| {
+                *kind = Some(provenant_run::ErrorKind::UnknownAccount);
+                format!("unknown account `{account}`")
+            })?;
             if let Some(name) = display_name {
                 let name = name.trim();
                 entry.display_name = (!name.is_empty()).then(|| name.to_owned());

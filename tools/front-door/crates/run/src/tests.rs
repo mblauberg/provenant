@@ -683,6 +683,7 @@ pub(super) fn exit() -> ExitObservation {
         omitted_reaped: 0,
         spared: vec![],
         omitted_spared: 0,
+        launch_refusal: None,
         warnings: vec![],
         omitted_warnings: 0,
         // Production guardians have no live frame decoder; delivery must not need one.

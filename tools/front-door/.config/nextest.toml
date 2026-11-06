@@ -113,6 +113,15 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'test(=review_fans_out_and_collects_fake_provider) | test(=review_resolves_identity_only_dispositions)'
 slow-timeout = { period = "30s", terminate-after = 2 }
 
+# These tests perform several dispatches, including writer worktree preparation.
+[[profile.default.overrides]]
+filter = 'test(=opus_writer_dispatch_advises_a_cheaper_route) | test(=cancel_live_preparation_releases_writer_for_the_next_run)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'test(=opus_writer_dispatch_advises_a_cheaper_route) | test(=cancel_live_preparation_releases_writer_for_the_next_run)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 [[profile.ci.overrides]]
 filter = 'test(=run::tests::wait_handles_a_stale_default_cursor)'
 slow-timeout = { period = "60s", terminate-after = 5 }

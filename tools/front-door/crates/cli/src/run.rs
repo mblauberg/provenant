@@ -61,34 +61,6 @@ pub use telemetry::*;
 pub use wait::*;
 pub use worktree::*;
 
-/// Project the host disk precheck from its typed facts, never its I/O text.
-fn writer_disk_policy_refusal(check: DiskCheck) -> run::PrepareRefusal {
-    use provenant_records::run::TerminalCause;
-    let (cause, note) = match &check {
-        DiskCheck::Low {
-            available,
-            floor,
-            reclaimed,
-            origin,
-            ..
-        } => (
-            TerminalCause::DiskFloor,
-            Some(format!(
-                "{available} bytes available; gc.free_floor is {floor} bytes (source: {}); bounded GC reported {reclaimed} bytes reclaimed",
-                origin.description()
-            )),
-        ),
-        DiskCheck::Unobserved(_) => (TerminalCause::DiskObservationUnavailable, None),
-    };
-    run::PrepareRefusal {
-        terminal_cause: Some(cause),
-        terminal_note: note,
-        message: String::from(check),
-        skipped_routes: Vec::new(),
-        fallback_outcome: None,
-    }
-}
-
 /// Catalogue family of a provider-qualified model, for family-distinct routing.
 pub fn model_family(model: &str) -> Option<String> {
     let catalogue = provenant_routing::Catalogue::bundled().ok()?;
@@ -331,6 +303,32 @@ fn writer_gc_settings(state: &Path) -> provenant_config::GcSettings {
     })
 }
 
+fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
+    let resource = match &error {
+        DiskCheck::Low {
+            available,
+            floor,
+            origin,
+            ..
+        } => Some(provenant_records::diagnostic::ResourceFact::Disk {
+            free: *available,
+            floor: *floor,
+            origin: *origin,
+        }),
+        DiskCheck::Unobserved(_) => None,
+    };
+    let cause = match &error {
+        DiskCheck::Low { .. } => provenant_records::run::TerminalCause::DiskFloor,
+        DiskCheck::Unobserved(_) => {
+            provenant_records::run::TerminalCause::DiskObservationUnavailable
+        }
+    };
+    let mut refusal = run::PrepareRefusal::from(String::from(error));
+    refusal.terminal_cause = Some(cause);
+    refusal.resource = resource;
+    refusal
+}
+
 impl run::Providers for Registry<'_> {
     fn write_grant_limit(&self) -> run::WriteGrantLimit {
         let Some(roots) = self.roots else {
@@ -342,9 +340,9 @@ impl run::Providers for Registry<'_> {
                     config.origins.get("domains.run.write_grant_limit_bytes"),
                     Some(provenant_config::Origin::User { .. })
                 ) {
-                    "host configuration"
+                    provenant_records::diagnostic::SettingSource::Configuration
                 } else {
-                    "compiled default"
+                    provenant_records::diagnostic::SettingSource::ShippedDefault
                 };
                 run::WriteGrantLimit {
                     bytes: config.domains.run.write_grant_limit_bytes,
@@ -505,7 +503,7 @@ impl run::Providers for Registry<'_> {
             &writer.project,
             home,
         )
-        .map_err(writer_disk_policy_refusal)
+        .map_err(disk_policy_refusal)
     }
 
     fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {

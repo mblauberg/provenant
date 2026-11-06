@@ -867,7 +867,7 @@ fn pacing_factor_basis_points(
                 context.catalogue.quota_pool(model),
             )
         })
-        .map(|window| format!(" reserve exclusion window={window}"))
+        .map(|window| format!(" reserve exclusion window={}", window.pool))
         .unwrap_or_default();
     let detail = format!("{detail}{reserve_detail}");
     let neutral_detail = match profile.and_then(|p| p.deadline.as_ref()) {
@@ -951,6 +951,13 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
         .collect()
 }
 
+struct ReserveWindow {
+    pool: String,
+    percent: u8,
+    profile: bool,
+    seven_day: bool,
+}
+
 fn pacing_reserve_window(
     snapshot: &provenant_quota::QuotaSnapshot,
     now: i64,
@@ -958,35 +965,40 @@ fn pacing_reserve_window(
     profile: Option<&PacingProfile>,
     adapter: &str,
     model_pool: Option<&str>,
-) -> Option<String> {
+) -> Option<ReserveWindow> {
+    let reserve_for = |window: &provenant_quota::QuotaWindow| {
+        let kind = [
+            PacingWindow::Rolling,
+            PacingWindow::FiveHour,
+            PacingWindow::SevenDay,
+            PacingWindow::Daily,
+            PacingWindow::Monthly,
+        ]
+        .into_iter()
+        .find(|k| window_matches(window, *k, adapter));
+        let selected = profile.and_then(|p| {
+            p.reserve
+                .iter()
+                .find(|(k, _)| window_matches(window, **k, adapter))
+                .map(|(_, value)| *value)
+        });
+        let percent = selected.unwrap_or(match kind {
+            Some(PacingWindow::FiveHour | PacingWindow::Rolling) => reserve.five_hour_percent,
+            Some(PacingWindow::SevenDay) => reserve.seven_day_percent,
+            _ => 0,
+        });
+        (
+            percent,
+            selected.is_some(),
+            matches!(kind, Some(PacingWindow::SevenDay)),
+        )
+    };
     snapshot
         .windows
         .iter()
         .filter(|w| selected_window(w, profile, adapter, model_pool))
         .find(|window| {
-            let kind = [
-                PacingWindow::Rolling,
-                PacingWindow::FiveHour,
-                PacingWindow::SevenDay,
-                PacingWindow::Daily,
-                PacingWindow::Monthly,
-            ]
-            .into_iter()
-            .find(|k| window_matches(window, *k, adapter));
-            let percent = profile
-                .and_then(|p| {
-                    p.reserve
-                        .iter()
-                        .find(|(k, _)| window_matches(window, **k, adapter))
-                        .map(|(_, value)| *value)
-                })
-                .unwrap_or(match kind {
-                    Some(PacingWindow::FiveHour | PacingWindow::Rolling) => {
-                        reserve.five_hour_percent
-                    }
-                    Some(PacingWindow::SevenDay) => reserve.seven_day_percent,
-                    _ => 0,
-                });
+            let (percent, _, _) = reserve_for(window);
             percent > 0
                 && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
                     || (window.resets_unix_seconds.is_none()
@@ -1003,7 +1015,15 @@ fn pacing_reserve_window(
                         .is_some_and(|d| d.calibration_active(&window.pool, now)))
                 && window.used_basis_points >= 10_000 - u64::from(percent) * 100
         })
-        .map(|w| w.pool.clone())
+        .map(|window| {
+            let (percent, profile, seven_day) = reserve_for(window);
+            ReserveWindow {
+                pool: window.pool.clone(),
+                percent,
+                profile,
+                seven_day,
+            }
+        })
 }
 
 fn availability_reason(
@@ -1540,6 +1560,68 @@ fn candidate(
         },
     };
     let mut extra = provenant_records::ExtraFields::default();
+    if matches!(
+        &readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::PacingReserve,
+            ..
+        }
+    ) && let Some(availability) = availability
+        && let Some(quota) = latest_reading(model, availability, context, true)
+    {
+        use provenant_records::diagnostic::{
+            PacingReserveSetting, PacingSettingSource, ResourceFact,
+        };
+        let (_, profile, _, _) =
+            effective_profile(context, model, availability.account_key.as_deref());
+        let reserve = context
+            .config
+            .pacing_reserve
+            .get(model.adapter())
+            .copied()
+            .unwrap_or_default();
+        if let Some(window) = pacing_reserve_window(
+            &quota.snapshot,
+            context.now_seconds(),
+            reserve,
+            profile,
+            model.adapter(),
+            context.catalogue.quota_pool(model),
+        ) {
+            let account_profile = availability.account_key.as_deref().is_some_and(|key| {
+                context
+                    .config
+                    .pacing
+                    .accounts
+                    .contains_key(&format!("{}/{key}", model.adapter()))
+                    || context.config.pacing.accounts.contains_key(key)
+            });
+            let setting = if !window.profile && window.seven_day {
+                PacingReserveSetting::AdapterSevenDay
+            } else if !window.profile {
+                PacingReserveSetting::AdapterFiveHour
+            } else if account_profile {
+                PacingReserveSetting::Account
+            } else {
+                PacingReserveSetting::Free
+            };
+            let origin = if window.profile {
+                PacingSettingSource::Configuration
+            } else if context.config.pacing_reserve.contains_key(model.adapter()) {
+                PacingSettingSource::Unresolved
+            } else {
+                PacingSettingSource::ShippedDefault
+            };
+            extra.insert(
+                "pacing_reserve_fact".into(),
+                serde_json::json!(ResourceFact::PacingReserve {
+                    percent: window.percent,
+                    setting,
+                    origin
+                }),
+            );
+        }
+    }
     if evaluated.iter().all(|(_, reason, _)| reason.is_some()) && !evaluated.is_empty() {
         let details: Vec<_> = evaluated
             .iter()

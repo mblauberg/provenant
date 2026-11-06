@@ -164,6 +164,17 @@ use origin and the lane branch. Integration targets must already exist;
 checked out nowhere, including the delivering lane's own worktree. Integration
 conflicts leave checkouts and destination refs intact. Inspect the failure and resolve it through the owning lane.
 
+Writer Git inherits host global and system Git configuration. Launch places the
+resolved global name and email in a private global config, with
+`user.useConfigOnly=true`; repository identity still takes precedence. A missing
+identity makes Git refuse a commit instead of generating a hostname identity,
+and identity values containing control characters refuse launch. The host global
+config files included by the lane are readable inside the writer sandbox. The
+lane's GitHub token helper resets earlier credential helpers for Git processes
+that retain the lane environment; the wrapper also restores this precedence when
+`GH_TOKEN` survives an otherwise cleared environment. Explicit Git command-line
+configuration can override it.
+
 Publishing from a writer lane is opt-in and off by default: enabling it gives the
 lane your GitHub credential, so a malicious lane can extract the token and act
 outside the wrapper. By default the chair publishes through host-side delivery.
@@ -271,6 +282,9 @@ For recovery, use the existing operation that matches the situation:
   reservation remains in place; address the reported cause and inspect the
   attempt's custody evidence. Do not remove
   the reservation to force another launch.
+  A retained slot-root reservation is carried to its named attempt during
+  locked recovery. If reconciliation reports unreadable or conflicting
+  evidence, retain it for host investigation; it continues to fence writers.
 - **Resume a graph:** `provenant fabric graph resume` continues its recorded
   checkpoint. A plain rerun of the same preset inputs reattaches to that graph.
 - **Retry a lane:** `provenant resume ATTEMPT` continues from the recorded
