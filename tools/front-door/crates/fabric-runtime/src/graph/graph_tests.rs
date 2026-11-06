@@ -67,6 +67,8 @@ struct FakeOwner {
     implicit_head: Option<String>,
     implicit_bindings: usize,
     provisions: Vec<(String, String, String)>,
+    provisioned: Vec<(String, String)>,
+    provision_fail_once: bool,
     source_commits: Vec<Option<String>>,
     resolved_review_base: Option<String>,
     review_base_resolutions: usize,
@@ -226,6 +228,14 @@ impl AttemptOwner for FakeOwner {
         self.implicit_head = Some(base.into());
         self.bind_writer_worktree(path)
     }
+    fn provision_child_worktree(&mut self, path: &str, source: &str) -> Result<bool, Self::Error> {
+        self.provisioned.push((path.into(), source.into()));
+        if std::mem::take(&mut self.provision_fail_once) {
+            return Err(NoObservation);
+        }
+        Ok(true)
+    }
+
     fn bound_graph_bases(
         &self,
     ) -> (

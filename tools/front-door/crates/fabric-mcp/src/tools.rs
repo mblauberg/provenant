@@ -152,6 +152,11 @@ pub trait McpFacade: F3Facade {
         Err(FacadeError::OwnerUnavailable.into())
     }
 
+    /// Compile a lane launch without writing a local graph or coordination store.
+    fn compile_lane_run(&self, input: &Value) -> Result<provenant_fabric_runtime::graph::relay::RelayOp, ServiceError> {
+        lane_run_request(input)
+    }
+
     /// A lane launch is a graph mutation owned by its host. Production composition
     /// forwards this to the CLI's `graph_relay::from_lane`.
     fn add_from_lane(
@@ -848,7 +853,7 @@ impl ToolCall {
             && let Self::GraphDocument(input) = &self
             && input["op"] == "run"
         {
-            let operation = lane_run_request(input)?;
+            let operation = service.facade.compile_lane_run(input)?;
             if input["explain"] == true {
                 return service.limit_response(
                     response(self.name(), serde_json::to_value(operation)?),
@@ -1529,7 +1534,9 @@ pub fn lane_run_request(
             .unwrap_or(false),
         idempotency_key,
         reason: Some("run".into()),
+        launch: None,
     }))
+
 }
 
 fn new_operation_id() -> Result<String, provenant_fabric_runtime::coordination::CoordinationError> {

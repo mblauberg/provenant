@@ -3846,3 +3846,43 @@ fn raw_submission_preserves_raw_reporting_label() {
     assert_eq!(document.nodes[0].extra["template"], "raw");
     assert_eq!(document.extra["submission_patch"]["nodes"][0]["use"], "raw");
 }
+
+#[test]
+fn planner_writer_without_worktree_is_provisioned_before_launch_and_replayed() {
+    let doc = planner(1);
+    let mut writer = slice("write", &["src"]);
+    writer["access"] = json!("worktree_write");
+    let output = result(vec![writer]);
+    let mut owner = fixture_owner(&[&output, "written", "checked"]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(owner.provisioned, vec![(".worktrees/planned-plan--write".into(), "a".repeat(40))]);
+    assert_eq!(owner.permissions[1].1.as_deref(), Some("/fixture/.worktrees/planned-plan--write"));
+    assert!(relay::pending_provisioning(&run.checkpoint).is_empty());
+    let launches = owner.calls.len();
+    let replay = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(replay.status, GraphStatus::Complete);
+    assert_eq!(owner.calls.len(), launches);
+    assert_eq!(owner.provisioned.len(), 1);
+}
+
+#[test]
+fn planner_writer_provisioning_recovers_fenced_source_after_crash() {
+    let doc = planner(1);
+    let mut writer = slice("write", &["src"]);
+    writer["access"] = json!("worktree_write");
+    let output = result(vec![writer]);
+    let mut owner = fixture_owner(&[&output, "written", "checked"]);
+    owner.provision_fail_once = true;
+    let mut journal = MemoryJournal::default();
+    assert!(matches!(advance(&doc, &mut owner, &mut journal), Err(GraphError::Run(_))));
+    let saved = journal.0.as_ref().unwrap();
+    assert_eq!(relay::pending_provisioning(saved), vec![("plan--write".into(), ".worktrees/planned-plan--write".into(), "a".repeat(40))]);
+    owner.implicit_head = Some("b".repeat(40));
+    let recovered = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(recovered.status, GraphStatus::Complete);
+    assert_eq!(owner.provisioned.len(), 2);
+    assert!(owner.provisioned.iter().all(|(_, source)| source == &"a".repeat(40)));
+    assert!(relay::pending_provisioning(&recovered.checkpoint).is_empty());
+}

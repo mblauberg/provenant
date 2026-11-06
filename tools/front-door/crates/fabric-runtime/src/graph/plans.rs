@@ -119,6 +119,15 @@ pub struct Expansion {
     pub patch: Option<PatchRecord>,
 }
 
+impl Expansion {
+    /// Live children and edits leave their producer open for its final output.
+    pub(super) fn closes_producer(&self) -> bool {
+        self.patch.is_none()
+            || self.extra.get("final_result") == Some(&serde_json::Value::Bool(true))
+            || self.extra.get("final_fragment") == Some(&serde_json::Value::Bool(true))
+    }
+}
+
 // Documents and untrusted fragments cannot set computed topology. Flattened
 // expansion records, however, must retain it across a journal JSON round trip.
 mod expanded_nodes {
@@ -235,7 +244,7 @@ pub fn prompt(node: &GraphNode) -> String {
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(spec.max_nodes);
-        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`brief`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, composite, loop, gate, decide, synthesise or land (use `plan` for a planning brief); composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `brief` (or `goal`), `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes."));
+        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`brief`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, composite, loop, gate, decide, synthesise or land (use `plan` for a planning brief); composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `brief` (or `goal`), `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and also require `write_scope` (relative literal files/directories) ; omit `worktree` for a host-provisioned checkout or name an existing registered worktree; read-only agents may omit `write_scope`. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 200 bytes."));
         if !spec.templates.is_empty() {
             prompt.push_str(&format!(
                 " Host templates with their declared authority: {}.",
@@ -554,6 +563,9 @@ fn check_patch_topology(
             ));
         }
     }
+    if !addition.closes_producer() {
+        return Ok(());
+    }
     let Some(planner) = expanded
         .nodes
         .iter()
@@ -676,7 +688,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                     .map(|n| n.id.clone()),
             );
 
-            if !expansion.continuation {
+            if !expansion.continuation && expansion.closes_producer() {
                 wire_exports(node, &expansion.source, &exported);
                 if let Some(composite) = &mut node.composite
                     && (composite.reduce_verdict || review_minimum.is_some())
@@ -1219,7 +1231,7 @@ fn fragment(
         Some(node),
         &patch,
         &context,
-        None,
+        super::patch::Preparation::FinalFragment,
     )
     .map_err(|error| {
         *safe_reason = error.cause.unwrap_or(PlanFailureFact::InvalidFragment);
@@ -1349,7 +1361,7 @@ pub(super) fn flatten_fragment(
     // A host or lane patch may wait on nodes already in the graph; a planner
     // names only its own fragment's nodes. External nodes stand in as plain
     // read-only placeholders while the fragment is checked, then drop out.
-    let external: BTreeSet<String> = if parent.is_none_or(|parent| parent.plan.is_none()) {
+    let external: BTreeSet<String> = if spec.is_none() {
         units
             .values()
             .flatten()
@@ -1361,6 +1373,30 @@ pub(super) fn flatten_fragment(
         BTreeSet::new()
     };
     let mut local_nodes = local_nodes;
+    fn provision_paths(nodes: &mut [GraphNode], graph: &str, prefix: &str) {
+        for child in nodes {
+            let id = if prefix.is_empty() {
+                child.id.clone()
+            } else {
+                format!("{prefix}--{}", child.id)
+            };
+            if child.access == AccessMode::WorktreeWrite && child.worktree.is_none() {
+                child.worktree = Some(super::relay::child_worktree(graph, &id));
+                child.extra.insert("provision_worktree".into(), true.into());
+            }
+            if let Some(composite) = &mut child.composite {
+                provision_paths(&mut composite.nodes, graph, &id);
+            }
+            if let Some(body) = &mut child.loop_body {
+                provision_paths(&mut body.body, graph, &id);
+            }
+        }
+    }
+    provision_paths(
+        &mut local_nodes,
+        &document.graph_id,
+        parent.map_or("", |parent| parent.id.as_str()),
+    );
     for existing in document
         .nodes
         .iter()
@@ -1487,7 +1523,7 @@ pub(super) fn flatten_fragment(
             child.depends_on = child.depends_on.iter().map(|name| id(name)).collect();
             // A planner's patch consumes its plan; a lane's children do not
             // wait for the lane that spawned them.
-            if child.depends_on.is_empty() && parent.plan.is_some() {
+            if child.depends_on.is_empty() && spec.is_some() {
                 child.depends_on.push(parent.id.clone());
             }
             child.after_expansion = child.after_expansion.iter().map(|name| id(name)).collect();
@@ -1792,9 +1828,8 @@ pub(super) fn settle(
         .cloned();
     if checkpoint.expansions.iter().any(|e| {
         e.source == node.id
-            && (e.patch.is_none()
-                || e.extra.get("final_result") == Some(&serde_json::Value::Bool(true)))
             && e.extra.get("retry_generation") == generation.as_ref()
+            && e.closes_producer()
     }) {
         return None;
     }
