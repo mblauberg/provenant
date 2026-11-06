@@ -2475,25 +2475,7 @@ esac
     #[test]
     fn production_owner_panel_uses_distinct_families_and_synthesises()
     -> Result<(), Box<dyn std::error::Error>> {
-        // A nested lane submits without starting a real provider. Keep the
-        // environment change inside a child so other tests cannot see it.
-        const CHILD: &str = "PROVENANT_PANEL_ROUTING_FIXTURE";
-        if std::env::var_os(CHILD).is_none() {
-            use provenant_os::exec::{ExecOptions, Executor, Termination};
-            let argv = vec![std::env::current_exe()?.into_os_string(), "--exact".into(),
-                "fabric::peer_tests::production_owner_panel_uses_distinct_families_and_synthesises".into(), "--nocapture".into()];
-            let removed = [provenant_core::RUN_STATE_DIRECTORY_ENV, provenant_run::LANE_DEPTH_ENV,
-                provenant_run::PARENT_ATTEMPT_ENV, CHILD];
-            let mut env: Vec<_> = std::env::vars_os().filter(|(key, _)| !removed.iter().any(|name| key == name)).collect();
-            env.push((CHILD.into(), "1".into()));
-            env.push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
-            env.push((provenant_run::PARENT_ATTEMPT_ENV.into(), AttemptId::from_bytes([99; 16]).to_string().into()));
-            let cwd = std::env::current_dir()?;
-            let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(120));
-            options.env = Some(&env);
-            let output = SystemExecutor::new(1)?.execute(options)?;
-            assert_eq!(output.termination, Termination::Exit(0), "{}\n{}",
-                String::from_utf8_lossy(&output.stdout.bytes), String::from_utf8_lossy(&output.stderr.bytes));
+        if host_test("fabric::peer_tests::production_owner_panel_uses_distinct_families_and_synthesises")? {
             return Ok(());
         }
         use provenant_fabric_runtime::graph::{self, AttemptOwner};
@@ -2563,7 +2545,9 @@ esac
         let mut picked: std::collections::BTreeMap<String, Vec<(String, String)>> = Default::default();
         let mut published = std::collections::BTreeSet::new();
         let run = loop {
-            let run = graph::advance_with_budget(&document, &mut owner, &mut journal, &Default::default(), &Default::default()).map_err(|error| format!("advance: {error}"))?;
+            let run = provenant_cli::run::with_deferred_provider_launch(|| {
+                graph::advance_with_budget(&document, &mut owner, &mut journal, &Default::default(), &Default::default())
+            }).map_err(|error| format!("advance: {error}"))?;
             if run.checkpoint.successful() { break run; }
             let mut progressed = false;
             for node in &run.checkpoint.nodes {

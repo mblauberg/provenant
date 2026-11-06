@@ -1,13 +1,13 @@
 use super::*;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 thread_local! {
     static TEST_DEFER_PROVIDER_LAUNCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Keep a test submission queued after admission, before provider preparation.
-#[cfg(test)]
-pub(super) fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
+#[cfg(any(test, feature = "fixture"))]
+pub fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -755,7 +755,7 @@ fn submit_with_launcher(
             }
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixture"))]
     if TEST_DEFER_PROVIDER_LAUNCH.with(std::cell::Cell::get) {
         return Ok((record, Vec::new()));
     }
