@@ -445,6 +445,15 @@ pub trait AttemptOwner {
         Ok(false)
     }
 
+    /// Positively prove that a failed submission never crossed acceptance.
+    /// Owners without a durable acceptance lookup must leave recovery fenced.
+    fn launch_refused_before_acceptance(
+        &mut self,
+        _attempt: &GraphAttempt,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
     /// Resolve the range of an immutable review attempt, without launching it.
     fn review_range(
         &mut self,
@@ -2728,13 +2737,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 last.state == AttemptState::Starting && last.attempt_ref.is_none()
                             }) =>
                     {
+                        let clock = owner.wall_now();
+                        let admission_seconds = owner.admission_timeout_seconds().unwrap_or(3600);
+                        let policy = owner.launch_retry_policy();
                         launch_disposition::<R, J>(
+                            owner,
                             &mut checkpoint,
                             node_index,
                             &error,
-                            owner.wall_now(),
-                            owner.admission_timeout_seconds().unwrap_or(3600),
-                            owner.launch_retry_policy(),
+                            clock,
+                            admission_seconds,
+                            policy,
                             journal,
                         )?;
                         break;

@@ -429,12 +429,32 @@ pub fn retry_node(
         .position(|node| node.id == id)
         .ok_or_else(|| PatchError::invalid(format!("unknown node {id}")))?;
     let old = &graph.checkpoint.nodes[index];
+    // An explicit pre-launch refusal leaves its durable attempt in Starting.
+    // It has no process to stop; retain it as history without cancelling siblings.
+    // Uncertain handoffs and any evidence of an accepted launch still require custody.
+    let refused_before_launch = old.state == NodeState::Blocked
+        && old.advance_error_code.as_deref() == Some("launch_refused")
+        && old
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.state != AttemptState::Terminal)
+            .all(|attempt| {
+                attempt
+                    .extra
+                    .get(PRELAUNCH_REFUSAL_PROOF)
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                    && !attempt.launched
+                    && attempt.attempt_ref.is_none()
+                    && attempt.state == AttemptState::Starting
+            });
     if !old.state.settled()
         || (old
             .attempts
             .iter()
             .any(|a| a.state != AttemptState::Terminal)
-            && !(old.state == NodeState::Skipped && old.cancelled_from.is_some()))
+            && !(refused_before_launch
+                || old.state == NodeState::Skipped && old.cancelled_from.is_some()))
     {
         return Err(PatchError::invalid(
             "node retry requires a settled node and attempts",

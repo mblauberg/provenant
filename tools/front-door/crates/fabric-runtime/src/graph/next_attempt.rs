@@ -2,6 +2,8 @@
 use super::*;
 use std::error::Error;
 
+pub(crate) const PRELAUNCH_REFUSAL_PROOF: &str = "host_refused_before_acceptance";
+
 /// Kernel next-attempt disposition for a graph node.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum NextAttempt {
@@ -151,15 +153,27 @@ pub(crate) fn apply_launch_disposition(
             )
         }) {
         String::new()
-    } else if graph_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    } else if !progress
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.state != AttemptState::Terminal)
+        .all(|attempt| {
+            attempt
+                .extra
+                .get(PRELAUNCH_REFUSAL_PROOF)
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
     {
-        format!(
-            "; after correcting the cause, cancel with `provenant fabric graph cancel {graph_id}` and rerun with a new graph_id (for a preset, use `provenant run --preset <name> --fresh`)"
-        )
+        String::new()
+    } else if [graph_id.as_str(), id.as_str()].iter().all(|value| {
+        value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    }) {
+        format!("; after correcting the cause, retry with `provenant retry {graph_id} --node {id}`")
     } else {
-        "; inspect and cancel the graph before rerunning with a new graph_id (for a preset, use `provenant run --preset <name> --fresh`)".into()
+        "; inspect the graph, then use `provenant retry` with its graph and node selectors".into()
     };
     progress.advance_error = Some(bounded(
         &format!(
@@ -188,6 +202,7 @@ pub(crate) fn apply_launch_disposition(
 /// kind, a blocked node with reason and remedy otherwise and after the
 /// admission deadline. Saves the checkpoint either way.
 pub(crate) fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
+    owner: &mut R,
     checkpoint: &mut GraphCheckpoint,
     index: usize,
     error: &R::Error,
@@ -196,6 +211,21 @@ pub(crate) fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     policy: LaunchRetryPolicy,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
+    let proof = !launch_retry_kind(error)
+        && checkpoint.nodes[index]
+            .attempts
+            .last()
+            .is_some_and(|attempt| {
+                matches!(owner.launch_refused_before_acceptance(attempt), Ok(true))
+            });
+    if let Some(attempt) = checkpoint.nodes[index].attempts.last_mut() {
+        attempt.extra.remove(PRELAUNCH_REFUSAL_PROOF);
+        if proof {
+            attempt
+                .extra
+                .insert(PRELAUNCH_REFUSAL_PROOF.into(), true.into());
+        }
+    }
     apply_launch_disposition(checkpoint, index, error, clock, admission_seconds, policy)
         .map_err(GraphError::Refused)?;
     journal.save(checkpoint).map_err(GraphError::Journal)

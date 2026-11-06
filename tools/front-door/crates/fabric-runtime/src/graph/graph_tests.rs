@@ -9860,6 +9860,7 @@ struct ErrorLauncher {
     admission_seconds: Option<u64>,
     launch_policy: Option<LaunchRetryPolicy>,
     accepted: bool,
+    acceptance_lookup_error: bool,
 }
 
 impl AttemptOwner for ErrorLauncher {
@@ -9884,6 +9885,15 @@ impl AttemptOwner for ErrorLauncher {
     }
     fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
         Ok(self.accepted)
+    }
+    fn launch_refused_before_acceptance(
+        &mut self,
+        attempt: &GraphAttempt,
+    ) -> Result<bool, Self::Error> {
+        if self.acceptance_lookup_error {
+            return Err(Self::Error::StateCorrupt);
+        }
+        self.launch_accepted(attempt).map(|accepted| !accepted)
     }
     fn observe_or_start(
         &mut self,
@@ -10434,9 +10444,7 @@ fn a_permanent_refusal_blocks_the_node_at_once_with_reason_and_remedy() {
     );
     let reason = progress.advance_error.as_deref().expect("blocked reason");
     assert!(reason.contains("invalid input"));
-    assert!(reason.contains("provenant fabric graph cancel g-test"));
-    assert!(reason.contains("new graph_id"));
-    assert!(reason.contains("provenant run --preset <name> --fresh"));
+    assert!(reason.contains("provenant retry g-test --node one"));
     assert_eq!(run.checkpoint.wake_at, None);
 
     // The refusal is durable: the next advance never relaunches the node.
