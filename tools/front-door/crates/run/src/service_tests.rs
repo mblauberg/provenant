@@ -736,14 +736,6 @@ fn each_refusal_has_its_own_stable_code() {
         ),
         (RunError::Admission(AdmissionError::Clock), "HOST_CLOCK"),
         (
-            RunError::WriterRefLocked("ref.lock".into()),
-            "WRITER_REF_LOCKED",
-        ),
-        (
-            RunError::SetupLockTimeout { seconds: 1 },
-            "SETUP_LOCK_TIMEOUT",
-        ),
-        (
             RunError::ObjectImportLimit("fixture"),
             "OBJECT_IMPORT_LIMIT",
         ),

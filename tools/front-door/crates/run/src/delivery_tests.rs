@@ -1,7 +1,7 @@
 //! Host Git conformance with a linked worktree and a local bare remote.
 use super::delivery::*;
 use super::*;
-use provenant_core::GitOid;
+use provenant_core::{CancelToken, GitOid};
 use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
@@ -66,7 +66,6 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
             &db::bytes(&writer::WriterTerminal {
                 schema_version: 1,
                 head,
-                protected_paths: vec![],
             })?,
             RECORD_LIMIT,
         )?;
@@ -464,7 +463,7 @@ pub(super) struct PrepareFixture {
 }
 
 #[test]
-fn terminal_archives_an_unfinished_host_sequencer_before_refusal()
+fn terminal_refuses_an_unfinished_host_sequencer()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
     std::fs::write(
@@ -494,7 +493,7 @@ fn terminal_archives_an_unfinished_host_sequencer_before_refusal()
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(
         fixture.root.join("attempt/quarantine/manifest.json"),
     )?)?;
-    assert_eq!(manifest["review_required"], true);
+    assert_eq!(manifest["disposition"], "writer_settled");
     Ok(())
 }
 
@@ -790,7 +789,7 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
 }
 
 #[test]
-fn terminal_imports_private_objects_before_quarantine_reads_the_lane()
+fn terminal_verifies_private_objects_before_publication()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     for corrupt in [false, true] {
         let fixture = PrepareFixture::new()?;
@@ -902,8 +901,7 @@ fn terminal_imports_private_objects_before_quarantine_reads_the_lane()
 }
 
 #[test]
-fn terminal_archives_a_private_rewind_and_requires_review()
--> std::result::Result<(), Box<dyn std::error::Error>> {
+fn terminal_settles_a_private_rewind() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
     let previous = fixture.prepare()?.head(&fixture.writer)?;
     fixture.git(&[
@@ -946,10 +944,7 @@ fn terminal_archives_a_private_rewind_and_requires_review()
         )?;
         Ok(())
     })?;
-    assert!(
-        review,
-        "rewritten history retains instruction review evidence"
-    );
+    assert!(!review);
     assert!(
         fixture
             .root
@@ -1079,6 +1074,161 @@ fn integration_refreshes_forged_tracking_ref_and_fails_closed()
             WriterDeliveryStage::Integrate
         )?
     );
+    Ok(())
+}
+
+// Medium: real filesystem locking with the remote process edge supplied as a callback.
+#[test]
+#[allow(clippy::disallowed_methods)] // Concurrent requests exercise cross-thread flock contention.
+fn overlapping_origin_requests_share_a_fetch_even_when_it_starts_later()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let temp = tempfile::tempdir()?;
+    let common = Directory::open_anchor(temp.path())?;
+    let start = Barrier::new(8);
+    let fetches = AtomicUsize::new(0);
+    std::thread::scope(|scope| -> crate::Result<()> {
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let common = &common;
+            let start = &start;
+            let fetches = &fetches;
+            workers.push(scope.spawn(move || {
+                let requested = OriginRefreshRequest::capture()?;
+                start.wait();
+                coalesced_origin_refresh(common, &requested, &CancelToken::new(), || {
+                    // Origin refresh must never need or retain the config lock.
+                    let _config = common.try_lock(
+                        std::ffi::OsStr::new("provenant-lane-setup.lock"),
+                        provenant_os::fs::LockMode::Exclusive,
+                    )?;
+                    fetches.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("refresh request panicked")?;
+        }
+        Ok(())
+    })?;
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+    // A fetch starting after the request counts even if it finishes before
+    // that caller reaches the fetch lock (e.g. during transport validation).
+    let requested = OriginRefreshRequest::capture()?;
+    coalesced_origin_refresh(&common, &requested, &CancelToken::new(), || {
+        fetches.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })?;
+    coalesced_origin_refresh(&common, &requested, &CancelToken::new(), || {
+        panic!("newer fetch already satisfies this request")
+    })?;
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    // A caller arriving during an in-flight fetch also reuses its completion,
+    // even if transport checks delay its acquisition of the fetch lock.
+    let mut during_fetch = None;
+    coalesced_origin_refresh(
+        &common,
+        &OriginRefreshRequest::capture()?,
+        &CancelToken::new(),
+        || {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            during_fetch = Some(OriginRefreshRequest::capture()?);
+            Ok(())
+        },
+    )?;
+    coalesced_origin_refresh(
+        &common,
+        &during_fetch.ok_or("request")?,
+        &CancelToken::new(),
+        || panic!("overlapping fetch already completed"),
+    )?;
+    assert_eq!(fetches.load(Ordering::SeqCst), 3);
+    let _held = common.try_lock(
+        std::ffi::OsStr::new("provenant-lane-origin-refresh.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let cancelled = CancelToken::new();
+    cancelled.cancel();
+    let error = coalesced_origin_refresh(
+        &common,
+        &OriginRefreshRequest::capture()?,
+        &cancelled,
+        || panic!("cancelled request must not fetch"),
+    )
+    .expect_err("cancelled lock wait must stop");
+    assert!(matches!(
+        error,
+        RunError::Filesystem(provenant_os::fs::FsError::Cancelled { .. })
+    ));
+    Ok(())
+}
+
+// Medium: a real contended fetch lock with an exhausted wait budget.
+#[test]
+fn origin_refresh_lock_timeout_allows_launch_but_fetch_failure_is_reported()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_os::{clock::SystemClock, fs::LockMode};
+    let temp = tempfile::tempdir()?;
+    let common = Directory::open_anchor(temp.path())?;
+    let held = common.try_lock(
+        std::ffi::OsStr::new("provenant-lane-origin-refresh.lock"),
+        LockMode::Exclusive,
+    )?;
+    let requested = OriginRefreshRequest::capture()?;
+    let cancel = CancelToken::new();
+    let immediate = || WaitBudget::nonblocking(SystemClock::new().mono_now());
+    coalesced_origin_refresh_with_budget(&common, &requested, &cancel, immediate(), || {
+        panic!("busy refresh should use existing tracking refs")
+    })?;
+    drop(held);
+    let error =
+        coalesced_origin_refresh_with_budget(&common, &requested, &cancel, immediate(), || {
+            Err(prepare_error("fetch", "remote unavailable"))
+        })
+        .expect_err("a failed fetch must retain its error");
+    assert!(
+        matches!(error, RunError::DeliveryPrepare { step: "fetch", reason } if reason == "remote unavailable")
+    );
+    Ok(())
+}
+
+// Medium: an external Git client holds a real tracking-ref lock.
+#[test]
+fn origin_refresh_ref_collision_does_not_refuse_launch_or_hide_transport_failure()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = OriginFixture::new()?;
+    let previous = fixture.local(&["rev-parse", "refs/remotes/origin/main"])?;
+    let newer = fixture.commit("newer")?;
+    fixture.advertise(&[("main", &newer)], "main")?;
+    let lock = fixture.project.join(".git/refs/remotes/origin/main.lock");
+    std::fs::write(&lock, b"external Git transaction")?;
+    fixture.refresh(None)?;
+    assert_eq!(
+        fixture.local(&["rev-parse", "refs/remotes/origin/main"])?,
+        previous
+    );
+    assert_eq!(std::fs::read(&lock)?, b"external Git transaction");
+    std::fs::remove_file(&lock)?;
+    fixture.refresh(None)?;
+    assert_eq!(
+        fixture.local(&["rev-parse", "refs/remotes/origin/main"])?,
+        newer
+    );
+    fixture.local(&[
+        "remote",
+        "set-url",
+        "origin",
+        fixture.root.join("absent.git").to_str().ok_or("path")?,
+    ])?;
+    assert!(matches!(
+        fixture.refresh(None),
+        Err(RunError::DeliveryPrepare { .. })
+    ));
     Ok(())
 }
 
@@ -2504,16 +2654,12 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
-    let path = provenant_records::PathWire::from_relative(&provenant_core::RelativePath::parse(
-        ".github/workflows/ci.yml",
-    )?)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
-            protected_paths: vec![path.clone()],
         })?,
         RECORD_LIMIT,
     )?;
@@ -2666,16 +2812,12 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
-    let path = provenant_records::PathWire::from_relative(&provenant_core::RelativePath::parse(
-        ".github/workflows/ci.yml",
-    )?)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
-            protected_paths: vec![path.clone()],
         })?,
         RECORD_LIMIT,
     )?;
@@ -2718,7 +2860,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
         WriterDeliveryState::Delivered { .. }
     ));
     let acceptance = receipt.review_acceptance.as_ref().ok_or("acceptance")?;
-    assert_eq!(acceptance.protected_paths, vec![path]);
+    assert!(acceptance.protected_paths.is_empty());
     assert_eq!(acceptance.actor, execution.actor_id);
     assert_eq!(
         store.delivered(id, &call)?.map(|(_, receipt)| receipt),
@@ -2824,7 +2966,6 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
-            protected_paths: vec![],
         })?,
         RECORD_LIMIT,
     )?;
@@ -3033,8 +3174,8 @@ impl PrepareFixture {
     }
     fn terminal_via_inner(
         &self,
-        remote: &str,
-        base_ref: Option<&str>,
+        _remote: &str,
+        _base_ref: Option<&str>,
         resume_after_publish: bool,
         advance_after_publish: bool,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
@@ -3194,34 +3335,65 @@ impl PrepareFixture {
                 .ok_or("no claim attempted")??
                 .ok_or_else(|| format!("resumed owner: {observation}"))?;
         }
-        let review = launch.terminal(
-            &state,
-            &attempt,
-            &recovery,
-            remote,
-            base_ref,
-            &mut settlement,
-        )?;
+        launch.terminal(&state, &attempt, &recovery, &mut settlement)?;
         let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;
         let manifest: serde_json::Value = serde_json::from_slice(
             &archive.read_bounded(OsStr::new("manifest.json"), RECORD_LIMIT)?,
         )?;
-        assert_eq!(manifest["review_required"], review);
+        assert_eq!(manifest["disposition"], "writer_settled");
         let terminal: writer::WriterTerminal = serde_json::from_slice(
             &attempt.read_bounded(OsStr::new("writer-terminal.json"), RECORD_LIMIT)?,
         )?;
-        if !review {
-            assert!(terminal.protected_paths.is_empty());
-        }
         if advance_after_publish {
             assert_eq!(terminal.head, tip);
-            let evidence: serde_json::Value = serde_json::from_slice(
-                &archive.read_bounded(OsStr::new("evidence.json"), RECORD_LIMIT)?,
-            )?;
-            assert_eq!(evidence["observed_head"], tip.to_string());
         }
-        Ok(review)
+        Ok(false)
     }
+}
+
+#[test]
+fn terminal_settles_instruction_file_edits() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = PrepareFixture::new()?;
+    assert!(!fixture.terminal(|| {
+        for name in ["AGENTS.md", "CLAUDE.md"] {
+            std::fs::write(
+                fixture.writer.worktree.join(name),
+                format!("writer {name}\n"),
+            )?;
+        }
+        fixture.lane_git(&["add", "AGENTS.md", "CLAUDE.md"])?;
+        fixture.commit(&fixture.writer.worktree, "Edit instructions")
+    })?);
+    for name in ["AGENTS.md", "CLAUDE.md"] {
+        assert_eq!(
+            std::fs::read_to_string(fixture.writer.worktree.join(name))?,
+            format!("writer {name}\n")
+        );
+        fixture.lane_git(&["cat-file", "-e", &format!("HEAD:{name}")])?;
+    }
+    Ok(())
+}
+
+#[test]
+fn terminal_leaves_uncommitted_instruction_edits_in_place()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    std::fs::write(fixture.writer.worktree.join("AGENTS.md"), "baseline\n")?;
+    fixture.lane_git(&["add", "AGENTS.md"])?;
+    fixture.commit(&fixture.writer.worktree, "Baseline")?;
+    assert!(!fixture.terminal(|| {
+        std::fs::write(
+            fixture.writer.worktree.join("AGENTS.md"),
+            "uncommitted edit\n",
+        )?;
+        Ok(())
+    })?);
+    assert_eq!(
+        std::fs::read_to_string(fixture.writer.worktree.join("AGENTS.md"))?,
+        "uncommitted edit\n"
+    );
+    Ok(())
 }
 
 #[test]
@@ -3369,95 +3541,6 @@ fn terminal_imports_a_stopped_merge_into_the_worktree()
 }
 
 #[test]
-fn terminal_falls_back_when_delivery_target_cannot_be_resolved()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    for target in ["missing_head", "dangling_head", "unrelated"] {
-        for protected in [false, true] {
-            let fixture = PrepareFixture::new()?;
-            if target != "missing_head" {
-                fixture.git(&[
-                    "symbolic-ref",
-                    "refs/remotes/origin/HEAD",
-                    "refs/remotes/origin/main",
-                ])?;
-            }
-            if target == "unrelated" {
-                fixture.git(&["checkout", "--orphan", "unrelated"])?;
-                fixture.commit(&fixture.writer.project, "Unrelated target")?;
-                fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"])?;
-            }
-            let review = fixture.terminal(|| {
-                let path = if protected { "AGENTS.md" } else { "source.txt" };
-                std::fs::write(fixture.writer.worktree.join(path), "writer change\n")?;
-                fixture.lane_git(&["add", path])?;
-                fixture.commit(&fixture.writer.worktree, "Writer change")
-            })?;
-            assert_eq!(review, protected, "{target}");
-        }
-    }
-    Ok(())
-}
-
-fn merge_upstream_then_edit(
-    fixture: &PrepareFixture,
-    remote_ref: &str,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    fixture.lane_git(&["merge", "--no-edit", remote_ref])?;
-    std::fs::write(
-        fixture.writer.worktree.join("source.txt"),
-        "writer source\n",
-    )?;
-    fixture.lane_git(&["add", "source.txt"])?;
-    fixture.commit(&fixture.writer.worktree, "Writer source")
-}
-
-fn commit_protected_on(
-    fixture: &PrepareFixture,
-    remote_ref: &str,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(fixture.writer.project.join(".github"))?;
-    std::fs::write(
-        fixture.writer.project.join(".github/ci.yml"),
-        "upstream policy\n",
-    )?;
-    fixture.git(&["add", ".github"])?;
-    fixture.commit(&fixture.writer.project, "Upstream policy")?;
-    fixture.git(&["update-ref", remote_ref, "HEAD"])
-}
-
-#[test]
-fn terminal_uses_the_base_branch_on_a_delivery_remote_without_head()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    let fixture = PrepareFixture::new()?;
-    commit_protected_on(&fixture, "refs/remotes/fork/main")?;
-    // The delivery remote "fork" has no HEAD, but it carries the base branch.
-    let review = fixture.terminal_via("fork", Some("main"), || {
-        merge_upstream_then_edit(&fixture, "fork/main")
-    })?;
-    assert!(!review);
-    Ok(())
-}
-
-#[test]
-fn terminal_never_exempts_a_commit_reachable_only_from_another_remote()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    let fixture = PrepareFixture::new()?;
-    // origin is a fork with an unreviewed protected commit and a HEAD; the
-    // delivery remote "upstream" has neither HEAD nor the base branch.
-    commit_protected_on(&fixture, "refs/remotes/origin/main")?;
-    fixture.git(&[
-        "symbolic-ref",
-        "refs/remotes/origin/HEAD",
-        "refs/remotes/origin/main",
-    ])?;
-    let review = fixture.terminal_via("upstream", Some("main"), || {
-        merge_upstream_then_edit(&fixture, "origin/main")
-    })?;
-    assert!(review);
-    Ok(())
-}
-
-#[test]
 fn terminal_names_a_writer_left_off_the_lane_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
@@ -3471,70 +3554,6 @@ fn terminal_names_a_writer_left_off_the_lane_branch()
         error.downcast_ref::<RunError>(),
         Some(RunError::WriterHeadNotLaneBranch)
     ));
-    Ok(())
-}
-
-#[test]
-fn terminal_exempts_merged_upstream_protected_changes()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    for inherited in ["none", "addition", "deletion"] {
-        for protected in [false, true] {
-            let fixture = PrepareFixture::new()?;
-            if inherited == "addition" {
-                std::fs::create_dir(fixture.writer.worktree.join(".github"))?;
-                std::fs::write(
-                    fixture.writer.worktree.join(".github/pr.yml"),
-                    "PR policy\n",
-                )?;
-                fixture.lane_git(&["add", ".github"])?;
-                fixture.commit(&fixture.writer.worktree, "Existing PR addition")?;
-            } else if inherited == "deletion" {
-                std::fs::create_dir(fixture.writer.project.join(".github"))?;
-                std::fs::write(
-                    fixture.writer.project.join(".github/old.yml"),
-                    "old policy\n",
-                )?;
-                fixture.git(&["add", ".github"])?;
-                fixture.commit(&fixture.writer.project, "Shared policy")?;
-                fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"])?;
-                fixture.lane_git(&["merge", "--ff-only", "origin/main"])?;
-                fixture.lane_git(&["rm", ".github/old.yml"])?;
-                fixture.commit(&fixture.writer.worktree, "Existing PR deletion")?;
-            }
-            let review = fixture.terminal(|| {
-                std::fs::create_dir_all(fixture.writer.project.join(".github"))?;
-                std::fs::write(
-                    fixture.writer.project.join(".github/ci.yml"),
-                    "main policy\n",
-                )?;
-                fixture.git(&["add", ".github"])?;
-                fixture.commit(&fixture.writer.project, "Upstream policy")?;
-                fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"])?;
-                fixture.git(&[
-                    "symbolic-ref",
-                    "refs/remotes/origin/HEAD",
-                    "refs/remotes/origin/main",
-                ])?;
-                std::fs::write(
-                    fixture.writer.worktree.join("source.txt"),
-                    "writer source\n",
-                )?;
-                fixture.lane_git(&["add", "source.txt"])?;
-                fixture.commit(&fixture.writer.worktree, "Writer source")?;
-                fixture.lane_git(&["merge", "--no-edit", "origin/main"])?;
-                if protected {
-                    std::fs::write(
-                        fixture.writer.worktree.join(".github/ci.yml"),
-                        "writer policy\n",
-                    )?;
-                    fixture.lane_git(&["add", ".github"])?;
-                    fixture.commit(&fixture.writer.worktree, "Writer policy")?;
-                }
-                Ok(())
-            })?;
-            assert_eq!(review, protected, "{inherited}");
-        }
-    }
     Ok(())
 }
 

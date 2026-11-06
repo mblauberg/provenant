@@ -1,5 +1,5 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_root, subtree,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_grant, subtree,
     uuid_v4,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
@@ -112,6 +112,12 @@ impl std::fmt::Debug for OauthToken {
 }
 
 impl OauthToken {
+    /// Construct an in-memory token for cross-crate fixtures.
+    #[cfg(feature = "fixture")]
+    pub fn fixture() -> Result<Self, ProviderError> {
+        Self::parse(br#"{"claudeAiOauth":{"accessToken":"fixture","refreshToken":"fixture","expiresAt":4000000000000}}"#, 1)
+    }
+
     #[cfg(test)]
     pub(crate) fn for_account(mut self, key: &str, dir: &Path) -> Self {
         self.account = Some((key.into(), dir.to_owned()));
@@ -659,7 +665,8 @@ fn prepare(
     );
     let project = config_dir.join("projects").join(project_key(input.cwd));
     let transcript_dir = project.join(&session_id);
-    let package = package_root(input.executable)?;
+    let mut package_omissions = Vec::new();
+    let package = package_grant(input.executable, &mut package_omissions);
     let scratch = &plan.scratch.path;
     // Scrub mode forces default permissions, regardless of --permission-mode.
     let allowed_tools = if shell && input.images.is_empty() {
@@ -727,12 +734,8 @@ fn prepare(
         .claude(scratch, &mut argv, &allowed_tools, &image_rules)?;
 
     let toolchain = shell || web;
-    let path = if toolchain {
-        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
-    } else {
-        "/usr/bin:/bin".into()
-    };
-    let mut env = base_env(input, scratch, &path);
+    let path = crate::launch::tool_search_path(input.home, toolchain);
+    let mut env = base_env(input, scratch, path);
     input
         .provenant
         .environment(scratch, &mut env, &mut setup, true)?;
@@ -750,15 +753,18 @@ fn prepare(
     let staged_skills = input.stage_user_skills();
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
-    let omitted_discovery = Vec::new();
+    let omitted_discovery = package_omissions;
     let discover_skills = user_skills.is_some();
     if shell || discover_skills {
-        let config = plan
-            .private_state
-            .as_ref()
-            .ok_or(ProviderError::UnsupportedPolicy)?
-            .path
-            .join("claude-config");
+        let private = plan.private_state.as_ref().map_or_else(
+            || {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: Claude private state is unavailable; using the attempt scratch directory");
+                &plan.scratch.path
+            },
+            |state| &state.path,
+        );
+        let config = private.join("claude-config");
         env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
         setup.push(SetupStep::CreateDir(config.clone()));
         if let Some(user_skills) = &user_skills {
@@ -770,18 +776,11 @@ fn prepare(
     } else if input.account.is_some() {
         env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
     }
-    let mut runtime_reads = vec![subtree(package)];
+    let mut runtime_reads = vec![package.clone()];
     if discover_skills {
         for grant in &skill_reads {
-            // Claude's workspace arguments accept directories only. The
-            // outer profile still grants linked files exactly, never siblings.
-            let directory = match grant.scope {
-                provenant_confinement::permissions::PathScope::Exact => {
-                    grant.path.parent().ok_or(ProviderError::InvalidPath)?
-                }
-                provenant_confinement::permissions::PathScope::Subtree => &grant.path,
-            };
-            argv.extend(["--add-dir".into(), directory.as_os_str().to_owned()]);
+            // Staging produces a directory subtree for Claude's workspace.
+            argv.extend(["--add-dir".into(), grant.path.as_os_str().to_owned()]);
         }
         runtime_reads.extend(skill_reads);
     }

@@ -17,6 +17,8 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 
+toml_edit = { workspace = true }
+
 [features]
 # Exposes the pure Seatbelt rendering path to the provider snapshot tests.
 snapshot = []
@@ -26,7 +28,6 @@ provenant-test-support = { path = "../test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
-toml_edit = { workspace = true }
 
 [lints]
 workspace = true

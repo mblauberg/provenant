@@ -586,9 +586,6 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     seal_exit_fixture(&store, &input)?;
     let id = input.attempts[0].attempt_id;
     let head = provenant_core::GitOid::parse(&"a".repeat(40))?;
-    let path = provenant_records::PathWire::from_relative(&provenant_core::RelativePath::parse(
-        ".github/workflows/ci.yml",
-    )?)?;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
     artifacts::seal(
         &attempt,
@@ -596,7 +593,6 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
-            protected_paths: vec![path.clone()],
         })?,
         RECORD_LIMIT,
     )?;
@@ -611,7 +607,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     ));
     let record = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
     assert_eq!(record.head, Some(head));
-    assert_eq!(record.protected_paths, vec![path]);
+    assert!(record.protected_paths.is_empty());
     assert!(record.delivery.is_none());
     assert!(matches!(
         record.state,
@@ -2402,7 +2398,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
-fn the_store_initialises_at_version_six_without_spacing() -> TestResult {
+fn the_store_initialises_at_version_nine_without_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -2415,7 +2411,7 @@ fn the_store_initialises_at_version_six_without_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let spacing: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
         [],
@@ -2443,7 +2439,7 @@ fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let operation = OperationId::parse("admit-after-upgrade")?;
     assert!(store.admission_window(&operation, &call)?.is_none());
     let deadline = WallTime::from_micros(1_000_000)?;
@@ -2491,7 +2487,7 @@ fn a_store_failure_names_its_cause_only_on_the_local_host() {
 }
 
 #[test]
-fn the_store_refuses_a_version_newer_than_eight() -> TestResult {
+fn the_store_refuses_a_version_newer_than_nine() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -2499,17 +2495,17 @@ fn the_store_refuses_a_version_newer_than_eight() -> TestResult {
     let call = call(&clock, &cancel);
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("PRAGMA user_version=9;")?;
+        .execute_batch("PRAGMA user_version=10;")?;
     assert!(matches!(
         RunStore::open(&context, &call),
-        Err(RunError::Version(9))
+        Err(RunError::Version(10))
     ));
     let state = context.state_root.as_path();
     let version: i64 = provenant_sqlite::open_connection(&state.join("run.sqlite3"), true)?
         .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
             r.get(0)
         })?;
-    assert_eq!(version, 9, "a refused store stays as it was");
+    assert_eq!(version, 10, "a refused store stays as it was");
     assert!(
         !std::fs::read_dir(state)?
             .filter_map(std::result::Result::ok)
@@ -2707,7 +2703,7 @@ fn version_seven_is_snapshotted_before_admission_windows_are_added() -> TestResu
     let version: i64 = store
         .db
         .pragma_query_value(None, "user_version", |row| row.get(0))?;
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let backup = context.state_root.as_path().join(format!(
         "run.sqlite3.bak-{}",
         call.clock.wall_now()?.as_micros()
@@ -3192,5 +3188,77 @@ fn historical_run_stores_upgrade_with_attempts_and_backups() -> TestResult {
             ));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn version_eight_upgrade_preserves_terminal_attempt_references() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    let store = RunStore::open(&context, &call)?;
+    store.create(&input, &call)?;
+    store.withdraw(
+        id,
+        AttemptState::Queued {
+            extra: Default::default(),
+        },
+        Outcome::Rejected,
+        "fixture rejection",
+        WallTime::from_micros(200)?,
+        &call,
+    )?;
+    let before = store.record(id, &call)?;
+    let event_count: i64 = store.db.query_row(
+        "SELECT count(*) FROM events WHERE attempt=?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert!(event_count > 0);
+    store.db.pragma_update(None, "user_version", 8)?;
+    drop(store);
+    let upgraded = RunStore::open(&context, &call)?;
+    assert_eq!(upgraded.record(id, &call)?, before);
+    assert_eq!(
+        upgraded.db.query_row(
+            "SELECT count(*) FROM events WHERE attempt=?1",
+            [id.to_string()],
+            |row| row.get::<_, i64>(0)
+        )?,
+        event_count
+    );
+    assert_eq!(
+        upgraded
+            .db
+            .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?,
+        1
+    );
+    assert_eq!(
+        upgraded
+            .db
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })?,
+        0
+    );
+    assert!(
+        upgraded
+            .db
+            .execute(
+                "UPDATE attempts SET record=record WHERE id=?1",
+                [id.to_string()]
+            )
+            .is_err()
+    );
+    assert!(
+        upgraded
+            .db
+            .execute("DELETE FROM attempts WHERE id=?1", [id.to_string()])
+            .is_err()
+    );
     Ok(())
 }

@@ -449,8 +449,6 @@ pub struct Lanes {
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub build_wait_minutes: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
-    pub setup_lock_wait_seconds: Option<u64>,
-    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub lane_port_base: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub lane_port_block: Option<u64>,
@@ -509,7 +507,6 @@ impl Lanes {
             max_writer_lanes: self.max_writer_lanes,
             max_project_writer_lanes: self.max_project_writer_lanes,
             build_wait_minutes: self.build_wait_minutes,
-            setup_lock_wait_seconds: self.setup_lock_wait_seconds,
             lane_port_base: self.lane_port_base,
             lane_port_block: self.lane_port_block,
             lane_port_blocks: self.lane_port_blocks,
@@ -551,9 +548,9 @@ pub struct LanePriority {
 impl Default for LanePriority {
     fn default() -> Self {
         Self {
-            writer: 10,
-            read_only: 5,
-            build_heavy: 15,
+            writer: provenant_records::run::DEFAULT_WRITER_PRIORITY,
+            read_only: provenant_records::run::DEFAULT_READER_PRIORITY,
+            build_heavy: provenant_records::run::DEFAULT_BUILD_HEAVY_PRIORITY,
         }
     }
 }
@@ -860,11 +857,6 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("lanes.max_writer_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_writer_lanes", 1, 32),
     FieldMetadata::int("lanes.build_wait_minutes", 1, 1440),
-    FieldMetadata::int(
-        "lanes.setup_lock_wait_seconds",
-        1,
-        provenant_core::MAX_LANE_RUNTIME_SECONDS as i64,
-    ),
     FieldMetadata::int("lanes.lane_port_base", 1024, 65535),
     FieldMetadata::int("lanes.lane_port_block", 1, 1024),
     FieldMetadata::int("lanes.lane_port_blocks", 0, 1024),
@@ -1008,7 +1000,6 @@ mod tests {
         config.lanes.max_writer_lanes = Some(65);
         config.lanes.max_project_writer_lanes = Some(0);
         config.lanes.build_wait_minutes = Some(0);
-        config.lanes.setup_lock_wait_seconds = Some(14401);
         let errors = config.validate();
         assert!(
             errors
@@ -1020,7 +1011,6 @@ mod tests {
             "max_writer_lanes",
             "max_project_writer_lanes",
             "build_wait_minutes",
-            "setup_lock_wait_seconds",
         ] {
             assert!(errors.iter().any(|e| e.field == format!("lanes.{key}")));
         }

@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 const MAX_WRITER_WRITES: usize = 16;
+/// Default maximum prompt text passed as a single argument.
+pub const DEFAULT_ARGV_PROMPT_LIMIT_BYTES: usize = 65_536;
 /// Paths every implementation legitimately changes: release-note fragments,
 /// specs, lock files and the tracker's input file. None is a control file.
 pub const DEFAULT_REVIEW_EXEMPT: [&str; 4] = [
@@ -22,6 +24,8 @@ push_conflict_markers = true
 brief_read_root_warnings = true
 profile_limit_bytes = 524288
 grant_limit = 128
+write_grant_limit_bytes = 262144
+argv_prompt_limit_bytes = 65536
 
 [projects]
 "#;
@@ -31,9 +35,8 @@ grant_limit = 128
 /// Each directory is read-write for writer lanes only; read-only lanes ignore
 /// it. Plan compilation still refuses any overlap with protected roots.
 ///
-/// `review_exempt` lists repository-relative paths a writer may commit without
-/// the lane ending `review_required`, and may leave uncommitted without it
-/// ending `uncommitted`: `dir/` for a directory at the root, a bare name for a
+/// `review_exempt` lists repository-relative paths a writer may leave
+/// uncommitted without the lane ending `uncommitted`: `dir/` for a directory at the root, a bare name for a
 /// file at any depth, otherwise one exact path. A project can replace the list
 /// under `[domains.run.projects."PROJECT_ID"]`. Git metadata, hooks and
 /// provider control roots can never be listed.
@@ -61,7 +64,8 @@ pub struct RunConfig {
     /// Maximum rendered Seatbelt profile size, in bytes.
     #[serde(default = "default_profile_limit_bytes")]
     pub profile_limit_bytes: usize,
-    /// Maximum path grants in each profile family and in the plan.
+    /// Maximum entries in each profile family and path grants in the plan;
+    /// authentication and native controls retain minimum caps of 16 and 64.
     #[serde(default = "default_grant_limit")]
     pub grant_limit: usize,
     /// Tokens a writer attempt may use before it is ended. 0 turns the budget
@@ -70,6 +74,12 @@ pub struct RunConfig {
     /// number.
     #[serde(default)]
     pub writer_token_budget: Option<u64>,
+    /// Maximum encoded bytes in the applied write-grant ledger.
+    #[serde(default = "default_write_grant_limit_bytes")]
+    pub write_grant_limit_bytes: u64,
+    /// Prompt bytes passed directly to argv before the file-backed fallback.
+    #[serde(default = "default_argv_prompt_limit_bytes")]
+    pub argv_prompt_limit_bytes: usize,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
@@ -80,6 +90,12 @@ fn default_profile_limit_bytes() -> usize {
 }
 fn default_grant_limit() -> usize {
     128
+}
+fn default_write_grant_limit_bytes() -> u64 {
+    provenant_records::run::MAX_WRITE_GRANT_BYTES
+}
+fn default_argv_prompt_limit_bytes() -> usize {
+    DEFAULT_ARGV_PROMPT_LIMIT_BYTES
 }
 fn default_true() -> bool {
     true
@@ -123,6 +139,8 @@ impl Default for RunConfig {
             profile_limit_bytes: default_profile_limit_bytes(),
             grant_limit: default_grant_limit(),
             writer_token_budget: None,
+            write_grant_limit_bytes: default_write_grant_limit_bytes(),
+            argv_prompt_limit_bytes: default_argv_prompt_limit_bytes(),
             projects: BTreeMap::new(),
         }
     }
@@ -140,11 +158,18 @@ impl RunConfig {
 
     /// Read `[domains.run]` from the state root's `config.toml`.
     pub fn read(state: &Path) -> std::io::Result<Self> {
-        let config: Self = provenant_config::read_domain(state, "run")?;
+        Self::read_with_keys(state).map(|(config, _)| config)
+    }
+
+    /// Read the settings and their explicit top-level keys from one snapshot.
+    pub fn read_with_keys(
+        state: &Path,
+    ) -> std::io::Result<(Self, std::collections::BTreeSet<String>)> {
+        let (config, keys): (Self, _) = provenant_config::read_domain_with_keys(state, "run")?;
         if let Some(error) = config.validate().into_iter().next() {
             return Err(std::io::Error::other(error));
         }
-        Ok(config)
+        Ok((config, keys))
     }
 
     /// The admission seconds that apply to `project`: its own setting when it
@@ -191,7 +216,7 @@ impl RunConfig {
     }
 
     /// The matcher a writer settlement uses. A config that cannot be read
-    /// exempts nothing, which only adds review.
+    /// exempts nothing, which may report uncommitted changes.
     pub fn review_exempt_at(state: &Path, project: &str) -> ReviewExempt {
         Self::read(state).map_or_else(
             |_| ReviewExempt::none(),
@@ -296,6 +321,7 @@ impl DomainConfig for RunConfig {
         for (field, value) in [
             ("profile_limit_bytes", self.profile_limit_bytes),
             ("grant_limit", self.grant_limit),
+            ("argv_prompt_limit_bytes", self.argv_prompt_limit_bytes),
         ] {
             if value == 0 {
                 errors.push(SectionError {
@@ -303,6 +329,14 @@ impl DomainConfig for RunConfig {
                     code: "range",
                 });
             }
+        }
+        if !(1..=provenant_records::run::MAX_WRITE_GRANT_BYTES_CEILING)
+            .contains(&self.write_grant_limit_bytes)
+        {
+            errors.push(SectionError {
+                field: "write_grant_limit_bytes".into(),
+                code: "range",
+            });
         }
         valid_patterns("review_exempt", &self.review_exempt, &mut errors);
         valid_writer_writes("writer_writes", &self.writer_writes, &mut errors);
@@ -349,6 +383,12 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("profile_limit_bytes", "int"),
     FieldMetadata::new("grant_limit", "int"),
     FieldMetadata::new("writer_token_budget", "int"),
+    FieldMetadata::int(
+        "write_grant_limit_bytes",
+        1,
+        provenant_records::run::MAX_WRITE_GRANT_BYTES_CEILING as i64,
+    ),
+    FieldMetadata::new("argv_prompt_limit_bytes", "int"),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("brief_read_root_warnings", "bool"),
     FieldMetadata::new("warn_brief_read_roots", "bool"),
@@ -382,10 +422,20 @@ mod tests {
     fn launch_resource_defaults_can_be_raised() -> Result<(), Box<dyn std::error::Error>> {
         let defaults: RunConfig = toml_edit::de::from_str("")?;
         assert_eq!(defaults.grant_limit, 128);
+        assert_eq!(
+            defaults.write_grant_limit_bytes,
+            provenant_records::run::MAX_WRITE_GRANT_BYTES
+        );
+        assert_eq!(
+            defaults.argv_prompt_limit_bytes,
+            DEFAULT_ARGV_PROMPT_LIMIT_BYTES
+        );
         assert_eq!(defaults.profile_limit_bytes, 512 * 1024);
-        let raised: RunConfig =
-            toml_edit::de::from_str("grant_limit = 2048\nprofile_limit_bytes = 2097152\n")?;
+        let raised: RunConfig = toml_edit::de::from_str(
+            "grant_limit = 2048\nprofile_limit_bytes = 2097152\nargv_prompt_limit_bytes = 131072\n",
+        )?;
         assert!(raised.validate().is_empty());
+        assert_eq!(raised.argv_prompt_limit_bytes, 131_072);
         assert_eq!(
             (raised.grant_limit, raised.profile_limit_bytes),
             (2048, 2097152)
@@ -393,12 +443,30 @@ mod tests {
         let state = tempfile::tempdir()?;
         std::fs::write(
             state.path().join("config.toml"),
-            "schema_version=1\n[domains.run]\ngrant_limit=2048\nprofile_limit_bytes=2097152\n",
+            "schema_version=1\n[domains.run]\ngrant_limit=2048\nprofile_limit_bytes=2097152\nargv_prompt_limit_bytes=131072\n",
         )?;
         let loaded = RunConfig::read(state.path())?;
+        assert_eq!(loaded.argv_prompt_limit_bytes, 131_072);
         assert_eq!(
             (loaded.grant_limit, loaded.profile_limit_bytes),
             (2048, 2097152)
+        );
+        let configured: RunConfig = toml_edit::de::from_str("write_grant_limit_bytes = 1048576")?;
+        assert!(configured.validate().is_empty());
+        assert_eq!(configured.write_grant_limit_bytes, 1048576);
+        let invalid: RunConfig = toml_edit::de::from_str("write_grant_limit_bytes = 8388609")?;
+        assert!(
+            invalid
+                .validate()
+                .iter()
+                .any(|error| error.field == "write_grant_limit_bytes")
+        );
+        let invalid_argv: RunConfig = toml_edit::de::from_str("argv_prompt_limit_bytes = 0")?;
+        assert!(
+            invalid_argv
+                .validate()
+                .iter()
+                .any(|error| error.field == "argv_prompt_limit_bytes")
         );
         let invalid: RunConfig = toml_edit::de::from_str("grant_limit = 0")?;
         assert!(

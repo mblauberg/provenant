@@ -471,7 +471,6 @@ lane; silence never counts as completion or settlement.
   `::read_only_lanes_are_spaced_2_seconds_apart`;
   `::memory_floor_refuses_both_lane_classes`;
   `::project_cap_allows_up_to_32_active_lanes`;
-  `::legacy_tickets_without_a_class_are_treated_as_writers`;
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
   `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;
@@ -488,11 +487,6 @@ lane; silence never counts as completion or settlement.
   `::an_unreadable_host_clock_or_boot_identity_refuses_the_claim`;
   `::a_start_ahead_of_the_host_clock_in_the_same_boot_never_frees_the_class`;
   `::lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreadable`;
-  `::a_version_2_ledger_that_kept_wall_milliseconds_starts_every_class_free`;
-  `::upgrading_a_version_1_ledger_is_atomic`;
-  `::a_version_1_start_of_any_age_holds_each_class_one_full_spacing`;
-  `::a_version_1_ledger_with_no_start_holds_nothing`;
-  `::a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read`;
   `crates/supervisor/tests/custody.rs::the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal`;
   `crates/run/src/holder.rs::host_clock_tests::an_unreadable_host_clock_reaches_the_guardian_as_itself`;
   `crates/os/src/sys/clock.rs::host_monotonic_clock_does_not_go_backwards_and_the_boot_identity_is_stable`;
@@ -597,8 +591,7 @@ provider has already stopped consuming host build capacity and live custody.
 An import failure preserves an already established failed, timed-out or lost
 provider outcome and its reason. A potential success with unverified writer
 facts becomes `unsettled`; even after import recovery it requires a fresh attempt
-or manual host recovery to obtain success or delivery eligibility. Effect
-completion alone does not approve protected changes.
+or manual host recovery to obtain success or delivery eligibility.
 
 Unresolved imports also seal a scoped `import-retained.json` marker beside the
 custody reservation. Run checks predecessor markers after acquiring the normal
@@ -676,7 +669,7 @@ Peers sharing a state root must upgrade together: schema 7 and the version 2 att
 
 `cancel` durably records the request and signals the supervisor without waiting
 for a writer lock. The settlement driver checks it between phases and polls it
-every 50 ms during import, instruction checks and optional automatic delivery,
+every 50 ms during import and optional automatic delivery,
 stopping the owned Git child when required.
 Public `reconcile` starts the same binary's detached `internal settle` worker
 only when a non-terminal attempt needs settlement. A run-scoped queued claim
@@ -698,9 +691,8 @@ or an existing settlement owner; the supervisor owns this work after return.
 
 Success needs a supervisor-observed exit 0, a matching provider identity and
 a complete, validated, non-empty result; capture bytes are never completion
-evidence. A dead owner is not a failed provider. A completed writer whose
-protected changes need review ends `review_required`, and one with only
-uncommitted edits ends `uncommitted`; neither delivers. Paths in the project's
+evidence. A dead owner is not a failed provider. A writer with only uncommitted edits ends `uncommitted` and does not deliver,
+unless those paths are review-exempt. Paths in the project's
 `[domains.run] review_exempt` list (release-note fragments, specs, lock files
 and `.tracker-input` by default) never count toward either, and Git metadata,
 hooks and provider control roots can never be listed. Run reads no provider
@@ -711,10 +703,6 @@ transcript except Codex's post-exit identity projection. A read-only lane (no
 - Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
   `crates/run/src/dispatch_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`;
   `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
-  `crates/confinement/src/quarantine.rs::exempt_instruction_tree_paths_settle_without_review`;
-  `::hard_controls_stay_under_review_even_when_listed`;
-  `::a_staged_rename_of_exempt_paths_does_not_force_review`;
-  `::ordinary_project_paths_never_need_review`;
   `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
 - Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`, `crates/confinement/src/review_exempt.rs`
 
@@ -857,14 +845,16 @@ back to a fresh named launch under the existing resume policy.
 
 ## Launch prompts
 
-Launch prompts are bounded to 1 MiB. Argv adapters take up to 64 KiB; a
+Launch prompts are bounded to 1 MiB. Argv adapters take up to the
+`domains.run.argv_prompt_limit_bytes` threshold (64 KiB by default); a
 larger top-level prompt is sealed as `prompt.md` and replaced by a pointer to it, while
 nested argv attempts refuse it because the parent lane can write their
 directory. Prompt digests cover the full text in `prompt.txt`.
 - Why: a spill file a lane can rewrite would change its child's task.
-- Test: `crates/cli/src/run/provider.rs::launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file`;
-  `::launch_prompt_refuses_symlinked_attempt_ancestors`
-- Owner: `crates/cli/src/run/provider.rs`
+- Test: `tools/front-door/crates/cli/src/run/provider/tests.rs#launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file`;
+  `tools/front-door/crates/cli/src/run/provider/tests.rs#nested_argv_prompt_respects_configured_byte_limit`;
+  `tools/front-door/crates/cli/src/run/provider/tests.rs#launch_prompt_refuses_symlinked_attempt_ancestors`
+- Owner: `tools/front-door/crates/cli/src/run/provider/observation.rs#launch_prompt`
 
 ## Read-only write exceptions
 
@@ -993,10 +983,7 @@ a peak-disk measurement.
 Git owns hashing, parsing, pack checks and quarantine. There is no custom
 object verifier, full-store generation scan, verification cache or separate
 verification deadline/retry mechanism. SHA-1 and SHA-256 repositories use the
-same Git receive boundary. The host restores the private index for instruction
-quarantine only after import succeeds, clearing skip-worktree and
-assume-unchanged flags so an uncommitted edit remains visible. The host
-publishes the real branch with a
+same Git receive boundary. The host publishes the real branch with a
 compare-and-swap against the pinned launch base. Replaying the same head is
 idempotent; a branch already containing that head also satisfies publication. A diverged shared ref refuses publication. A published tip
 must descend from the lane base or the current `origin` default branch, which
@@ -1017,8 +1004,7 @@ for host recovery.
 - Why: Git already owns the receive boundary; private Git state removes the
   fragile list of individual write exceptions under the shared repository.
 - Test: `crates/confinement/tests/lane_git_conformance.rs`;
-  `crates/run/src/objects_tests.rs`;
-  `crates/run/src/delivery_tests.rs::terminal_imports_private_objects_before_quarantine_reads_the_lane`
+  `crates/run/src/objects_tests.rs`
 - Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/launch.rs`,
   `crates/providers/src/lane.rs`, `crates/run/src/objects.rs`,
   `crates/run/src/writer.rs`, `crates/run/src/delivery.rs`
@@ -1358,10 +1344,7 @@ origin push when the settled lane recorded none. An explicit `integrate:`
 override naming the recorded target keeps a recorded fast-forward-only guard,
 so pickup cannot merge a refused loop round. It requires a succeeded
 writer, released custody, no new reservation, a clean tree and the exact
-receipt head. After reviewing a `review_required` writer, the chair can use
-`lane deliver --accept-review ATTEMPT` to accept its protected changes and
-deliver the same exact head. The delivery receipt records the acceptance and
-protected paths. Lanes and peers cannot accept review. Delivery persists a
+receipt head. Delivery persists a
 keyed host pickup receipt separately from the immutable terminal record.
 Successful pickup replays without repeating
 external effects, while failures remain explicitly retryable. A worktree

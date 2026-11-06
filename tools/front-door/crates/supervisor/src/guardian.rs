@@ -51,6 +51,11 @@ fn census_fallback_notice(fallback: bool, recorded: &mut bool) -> Option<&'stati
 const CENSUS_INTERVAL_MS: u64 = 100;
 const FULL_CENSUS_INTERVAL_MS: u64 = 5_000;
 const EVENT_DRAIN_BACKOFF_MS: u64 = 10;
+const JOURNAL_RETRY_INTERVAL_MS: u64 = 100;
+
+fn journal_retry_due(now: u64, last_attempt: u64, failed: bool) -> bool {
+    failed && now.saturating_sub(last_attempt) >= JOURNAL_RETRY_INTERVAL_MS
+}
 
 fn census_full_due(now: u64, last_full: Option<u64>, event_failure: bool) -> bool {
     event_failure
@@ -60,6 +65,26 @@ fn census_full_due(now: u64, last_full: Option<u64>, event_failure: bool) -> boo
 fn census_walk_due(now: u64, last_walk: Option<u64>) -> bool {
     last_walk.is_none_or(|last| now.saturating_sub(last) >= CENSUS_INTERVAL_MS)
 }
+
+/// Whether this turn walks at all. Every known PID carries a fork and exit
+/// filter, so with healthy watches the tree can only change after an event;
+/// a walk with no event repeats the last one. An idle lane therefore walks
+/// only at the full backstop. A pending event, a newly added watch, failed
+/// watches or a failed reactor keep the former 100 ms rate.
+fn census_turn_due(
+    now: u64,
+    last_walk: Option<u64>,
+    last_full: Option<u64>,
+    reason_to_walk: bool,
+) -> bool {
+    census_walk_due(now, last_walk)
+        && (last_walk.is_none() || reason_to_walk || census_full_due(now, last_full, false))
+}
+
+// Provider CPU only feeds progress evidence published by the one-second
+// checkpoint, and silence is never a stop reason; sampling faster than the
+// checkpoint only repeated `proc_pidinfo`.
+const CPU_SAMPLE_INTERVAL_MS: u64 = 1_000;
 
 fn retry_terminal_with(
     schedule: [u64; 4],
@@ -304,6 +329,18 @@ pub trait Holder {
 }
 /// Final reservation and immutable exit publication share one storage seam.
 pub trait ExitPublisher {
+    fn tracking(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
+        if bytes.len() as u64 > crate::custody::RECORD_LIMIT {
+            return Err(CustodyError::InvalidRecord);
+        }
+        Ok(directory.atomic_write(
+            OsStr::new("reservation.json"),
+            ".custody-",
+            bytes,
+            PublishMode::Replace,
+        )?)
+    }
+
     fn commit_reservation(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
         Ok(directory.atomic_write(
             OsStr::new("reservation.json"),
@@ -642,6 +679,50 @@ fn admission_refusal(error: &CustodyError) -> String {
         _ => "admission refused".into(),
     }
 }
+fn lane_port_allocation(
+    plan: Option<&provenant_os::lane_ports::Plan>,
+) -> std::result::Result<
+    (
+        Option<provenant_os::lane_ports::Lease>,
+        Option<&'static str>,
+    ),
+    String,
+> {
+    let Some(plan) = plan else {
+        return Ok((None, None));
+    };
+    match plan.try_acquire() {
+        Ok(Some(lease)) => Ok((Some(lease), None)),
+        Ok(None) => {
+            let origin = match plan.blocks_origin {
+                Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => "compiled default",
+                Some(provenant_os::lane_ports::BlocksOrigin::HostConfig) => "host configuration",
+                None => "recorded plan",
+            };
+            Err(format!(
+                "no free lane port block; domains.fabric.lanes.lane_port_blocks={} ({origin}); raise or disable this setting",
+                plan.blocks
+            ))
+        }
+        Err(_) => Ok((
+            None,
+            Some(
+                "lane port block unavailable; continuing without allocation (domains.fabric.lanes.lane_port_blocks)",
+            ),
+        )),
+    }
+}
+
+fn without_lane_ports(env: &[(OsString, OsString)]) -> Vec<(OsString, OsString)> {
+    env.iter()
+        .filter(|(name, _)| {
+            name != provenant_os::lane_ports::BASE_ENV
+                && name != provenant_os::lane_ports::COUNT_ENV
+        })
+        .cloned()
+        .collect()
+}
+
 /// `env` with the lane's port block set, replacing any value it carried.
 fn with_lane_ports(
     env: &[(OsString, OsString)],
@@ -703,20 +784,20 @@ impl Driver<'_> {
         }
         // Held until this function returns, which is after the provider and
         // its descendants are settled; the kernel drops it if we die first.
-        let ports = match self.lane_ports.as_ref().map(|plan| plan.try_acquire()) {
-            None => None,
-            Some(Ok(Some(lease))) => Some(lease),
-            Some(Ok(None)) => {
-                return self.never_spawned(
-                    "no free lane port block; raise domains.fabric.lanes.lane_port_blocks",
-                );
-            }
-            Some(Err(_)) => return self.never_spawned("lane port blocks unavailable"),
+        let (ports, port_warning) = match lane_port_allocation(self.lane_ports.as_ref()) {
+            Ok(result) => result,
+            Err(reason) => return self.never_spawned(&reason),
         };
-        let leased_env;
+        if let Some(warning) = port_warning {
+            warn(&mut warnings, &mut omitted_warnings, warning);
+        }
+        let adjusted_env;
         let env = if let Some(lease) = &ports {
-            leased_env = with_lane_ports(env, lease);
-            leased_env.as_slice()
+            adjusted_env = with_lane_ports(env, lease);
+            adjusted_env.as_slice()
+        } else if port_warning.is_some() {
+            adjusted_env = without_lane_ports(env);
+            adjusted_env.as_slice()
         } else {
             env
         };
@@ -866,6 +947,8 @@ impl Driver<'_> {
         let mut census_reactor_failed = false;
         let mut reactor_warning_recorded = false;
         let mut process_watch_unavailable = false;
+        let mut census_retry = false;
+        let mut last_journal_attempt_ms = 0;
         let mut cleanup_complete;
         let mut drain_deadline = None;
         let mut cleanup_pending = false;
@@ -915,7 +998,8 @@ impl Driver<'_> {
             }
             last_stdout_bytes = stdout_bytes;
             last_stderr_bytes = stderr_bytes;
-            let cpu_sample_due = now.saturating_sub(last_cpu_observation_ms) >= 100;
+            let cpu_sample_due =
+                now.saturating_sub(last_cpu_observation_ms) >= CPU_SAMPLE_INTERVAL_MS;
             let cpu_progress = if cpu_sample_due {
                 last_cpu_observation_ms = now;
                 provider_cpu_micros = self.provider_cpu_micros();
@@ -1214,6 +1298,8 @@ impl Driver<'_> {
                 if let Some(disk) = hooks.disk {
                     match disk.below_floor(&self.holder_context) {
                         Ok(paused) => {
+                            // Crossing the floor must pause running builds promptly.
+                            census_event_pending |= paused && !disk_paused;
                             disk_paused = paused;
                             disk_warning_active = false;
                         }
@@ -1234,11 +1320,21 @@ impl Driver<'_> {
             if !disk_paused || exit.is_some() || stop_reason.is_some() {
                 child.resume_builds();
             }
-            // Process events wake the scoped tree and provider-group walk;
-            // a 100 ms timer also samples when no event arrives. A full scan
-            // backs it up every five seconds and is mandatory for cleanup.
-            // Failed events, overflow or a racing walk require a full scan.
-            if census_walk_due(now, last_census_ms) {
+            // Process events wake the scoped tree and provider-group walk, at
+            // most every 100 ms. Without an event nothing watched has forked
+            // or exited, so an idle lane walks only at the five-second full
+            // backstop, which is also mandatory for cleanup. Failed events,
+            // overflow, failed watches or a racing walk require a full scan.
+            if census_turn_due(
+                now,
+                last_census_ms,
+                last_full_census_ms,
+                census_event_pending
+                    || census_event_failed
+                    || census_reactor_failed
+                    || process_watch_unavailable
+                    || census_retry,
+            ) {
                 last_census_ms = Some(now);
                 census_event_pending = false;
                 let event_fallback =
@@ -1282,6 +1378,8 @@ impl Driver<'_> {
                 if census.is_some() && (full_due || fallback) {
                     last_full_census_ms = Some(now);
                 }
+                // A failed census keeps retrying at the walk rate.
+                census_retry = census.is_none();
                 if let Some(census) = census {
                     if full_due || fallback {
                         if !census.is_complete() && !census_warning_active {
@@ -1323,6 +1421,11 @@ impl Driver<'_> {
                     census_warning_active = true;
                 }
                 self.persist_tracking(&mut warnings, &mut omitted_warnings);
+                last_journal_attempt_ms = now;
+            } else if journal_retry_due(now, last_journal_attempt_ms, self.journal_warning_active) {
+                // Retry the last tracking state without an expensive census.
+                self.persist_tracking(&mut warnings, &mut omitted_warnings);
+                last_journal_attempt_ms = now;
             }
             // Process checkpoint durability is independent of census cadence.
             if last_observation_ms.is_none_or(|last| now.saturating_sub(last) >= 1_000) {
@@ -1392,16 +1495,23 @@ impl Driver<'_> {
                 last_observation_ms = Some(now);
             }
             let watches = child.watches();
-            // Pipes and signals wake the reactor. Timer-only work wakes at
-            // its next deadline, including the unchanged 100 ms census.
+            // Pipes, signals and process events wake the reactor. Timer-only
+            // work wakes at its next deadline: the 100 ms cancellation read,
+            // the one-second CPU sample and the five-second full census.
             let wait_now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let wall_ms = wall_started.zip(wall_now()).map_or(0, |(began, current)| {
                 u64::try_from(current.as_micros().saturating_sub(began.as_micros()) / 1000)
                     .unwrap_or(0)
             });
             let mut wait_ms = last_cpu_observation_ms
-                .saturating_add(100)
+                .saturating_add(CPU_SAMPLE_INTERVAL_MS)
                 .saturating_sub(wait_now);
+            if let Some(last) = last_full_census_ms {
+                wait_ms = wait_ms.min(
+                    last.saturating_add(FULL_CENSUS_INTERVAL_MS)
+                        .saturating_sub(wait_now),
+                );
+            }
             if let Some(last) = last_cancel_ms {
                 wait_ms = wait_ms.min(last.saturating_add(100).saturating_sub(wait_now));
             }
@@ -1417,11 +1527,23 @@ impl Driver<'_> {
             if cleanup_pending && let Some(deadline) = drain_deadline {
                 wait_ms = wait_ms.min(deadline.saturating_sub(wait_now));
             }
-            if census_event_pending || census_event_failed {
+            if census_event_pending
+                || census_event_failed
+                || census_reactor_failed
+                || process_watch_unavailable
+                || census_retry
+            {
                 wait_ms = wait_ms.min(
                     last_census_ms
                         .unwrap_or(0)
                         .saturating_add(CENSUS_INTERVAL_MS)
+                        .saturating_sub(wait_now),
+                );
+            }
+            if self.journal_warning_active {
+                wait_ms = wait_ms.min(
+                    last_journal_attempt_ms
+                        .saturating_add(JOURNAL_RETRY_INTERVAL_MS)
                         .saturating_sub(wait_now),
                 );
             }

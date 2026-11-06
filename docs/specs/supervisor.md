@@ -8,8 +8,7 @@ Anchor: `crates/supervisor/tests/custody.rs`, `crates/supervisor/src/custody_tes
 Supervisor holds processes, output and live custody through provider exit and
 durable exit publication. Run then drives resumable settlement while retaining
 the worktree writer flock through import and publication. Confinement turns an authorised plan into
-filesystem, Git, network and provider permissions, checks evidence and
-quarantines instruction changes. Together they prevent a failed write, a lost client or a mistaken process identity from killing a healthy lane, freeing a busy worktree or publishing an incomplete result. Run owns admission and result
+filesystem, Git, network and provider permissions and checks evidence. Together they prevent a failed write, a lost client or a mistaken process identity from killing a healthy lane, freeing a busy worktree or publishing an incomplete result. Run owns admission and result
 semantics ([run](run.md)). Wiring and platform limits are in the [crate
 notes](../../tools/front-door/crates/supervisor/README.md). Paths are
 relative to `tools/front-door/`.
@@ -178,7 +177,7 @@ supervisor releases a 64 KiB reserve for one retry, with no provider signal.
 ### Writer reservation and settlement
 
 The writer reservation is published in `<worktree-slot>/<attempt>/` under
-the shared writer lock before spawn and cleared only after quiescence, quarantine and run's terminal commit, or an
+the shared writer lock before spawn and cleared only after quiescence and run's terminal commit, or an
 authorised reconcile decision. Provider exit releases its host build slot;
 once quiescence is proven, the attempt custody lock is released, while the
 worktree writer flock remains held through object import and publication. The
@@ -279,6 +278,10 @@ as already covered and still traversed for their own dependencies.
 Trace output names the tool and reason without exposing dependency directories.
 An incomplete closure leaves the resolved grants in place and does not itself
 refuse launch. The host dependency-preparation PATH does not grant lane access.
+An optional search-path entry that cannot be encoded is omitted with a warning;
+the writer's private Git binding remains required. The complete applied write-grant
+ledger is bounded by `domains.run.write_grant_limit_bytes`; its effective value
+and origin are reported, and terminal decisions retain space for the ledger.
 
 ### Staged user content
 
@@ -287,8 +290,10 @@ access to the staged copy. Links are copied as content rather than retained;
 links resolving into credential roots, cycles, changed entries and content
 exceeding the configured size bound are skipped with warnings. Optional grant
 discovery also omits credential-root targets with warnings. Required executable,
-worktree and configured grants keep the credential-root guard. Confinement
-limits access; it does not make a networked lane hermetic.
+worktree and configured grants keep the credential-root guard. Invalid provider
+network endpoints, discovery-only paths and native-control labels are omitted
+with warnings; valid endpoints and the selected network policy remain in force. Confinement limits
+access; it does not make a networked lane hermetic.
 
 ### Database IPC shares the host namespace
 
@@ -328,15 +333,10 @@ The explicit database capability accepts that exposure; it does not create a
 lane-private SysV namespace. Other users' objects remain protected under normal
 restrictive permissions. Profiles without the capability cannot mutate or
 remove the host's objects, including those owned by the same user.
-macOS checks SysV segment and semaphore authority only when an existing
-object is looked up, after creation has already succeeded, so the `ipc-sysv-*`
-rules cannot stop a lane allocating an object it is then refused permission to
-remove. Profiles without the capability therefore deny the creating system calls
-instead; see [SysV object creation is denied without database
-authority](#sysv-object-creation-is-denied-without-database-authority).
-A lane with the capability can still exhaust host-global IPC limits such as
+macOS can allocate SysV objects before checking access to existing objects.
+A lane can still exhaust host-global IPC limits such as
 `kern.sysv.shmmni` with its own objects, and a failed database start can leave
-them behind. That exposure is part of the accepted capability.
+them behind. Such objects are not swept at settlement.
 
 Every SysV-touching native test records host `ipcs -m -s -q` inventories before
 and after. Trusted test code journals exact newly created IDs; a host-side
@@ -368,68 +368,8 @@ authority.
   `crates/confinement/src/permissions/tests/ipc.rs::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`;
   `::postgres_without_database_ipc_refuses_initdb`;
   `::database_off_cannot_mutate_or_remove_foreign_sysv_objects`;
-  `::database_off_cannot_create_sysv_objects`;
   `::database_on_creates_and_removes_own_sysv_segments_and_semaphores`;
   `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`
-- Owner: `crates/confinement/src/permissions.rs`
-
-### SysV object creation is denied without database authority
-
-Every profile without `allow_database_ipc` renders
-
-```scheme
-(deny syscall-unix (syscall-number SYS_shmget SYS_semget SYS_shmsys SYS_semsys))
-```
-
-so a lane without database authority cannot allocate a shared-memory segment or
-semaphore set at all: `shmget` and `semget` fail with `EPERM` before the kernel
-allocates anything, for `IPC_PRIVATE` and for keyed requests alike, in every
-process the lane starts. The legacy multiplexed `shmsys` and `semsys` entry
-points still reach the same allocation code on macOS 27 and are denied with
-them. Calling the system call directly, including through `syscall(2)` or a
-raw trap, meets the same filter. Because no object is created, there is nothing
-to reclaim, and no ownership evidence is needed: the supervisor does not
-inspect, sweep or remove SysV objects at lane end, and a UID match, a global
-before-and-after inventory difference or process ancestry never authorises a
-removal.
-
-Every profile, with or without the capability, also renders
-
-```scheme
-(deny syscall-unix (syscall-number SYS_msgget SYS_msgsys))
-```
-
-because no profile grants SysV message queues and creation has the same
-create-but-cannot-remove behaviour. The two rules are the only change; the
-`ipc-sysv-shm` and `ipc-sysv-sem` grants, POSIX shared-memory access to
-`apple.cfprefs.*`, and every file, process and network rule are unchanged.
-The creation denial is rendered only when the capability is absent, so
-`provenant run --capability postgres` lanes behave as before.
-
-Remaining limits:
-
-- A lane with the database capability can create segments and semaphore sets,
-  as PostgreSQL requires, and can leave them behind if killed. Reclaiming those
-  would need ownership proof that macOS does not provide: `semid_ds` has no
-  creator PID, `shm_cpid` carries no process start identity, and a sampled
-  process tree misses exited children. No such sweep exists.
-- Objects allocated before this rule, or by processes outside any lane, are not
-  touched.
-- Syscall filtering is checked by the native tests below under
-  `PROVENANT_CONFINEMENT_REQUIRED=1`; a macOS release that renumbers or removes
-  the system calls fails them rather than silently allowing creation.
-
-- Why: macOS permits SysV creation before its IPC authority check, so a
-  capability-off lane could exhaust host-global IPC objects it cannot remove.
-- Test: `crates/confinement/src/permissions.rs::writer_test_grants_stay_within_the_attempt_and_mode`;
-  `crates/confinement/src/permissions/tests/ipc.rs::database_off_cannot_create_sysv_objects`
-  (shared memory, semaphores and message queues, private and keyed, library and
-  raw and legacy entry points, writer and read-only; asserts no allocation and no
-  surviving keyed object);
-  `::database_on_creates_and_removes_own_sysv_segments_and_semaphores`;
-  `::postgres_without_database_ipc_refuses_initdb`;
-  `::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`;
-  `crates/providers/tests/snapshots/seatbelt/`
 - Owner: `crates/confinement/src/permissions.rs`
 
 ### Lane process-tree memory interface
@@ -611,7 +551,7 @@ and publishing configuration where needed.
 The linked admin directory and shared Git directory are read-only throughout
 their subtrees. This includes the original index, all refs and reflogs, config,
 hooks and info. No per-file write exception reopens either subtree. Provider
-configuration and protected instructions retain their separate protections.
+configuration retains its separate protections.
 After provider exit, the host imports the pinned head through Git's receive
 quarantine and moves the real branch with compare-and-swap. Lane configuration
 is never executed as host configuration. Read-only lanes likewise cannot write
@@ -728,20 +668,6 @@ persisted.
   `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
   `crates/confinement/src/disclosure.rs::snapshot_refuses_known_secrets_without_returning_content`
 - Owner: `crates/confinement/src/redact.rs`, `crates/confinement/src/disclosure.rs`
-
-### Quarantine
-
-After quiescence, quarantine archives protected disk, index and HEAD
-changes before restoring anything. Only attributable ordinary `.agents/`
-edits are restored automatically; control-file changes, concurrent edits or
-unaccountable history keep their evidence and end `review_required`. Clean
-upstream changes are exempt, and a tracked symlink is checked by its target
-bytes, never followed.
-- Why: a lane must not silently change the instructions the next agent
-  obeys.
-- Test: `crates/confinement/src/quarantine.rs::policy_control_edit_is_archived_and_retained_for_review`;
-  `::quarantine_archives_then_restores_only_attributable_ordinary_edit`
-- Owner: `crates/confinement/src/quarantine.rs`
 
 ### Safe Git evidence
 

@@ -1,28 +1,25 @@
-//! Irreversible git and shell actions, as a compiled rule table over the
-//! simple commands that `shell_command` finds. Config chooses which rules are
-//! on; there are no user patterns. A rule only ever reads argv and the
-//! filesystem layout, so an unrecognised shape allows rather than denies.
+//! The shell rules ADR 0035's boundaries need, as a compiled table over the
+//! simple commands that `shell_command` finds: shared refs (lane Git) and the
+//! Provenant state directory (credentials, objects, authority). Config chooses
+//! which rules are on; there are no user patterns. A rule only ever reads argv
+//! and the filesystem layout, so an unrecognised shape allows rather than denies.
 use crate::shell_command;
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 /// A rule id and the one-line alternative shown when it denies.
-pub const RULES: [(&str, &str); 3] = [
+pub const RULES: [(&str, &str); 2] = [
     (
         "force-push",
         "Force push to the default branch is refused. Accepted: `git push origin my-topic` then open a PR.",
-    ),
-    (
-        "rm-root",
-        "Recursively removing the home directory, the repository root or a parent of either is refused. Accepted: name the subdirectory, for example `rm -r ./target` or `rm -r ~/old-project/build`.",
     ),
     (
         "rm-state",
         "Deleting Provenant state is refused. Accepted: `provenant worktree remove my-lane`, or `rm -r` on one named subdirectory below the state directory.",
     ),
 ];
-const DEFAULT_DENY: &str = r#"deny = ["force-push", "rm-root", "rm-state"]
+const DEFAULT_DENY: &str = r#"deny = ["force-push", "rm-state"]
 "#;
 
 /// `[domains.guard]`: the rule ids that deny. Omit an id to turn its rule off.
@@ -38,29 +35,36 @@ impl Default for GuardConfig {
         }
     }
 }
-impl DomainConfig for GuardConfig {
-    fn validate(&self) -> Vec<SectionError> {
-        let unknown = self
-            .deny
-            .iter()
-            .any(|id| !RULES.iter().any(|(rule, _)| rule == id));
-        if unknown {
-            vec![SectionError {
-                field: "deny".into(),
-                code: "unknown-rule",
-            }]
-        } else {
-            Vec::new()
-        }
+impl DomainConfig for GuardConfig {}
+
+fn removed_rule_advisories(table: &toml_edit::Table) -> Vec<SectionError> {
+    let unknown = table
+        .get("deny")
+        .and_then(|value| value.as_array())
+        .is_some_and(|ids| {
+            ids.iter()
+                .filter_map(|id| id.as_str())
+                .any(|id| !RULES.iter().any(|(rule, _)| *rule == id))
+        });
+    if unknown {
+        vec![SectionError {
+            field: "deny".into(),
+            code: "unknown-rule",
+        }]
+    } else {
+        Vec::new()
     }
 }
 pub const FIELD_METADATA: &[FieldMetadata] = &[FieldMetadata {
-    values: &["force-push", "rm-root", "rm-state"],
+    values: &["force-push", "rm-state"],
     ..FieldMetadata::new("deny", "string_list")
 }];
-pub const SECTION: DomainSection = DomainSection::new::<GuardConfig>("guard", |_| DEFAULT_DENY)
-    .with_boundary_checks()
-    .with_fields(FIELD_METADATA);
+pub const SECTION: DomainSection = DomainSection {
+    advisories: removed_rule_advisories,
+    ..DomainSection::new::<GuardConfig>("guard", |_| DEFAULT_DENY)
+        .with_boundary_check(|error| error.code != "unknown-rule")
+        .with_fields(FIELD_METADATA)
+};
 
 /// Where a command runs and the directories it must not remove. A rule whose
 /// directory is unknown allows.
@@ -91,12 +95,7 @@ fn breaks(rule: &str, argv: &[String], ctx: &Context) -> bool {
             let git = Git::parse(args);
             git.sub == "push" && forces_default_branch(&git, ctx.cwd)
         }
-        ("rm-root", "rm") => {
-            let repo = Repo::at(ctx.cwd).map(|repo| repo.root);
-            let protected: Vec<&Path> = ctx.home.into_iter().chain(repo.as_deref()).collect();
-            removes_any(args, ctx, &protected)
-        }
-        ("rm-state", "rm") => removes_any(args, ctx, ctx.state.as_slice()),
+        ("rm-state", "rm") => removes_state(args, ctx),
         _ => false,
     }
 }
@@ -143,17 +142,18 @@ fn forces_default_branch(git: &Git, cwd: &Path) -> bool {
     })
 }
 
-/// Whether `rm` removes recursively a path that is, or contains, a protected one.
-fn removes_any(args: &[String], ctx: &Context, protected: &[&Path]) -> bool {
+/// Whether `rm` removes recursively a path that is, or contains, the state directory.
+fn removes_state(args: &[String], ctx: &Context) -> bool {
     let scan = Scan::parse(args, "", &[]);
     if !(scan.short.contains(&'r') || scan.short.contains(&'R') || scan.long("recursive")) {
         return false;
     }
-    let protected: Vec<PathBuf> = protected.iter().map(|path| normal(path)).collect();
-    scan.positional.iter().any(|target| {
-        let target = resolve(target, ctx);
-        protected.iter().any(|path| path.starts_with(&target))
-    })
+    let Some(state) = ctx.state.map(normal) else {
+        return false;
+    };
+    scan.positional
+        .iter()
+        .any(|target| state.starts_with(resolve(target, ctx)))
 }
 /// The absolute, normalised path a `rm` operand names; `~` and `$HOME` are the
 /// home directory.
@@ -183,10 +183,8 @@ fn normal(path: &Path) -> PathBuf {
     std::fs::canonicalize(&out).unwrap_or(out)
 }
 
-/// The checkout holding a directory: its root, and the Git directories that
-/// name its branch and its default branch.
+/// The Git directories that name a checkout's branch and its default branch.
 struct Repo {
-    root: PathBuf,
     git_dir: Option<PathBuf>,
     common_dir: Option<PathBuf>,
 }
@@ -194,11 +192,10 @@ impl Repo {
     /// No repository, or any read failure, answers `None`.
     fn at(dir: &Path) -> Option<Self> {
         let dir = std::fs::canonicalize(dir).ok()?;
-        let (root, marker) = dir.ancestors().find_map(|root| {
-            provenant_os::git::repository_marker(root).map(|marker| (root, marker))
-        })?;
+        let marker = dir
+            .ancestors()
+            .find_map(provenant_os::git::repository_marker)?;
         Some(Self {
-            root: root.to_owned(),
             git_dir: marker.git_dir,
             common_dir: marker.common_dir,
         })
@@ -402,6 +399,7 @@ mod tests {
             "$CMD run",
             "echo kill 1 | sh",
             "rm -rf build",
+            "rm -rf .",
             "rm -rf ~/scratch /tmp/x",
             "rm -rf home/state/runs/one",
             "rm -f ~",
@@ -498,64 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn malformed_git_marker_still_protects_repository_root() {
-        let (_dir, root) = tree();
-        let lane = root.join("home/lane");
-        std::fs::create_dir(&lane).unwrap();
-        std::fs::write(lane.join(".git"), b"invalid marker\n").unwrap();
-        assert!(denies_in(
-            "rm -rf .",
-            &root,
-            "home/lane",
-            &GuardConfig::default()
-        ));
-    }
-
-    #[test]
-    fn recursive_removal_of_home_or_the_repository_root_is_refused() {
-        let (_dir, root) = tree();
-        let home = root.join("home");
-        let project = home.join("project");
-        for denied in [
-            "rm -rf ~".to_owned(),
-            "rm -rf ~/".to_owned(),
-            "rm -rf $HOME".to_owned(),
-            "rm -rf \"$HOME\"".to_owned(),
-            "rm -rf ${HOME}/".to_owned(),
-            "rm -Rf ~".to_owned(),
-            "rm -r -f ~".to_owned(),
-            "rm --recursive --force ~".to_owned(),
-            "rm -rf -- ~".to_owned(),
-            "rm -rf /".to_owned(),
-            "rm -rf .".to_owned(),
-            "rm -rf ..".to_owned(),
-            "rm -rf ../project".to_owned(),
-            "rm -rf ./".to_owned(),
-            "rm -rf x ~".to_owned(),
-            "sudo rm -rf ~".to_owned(),
-            "bash -c 'rm -rf ~'".to_owned(),
-            format!("rm -rf {}", home.display()),
-            format!("rm -rf {}", project.display()),
-            format!("rm -rf {}/..", project.display()),
-            format!("rm -rf {}", root.display()),
-        ] {
-            assert!(denies(&denied, &root), "{denied}");
-        }
-        // From a subdirectory the repository root is still the nearest `.git`.
-        std::fs::create_dir(project.join("src")).unwrap();
-        let config = GuardConfig::default();
-        assert!(denies_in("rm -rf ..", &root, "home/project/src", &config));
-        assert!(!denies_in("rm -rf .", &root, "home/project/src", &config));
-        assert!(!denies_in("rm -rf src", &root, "home/project", &config));
-        assert!(!denies_in(
-            "rm -rf ../other",
-            &root,
-            "home/project",
-            &config
-        ));
-    }
-
-    #[test]
     fn deleting_provenant_state_is_refused() {
         let (_dir, root) = tree();
         let state = root.join("home/state");
@@ -565,11 +505,8 @@ mod tests {
             "rm -rf ../state".to_owned(),
             "rm -rf $HOME/state/".to_owned(),
         ] {
-            let only_state = GuardConfig {
-                deny: vec!["rm-state".into()],
-            };
             assert!(
-                denies_in(&denied, &root, "home/project", &only_state),
+                denies_in(&denied, &root, "home/project", &GuardConfig::default()),
                 "{denied}"
             );
         }
@@ -585,24 +522,84 @@ mod tests {
     }
 
     #[test]
-    fn config_turns_rules_off_and_rejects_unknown_ids() {
+    fn config_turns_rules_off_and_accepts_removed_ids() {
         let (_dir, root) = tree();
-        let only_rm = GuardConfig {
-            deny: vec!["rm-root".into()],
+        let only_state = GuardConfig {
+            deny: vec!["rm-state".into()],
         };
-        assert!(denies_in("rm -rf ~", &root, ".", &only_rm));
-        assert!(!denies_in("git push -f origin main", &root, ".", &only_rm));
+        assert!(denies_in(
+            "rm -rf ../state",
+            &root,
+            "home/project",
+            &only_state
+        ));
         assert!(!denies_in(
-            "rm -rf ~",
+            "git push -f origin main",
             &root,
             ".",
+            &only_state
+        ));
+        assert!(!denies_in(
+            "rm -rf ../state",
+            &root,
+            "home/project",
             &GuardConfig { deny: vec![] }
         ));
         let bad = GuardConfig {
-            deny: vec!["stash".into()],
+            deny: vec!["rm-root".into()],
         };
-        assert_eq!(bad.validate().len(), 1);
+        assert!(bad.validate().is_empty());
         assert!(GuardConfig::default().validate().is_empty());
+    }
+
+    #[test]
+    fn removed_rule_ids_warn_and_leave_active_rules_enabled() {
+        let document: toml_edit::DocumentMut = "deny = ['rm-root', 'force-push', 'rm-state']"
+            .parse()
+            .unwrap();
+        assert!((SECTION.validate)(document.as_table()).is_empty());
+        let warnings = (SECTION.advisories)(document.as_table());
+        assert_eq!(warnings[0].field, "deny");
+        assert_eq!(warnings[0].code, "unknown-rule");
+        let config: GuardConfig = toml_edit::de::from_document(document).unwrap();
+        let ctx = Context {
+            cwd: Path::new("/"),
+            home: None,
+            state: None,
+        };
+        assert!(violation("git push -f origin main", &ctx, &config).is_some());
+        let current: toml_edit::DocumentMut = DEFAULT_DENY.parse().unwrap();
+        assert!((SECTION.advisories)(current.as_table()).is_empty());
+    }
+
+    #[test]
+    fn config_load_warns_for_removed_guard_rule() -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Deserialize, Serialize)]
+        struct Domains {
+            guard: GuardConfig,
+        }
+        let temp = tempfile::tempdir()?;
+        let mut input =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("repo"));
+        input.state_dir = Some(temp.path().to_owned());
+        let roots = input.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "schema_version=1\n[domains.guard]\ndeny=['rm-root','force-push','rm-state']\n",
+        )?;
+        let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
+        let loaded = provenant_config::read_with_domains(&roots, &sections)?;
+        assert_eq!(
+            loaded.domains.guard.deny,
+            ["rm-root", "force-push", "rm-state"]
+        );
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|warning| warning.rule == "domain" && warning.message.contains("unknown-rule"))
+        );
+        Ok(())
     }
 
     #[test]

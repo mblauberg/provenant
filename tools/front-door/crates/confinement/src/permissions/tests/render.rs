@@ -14,6 +14,58 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
+fn profile_path_representability_matches_encoder() {
+    use std::os::unix::ffi::OsStringExt;
+    let unrepresentable =
+        PathBuf::from(std::ffi::OsString::from_vec(b"/fixture/name-\xff".to_vec()));
+    for path in [
+        Path::new("/fixture/normal"),
+        Path::new("/fixture/with\nline"),
+        Path::new("/fixture/with\t tab"),
+    ] {
+        assert!(profile_path_representable(path));
+        assert!(sbpl_path(path).is_ok());
+    }
+    for path in [
+        Path::new("/fixture/control-\u{1}"),
+        unrepresentable.as_path(),
+    ] {
+        assert!(!profile_path_representable(path));
+        assert!(sbpl_path(path).is_err());
+    }
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn expanded_authentication_family_grants_only_selected_credentials() -> Result<(), PermissionError>
+{
+    let (plan, mut profile) = write_grants_fixture();
+    profile.spec.process_executables.push(PathGrant {
+        path: "/fixture/provider".into(),
+        scope: PathScope::Exact,
+    });
+    for index in 0..20 {
+        profile.spec.authentication.push(AuthenticationProfile {
+            mechanism: format!("extra-{index}"),
+            roots: vec![PathGrant {
+                path: format!("/fixture/credential-{index}").into(),
+                scope: PathScope::Exact,
+            }],
+            in_place_writes: vec![],
+        });
+    }
+    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
+    for auth in &profile.spec.authentication {
+        for root in &auth.roots {
+            assert_eq!(grants.reads.contains(root), auth.mechanism == "selected");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
 fn profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_size()
 -> Result<(), Box<dyn std::error::Error>> {
     let (plan, profile) = write_grants_fixture();
@@ -609,4 +661,79 @@ fn network_endpoints_accept_only_sbpl_hosts_and_checked_ports() {
             .is_err()
         );
     }
+}
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn invalid_provider_endpoints_warn_and_preserve_open_network() -> Result<(), PermissionError> {
+    let (mut plan, mut profile) = write_grants_fixture();
+    plan.network = NetworkAccess::Open;
+    profile.spec.process_executables.push(PathGrant {
+        path: "/fixture/provider".into(),
+        scope: PathScope::Exact,
+    });
+    profile.spec.provider_api = vec![
+        NetworkEndpoint {
+            address: "localhost".into(),
+            port: 443,
+        },
+        NetworkEndpoint {
+            address: "invalid\") (allow file-read* (subpath \"/".into(),
+            port: 443,
+        },
+        NetworkEndpoint {
+            address: "*".into(),
+            port: 0,
+        },
+    ];
+    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
+    let source = render(&grants)?;
+    assert!(source.contains("(allow network-outbound (remote tcp \"localhost:443\"))"));
+    assert!(source.contains("(allow network-outbound (remote ip \"*:*\"))"));
+    assert!(!source.contains("invalid"));
+    assert!(!source.contains("remote tcp \"*:0\""));
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn invalid_discovery_reads_are_omitted_before_anchoring_and_rendering()
+-> Result<(), PermissionError> {
+    use std::os::unix::ffi::OsStringExt;
+    let (plan, mut profile) = write_grants_fixture();
+    profile.spec.process_executables.push(PathGrant {
+        path: "/fixture/provider".into(),
+        scope: PathScope::Exact,
+    });
+    let invalid_native = PathBuf::from(std::ffi::OsString::from_vec(
+        b"/fixture/invalid-\xff/.agents".to_vec(),
+    ));
+    profile.spec.discovery_reads = vec![
+        PathGrant {
+            path: "/fixture/repo/.agents".into(),
+            scope: PathScope::Exact,
+        },
+        PathGrant {
+            path: "/fixture/home/.config/gh/hosts.yml".into(),
+            scope: PathScope::Exact,
+        },
+        PathGrant {
+            path: invalid_native.clone(),
+            scope: PathScope::Exact,
+        },
+        PathGrant {
+            path: "/fixture/unsafe/.codex".into(),
+            scope: PathScope::Subtree,
+        },
+    ];
+    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    let anchors = required_anchors(&plan, &profile, None);
+    assert!(!anchors.contains(Path::new("/fixture/home/.config/gh")));
+    assert!(!anchors.contains(invalid_native.parent().expect("fixture parent")));
+    let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
+    let source = render(&grants)?;
+    assert!(source.contains("(allow file-read* (literal \"/fixture/repo/.agents\"))"));
+    assert!(!source.contains("hosts.yml"));
+    assert!(!source.contains("/fixture/unsafe/.codex"));
+    Ok(())
 }

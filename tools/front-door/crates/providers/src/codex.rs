@@ -1,5 +1,5 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_root, subtree,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_grant, subtree,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::CodexPolicy;
@@ -135,17 +135,18 @@ fn prepare(
     // and `zsh`), and its shell tool runs system programs. System directories
     // are readable through the runtime baseline; exec roots add exec, not
     // reads. No shared install prefix: its var/ stays unreadable.
-    let package = package_root(input.executable)?;
+    let mut package_omissions = Vec::new();
+    let package = package_grant(input.executable, &mut package_omissions);
     let tool_exec_roots = vec![
         subtree("/bin"),
         subtree("/usr/bin"),
         subtree("/usr/libexec"),
-        subtree(package),
+        package.clone(),
     ];
-    let mut runtime_reads = vec![subtree(package)];
+    let mut runtime_reads = vec![package.clone()];
     let tool_writes = Vec::new();
     let staged_skills = input.stage_user_skills();
-    let omitted_discovery = Vec::new();
+    let omitted_discovery = package_omissions;
     let mut setup = vec![SetupStep::Symlink {
         link: codex_home.join("auth.json"),
         target: credential.clone(),
@@ -158,8 +159,8 @@ fn prepare(
             target: skills.clone(),
         });
     }
-    let path = format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display());
-    let mut env = base_env(input, &plan.scratch.path, &path);
+    let path = crate::launch::tool_search_path(input.home, true);
+    let mut env = base_env(input, &plan.scratch.path, path);
     input
         .provenant
         .environment(&plan.scratch.path, &mut env, &mut setup, false)?;
@@ -264,6 +265,21 @@ struct Usage {
     cache_write_input_tokens: Option<u64>,
     output_tokens: u64,
 }
+/// The provider's own refusal of the requested model, in its words.
+fn model_refusal(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("model")
+        && [
+            "not supported",
+            "unsupported model",
+            "does not exist",
+            "not found",
+            "unknown model",
+            "no access",
+        ]
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+}
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
         Event::Thread { thread_id } => vec![E::Session(thread_id)],
@@ -291,6 +307,8 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             let lower = message.to_ascii_lowercase();
             vec![if lower.contains("reconnecting") {
                 E::TransientError
+            } else if model_refusal(&message) {
+                E::ModelUnavailable { message }
             } else if lower.contains("too many requests") || lower.contains("status: 429") {
                 E::RateLimited { message }
             } else {
@@ -299,12 +317,22 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         }
         Event::Failed { error } => {
             let typed = error.as_ref().and_then(|error| {
+                let refused = error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|message| model_refusal(message))
+                    .map(|message| E::ModelUnavailable {
+                        message: message.to_owned(),
+                    });
                 let message = || {
                     error
                         .get("message")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned)
                 };
+                if refused.is_some() {
+                    return refused;
+                }
                 match error.get("codex_error_info")?.as_str()? {
                     // Without the capacity message the failure stays generic.
                     "server_overloaded" => message().map(|message| E::ModelOverloaded { message }),
@@ -350,5 +378,28 @@ mod live_usage_tests {
             assert_eq!(LiveUsage.decode(other).unwrap(), FrameEvent::Progress);
         }
         assert!(LiveUsage.reports_usage());
+    }
+}
+
+#[cfg(test)]
+mod model_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn a_provider_model_refusal_is_a_typed_cause() {
+        let message = "The 'gpt-9' model is not supported when using Codex with a ChatGPT account.";
+        for line in [
+            serde_json::json!({"type": "error", "message": message}),
+            serde_json::json!({"type": "turn.failed", "error": {"message": message}}),
+        ] {
+            let events = decode(line.to_string().as_bytes()).expect("decoded");
+            assert!(
+                matches!(events.as_slice(), [E::ModelUnavailable { message: m }] if m == message),
+                "{events:?}"
+            );
+        }
+        let other = serde_json::json!({"type": "error", "message": "stream disconnected"});
+        let events = decode(other.to_string().as_bytes()).expect("decoded");
+        assert!(matches!(events.as_slice(), [E::Error]));
     }
 }
