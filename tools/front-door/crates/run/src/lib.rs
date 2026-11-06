@@ -648,7 +648,9 @@ impl RunError {
                         .detail(format!("detached HEAD at {head}"))
                         .next("create a branch or remove --worktree and pass --mode read-only");
                 }
-                if matches!(error, WorktreeError::Dirty(_)) {
+                // An empty path list means the tree was not found edited, only
+                // refused for another reason, so claim nothing about edits.
+                if matches!(error, WorktreeError::Dirty(paths) if !paths.is_empty()) {
                     diagnostic = diagnostic.detail("the writer worktree has uncommitted edits");
                 }
             }
@@ -910,6 +912,20 @@ mod diagnostic_projection_tests {
                     .contains("TOKEN_SENTINEL")
             );
         }
+    }
+
+    #[test]
+    fn writer_refusal_without_named_edits_does_not_claim_edits() {
+        use provenant_confinement::worktrees::WorktreeError;
+        let error = RunError::Writer(WorktreeError::Dirty(String::new()));
+        let diagnostic = error.diagnostic(Destination::Local);
+        assert!(
+            !diagnostic
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("uncommitted")
+        );
     }
 
     #[test]

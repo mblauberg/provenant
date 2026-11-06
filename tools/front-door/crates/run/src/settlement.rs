@@ -176,13 +176,29 @@ fn identity_stalled_with(
     >,
 ) -> bool {
     let matches = || matches!(observe(identity.pid), ProcessObservation::Present(fact) if fact.identity == *identity && !fact.zombie);
-    matches()
-        && matches!(
-            probe(identity.pid),
-            Ok(provenant_os::pid::ProcessState::Uninterruptible)
-        )
-        && matches()
+    // A healthy process passes through uninterruptible sleep during ordinary
+    // disk and network waits. Only a state that persists across the samples,
+    // with the same identity throughout, is a stall.
+    for sample in 0..STALL_SAMPLES {
+        if sample > 0 {
+            std::thread::sleep(STALL_INTERVAL);
+        }
+        if !(matches()
+            && matches!(
+                probe(identity.pid),
+                Ok(provenant_os::pid::ProcessState::Uninterruptible)
+            )
+            && matches())
+        {
+            return false;
+        }
+    }
+    true
 }
+
+/// Consecutive observations that must all find the process uninterruptible.
+const STALL_SAMPLES: u32 = 3;
+const STALL_INTERVAL: Duration = Duration::from_millis(150);
 
 pub(crate) fn host_stalled(attempt: &Directory, scope: Scope) -> bool {
     let observer = |pid| SystemProcessObserver.observe(pid);
@@ -603,6 +619,38 @@ mod tests {
     }
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn one_uninterruptible_observation_is_not_a_stall() {
+        use provenant_supervisor::census::ProcessFact;
+        let identity = ProcessIdentity {
+            boot: "fixture".into(),
+            pid: 42,
+            native_start: 1,
+            group_id: 42,
+            session_id: 42,
+        };
+        let fact = ProcessFact {
+            identity: identity.clone(),
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let observe = |_| ProcessObservation::Present(fact.clone());
+        let calls = std::cell::Cell::new(0);
+        let transient = |_| {
+            calls.set(calls.get() + 1);
+            Ok(if calls.get() == 1 {
+                provenant_os::pid::ProcessState::Uninterruptible
+            } else {
+                provenant_os::pid::ProcessState::Running
+            })
+        };
+        assert!(!identity_stalled_with(&identity, &observe, &transient));
+        let persistent = |_| Ok(provenant_os::pid::ProcessState::Uninterruptible);
+        assert!(identity_stalled_with(&identity, &observe, &persistent));
+    }
 
     #[test]
     fn stalled_probe_requires_matching_identity_before_and_after() {

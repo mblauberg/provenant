@@ -522,10 +522,11 @@ pub(crate) fn private_git_objects(
             .path
             .join("read-only-git");
         spec.setup.push(SetupStep::CreateDir(bin.clone()));
-        spec.setup.push(SetupStep::Symlink {
-            link: bin.join("git"),
-            target: git.to_owned(),
+        spec.setup.push(SetupStep::WriteExecutable {
+            path: bin.join("git"),
+            bytes: crate::lane::git_wrapper(git, &Default::default())?,
         });
+        grant_exec_path(git, spec);
         if let Some((_, path)) = spec.env.iter_mut().find(|(key, _)| key == "PATH") {
             match std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&*path))) {
                 Ok(value) => *path = value,
@@ -577,6 +578,7 @@ pub(crate) fn private_git_objects(
     // A single source generates every Git shim, including Claude's scrub shim.
     spec.git_wrapper.scrub = true;
     spec.write_git_wrapper(&scratch.join("bin"), input.provenant.git)?;
+    grant_exec_path(input.provenant.git, spec);
     spec.profile
         .spec
         .tool_exec_roots
@@ -586,6 +588,15 @@ pub(crate) fn private_git_objects(
         .process_executables
         .extend([exact("/bin/sh"), exact(input.provenant.git)]);
     Ok(())
+}
+
+/// Let the lane read and run the helpers (`git-remote-https`) in the exec path
+/// the launcher pins for the selected Git, wherever that host keeps them.
+fn grant_exec_path(git: &Path, spec: &mut LaunchSpec) {
+    if let Some(core) = crate::lane::host_exec_path(git) {
+        spec.profile.spec.runtime_reads.push(subtree(&core));
+        spec.profile.spec.tool_exec_roots.push(subtree(core));
+    }
 }
 
 /// Resolve all exact executable requirements in the profile once, then use
