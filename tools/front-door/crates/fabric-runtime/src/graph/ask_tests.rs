@@ -719,10 +719,58 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             assert_eq!(approved_owner.calls.len(), 1);
             assert_eq!(approved_owner.asked, ["scope.ask-1"]);
             assert!(approved_owner.owner_notifications.is_empty());
+            let library = template::TemplateLibrary::bundled();
+            let resolvers = std::collections::BTreeMap::new();
+            let limits = crate::config::GraphLimits::default();
+            let context = patch::PatchContext { library:&library, resolvers:&resolvers,
+                scan:&patch::scan_for_secrets, journal:None, limits:&limits };
+            patch::retry_node(&mut patch::LiveGraph { document:&document,
+                checkpoint:approved_journal.0.as_mut().unwrap() }, "scope", None, &context).unwrap();
+            let retried = advance(&document, &mut approved_owner, &mut approved_journal).unwrap();
+            assert_eq!(state(&retried, "scope"), NodeState::Running);
+            assert!(retried.checkpoint.asks.iter().any(|ask| ask.ask_id == "scope.ask-2.retry-1" && !ask.resolved));
+            assert_eq!(approved_owner.owner_notifications, ["scope.owner-notification.retry-1"]);
             owner.answers.insert("scope.ask-1".into(), reply(Some("hold"), None));
             let held = advance(&document, &mut owner, &mut journal).unwrap();
             assert_ne!(state(&held, "writer"), NodeState::Succeeded);
             assert_eq!(owner.calls.len(), 1);
         }
     }
+}
+
+
+#[test]
+fn principal_container_retry_does_not_reuse_owner_decision() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"principal-retry","nodes":[
+            {"id":"redesign","kind":"composite","access":"read_only","composite":{"exports":[],"nodes":[
+                {"id":"design","access":"read_only","prompt":"design","route":fixture_route()},
+                {"id":"scope","kind":"decide","access":"read_only","depends_on":["design"],
+                 "repair_scope_gate":true,"decide":{"question":"Approve the changed slice?",
+                    "options":[{"id":"approve","label":"Approve"},{"id":"hold","label":"Hold"}]}}
+            ]}}
+        ]
+    })).unwrap();
+    let report = "First principal slice\n```findings\n{\"schema_version\":1,\"findings\":[],\"repair_design\":{\"within_scope\":false,\"one_way_door\":true}}\n```";
+    let mut owner = FakeOwner { actor:"chair".into(),
+        observations:[terminal_with_result(AttemptOutcome::Succeeded, report)].into(),
+        answers:std::collections::BTreeMap::from([("redesign--scope.ask-1".into(), reply(Some("approve"), None))]),
+        ..Default::default() };
+    let mut journal = MemoryJournal::default();
+    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Complete);
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = std::collections::BTreeMap::new();
+    let limits = crate::config::GraphLimits::default();
+    let context = patch::PatchContext { library:&library, resolvers:&resolvers,
+        scan:&patch::scan_for_secrets, journal:None, limits:&limits };
+    patch::retry_node(&mut patch::LiveGraph { document:&document,
+        checkpoint:journal.0.as_mut().unwrap() }, "redesign", None, &context).unwrap();
+    owner.observations.push_back(terminal_with_result(AttemptOutcome::Succeeded,
+        &report.replace("First principal slice", "Revised principal slice")));
+    let retried = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(retried.status, GraphStatus::Pending);
+    assert_eq!(state(&retried, "redesign--scope"), NodeState::Running);
+    assert_eq!(retried.checkpoint.asks[0].ask_id, "redesign--scope.ask-1.retry-1");
+    assert!(retried.checkpoint.asks[0].body.contains("Revised principal slice"));
+    assert_eq!(owner.owner_notifications, ["redesign--scope.owner-notification", "redesign--scope.owner-notification.retry-1"]);
 }

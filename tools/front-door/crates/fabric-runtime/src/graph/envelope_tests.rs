@@ -467,7 +467,12 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
         }
         if let Some(outputs) = &mut node.outputs {
             outputs.extra.insert("risk_tier".into(), tier.into());
-            outputs.extra.insert("repair_design".into(), json!({"within_scope":false,"one_way_door":false}));
+            if plan.nodes.iter().any(|consumer| {
+                consumer.extra.get("repair_scope_gate") == Some(&json!(true))
+                    && consumer.depends_on.contains(&planned.id)
+            }) {
+                outputs.extra.insert("repair_design".into(), json!({"within_scope":false,"one_way_door":false}));
+            }
         }
     }
     let execution = GraphExecution {

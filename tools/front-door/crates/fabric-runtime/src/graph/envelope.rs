@@ -351,10 +351,15 @@ fn node_bound(
         outputs
             .extra
             .insert("risk_tier".into(), "substantial".into());
+        if plan.nodes.iter().any(|consumer| {
+            consumer.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true))
+                && consumer.depends_on.contains(&node.id)
+        }) {
         outputs.extra.insert(
             "repair_design".into(),
             serde_json::json!({"within_scope":false,"one_way_door":false}),
         );
+        }
     }
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
@@ -406,7 +411,7 @@ fn node_bound(
             if repair_scope {
                 // The scope decision includes a principal report; `bounded`
                 // limits the whole dynamic body in canonical bytes.
-                provenant_records::inbox::REQUEST_BODY_BYTES
+                provenant_records::inbox::REQUEST_BODY_BYTES + 27 // .retry- plus a u64 generation
             } else {
                 MAX_ADVANCE_ERROR_BYTES
             },
