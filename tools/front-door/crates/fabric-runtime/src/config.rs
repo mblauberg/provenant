@@ -27,9 +27,6 @@ pub struct FabricConfig {
     /// The planner front-end: whether `provenant run --preset` runs a planner.
     #[serde(default)]
     pub plan: PlanConfig,
-    /// The front door reads and validates pipeline experiments. The runtime only accepts the key.
-    #[serde(default, skip_serializing)]
-    pub pipelines: provenant_config::experiment::PipelineExperiments,
 }
 
 /// Whether a preset run puts a principal planner in front of its graph.
@@ -1100,7 +1097,6 @@ mod tests {
             client_label: "agent".into(),
             commands: BTreeMap::new(),
             host_native: BTreeMap::new(),
-            pipelines: Default::default(),
             home_hosts: BTreeMap::new(),
             peers: BTreeMap::from([(
                 "worker".into(),
@@ -1375,6 +1371,25 @@ mod tests {
         inputs.state_dir = Some("/fixture/state".into());
         let roots = inputs.resolve(&Resolver).unwrap();
         let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
+        for stale in [
+            "[domains.fabric.pipelines.experiment.trial]\ncontrol='private-sentinel'",
+            "[domains.fabric.pipelines.experiment]",
+            "[domains.fabric.pipelines]\ntypo=true",
+            "[domains.fabric]\npipelines={experiment={trial={control='private-sentinel'}}}",
+        ] {
+            let text = format!("schema_version=1\n{stale}\n");
+            let loaded = provenant_config::load_with_domains(
+                &roots,
+                Some(text.as_bytes()),
+                &sections,
+            )
+            .unwrap();
+            assert!(loaded.warnings.iter().any(|warning| {
+                warning.rule == "unknown_key"
+                    && warning.message.starts_with("domains.fabric.pipelines:")
+            }));
+            assert!(!format!("{:?}", loaded.warnings).contains("private-sentinel"));
+        }
         let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.ci_poll_backoff]\ninitial_seconds = 60\nmax_seconds = 300\n[domains.fabric.graph.ci_poll_overrides.build]\ninitial_seconds = 120\nmax_seconds = 600\n";
         let retired = b"schema_version = 1\n[domains.fabric.graph.limit_ceiling]\nnodes = 1\n";
         let loaded =

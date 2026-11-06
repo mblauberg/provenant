@@ -1644,7 +1644,25 @@ fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Resu
     assert!(output.contains(&format!(
         "Pending graph {project}/old-pending-fixture: finish or cancel it with the previous release before upgrading"
     )), "{output}");
+    assert_eq!(fs::read(&path)?, checkpoint);
+    // An older updater may pass --yes to staged preflight. Starting the new
+    // executable must still refuse before a provider or graph can be launched.
+    let bypass = rig.command(&[
+        "install", "--source", rig.root.to_str().ok_or("fixture source")?,
+        "--upgrade-preflight", "--yes",
+    ])?;
+    assert_eq!(code(&bypass), 0, "{bypass:?}");
+    let launch = rig.command(&["run", "New work", "--json"])?;
+    let refusal: serde_json::Value = serde_json::from_slice(&launch.stdout.bytes)?;
+    assert_eq!(refusal["error"]["code"], "UPGRADE_DRAIN_REQUIRED");
+    assert!(refusal["error"]["message"].as_str().ok_or("refusal message")?.contains("previous release"));
     assert_eq!(fs::read(path)?, checkpoint);
+    let presets = rig.project.join(".provenant/presets");
+    fs::create_dir_all(&presets)?;
+    let preset = presets.join("local.toml");
+    fs::write(&preset, "synthetic preset")?;
+    let result = rig.command(&["install", "--source", rig.root.to_str().ok_or("fixture source")?, "--upgrade-preflight"])?;
+    assert!(String::from_utf8(result.stdout.bytes)?.contains(preset.to_str().ok_or("preset path")?));
     Ok(())
 }
 

@@ -14,8 +14,6 @@ mod console;
 mod disk;
 mod disk_guard;
 pub mod event_intake;
-#[cfg(test)]
-mod experiment;
 mod fabric;
 mod tick;
 mod tick_agent;
@@ -1424,6 +1422,22 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             .busy_timeout()
     }) {
         provenant_sqlite::set_busy_timeout(timeout);
+    }
+    let needs_cutover_guard = match &parsed {
+        ParseOutcome::Invocation(inv) => match &inv.command {
+            Command::Run(args) => !args.explain,
+            Command::Edit(_) | Command::Retry(_) | Command::Steer(_) | Command::Stop(_)
+                | Command::Lane(_) | Command::Reconcile(_) | Command::Native(_) | Command::Gc(_)
+                | Command::Tick | Command::Fabric(_) | Command::Hook(_) | Command::Internal(_) => true,
+            _ => false,
+        },
+        _ => false,
+    };
+    if needs_cutover_guard
+        && let Some(resolved) = &resolved
+        && let Err(error) = install::cutover_pending_guard(&resolved.roots.state)
+    {
+        return fail(&verb, Outcome::Refused, "UPGRADE_DRAIN_REQUIRED", &error, globals);
     }
     let read_only_graph = match &parsed {
         ParseOutcome::Invocation(inv) => {

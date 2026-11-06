@@ -377,16 +377,17 @@ lane cache.
 
 ## Writer dispatch
 
-Agents use `fabric_run` (`op: submit`); this is the terminal path for a shell
-without MCP.
+Agents use `fabric_run` (`op: run`) with the same graph document as the CLI.
+A shell can start a writer with a text brief:
 
 ```sh
-provenant run --operation-id OP --model ADAPTER/MODEL \
-  --prompt-file BRIEF --branch BRANCH --base main
+provenant run --file BRIEF --tier junior \
+  --branch BRANCH --base origin/main
 ```
 
-Fabric uses `access: "worktree_write"` and `worktree`. Both entry points accept
-an absolute path or one relative to the selected repository's primary root.
+For an existing writer worktree, use `--worktree PATH` or bind the corresponding
+access in the template. A worktree path may be absolute or relative to the
+selected repository's primary root.
 The worktree must appear in that project's Git inventory.
 The primary checkout and another project's worktree are refused. Run reserves
 the worktree before compiling its writer permissions, so another writer cannot

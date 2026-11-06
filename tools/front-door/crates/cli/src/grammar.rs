@@ -1119,7 +1119,7 @@ pub enum Experiments {
 }
 #[derive(Debug, Args)]
 pub struct ExperimentShow {
-    /// Experiment name from domains.fabric.pipelines.experiment
+    /// Historical experiment name recorded in offline outcomes
     pub id: String,
     #[command(flatten)]
     pub pipeline: PipelineOptions,

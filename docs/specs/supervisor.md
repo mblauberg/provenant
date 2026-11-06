@@ -126,11 +126,11 @@ The guardian stops the provider (SIGTERM, then SIGKILL after the cleanup
 grace) when either the monotonic clock or the wall clock has run the whole
 allowance since launch. The monotonic clock stands still while a host sleeps, so
 it alone would extend a deadline by the length of every sleep. Run records the
-absolute `runtime_deadline` when the attempt starts, `lanes` shows it for
+absolute `runtime_deadline` when the attempt starts, `status` shows it for
 running lanes, and `reconcile` asks a live guardian that is still running
 two minutes past it to stop at the deadline. The attempt settles as
 `timed_out` with the reason `runtime deadline exceeded: provider stopped after
-Ns`, custody is released, and `provenant resume` continues its session.
+Ns`, custody is released, and `provenant retry` continues its session.
 - Why: stuck attempts hold worktrees, locks and quota for hours.
 - Test: `crates/supervisor/src/machine.rs::a_host_sleep_cannot_extend_the_wall_deadline`;
   `crates/supervisor/tests/custody.rs::a_host_sleep_cannot_extend_the_wall_deadline`;

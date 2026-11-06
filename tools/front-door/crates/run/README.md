@@ -61,7 +61,7 @@ before returning a chunk. Requests above 64 KiB are refused. Prompt/result
 files are bounded at 1 MiB/4 MiB; JSON records and event pages at 1 MiB.
 A byte cut through a UTF-8 scalar is labelled `utf8-fragment`; invalid stderr
 is labelled `utf8-lossy`. Chunks report the total length so the edge can tail.
-`lanes` pages attempts by run, task or attempt target, or all nonterminal
+`status` pages attempts by run, task or attempt target, or all nonterminal
 attempts, at most 100 per page.
 All artefact references are relative to their run root and traverse verified,
 private directories without following links.
@@ -96,14 +96,14 @@ because the guardian's environment is cleared.
 
 ## Controls
 
-`cancel` withdraws queued work or asks the attempt's guardian to stop.
-`resume` accepts a continuation of one terminal attempt as a new run, once
+`stop` withdraws queued work or asks the attempt's guardian to stop.
+`retry` accepts a continuation of one terminal attempt as a new run, once
 per attempt, and `start` hands the prior attempt to `Providers::prepare` so
 the exact session is continued. `reconcile` commits durable exits, withdraws
 launches that provably never reached a guardian, and settles attempts proven
 to belong to a previous boot as `lost`. Reboot recovery releases the reservation
 after the terminal transaction and preserves all attempt artefacts and worktree
-contents. `cancel` also performs this recovery. Other custody stays held or
+contents. `stop` also performs this recovery. Other custody stays held or
 uncertain without being changed. `open_runs` lists runs with
 nonterminal work for a recovery scan.
 
@@ -116,8 +116,8 @@ hiding valid ones; the CLI includes those diagnostics and returns a non-success
 reconcile status.
 
 Tests use fake providers and resources at this boundary. The CLI composes the
-production provider registry and the `dispatch`, `lanes`, `output`, `cancel`,
-`resume`, `reconcile` and `telemetry stats` leaves.
+production provider registry and the graph front door (`run`, `status`,
+`output`, `stop` and `retry`), plus `reconcile` and `telemetry stats`.
 
 Start creates a private attempt-owned `tmp/` and passes it to provider
 preparation as `LaunchPaths::temporary`; every lane stages scratch files in

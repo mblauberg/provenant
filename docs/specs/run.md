@@ -13,10 +13,8 @@ stores chair associations, with execution facts owned by Run ([fabric](fabric.md
 itself. Grammar and bounds are in the generated [CLI
 reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
 
-`run` accepts the same effort and network controls as `dispatch`. An explicit
-model without an effort uses its configured route or pool default when those
-defaults agree; conflicting defaults leave the provider default in place.
-The receipt reports the applied effort and effective network access.
+Templates bind route and access controls before admission. The receipt reports
+the applied effort and effective network access.
 
 ## Cargo home seed
 
@@ -91,7 +89,7 @@ Run and dispatch accept an optional human-supplied title, including per-task
 titles in manifests and Fabric submissions. The title is sealed in the request
 and copied to each attempt; it participates in operation replay identity.
 Titles are nonempty, contain no control characters and are limited to 256 UTF-8
-bytes. `lanes` displays titles when present and includes them in JSON output;
+bytes. `status` displays titles when present and includes them in JSON output;
 absent titles remain absent in older records. Titles are never inferred from
 prompts.
 - Test: `crates/run/src/service_tests.rs::task_title_roundtrip`
@@ -429,7 +427,7 @@ below of a version 1 ledger that recorded a start, which holds each class for
 one spacing. If the clock or the boot identity cannot be read the claim is refused with a reason (`startup spacing cannot be
 judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
-`lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
+`status` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
 memory floor (5 %) warns for both classes; the live `gc.free_floor` disk floor
 can refuse any lane with write authority; lanes limited to provider bookkeeping
 and private scratch warn once below it and proceed.
@@ -448,16 +446,16 @@ they set the read-only knob too. Every entry point (CLI, Fabric and a peer)
 accepts a value above the task count; it cannot admit more lanes than the run
 has.
 
-`lanes` shows each queued or starting lane's `lane_class` and `waiting_for`,
+`status` shows each queued or starting lane's `lane_class` and `waiting_for`,
 and uses the latter as its reason: launch not yet handed to a guardian, run
 concurrency, the class's remaining configured startup spacing, or a measured host
 limit. A reached lane cap names its scope and active and limit counts. When no
-check is failing, the reason says `launch preparation: preparing the lane`. It reads the store and host ledger, from a nested lane too, and names only a wait it can see. `lanes --host` and the other peer
+check is failing, the reason says `launch preparation: preparing the lane`. It reads the store and host ledger, from a nested lane too, and names only a wait it can see. Peer status reads and the other peer
 listings show the same two fields: the peer derives them from its own store and
 ledger (peer action `lane_waits`) and an older peer that does not know the
 action simply shows none.
 While a running lane's identity-checked guardian checkpoint reports silence,
-`lanes` and `status` show `provider silent for <duration>; provider still
+`status` shows `provider silent for <duration>; provider still
 running` as its reason and `waiting_for`, unless a visible disk pause or build
 slot wait supplies a more specific reason. This observation clears when
 progress resumes and never changes the lane state. Wait commands return early
@@ -677,7 +675,7 @@ contents while excluding concurrent writes. Downgrade is unsupported; recovery
 requires the pre-migration copy or a forward repair.
 Peers sharing a state root must upgrade together: schema 7 and the version 2 attempt record are not readable by earlier builds.
 
-`cancel` durably records the request and signals the supervisor without waiting
+`stop` durably records the request and signals the supervisor without waiting
 for a writer lock. The settlement driver checks it between phases and polls it
 every 50 ms during import and optional automatic delivery,
 stopping the owned Git child when required.
@@ -742,7 +740,7 @@ record, including a refusal before launch, carries a `settlement_reason`
 lost). Lane rows expose that settlement classification as `cause`. When a
 specific typed terminal cause was recorded, `terminal_cause` identifies it and
 structured `reason` fields retain the full safe cause, remedy and note in every
-lane response. Only human `status` and `lanes` rows use short labels pointing to
+lane response. Only human `status` rows use short labels pointing to
 `provenant output ID`. Pre-launch causes distinguish an
 unsupported platform, an unknown pacing account, an unregistered selected
 account, a credential-helper failure at delivery Prepare, a configured command
@@ -765,8 +763,8 @@ what the graph reads: `tools/front-door/src/fabric.rs` maps any outcome other
 than `succeeded`, including `review_required`, to a failed graph node attempt.
 Delivery is gated on the outcome before the stop, so a lane that succeeded
 before stopping still delivers its partial work once its publication is
-durable. The reason carries a `partial finish (...)` note, and `lanes` shows
-`(partial)` beside the state, the signals, and a `provenant resume` hint. Every
+durable. The reason carries a `partial finish (...)` note, and `status` shows
+`(partial)` beside the state, the signals, and a `provenant retry` hint. Every
 launch prompt asks for the same final `handoff` block on every finish. Its JSON
 has `schema_version: 2`, `status` (`done`, `stopped_early`, `blocked`), `note`,
 `remaining[]`, `decisions[]` and `verify[]`. Unknown fields are retained. The
@@ -1349,7 +1347,7 @@ branch may race and produce a warning.
 
 ## Delivery modes and settled pickup
 
-`dispatch --deliver none|push|integrate:BRANCH|pr` resolves to the existing
+A template delivery setting resolves to the existing
 explicit writer destination contract. Omission keeps delivery off. Push and
 PR modes use `origin` and the lane branch; `integrate:BRANCH` selects an
 existing local branch, and `integrate:origin/BRANCH` selects an existing

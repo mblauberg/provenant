@@ -1323,7 +1323,6 @@ mod tests {
             graph: Default::default(),
             lanes: Default::default(),
             plan: Default::default(),
-            pipelines: Default::default(),
             limits: crate::config::Limits {
                 body_bytes: 65536,
                 input_frame_bytes: 1048576,

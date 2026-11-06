@@ -68,7 +68,7 @@ live cooldowns; if all candidates are cooling, the normal choice remains availab
 and the receipt explains the fallback. Explicit model dispatches and resumes ignore
 capacity cooldowns. Quota refusals remain separate and continue to apply. The host
 setting `domains.routing.capacity_cooldown_seconds` defaults to 600 seconds; zero disables new cooldowns.
-`quota` and `lanes` show live cooldowns and their remaining time.
+`quota` and `status` show live cooldowns and their remaining time.
 - Test: `crates/quota/src/schedule.rs::tests::reserve_adopts_a_renamed_label_for_the_same_account_key`;
   `crates/quota/src/schedule.rs::tests::report_shows_only_live_capacity_cooldowns`;
   `crates/cli/src/run.rs::tests::lanes_show_only_live_capacity_cooldowns`;
