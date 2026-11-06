@@ -343,6 +343,11 @@ pub trait AttemptOwner {
     fn node_ask(&mut self, _scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         Ok(None)
     }
+    /// Send a durable non-blocking owner notification, idempotent by ask ID.
+    /// False means the host has no notification transport yet.
+    fn notify_owner(&mut self, _scope: AskScope<'_>) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
     /// Withdraw a resolved ask's inbox request. Closing never creates one.
     fn close_node_ask(&mut self, _scope: AskScope<'_>) -> Result<(), Self::Error> {
         Ok(())
@@ -3096,6 +3101,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 commit,
                                 &upstream_findings,
                             );
+                            if !plan.nodes.iter().any(|consumer| {
+                                consumer.extra.get("repair_scope_gate")
+                                    == Some(&serde_json::Value::Bool(true))
+                                    && consumer.depends_on.contains(&node.id)
+                            }) {
+                                outputs.extra.remove("repair_design");
+                            }
                             if node.kind == Some(NodeKind::Synthesise)
                                 && node.dispositions.is_empty()
                             {

@@ -423,6 +423,50 @@ mod graph_ask_inbox_tests {
     };
 
     #[test]
+    fn graph_owner_notification_is_non_blocking_and_replays_one_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        let identity = Identity {
+            project: provenant_core::ProjectId::from_bytes([2; 16]), host,
+            inbox: provenant_fabric_runtime::identity::Address::new(host, "chair")?,
+            client: "test".into(), cwd: provenant_records::AbsolutePath::new(&base)?,
+            common_dir: provenant_records::AbsolutePath::new(&base)?, federation: None,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
+        let mut ask = loop_ask("fixture", "principal.owner-notification", 1, "chair-session");
+        ask.title = "Principal redesign".into();
+        ask.body = "Delivery continues within approved scope: smallest slice and acceptance evidence".into();
+        let actor = identity.inbox.actor.to_string();
+        let scope = AskScope { graph_id:"fixture", instance_id:"instance-one", actor:&actor, ask:&ask };
+        let mut receipts = Vec::new();
+        for _ in 0..2 {
+            let input = graph_notification_input(&scope)?;
+            input.validate()?;
+            let InboxResult::Saved { receipt } = service.execute(input, &cancel)? else {
+                return Err("missing notification receipt".into());
+            };
+            receipts.push(receipt.request_id);
+        }
+        assert_eq!(receipts[0], receipts[1]);
+        let InboxResult::Item { item, .. } = service.execute(InboxInput::List {
+            extra:Default::default(), id:Some(receipts[0]), session:None,
+            state:InboxFilter::All, limit:1, cursor:None,
+        }, &cancel)? else { return Err("missing notification".into()); };
+        assert!(!item.request.request.blocking);
+        assert_eq!(item.request.request.kind, provenant_records::inbox::RequestKind::Question);
+        assert!(item.request.request.options.is_empty());
+        assert_eq!(item.request.request.body, ask.body);
+        Ok(())
+    }
+
+    #[test]
     fn graph_ask_inbox_replays_requests_and_acknowledged_answers()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
