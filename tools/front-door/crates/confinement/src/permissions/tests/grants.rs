@@ -212,8 +212,10 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
         )?)?;
         assert!(opted_in.contains("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n"));
         assert!(!rendered.contains("SYS_shmget") && !rendered.contains("SYS_msgget"));
-        let exec = format!("(allow process-exec (subpath \"{scratch}\"))");
-        assert_eq!(rendered.lines().any(|line| line == exec), writer);
+        assert_eq!(
+            rendered.lines().any(|line| line == "(allow process-exec)"),
+            writer
+        );
         assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));
         for outside in [
             "/fixture/runs",
@@ -293,6 +295,14 @@ fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::err
         for baseline in baseline_writes {
             assert!(rendered.lines().any(|line| line == baseline), "{baseline}");
         }
+        let pty_rules: Vec<_> = super::super::render::PSEUDO_TTY_RULES
+            .lines()
+            .filter(|line| line.contains("file-write*"))
+            .collect();
+        let allow_pty = writer || profile.spec.allow_pseudo_tty;
+        for rule in &pty_rules {
+            assert_eq!(rendered.lines().any(|line| line == *rule), allow_pty);
+        }
         let grants = write_grants(&plan, &profile);
         let mut checked = 0;
         for line in rendered.lines().filter(|line| {
@@ -300,6 +310,9 @@ fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::err
                 && (line.contains("file-write*") || line.contains("file-write-data"))
         }) {
             if baseline_writes.contains(&line) {
+                continue;
+            }
+            if allow_pty && pty_rules.contains(&line) {
                 continue;
             }
             let (scope, tail) = if let Some((_, tail)) = line.split_once("(subpath \"") {
