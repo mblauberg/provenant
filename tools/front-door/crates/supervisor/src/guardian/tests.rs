@@ -26,6 +26,49 @@ fn event_burst_has_bounded_walks_and_failures_request_full_scan() {
     assert!(super::census_full_due(u64::MAX, Some(100), false));
 }
 
+/// Counts census turns over one simulated idle minute at the guardian's
+/// 100 ms wake rate. Without process events only the full backstop runs.
+#[test]
+fn idle_lane_walks_only_at_the_full_backstop() {
+    let mut last_walk = None;
+    let mut last_full = None;
+    let mut walks = Vec::new();
+    for now in (0..60_000).step_by(100) {
+        if super::census_turn_due(now, last_walk, last_full, false) {
+            last_walk = Some(now);
+            if super::census_full_due(now, last_full, false) {
+                last_full = Some(now);
+            }
+            walks.push(now);
+        }
+    }
+    assert_eq!(
+        walks.len() as u64,
+        60_000 / super::FULL_CENSUS_INTERVAL_MS,
+        "{walks:?}"
+    );
+    assert!(
+        walks
+            .windows(2)
+            .all(|pair| pair[1] - pair[0] >= super::FULL_CENSUS_INTERVAL_MS)
+    );
+    // An event, failed watch or failed census still walks at the 100 ms rate.
+    assert!(super::census_turn_due(1_100, Some(1_000), Some(0), true));
+    assert!(!super::census_turn_due(1_050, Some(1_000), Some(0), true));
+    assert!(!super::census_turn_due(1_100, Some(1_000), Some(0), false));
+    assert!(super::census_turn_due(0, None, None, false));
+    // Progress evidence is published once a second; so is the CPU sample.
+    const { assert!(super::CPU_SAMPLE_INTERVAL_MS == 1_000) };
+}
+
+#[test]
+fn journal_retry_is_prompt_and_does_not_require_a_census() {
+    assert!(!super::journal_retry_due(99, 0, true));
+    assert!(super::journal_retry_due(100, 0, true));
+    assert!(!super::journal_retry_due(100, 0, false));
+    assert!(!super::census_turn_due(100, Some(0), Some(0), false));
+}
+
 #[cfg(all(feature = "fixture", target_os = "macos"))]
 #[test]
 #[allow(clippy::disallowed_methods)]
