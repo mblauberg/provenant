@@ -11713,4 +11713,6 @@ fn admission_rejects_review_without_space_for_expanded_ids() {
     );
 }
 
-mod retry_tests { include!("retry_tests.rs"); }
+mod retry_tests {
+    include!("retry_tests.rs");
+}

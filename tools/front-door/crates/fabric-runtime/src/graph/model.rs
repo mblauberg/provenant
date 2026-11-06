@@ -949,6 +949,9 @@ pub struct NodeProgress {
     pub last_launch_retry: Option<LaunchRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
+    /// Immutable evidence from earlier node redos, included in budget accounting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_attempts: Vec<GraphAttempt>,
     /// One durable row per route actually tried, in route order.
     pub attempts: Vec<GraphAttempt>,
 }
@@ -1185,6 +1188,11 @@ impl GraphCheckpoint {
 }
 
 impl NodeProgress {
+    /// All attempt evidence in launch order, including previous redos.
+    pub fn recorded_attempts(&self) -> impl Iterator<Item = &GraphAttempt> {
+        self.previous_attempts.iter().chain(&self.attempts)
+    }
+
     /// Attempt-less evidence for final graph delivery.
     pub fn deterministic_summary(&self) -> Option<String> {
         if let Some(reason) = self

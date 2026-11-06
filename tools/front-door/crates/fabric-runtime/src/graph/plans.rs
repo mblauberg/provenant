@@ -1521,8 +1521,16 @@ fn fragment(
         journal: None,
         limits,
     };
-    match super::patch::prepare(source, document, checkpoint, Some(node), &patch, &context)
-        .map_err(|error| error.message)?
+    match super::patch::prepare(
+        source,
+        document,
+        checkpoint,
+        Some(node),
+        &patch,
+        &context,
+        None,
+    )
+    .map_err(|error| error.message)?
     {
         super::patch::Prepared::Ready(admission) => {
             let mut expansion = admission.expansion;
@@ -2013,7 +2021,17 @@ pub(super) fn settle(
     PlannedGraph,
     std::collections::BTreeMap<String, usize>,
 )> {
-    if checkpoint.expansions.iter().any(|e| e.source == node.id) {
+    let generation = checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == node.id)
+        .and_then(|n| n.extra.get("retry_generation"))
+        .cloned();
+    if checkpoint
+        .expansions
+        .iter()
+        .any(|e| e.source == node.id && e.extra.get("retry_generation") == generation.as_ref())
+    {
         return None;
     }
     if node
@@ -2032,7 +2050,13 @@ pub(super) fn settle(
             .position(|progress| progress.id == node.id)?;
         let reason = fallback_reason(&checkpoint.nodes[index]);
         let built = (|| {
-            let addition = fallback_expansion(&node.id, spec, source, node.require_skill_location)?;
+            let mut addition =
+                fallback_expansion(&node.id, spec, source, node.require_skill_location)?;
+            if let Some(generation) = &generation {
+                addition
+                    .extra
+                    .insert("retry_generation".into(), generation.clone());
+            }
             let mut preview = document.clone();
             append(&mut preview, &addition);
             let (plan, positions) =
@@ -2119,7 +2143,12 @@ pub(super) fn settle(
     } else {
         return None;
     };
-    let result = addition.and_then(|addition| {
+    let result = addition.and_then(|mut addition| {
+        if let Some(generation) = &generation {
+            addition
+                .extra
+                .insert("retry_generation".into(), generation.clone());
+        }
         if let Some(warnings) = addition
             .extra
             .get("floor_warnings")
@@ -2196,8 +2225,13 @@ pub(super) fn settle(
                     NOTE_BYTES,
                 );
                 let fallback = (|| {
-                    let addition =
+                    let mut addition =
                         fallback_expansion(&node.id, spec, source, node.require_skill_location)?;
+                    if let Some(generation) = &generation {
+                        addition
+                            .extra
+                            .insert("retry_generation".into(), generation.clone());
+                    }
                     let mut preview = document.clone();
                     append(&mut preview, &addition);
                     validate_schema(&preview).map_err(str::to_owned)?;

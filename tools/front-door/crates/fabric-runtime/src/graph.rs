@@ -875,6 +875,59 @@ fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (Stri
     Ok(())
 }
 
+/// Fence one node and its attached descendants before stopping their attempts.
+pub fn cancel_node_subtree(
+    document: &GraphDocument,
+    checkpoint: &mut GraphCheckpoint,
+    id: &str,
+    reason: Option<&str>,
+) -> Result<relay::SubtreeCancel, String> {
+    let index = checkpoint
+        .nodes
+        .iter()
+        .position(|node| node.id == id)
+        .ok_or_else(|| format!("unknown node {id}"))?;
+    let mut effect = relay::cancel_subtree(document, checkpoint, id)?;
+    let node = &mut checkpoint.nodes[index];
+    if !node.state.settled() {
+        if node
+            .attempts
+            .iter()
+            .any(|a| a.state != AttemptState::Terminal)
+        {
+            node.extra.insert("subtree_cancel".into(), id.into());
+            effect.running.push(id.to_owned());
+        } else {
+            node.cancelled_from = Some(node.state);
+            node.state = NodeState::Skipped;
+            effect.skipped.push(id.to_owned());
+        }
+        node.skip_reason = Some(format!(
+            "parent {id} cancelled: {}",
+            reason.unwrap_or("stop requested")
+        ));
+    }
+    asks::refresh_wake(checkpoint);
+    Ok(effect)
+}
+
+/// Reconcile subtree cancellation without admitting or launching more work.
+pub fn settle_stopped_subtrees<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    checkpoint: &mut GraphCheckpoint,
+    owner: &mut R,
+    journal: &mut J,
+) -> Result<(), GraphError<R::Error, J::Error>> {
+    relay::settle_subtrees(
+        document,
+        checkpoint,
+        owner,
+        journal,
+        &mut Default::default(),
+    )?;
+    close_resolved_asks(checkpoint, owner, journal)
+}
+
 /// Mark nodes that have no live attempts, as part of the durable cancellation fence.
 pub fn mark_cancelled_nodes_without_live_attempts(checkpoint: &mut GraphCheckpoint) -> bool {
     if !checkpoint.cancelled {
@@ -1029,6 +1082,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                 }
             }
+            asks::refresh_wake(&mut validation);
             validate_checkpoint(document, &validation, &plan, &plan_digest)?;
             checkpoint
         }
@@ -1115,6 +1169,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         launch_retry: None,
                         last_launch_retry: None,
                         outputs: None,
+                        previous_attempts: Vec::new(),
                         attempts: Vec::new(),
                     })
                     .collect(),
@@ -1519,7 +1574,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
 
             let node = &plan.nodes[node_index];
-            if loops::inactive_round(node, &checkpoint, &positions) {
+            if checkpoint.nodes[node_index]
+                .extra
+                .get("retry_generation")
+                .is_none()
+                && loops::inactive_round(node, &checkpoint, &positions)
+            {
                 checkpoint.nodes[node_index].state = NodeState::Skipped;
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 continue;
@@ -1994,8 +2054,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         invariant: "attempt route index must name a configured route",
                     })?
                     .clone();
+                let mut attempt_extra = provenant_records::ExtraFields::default();
+                if let Some(generation) = checkpoint.nodes[node_index].extra.get("retry_generation")
+                {
+                    attempt_extra.insert("retry_generation".into(), generation.clone());
+                }
                 let key = AttemptKey {
-                    extra: Default::default(),
+                    extra: attempt_extra,
                     graph_id: plan.graph_id.clone(),
                     node_id: node.id.clone(),
                     route_index: u16::try_from(route_index)
