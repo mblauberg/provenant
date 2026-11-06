@@ -62,10 +62,6 @@ pub enum JournalError {
         "graph checkpoint topology is incomplete or invalid; finish or cancel it with the previous release, or cancel it here to retire the record"
     )]
     InvalidTopology,
-    #[error(
-        "graph checkpoint contains retired launched-route fallback history; finish or cancel it with the previous release, or cancel it here to retire the record"
-    )]
-    RetiredFallbackCheckpoint,
 }
 
 impl JournalError {
@@ -79,7 +75,6 @@ impl JournalError {
                 | Self::Canonical(_)
                 | Self::RetiredLoopCheckpoint
                 | Self::InvalidTopology
-                | Self::RetiredFallbackCheckpoint
         )
     }
 
@@ -98,7 +93,6 @@ impl JournalError {
             Self::BadDigest => "bad_digest",
             Self::RetiredLoopCheckpoint => "retired_loop_checkpoint",
             Self::InvalidTopology => "invalid_topology",
-            Self::RetiredFallbackCheckpoint => "retired_fallback_checkpoint",
         }
     }
 }
