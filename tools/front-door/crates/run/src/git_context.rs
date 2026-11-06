@@ -1268,7 +1268,8 @@ mod tests {
     }
 
     fn git(executor: &SystemExecutor, binary: &Path, cwd: &Path, args: &[&str]) -> TestResult {
-        read_git(executor, binary, cwd, args, 4096)?;
+        let _ = (executor, binary);
+        provenant_os::fixture::run_git(cwd, args)?;
         Ok(())
     }
 
@@ -1301,7 +1302,7 @@ mod tests {
         } = small_history()?;
         std::fs::write(
             root.join(".mailmap"),
-            "Rewritten <rewritten@example.test> Fixture <fixture@example.test>\n",
+            "Rewritten <rewritten@example.test> Fixture <fixture@example.invalid>\n",
         )?;
         let range = format!("{base}..HEAD");
         let control = read_git(
@@ -1315,7 +1316,7 @@ mod tests {
         let context = GitContext::capture(&binary, &root, &base)?;
         assert!(
             String::from_utf8_lossy(&context.log.bytes)
-                .contains("Author: Fixture <fixture@example.test>")
+                .contains("Author: Fixture <fixture@example.invalid>")
         );
         Ok(())
     }
@@ -1342,10 +1343,6 @@ mod tests {
                 &binary,
                 &root,
                 &[
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.test",
                     "-c",
                     "commit.gpgsign=false",
                     "commit",
@@ -1416,10 +1413,6 @@ mod tests {
             &upstream.binary,
             &upstream.root,
             &[
-                "-c",
-                "user.name=Moved",
-                "-c",
-                "user.email=moved@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -1629,10 +1622,6 @@ mod tests {
                 &root,
                 &[
                     "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.test",
-                    "-c",
                     "commit.gpgsign=false",
                     "commit",
                     "--quiet",
@@ -1658,10 +1647,6 @@ mod tests {
             &binary,
             &root,
             &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -1891,10 +1876,6 @@ mod tests {
             &fixture.binary,
             &fixture.root,
             &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",

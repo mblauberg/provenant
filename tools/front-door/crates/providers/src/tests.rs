@@ -734,6 +734,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
                 .current_dir(&linked)
                 .env_clear()
                 .envs(spec.env.iter().cloned())
+                .envs(provenant_os::fixture::fixture_git_settings())
                 .args(args)
                 .output()
                 .unwrap();
@@ -788,10 +789,6 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
             std::fs::write(linked.join("lane-blob"), "private committed blob")?;
             lane_git(&["add".as_ref(), "lane-blob".as_ref()]);
             lane_git(&[
-                "-c".as_ref(),
-                "user.name=Fixture".as_ref(),
-                "-c".as_ref(),
-                "user.email=fixture@example.test".as_ref(),
                 "commit".as_ref(),
                 "-qm".as_ref(),
                 "private lane commit".as_ref(),
@@ -837,10 +834,6 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
                 "{id} fetched head",
             );
             lane_git(&[
-                "-c".as_ref(),
-                "user.name=Fixture".as_ref(),
-                "-c".as_ref(),
-                "user.email=fixture@example.test".as_ref(),
                 "merge".as_ref(),
                 "--quiet".as_ref(),
                 "--no-ff".as_ref(),

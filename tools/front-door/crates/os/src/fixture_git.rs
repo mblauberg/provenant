@@ -281,16 +281,7 @@ mod tests {
         assert!(
             git_command()
                 .current_dir(&lane)
-                .args([
-                    "-c",
-                    "user.name=Lane",
-                    "-c",
-                    "user.email=lane@example.invalid",
-                    "commit",
-                    "--allow-empty",
-                    "-qm",
-                    "lane",
-                ])
+                .args(["commit", "--allow-empty", "-qm", "lane",])
                 .status()?
                 .success()
         );

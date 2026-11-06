@@ -3451,16 +3451,7 @@ fn preset_reuses_one_worktree_inventory_for_planning_and_spec()
         Ok(())
     };
     git(&["init", "-q"])?;
-    git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "initial",
-    ])?;
+    git(&["commit", "--allow-empty", "-qm", "initial"])?;
     for index in 0..100 {
         let path = temp.path().join(format!("worktree-{index}"));
         git(&[

@@ -2866,19 +2866,7 @@ fn gc_protects_nested_repositories_under_ignored_directories() -> Result<(), Box
             fs::create_dir(nested.join("build"))?;
             fs::write(nested.join("build/source"), "committed")?;
             run_in_worktree(&fixture, &nested, &["add", "-f", "build/source"])?;
-            run_in_worktree(
-                &fixture,
-                &nested,
-                &[
-                    "-c",
-                    "user.name=Test",
-                    "-c",
-                    "user.email=test@example.test",
-                    "commit",
-                    "-m",
-                    "nested source",
-                ],
-            )?;
+            run_in_worktree(&fixture, &nested, &["commit", "-m", "nested source"])?;
             fs::write(nested.join("build/source"), "uncommitted edit")?;
             let report = collect(
                 &context,
@@ -5379,16 +5367,7 @@ fn named_removal_refuses_a_head_that_moved_after_the_callers_check() -> Result<(
     run_in_worktree(
         &fixture,
         &created.path,
-        &[
-            "-c",
-            "user.name=raced",
-            "-c",
-            "user.email=raced@example.test",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "after the check",
-        ],
+        &["commit", "--allow-empty", "-m", "after the check"],
     )?;
     let branch = GitRefName::branch("feature/raced")?;
     let moved = read_branch_tips(&context, &cancellation)?
