@@ -61,7 +61,16 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("fabric-store", &["core", "records", "os", "sqlite"]),
     (
         "fabric-runtime",
-        &["core", "records", "config", "os", "fabric-store", "routing"],
+        // Graph patch and prompt persistence use confinement's secret scanners.
+        &[
+            "core",
+            "records",
+            "config",
+            "os",
+            "confinement",
+            "fabric-store",
+            "routing",
+        ],
     ),
     // The relay validates its socket directory against the effective UID.
     ("fabric-mcp", &["core", "records", "os", "fabric-runtime"]),

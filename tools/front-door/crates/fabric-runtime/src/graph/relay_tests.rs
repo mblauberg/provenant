@@ -41,6 +41,7 @@ fn add(
         library: &library,
         resolvers: &resolvers,
         scan: &|_| Ok(()),
+        journal: None,
         limits: &limits,
     };
     admit_child(
