@@ -600,10 +600,15 @@ impl PrepareError {
             }
             Self::Prompt(error) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
-                if matches!(error, LaunchPromptError::NestedArgvTooLarge { .. }) {
-                    refusal.boundary_class =
-                        provenant_records::diagnostic::BoundaryClass::Authority;
-                }
+                refusal.boundary_class = match &error {
+                    LaunchPromptError::TooLarge => {
+                        provenant_records::diagnostic::BoundaryClass::Integrity
+                    }
+                    LaunchPromptError::NestedArgvTooLarge { .. } => {
+                        provenant_records::diagnostic::BoundaryClass::Authority
+                    }
+                    _ => provenant_records::diagnostic::BoundaryClass::None,
+                };
                 refusal.resource = error.resource_fact();
                 refusal
             }
@@ -644,6 +649,12 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     })
     .into_refusal();
     assert_eq!(prompt.boundary_class, BoundaryClass::Authority);
+    assert_eq!(
+        PrepareError::Prompt(LaunchPromptError::TooLarge)
+            .into_refusal()
+            .boundary_class,
+        BoundaryClass::Integrity
+    );
     for error in [SourceHeadError::Missing, SourceHeadError::Invalid] {
         let refusal = PrepareError::SourceHead(error).into_refusal();
         assert_eq!(refusal.boundary_class, BoundaryClass::Authority);
