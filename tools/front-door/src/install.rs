@@ -1678,7 +1678,6 @@ mod tests {
                 target("orphan")?,
             ],
             entries: vec![],
-            legacy: None,
         };
         let orphans = orphaned_targets(&environment, &base, &receipt);
         assert_eq!(orphans.len(), 1);

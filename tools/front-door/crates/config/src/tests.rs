@@ -193,6 +193,13 @@ fn retention_defaults_overrides_and_invalid_values_are_named_cases() {
         assert!(defaults.retention.validate().is_ok());
         let defaults = serde_json::to_value(defaults).unwrap();
         let default = &defaults["retention"][key];
+        let default_value = default.as_u64().unwrap();
+        let upper_bound = if key == "provider_state_days" {
+            3650
+        } else {
+            64
+        };
+        assert!((1..=upper_bound).contains(&default_value), "{case} default");
         let text = format!("schema_version=1\n[retention]\n{key}={override_value}");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         let value = serde_json::to_value(&config).unwrap();
@@ -247,6 +254,14 @@ fn chair_log_retention_and_gc_settings_are_named_cases() {
 fn assert_chair_log_retention_defaults_overrides_and_validation() {
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
     assert!(defaults.retention.validate().is_ok());
+    let default_values = serde_json::to_value(&defaults).unwrap();
+    for (key, range) in [
+        ("chair_log_days", 1..=3650),
+        ("chair_log_entries", 1..=100_000),
+        ("chair_log_bytes", 65_536..=1_073_741_824),
+    ] {
+        assert!(range.contains(&default_values["retention"][key].as_u64().unwrap()));
+    }
     let short = load(
         &roots(),
         Some(&b"schema_version=1\n[retention]\nchair_log_days=1"[..]),

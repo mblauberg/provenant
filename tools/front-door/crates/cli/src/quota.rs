@@ -2640,6 +2640,15 @@ mod tests {
         assert!(mismatch.contains("account_mismatch"), "{mismatch}");
         assert!(mismatch.contains("differs"), "{mismatch}");
         assert!(!mismatch.contains("needs login"), "{mismatch}");
+        let entry: provenant_providers::accounts::Registration = serde_json::from_value(
+            serde_json::json!({"adapter":"agy","label":"work","key":"key","directory":"/tmp/account"}),
+        )
+        .unwrap();
+        let repair = login_repair(Some(&entry));
+        assert!(
+            repair.contains("provenant accounts register --adapter agy"),
+            "{repair}"
+        );
         let signed_out = human(ProbeFailure::Auth);
         assert!(signed_out.contains("needs login"), "{signed_out}");
         assert!(!signed_out.contains("differs"), "{signed_out}");
