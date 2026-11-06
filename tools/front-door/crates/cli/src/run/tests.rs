@@ -286,7 +286,6 @@ fn project_default_dispatch_renders_ipc_only_for_writer() -> Result<(), Box<dyn 
     use std::os::unix::fs::DirBuilderExt;
     const MARKER: &str = "PROVENANT_TEST_CAPABILITY_DISPATCH";
     let executor = SystemExecutor::new(1)?;
-    let parent = AttemptId::from_bytes([8; 16]);
     let Some(root) = std::env::var_os(MARKER).map(PathBuf::from) else {
         let fixture = linked_fixture()?;
         let gitdir = String::from_utf8(provenant_os::fixture::run_git(
@@ -324,16 +323,6 @@ fn project_default_dispatch_renders_ipc_only_for_writer() -> Result<(), Box<dyn 
             ("PROVENANT_WORKTREE_GITDIR".into(), gitdir.trim().into()),
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            (
-                provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
-                fixture
-                    .root
-                    .join("state/children")
-                    .join(parent.to_string())
-                    .into_os_string(),
-            ),
-            (run::LANE_DEPTH_ENV.into(), "1".into()),
-            (run::PARENT_ATTEMPT_ENV.into(), parent.to_string().into()),
         ]);
         let mut options = ExecOptions::new(&argv, &tree, Duration::from_secs(30));
         options.env = Some(&env);
@@ -381,7 +370,7 @@ fn project_default_dispatch_renders_ipc_only_for_writer() -> Result<(), Box<dyn 
             std::fs::write(
                 edge.roots.state.as_path().join("config.toml"),
                 format!(
-                    "schema_version = 1\n[domains.lanes.projects.\"{}\"]\ncapabilities = ['postgres']\n",
+                    "schema_version = 1\n[gc]\nfree_floor = '1B'\n[domains.lanes.projects.\"{}\"]\ncapabilities = ['postgres']\n",
                     binding.project_id()
                 ),
             )?;
@@ -409,7 +398,8 @@ fn project_default_dispatch_renders_ipc_only_for_writer() -> Result<(), Box<dyn 
                 }
                 let mut command = parsed_run(&args)?;
                 command.wait = None;
-                let reply = dispatch_with_workers(command, edge, &Free);
+                let reply =
+                    with_deferred_provider_launch(|| dispatch_with_workers(command, edge, &Free));
                 assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
                 let id: RunId = reply.result.data["run_id"]
                     .as_str()
@@ -1692,7 +1682,6 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
     use std::os::unix::fs::DirBuilderExt;
     const MARKER: &str = "PROVENANT_TEST_WORKTREE_ADMISSION";
     let executor = SystemExecutor::new(1)?;
-    let parent = AttemptId::from_bytes([8; 16]);
     let Some(root) = std::env::var_os(MARKER).map(PathBuf::from) else {
         let fixture = linked_fixture()?;
         let argv = vec![
@@ -1718,18 +1707,8 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
             (MARKER.into(), fixture.root.as_os_str().to_owned()),
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            (
-                provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
-                fixture
-                    .root
-                    .join("state/children")
-                    .join(parent.to_string())
-                    .into_os_string(),
-            ),
-            (run::LANE_DEPTH_ENV.into(), "1".into()),
-            (run::PARENT_ATTEMPT_ENV.into(), parent.to_string().into()),
         ]);
-        // Nested writer proposals must stay beneath the primary checkout.
+        // Keep the writer proposal beneath the primary checkout.
         let tree = fixture.project.join("writer");
         let move_argv = vec![
             provenant_os::git::git_executable()
@@ -1775,6 +1754,7 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
                 provenant_config::ProjectLocation::new(project.join(".git"))?,
             )?;
             provenant_config::bind_host(edge.roots)?;
+            allow_any_free_disk(edge)?;
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
@@ -1828,7 +1808,8 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
                     .is_none()
             );
             switch(&["switch", "writer"])?;
-            let admitted = dispatch(command("free-tree")?, edge);
+            let command_input = command("free-tree")?;
+            let admitted = with_deferred_provider_launch(|| dispatch(command_input, edge));
             assert_eq!(
                 admitted.result.status,
                 Status::Ok,
@@ -1896,7 +1877,8 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
                 &cancel,
                 &clock,
             )?;
-            let busy = dispatch(command("busy-tree")?, edge);
+            let command_input = command("busy-tree")?;
+            let busy = with_deferred_provider_launch(|| dispatch(command_input, edge));
             assert_eq!(busy.result.status, Status::Refused);
             let message = &busy.result.error.as_ref().ok_or("busy error")?.message;
             assert!(
@@ -1911,7 +1893,8 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
                     .operation(&"busy-tree".parse()?, &call)?
                     .is_none()
             );
-            let replay = dispatch(command("free-tree")?, edge);
+            let command_input = command("free-tree")?;
+            let replay = with_deferred_provider_launch(|| dispatch(command_input, edge));
             assert_eq!(
                 replay.result.status,
                 Status::Ok,
