@@ -759,6 +759,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
         for replacement in &record.replaced {
             if let Some(target) = document.nodes.iter_mut().find(|n| n.id == replacement.id) {
                 let mut node = replacement.clone();
+                node.composite_members = std::mem::take(&mut target.composite_members);
                 node.after_expansion = std::mem::take(&mut target.after_expansion);
                 node.round = target.round.take();
                 *target = node;

@@ -159,35 +159,399 @@ fn node_redo_refuses_live_attempts_secrets_and_journal_failures_atomically() {
     assert_eq!(candidate, checkpoint);
 }
 
+/// Persist a real checkpoint, then interrupt at the boundary before launching
+/// the selected attempt. Recovery must use the file, not the caller's memory.
+struct CrashAfterCheckpoint {
+    journal: FileJournal,
+    before_launch: &'static str,
+}
+
+impl GraphJournal for CrashAfterCheckpoint {
+    type Error = JournalError;
+
+    fn load(&mut self, graph_id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+        self.journal.load(graph_id)
+    }
+
+    fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+        self.journal.save(checkpoint)?;
+        if checkpoint.nodes.iter().any(|node| {
+            node.id == self.before_launch
+                && node.attempts.iter().any(|attempt| {
+                    attempt.state == AttemptState::Starting && attempt.attempt_ref.is_none()
+                })
+        }) {
+            panic!("injected crash after checkpoint and before launch");
+        }
+        Ok(())
+    }
+}
+
+fn redo_container_after_checkpoint_crash(
+    document: GraphDocument,
+    container: &str,
+    before_launch: &'static str,
+    initial: Vec<AttemptObservation>,
+    before_crash: Vec<AttemptObservation>,
+    resumed: Vec<AttemptObservation>,
+    expected_calls: &[&str],
+) -> GraphCheckpoint {
+    use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
+    use std::os::unix::fs::PermissionsExt;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([37; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let open =
+        || FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    let mut journal = open();
+    journal
+        .bind(GraphExecution {
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: base,
+            document: document.clone(),
+        })
+        .unwrap();
+    let mut initial_owner = FakeOwner {
+        observations: initial.into(),
+        ..Default::default()
+    };
+    let mut checkpoint = advance(&document, &mut initial_owner, &mut journal)
+        .unwrap()
+        .checkpoint;
+    assert!(checkpoint.successful());
+    let original = checkpoint.clone();
+    let sibling = original
+        .nodes
+        .iter()
+        .find(|node| node.id == "sibling")
+        .unwrap();
+    retry_id(
+        &document,
+        &mut checkpoint,
+        container,
+        None,
+        &|_| Ok(()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == container)
+            .unwrap()
+            .state,
+        NodeState::Pending
+    );
+    journal.save(&checkpoint).unwrap();
+    let mut crashing = CrashAfterCheckpoint {
+        journal,
+        before_launch,
+    };
+    let mut owner = FakeOwner {
+        observations: before_crash.into(),
+        ..Default::default()
+    };
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| advance(
+            &document,
+            &mut owner,
+            &mut crashing
+        )))
+        .is_err()
+    );
+    assert!(
+        owner
+            .calls
+            .iter()
+            .all(|(key, _)| key.node_id != before_launch)
+    );
+    drop(crashing);
+    // Reopen from disk after discarding every in-memory checkpoint.
+    let mut journal = open();
+    let saved = journal.load(&document.graph_id).unwrap().unwrap();
+    let fenced = saved
+        .nodes
+        .iter()
+        .find(|node| node.id == before_launch)
+        .unwrap()
+        .attempts
+        .last()
+        .unwrap()
+        .key
+        .clone();
+    let old = original
+        .nodes
+        .iter()
+        .find(|node| node.id == before_launch)
+        .unwrap();
+    assert!(old.attempts.iter().all(|attempt| attempt.key != fenced));
+    let mut resumed_owner = FakeOwner {
+        observations: resumed.into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut resumed_owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(
+        resumed_owner
+            .calls
+            .iter()
+            .map(|(key, _)| key.node_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_calls
+    );
+    assert_eq!(resumed_owner.calls[0].0, fenced);
+    let preserved = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "sibling")
+        .unwrap();
+    assert_eq!(preserved.attempts, sibling.attempts);
+    assert_eq!(preserved.outputs, sibling.outputs);
+    for prior in original
+        .nodes
+        .iter()
+        .filter(|node| node.id.starts_with(&format!("{container}--")))
+    {
+        let redone = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == prior.id)
+            .unwrap();
+        for attempt in &prior.attempts {
+            assert!(
+                redone.previous_attempts.contains(attempt),
+                "history lost for {}",
+                prior.id
+            );
+            assert!(
+                redone
+                    .attempts
+                    .iter()
+                    .all(|current| current.key != attempt.key)
+            );
+        }
+    }
+    let mut replay_owner = FakeOwner::default();
+    assert_eq!(
+        advance(&document, &mut replay_owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+    assert!(replay_owner.calls.is_empty());
+    run.checkpoint
+}
+
 #[test]
-fn node_redo_refuses_structural_nodes_without_mutating_the_checkpoint() {
+fn composite_redo_recovers_nested_subtree_after_checkpoint_before_launch_crash() {
     let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version":1,"graph_id":"composite-retry","nodes":[{
+        "schema_version":1,"graph_id":"composite-redo-crash","nodes":[{
             "id":"work","kind":"composite","access":"read_only","composite":{
-                "nodes":[{"id":"leaf","prompt":"work","access":"read_only","route":{"adapter":"first","model":"first/model"}}],
-                "exports":[{"node":"leaf","outputs":["result"]}]
+                "nodes":[
+                    {"id":"first","prompt":"First task","access":"read_only","route":{"alias":"junior"}},
+                    {"id":"nested","kind":"composite","access":"read_only","depends_on":["first"],"composite":{
+                        "nodes":[{"id":"leaf","prompt":"Nested task","access":"read_only","route":{"alias":"junior"}}],
+                        "exports":[{"node":"leaf","outputs":["result"]}]
+                    }}
+                ],"exports":[{"node":"first","outputs":["result"]},{"node":"nested","outputs":["result"]}]
+            }
+        },{"id":"sibling","prompt":"Other work","access":"read_only","depends_on":["work"],"route":{"alias":"junior"}}]
+    })).unwrap();
+    let checkpoint = redo_container_after_checkpoint_crash(
+        document,
+        "work",
+        "work--nested--leaf",
+        vec![
+            terminal_from("old first", "first-old"),
+            terminal_from("old nested", "nested-old"),
+            done_as("sibling-old"),
+        ],
+        vec![terminal_from("new first", "first-new")],
+        vec![terminal_from("new nested", "nested-new")],
+        &["work--nested--leaf"],
+    );
+    let result = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "work")
+        .unwrap()
+        .outputs
+        .as_ref()
+        .unwrap()
+        .result
+        .as_ref()
+        .unwrap();
+    assert!(result.excerpt.contains("new first") && result.excerpt.contains("new nested"));
+    assert!(!result.excerpt.contains("old first") && !result.excerpt.contains("old nested"));
+}
+
+#[test]
+fn loop_redo_restarts_rounds_after_checkpoint_before_launch_crash() {
+    let mut document: GraphDocument =
+        serde_json::from_str(include_str!("../fixtures/loop-pass-round-two.json")).unwrap();
+    let mut sibling = node("sibling", route("first"));
+    sibling.depends_on = vec!["revise".into()];
+    document.nodes.push(sibling);
+    let checkpoint = redo_container_after_checkpoint_crash(
+        document,
+        "revise",
+        "revise--r1--review",
+        vec![
+            terminal_from("VERDICT: FAIL", "review-old-1"),
+            terminal_from("VERDICT: PASS", "review-old-2"),
+            done_as("sibling-old"),
+        ],
+        vec![],
+        vec![terminal_from("VERDICT: PASS", "review-new-1")],
+        &["revise--r1--review"],
+    );
+    assert_eq!(
+        checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "revise--r1--approved")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    for id in ["revise--r2--review", "revise--r3--review"] {
+        let skipped = checkpoint.nodes.iter().find(|node| node.id == id).unwrap();
+        assert_eq!(skipped.state, NodeState::Skipped);
+        assert!(
+            skipped.attempts.is_empty(),
+            "inactive round was relaunched: {id}"
+        );
+    }
+}
+
+#[test]
+fn container_redo_refuses_dynamic_descendants_without_changing_the_checkpoint() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"redo-dynamic-container","nodes":[{
+            "id":"work","kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":"planner","kind":"plan","access":"read_only","prompt":"Plan work",
+                    "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4}}],
+                "exports":[{"node":"planner","outputs":["result"]}]
             }
         }]
-    })).unwrap();
+    }))
+    .unwrap();
+    let fragment = format!(
+        "```fragment\n{}\n```",
+        json!({
+            "schema_version":1,"nodes":[{"id":"slice","goal":"Do work","acceptance_checks":["Verify work"],"access":"read_only"}]
+        })
+    );
     let mut owner = FakeOwner {
-        observations: [done_as("first-attempt")].into(),
+        observations: [
+            terminal_from(&fragment, "planner-old"),
+            done_as("slice-old"),
+        ]
+        .into(),
         ..Default::default()
     };
     let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
         .unwrap()
         .checkpoint;
-    let before = checkpoint.clone();
+    assert!(checkpoint.successful());
     assert!(
-        retry(
-            &document,
-            &mut checkpoint,
-            Some("replacement"),
-            &|_| Ok(()),
-            None
-        )
-        .is_err()
+        checkpoint
+            .nodes
+            .iter()
+            .any(|node| node.id == "work--planner--slice")
     );
+    let before = checkpoint.clone();
+    let error = retry_id(&document, &mut checkpoint, "work", None, &|_| Ok(()), None).unwrap_err();
+    assert_eq!(error.code, "redo_dynamic_subtree");
     assert_eq!(checkpoint, before);
+}
+
+#[test]
+fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"redo-refused-container","nodes":[{
+            "id":"work","kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":"leaf","prompt":"Do work","access":"read_only","route":{"alias":"senior"}}],
+                "exports":[{"node":"leaf","outputs":["result"]}]
+            }
+        }]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
+        ..Default::default()
+    };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    for progress in &mut checkpoint.nodes {
+        progress.state = NodeState::Blocked;
+        progress.outputs = None;
+    }
+    let leaf = checkpoint
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "work--leaf")
+        .unwrap();
+    leaf.advance_error_code = Some("launch_refused".into());
+    let attempt = &mut leaf.attempts[0];
+    attempt.state = AttemptState::Starting;
+    attempt.launched = false;
+    attempt.attempt_ref = None;
+    attempt
+        .extra
+        .insert(PRELAUNCH_REFUSAL_PROOF.into(), json!(true));
+    let prior = attempt.clone();
+    for unsafe_case in 0..4 {
+        let mut candidate = checkpoint.clone();
+        let leaf = candidate
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "work--leaf")
+            .unwrap();
+        match unsafe_case {
+            0 => {
+                leaf.attempts[0].extra.remove(PRELAUNCH_REFUSAL_PROOF);
+            }
+            1 => leaf.attempts[0].launched = true,
+            2 => leaf.attempts[0].attempt_ref = Some("host/uncertain".into()),
+            _ => leaf.advance_error_code = Some("launch_retry_exhausted".into()),
+        }
+        let before = candidate.clone();
+        assert!(retry_id(&document, &mut candidate, "work", None, &|_| Ok(()), None).is_err());
+        assert_eq!(candidate, before);
+    }
+    retry_id(&document, &mut checkpoint, "work", None, &|_| Ok(()), None).unwrap();
+    let leaf = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "work--leaf")
+        .unwrap();
+    assert_eq!(leaf.state, NodeState::Pending);
+    assert_eq!(leaf.previous_attempts, vec![prior]);
+    assert!(leaf.attempts.is_empty());
+    let mut owner = FakeOwner {
+        observations: [done_as("leaf-new")].into(),
+        ..Default::default()
+    };
+    let completed = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap();
+    assert_eq!(completed.status, GraphStatus::Complete);
+    assert!(completed.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 1);
 }
 
 #[test]
