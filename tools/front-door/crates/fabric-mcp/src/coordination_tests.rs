@@ -503,13 +503,13 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
     let first = invoke(&mut service)?;
     let replay = invoke(&mut service)?;
     assert_eq!(first, replay);
-    assert_eq!(first["wait"]["children"][0]["settled"], true);
+    assert_eq!(first["children"]["children"][0]["settled"], true);
     let mut timed_out = input.clone();
     timed_out["wait_seconds"] = json!(2);
     let timed_out = ToolCall::parse("fabric_run", timed_out)?
         .execute(&mut service, &CancelToken::new())?
         .structured_content;
-    assert_eq!(timed_out["idempotency_key"], first["idempotency_key"]);
+    assert_eq!(timed_out["receipt"]["idempotency_key"], first["receipt"]["idempotency_key"]);
     assert!(timed_out.get("observation_error").is_some());
     let mut no_wait = input.clone();
     no_wait
@@ -519,21 +519,22 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
     let no_wait = ToolCall::parse("fabric_run", no_wait)?
         .execute(&mut service, &CancelToken::new())?
         .structured_content;
-    assert_eq!(no_wait["idempotency_key"], first["idempotency_key"]);
+    assert_eq!(no_wait["idempotency_key"], first["receipt"]["idempotency_key"]);
     assert!(no_wait.get("wait").is_none());
+    assert!(no_wait.get("children").is_none());
     assert!(no_wait.get("observation_error").is_none());
-    assert_eq!(first["op"], "add");
-    assert_eq!(first["use"], "task");
-    assert_eq!(first["tier"], "senior");
-    assert_eq!(first["brief"], "implement the child");
-    assert_eq!(first["writer"], true);
+    assert_eq!(first["receipt"]["op"], "add");
+    assert_eq!(first["receipt"]["use"], "task");
+    assert_eq!(first["receipt"]["tier"], "senior");
+    assert_eq!(first["receipt"]["brief"], "implement the child");
+    assert_eq!(first["receipt"]["writer"], true);
     assert!(
-        !first["idempotency_key"]
+        !first["receipt"]["idempotency_key"]
             .as_str()
             .ok_or("missing key")?
             .is_empty()
     );
-    assert!(first.get("targets").is_none());
+    assert!(first["receipt"].get("targets").is_none());
     for field in ["worktree", "branch", "base", "nodes", "templates"] {
         let mut unsupported = input.clone();
         unsupported["document"][field] = json!("unsupported");

@@ -530,3 +530,53 @@ fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Re
     assert_eq!(repeated["structuredContent"], *value);
     Ok(())
 }
+
+#[test]
+fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
+    use provenant_fabric_runtime::graph::relay::RelayOp;
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    let mut rig = TestRig::new()?;
+    host(&rig, &["fabric", "task", "list", "--json"])?;
+    let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+    let fail_observation = Arc::new(AtomicBool::new(false));
+    let failure = Arc::clone(&fail_observation);
+    let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        provenant_providers::LaneRuntime::fabric_socket(attempt),
+        provenant_records::Limits::CONFIG,
+        |_, _, _| Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+            code: "unexpected_coordination".into(), message: "expected graph request".into(), data: Value::Null,
+        }),
+        move |arguments, _, _| {
+            match serde_json::from_value::<RelayOp>(arguments)? {
+                RelayOp::Add(child) => {
+                    assert_eq!(child.brief, "Observe child");
+                    Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
+                }
+                RelayOp::Wait { .. } => Ok(json!({"waiting":true})),
+                RelayOp::Children if failure.load(Ordering::SeqCst) => Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                    code:"observation_fixture".into(), message:"scripted observation failure".into(), data:Value::Null,
+                }),
+                RelayOp::Children => Ok(json!({"children":[{"node":"parent--child","settled":true}]})),
+                _ => panic!("unexpected graph operation"),
+            }
+        },
+    )?;
+    lane_environment(&mut rig, attempt)?;
+    for fail in [false, true] {
+        fail_observation.store(fail, Ordering::SeqCst);
+        let cli = host(&rig, &["run", "Observe child", "--wait=1s", "--json"])?;
+        let mcp = mcp(&rig, "fabric_run", json!({"op":"run","brief":"Observe child","wait_seconds":1}))?;
+        assert_ne!(mcp["isError"], true, "{mcp}");
+        let value = &cli["data"];
+        assert_eq!(*value, mcp["structuredContent"]);
+        assert_eq!(value["receipt"]["revision"], 2);
+        if fail {
+            assert!(value["observation_error"].as_str().ok_or("observation diagnostic")?.contains("observation_fixture"));
+            assert!(value.get("children").is_none());
+        } else {
+            assert_eq!(value["children"]["children"][0]["settled"], true);
+            assert!(value.get("observation_error").is_none());
+        }
+    }
+    Ok(())
+}

@@ -263,6 +263,14 @@ pub struct BoundFacade<'a> {
     factory: &'a Factory,
 }
 impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
+    fn relay_document(
+        &mut self,
+        input: &serde_json::Value,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<serde_json::Value, ServiceError> {
+        self.factory.relay_document(input, budget, cancel).map_err(ServiceError::from)
+    }
     fn compile_lane_run(
         &self,
         input: &serde_json::Value,

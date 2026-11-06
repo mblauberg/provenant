@@ -160,6 +160,29 @@ pub trait McpFacade: F3Facade {
         lane_run_request(input)
     }
 
+    /// Submit and optionally observe a lane child through the shared reply contract.
+    fn relay_document(
+        &mut self,
+        input: &Value,
+        _budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<Value, ServiceError> {
+        let operation = self.compile_lane_run(input)?;
+        if input["explain"] == true {
+            return Ok(serde_json::to_value(operation)?);
+        }
+        let receipt = self.add_from_lane(
+            &operation, cancel, std::time::Duration::from_secs(crate::MAX_WAIT_SECONDS),
+        )?;
+        if let Some(seconds) = input["wait_seconds"].as_u64() {
+            return Ok(match self.wait_for_children(cancel, std::time::Duration::from_secs(seconds)) {
+                Ok(children) => serde_json::json!({"receipt":receipt,"children":children}),
+                Err(error) => serde_json::json!({"receipt":receipt,"observation_error":error.to_string()}),
+            });
+        }
+        Ok(receipt)
+    }
+
     /// A lane launch is a graph mutation owned by its host. Production composition
     /// forwards this to the CLI's `graph_relay::from_lane`.
     fn add_from_lane(
@@ -856,33 +879,9 @@ impl ToolCall {
             && let Self::GraphDocument(input) = &self
             && input["op"] == "run"
         {
-            let operation = service.facade.compile_lane_run(input)?;
-            if input["explain"] == true {
-                return service.limit_response(
-                    response(self.name(), serde_json::to_value(operation)?),
-                    false,
-                    false,
-                );
-            }
-            let seconds = input["wait_seconds"].as_u64();
-            if let Some(seconds) = seconds {
-                service.budget(seconds)?;
-            }
-            let mut value = service.facade.add_from_lane(
-                &operation,
-                cancel,
-                std::time::Duration::from_secs(crate::MAX_WAIT_SECONDS),
-            )?;
-            if let Some(seconds) = seconds {
-                match service
-                    .facade
-                    .wait_for_children(cancel, std::time::Duration::from_secs(seconds))
-                {
-                    Ok(states) => value["wait"] = states,
-                    Err(error) => value["observation_error"] = serde_json::json!(error.to_string()),
-                }
-            }
-            return service.limit_response(response(self.name(), value), true, false);
+            let budget = service.budget(input["wait_seconds"].as_u64().unwrap_or(crate::MAX_WAIT_SECONDS))?;
+            let value = service.facade.relay_document(input, budget, cancel)?;
+            return service.limit_response(response(self.name(), value), input["explain"] != true, false);
         }
         if service.in_lane
             && service.lane_relay_reads
