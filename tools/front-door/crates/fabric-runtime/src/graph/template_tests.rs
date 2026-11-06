@@ -620,3 +620,23 @@ fn review_cycle_limit_is_configurable_but_never_above_three() {
         .unwrap_err();
     assert!(error.contains("between 1 and 3"), "{error}");
 }
+
+#[test]
+fn review_behaviour_survives_brief_and_output_overrides() {
+    let bundled = library();
+    for (name, behaviour) in [("review.tests", "lens"), ("review.verify", "verify"), ("review.synthesis", "synthesis")] {
+        let node = Compiler::new(&bundled).compile(&json!({
+            "id":"review", "use":name, "brief":"Inspect this", "require_findings":false,
+            "required_verdict":"anything", "role":"task"
+        })).unwrap();
+        assert!(node.role.is_none());
+        assert_eq!(node.extra["review_behaviour"], behaviour);
+        assert!(node.require_findings);
+        assert_eq!(node.required_verdict.as_deref(), Some("VERDICT: PASS"));
+        if name == "review.synthesis" {
+            assert_eq!(node.kind, Some(NodeKind::Synthesise));
+            assert_eq!(node.dispositions, ["accepted", "rejected", "deferred"]);
+        }
+    }
+    assert!(Template::from_toml("review = 'unknown'").is_err());
+}

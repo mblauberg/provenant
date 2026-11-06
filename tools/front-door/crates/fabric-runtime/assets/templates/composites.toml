@@ -19,7 +19,7 @@ doc = "Review with a host-selected framing, verification and synthesis topology.
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
 nodes = [
   { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "synthesis", use = "synthesise", after = ["lenses"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+  { id = "synthesis", use = "review.synthesis", after = ["lenses"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
 ]
 
 [review-shape-f0-v1-s0]
@@ -27,7 +27,7 @@ doc = "Review with a host-selected framing, verification and synthesis topology.
 exports = [{ node = "lenses", outputs = ["result", "findings", "verdict"] }, { node = "verify", outputs = ["result", "findings"] }]
 nodes = [
   { id = "lenses", use = "review", over = "@review-panel", reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "verify", brief = "Try to falsify each finding against the pinned subject. Return a findings block with schema_version 1 and a findings array, preserving the IDs of qualified findings.", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
 ]
 
 [review-shape-f0-v1-s1]
@@ -35,8 +35,8 @@ doc = "Review with a host-selected framing, verification and synthesis topology.
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
 nodes = [
   { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "verify", brief = "Try to falsify each finding against the pinned subject. Return a findings block with schema_version 1 and a findings array, preserving the IDs of qualified findings.", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
-  { id = "synthesis", use = "synthesise", after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings"] }] },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+  { id = "synthesis", use = "review.synthesis", after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings"] }] },
 ]
 
 [review-shape-f1-v0-s0]
@@ -53,7 +53,7 @@ exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
 nodes = [
   { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
   { id = "lenses", use = "review", over = "@review-panel", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "synthesis", use = "synthesise", after = ["lenses"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+  { id = "synthesis", use = "review.synthesis", after = ["lenses"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
 ]
 
 [review-shape-f1-v1-s0]
@@ -62,7 +62,7 @@ exports = [{ node = "lenses", outputs = ["result", "findings", "verdict"] }, { n
 nodes = [
   { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
   { id = "lenses", use = "review", over = "@review-panel", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "verify", brief = "Try to falsify each finding against the pinned subject. Return a findings block with schema_version 1 and a findings array, preserving the IDs of qualified findings.", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
 ]
 
 [review-shape-f1-v1-s1]
@@ -71,8 +71,8 @@ exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
 nodes = [
   { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
   { id = "lenses", use = "review", over = "@review-panel", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "verify", brief = "Try to falsify each finding against the pinned subject. Return a findings block with schema_version 1 and a findings array, preserving the IDs of qualified findings.", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
-  { id = "synthesis", use = "synthesise", after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings"] }] },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+  { id = "synthesis", use = "review.synthesis", after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings"] }] },
 ]
 
 [research-swarm]
@@ -187,7 +187,7 @@ doc = "Collect qualified findings without treating reported defects as an execut
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
 nodes = [
   { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } } },
-  { id = "synthesis", use = "synthesise", after = ["lenses"], require_findings = true, inputs = [{ node = "lenses", outputs = ["result", "findings"] }], brief = "Reconcile every review, retaining every qualified finding with its lens, severity, location, evidence and proposed_fix. End with VERDICT: PASS only when every lens passed and no blocker remains; otherwise VERDICT: FAIL." },
+  { id = "synthesis", use = "review.synthesis", after = ["lenses"], require_findings = true, inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
 ]
 
 [review-repair]

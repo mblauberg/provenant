@@ -454,7 +454,7 @@ fn parse_findings(
         for source in copies {
             let mut entry = entry.clone();
             if let Some(source) = source {
-                if entry.contains_key("disposition")
+                if (entry.contains_key("disposition") || entry.contains_key("verification"))
                     && !entry.contains_key("propagates")
                     && let Some(marker) = source.extra.get("propagates")
                 {
@@ -662,7 +662,7 @@ pub(super) fn valid_compacted_findings(
     };
     if block.len() > 16 * 1024
         || !outputs.findings.is_empty()
-        || plan.nodes[index].dispositions.is_empty()
+        || (plan.nodes[index].dispositions.is_empty() && !template::review_verifier(&plan.nodes[index]))
     {
         return false;
     }
@@ -1120,7 +1120,7 @@ pub(super) fn render_input(
     }
     let mut prompt = prefix(&node.prompt, cap).to_owned();
     let proof_dispositions =
-        if node.dispositions.is_empty() && node.role.as_deref() == Some("review.verify") {
+        if node.dispositions.is_empty() && template::review_verifier(node) {
             vec![
                 "upheld".to_owned(),
                 "falsified".to_owned(),

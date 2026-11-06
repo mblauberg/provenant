@@ -49,7 +49,7 @@ nodes = [
 ```
 
 A dynamic list comes from a patch or from a resolver named `@name` at launch:
-`over = "@review-panel"` replaces `ReviewSpec`, with the host choosing lenses from
+`over = "@review-panel"` selects the resolved panel, with the host choosing lenses from
 risk tier and tags.
 
 **One mutation path.** `admit_patch(graph, parent, patch)` is called by submission,
@@ -129,7 +129,7 @@ documents, not file paths.
 Deleted: `dispatch`, `review`, `lanes`, `resume`, `cancel`, `preset`, `fabric graph`,
 `fabric_graph`, `PRESET_INCOMPATIBLE`, the policy successors and tail chase (#2869),
 child stores, `pattern_plan.rs`, per-preset `[plan]`, `shape_stages`,
-`review_lenses`, and `ReviewSpec` in favour of a panel resolved at launch.
+`review_lenses`; review uses a panel resolved at launch.
 
 ## Consequences
 
