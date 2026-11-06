@@ -444,25 +444,27 @@ pub fn retry_node(
                 .filter(|node| node.id.starts_with(&prefix))
                 .map(|node| node.id.clone()),
         );
-        // Prior producer output remains immutable history. Re-running the producer
-        // admits its next generation; re-running its old children would duplicate work.
-        for expansion in &graph.checkpoint.expansions {
-            if reset_ids.contains(&expansion.source) {
-                for child in &expansion.nodes {
-                    reset_ids.remove(&child.id);
-                }
-            }
+        // A producer's old descendants cannot share names and dependency edges
+        // with a new execution. Until generations can be retired atomically,
+        // refuse this topology rather than replaying stale dynamic work.
+        if graph.checkpoint.expansions.iter().any(|expansion| {
+            !expansion.nodes.is_empty()
+                && (expansion.source == id || expansion.source.starts_with(&prefix))
+        }) {
+            return Err(PatchError::new(
+                "redo_dynamic_subtree",
+                "container retry requires retirement of its dynamic subtree",
+            ));
         }
     }
     for progress in &graph.checkpoint.nodes {
-        if (reset_ids.contains(&progress.id) || container && progress.id.starts_with(&prefix))
+        if reset_ids.contains(&progress.id)
             && progress
                 .attempts
                 .iter()
                 .any(|attempt| attempt.state != AttemptState::Terminal)
             && !(progress.state == NodeState::Skipped && progress.cancelled_from.is_some())
-            && !(progress.id == id
-                && progress.advance_error_code.as_deref() == Some("launch_refused"))
+            && !refused_before_launch(progress)
         {
             return Err(PatchError::invalid(
                 "node retry requires settled subtree attempts",
@@ -470,33 +472,7 @@ pub fn retry_node(
         }
     }
     let old = &graph.checkpoint.nodes[index];
-    // An explicit pre-launch refusal leaves its durable attempt in Starting.
-    // It has no process to stop; retain it as history without cancelling siblings.
-    // Uncertain handoffs and any evidence of an accepted launch still require custody.
-    let refused_before_launch = old.state == NodeState::Blocked
-        && old.advance_error_code.as_deref() == Some("launch_refused")
-        && old
-            .attempts
-            .iter()
-            .filter(|attempt| attempt.state != AttemptState::Terminal)
-            .all(|attempt| {
-                attempt
-                    .extra
-                    .get(PRELAUNCH_REFUSAL_PROOF)
-                    .and_then(Value::as_bool)
-                    == Some(true)
-                    && !attempt.launched
-                    && attempt.attempt_ref.is_none()
-                    && attempt.state == AttemptState::Starting
-            });
-    if !old.state.settled()
-        || (old
-            .attempts
-            .iter()
-            .any(|a| a.state != AttemptState::Terminal)
-            && !(refused_before_launch
-                || old.state == NodeState::Skipped && old.cancelled_from.is_some()))
-    {
+    if !old.state.settled() {
         return Err(PatchError::invalid(
             "node retry requires a settled node and attempts",
         ));
@@ -600,6 +576,28 @@ pub fn retry_node(
     asks::refresh_wake(&mut candidate);
     *graph.checkpoint = candidate;
     Ok(admitted)
+}
+
+// An explicit host-proven refusal leaves a Starting row but no process to
+// stop. Apply the same proof to the selected node and every reset descendant;
+// stale launch flags alone never establish that a handoff was not accepted.
+fn refused_before_launch(progress: &NodeProgress) -> bool {
+    progress.state == NodeState::Blocked
+        && progress.advance_error_code.as_deref() == Some("launch_refused")
+        && progress
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.state != AttemptState::Terminal)
+            .all(|attempt| {
+                attempt
+                    .extra
+                    .get(PRELAUNCH_REFUSAL_PROOF)
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                    && !attempt.launched
+                    && attempt.attempt_ref.is_none()
+                    && attempt.state == AttemptState::Starting
+            })
 }
 
 fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, PatchError> {
