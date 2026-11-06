@@ -3134,7 +3134,7 @@ impl Providers for Fake {
         }
         Ok(Default::default())
     }
-    fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), String> {
+    fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
         if self.policy_task == Some(task.task_id) {
             return Err("insufficient disk space; run `provenant gc`".into());
         }
@@ -8300,7 +8300,14 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             Ok(self.0)
         }
     }
-    for (writer, free) in [(true, 99), (true, 100), (false, 99), (false, 100)] {
+    for (writer, write_root, free) in [
+        (true, false, 99),
+        (true, false, 100),
+        (false, false, 99),
+        (false, false, 100),
+        (false, true, 99),
+        (false, true, 100),
+    ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -8320,12 +8327,16 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             admission_seconds: 1,
             ..Default::default()
         });
-        let run = lane(98, writer);
+        let mut run = lane(98, writer);
+        if write_root {
+            run.request.tasks[0].access.write_roots = vec![temp.path().canonicalize()?];
+        }
+        let has_writes = writer || write_root;
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
         let record = store.record(id, &call)?;
         let waits = store.lane_waits_with_resources(&[record], &call, &Disk(free));
-        if writer && free < 100 {
+        if has_writes && free < 100 {
             assert_eq!(
                 waits[0].waiting_for,
                 "host capacity: disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration)"
@@ -8337,7 +8348,7 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             );
         }
         let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
-        if writer && free < 100 {
+        if has_writes && free < 100 {
             // Status sees a healthy attempt volume, but the guardian sampled
             // a full cwd/cache volume through its sealed LaneResources.
             let record = store.record(id, &call)?;
@@ -8347,7 +8358,7 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
                 "host capacity: disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration)"
             );
         }
-        if !writer || free == 100 {
+        if !has_writes || free == 100 {
             assert_eq!(
                 result?.state,
                 AttemptState::Running {
@@ -9671,5 +9682,175 @@ fn admission_wait_reason_names_the_reached_writer_cap() -> TestResult {
         waits[0].waiting_for,
         "host capacity: host writer lanes: 1 of 1 active"
     );
+    Ok(())
+}
+
+#[test]
+fn read_only_disk_floor_warning_is_emitted_once_by_admit() -> TestResult {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
+    use std::{ffi::OsString, time::Duration};
+    const CHILD: &str = "PROVENANT_TEST_ADMISSION_WARNING";
+    if std::env::var_os(CHILD).is_none() {
+        let temp = tempfile::tempdir()?;
+        let argv: Vec<OsString> = vec![
+            std::env::current_exe()?.into(),
+            "--exact".into(),
+            "dispatch_tests::read_only_disk_floor_warning_is_emitted_once_by_admit".into(),
+            "--nocapture".into(),
+        ];
+        let env = [(CHILD.into(), "1".into())];
+        let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(10));
+        options.env = Some(&env);
+        options.stdout = StreamPolicy::Capture { limit: 8192 };
+        options.stderr = StreamPolicy::Capture { limit: 8192 };
+        let output = SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+        let stderr = String::from_utf8(output.stderr.bytes)?;
+        assert_eq!(
+            stderr.matches("admission warning [DISK_FLOOR]").count(),
+            1,
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "99 bytes available; gc.free_floor is 100 bytes (source: host configuration)"
+            ),
+            "{stderr}"
+        );
+        assert!(stderr.contains("read-only lane is proceeding"), "{stderr}");
+        assert!(stderr.contains("provenant gc --apply"), "{stderr}");
+        return Ok(());
+    }
+    struct LowDisk {
+        facts: HostFacts,
+        probes: Cell<u32>,
+    }
+    impl Resources for LowDisk {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            self.facts.memory()
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(99)
+        }
+        fn observe_process(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            self.facts.observe_process(pid)
+        }
+        fn guardian_identity(&self) -> Option<provenant_supervisor::census::ProcessIdentity> {
+            self.facts.guardian_identity()
+        }
+        fn process_budget(&self) -> std::io::Result<provenant_os::sys::resources::ProcessBudget> {
+            let probes = self.probes.get() + 1;
+            self.probes.set(probes);
+            // Hold admission across several probes to prove the warning is once.
+            Ok(provenant_os::sys::resources::ProcessBudget {
+                used: if probes < 3 { 100 } else { 0 },
+                limit: 100,
+            })
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let registry = temp.path().canonicalize()?.join("registry");
+    std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
+    std::fs::write(
+        registry.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='100B'\n",
+    )?;
+    let store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
+    let run = lane(99, false);
+    let id = starting(&store, &run, &call)?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let probe = LowDisk {
+        facts: HostFacts::new(100),
+        probes: Cell::new(0),
+    };
+    let admitted = store.admit(id, &attempt, &probe, &clock, &cancel)?;
+    assert!(matches!(admitted.state, AttemptState::Running { .. }));
+    assert!(probe.probes.get() >= 3);
+    Ok(())
+}
+
+#[test]
+fn prepared_write_grants_hold_admission_on_the_disk_floor() -> TestResult {
+    use provenant_records::run::WriteSource;
+    for (source, writable) in [
+        (WriteSource::WriteRoot, true),
+        (WriteSource::ToolWrite, true),
+        (WriteSource::ReadOnlyException, true),
+        (WriteSource::LaneCache, true),
+        (WriteSource::StateWrite, false),
+        (WriteSource::CredentialWrite, false),
+        (WriteSource::PrivateState, false),
+        (WriteSource::Scratch, false),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let registry = temp.path().canonicalize()?.join("registry");
+        std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
+        std::fs::write(
+            registry.join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='100B'\n",
+        )?;
+        let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..Default::default()
+        });
+        let run = lane(97, false);
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        let grants = admission::AppliedWriteGrants {
+            grants: vec![WriteGrantRecord {
+                extra: Default::default(),
+                source,
+                path: provenant_records::AbsolutePath::new(temp.path())?,
+                scope: PathScope::Subtree,
+            }],
+            ..Default::default()
+        };
+        let record = store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &grants,
+            None,
+            &call,
+        )?;
+        let mut facts = HostFacts::new(100);
+        facts.disk = 99;
+        let waits = store.lane_waits_with_resources(&[record], &call, &facts);
+        assert_eq!(
+            waits[0].lane_class,
+            if writable {
+                LaneClass::Writer
+            } else {
+                LaneClass::ReadOnly
+            }
+        );
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let result = store.admit(id, &attempt, &facts, &clock, &cancel);
+        if writable {
+            assert!(
+                matches!(
+                    result,
+                    Err(RunError::Admission(AdmissionError::Disk {
+                        free: 99,
+                        floor: 100,
+                        ..
+                    }))
+                ),
+                "{source:?}: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result?.state, AttemptState::Running { .. }),
+                "{source:?}"
+            );
+        }
+    }
     Ok(())
 }

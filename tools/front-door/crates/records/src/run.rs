@@ -790,6 +790,8 @@ pub enum TerminalCause {
     AccountLoginRequired,
     RouteResolutionRefused,
     AccessPolicyRefused,
+    DiskFloor,
+    DiskObservationUnavailable,
     StoredPromptUnreadable,
     WriteGrantsRefused,
     WorktreeBusy,
@@ -820,6 +822,12 @@ impl TerminalCause {
             }
             Self::RouteResolutionRefused => {
                 "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"
+            }
+            Self::DiskFloor => {
+                "the host writer disk precheck refused launch below gc.free_floor; free disk space or run `provenant gc --apply` before retrying"
+            }
+            Self::DiskObservationUnavailable => {
+                "the host writer disk precheck could not observe free space; restore the host disk observation before retrying"
             }
             Self::AccessPolicyRefused => {
                 "launch access policy refused the lane; correct the request and declared access grants before retrying"

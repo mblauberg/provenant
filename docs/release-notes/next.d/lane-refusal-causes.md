@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- Rejected lanes retain a typed launch refusal cause and safe guidance, including exact-model requests with no skipped routes, instead of only a generic refusal.
+- Launch preparation refusals retain a typed cause and safe guidance, including exact-model requests with no skipped routes. Writer disk refusals name disk pressure and how to restore space; unrelated rejections keep their generic diagnostic.

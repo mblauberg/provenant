@@ -8955,45 +8955,81 @@ fn malformed_claude_result_preserves_provider_error_in_settlement() {
 
 #[test]
 fn lane_listing_omits_large_grants_but_id_retains_them() -> Result<(), Box<dyn std::error::Error>> {
-    let mut lane = lane_fixture(
-        1,
-        1,
-        run::AttemptState::Queued {
-            extra: Default::default(),
+    use std::ffi::OsString;
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let grants: Vec<run::WriteGrantRecord> = (0..600).map(|index| {
+            serde_json::from_value(json!({
+                "source": "tool_write",
+                "path": {"relative_to_root": {"encoding":"utf8", "path": format!("home/fixture/.cache/build/{index}/{}output", "directory/".repeat(8))}},
+                "scope":"subtree"
+            }))
+        }).collect::<Result<_, _>>()?;
+            let database = rusqlite::Connection::open(
+                session.context.state_root.as_path().join("run.sqlite3"),
+            )?;
+            let mut selected = None;
+            for number in 1..=25 {
+                let prepared =
+                    trace_run(number, AttemptId::from_bytes([99; 16]), clock.wall_now()?)?;
+                session.store.create(&prepared, &call)?;
+                let mut lane = session
+                    .store
+                    .record(prepared.attempts[0].attempt_id, &call)?;
+                lane.write_grants = grants.clone();
+                // Seed retained launch evidence without starting 25 native providers.
+                // The command still opens the store and reads its ordinary lane query.
+                assert_eq!(
+                    database.execute(
+                        "UPDATE attempts SET record=?1 WHERE id=?2",
+                        rusqlite::params![serde_json::to_vec(&lane)?, lane.attempt_id.to_string()]
+                    )?,
+                    1
+                );
+                selected = Some(Target {
+                    selection: None,
+                    run: Some(lane.run_id),
+                    task: None,
+                    attempt: Some(lane.attempt_id),
+                });
+            }
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(
+                ["lanes", "--all", "--limit", "25"]
+                    .into_iter()
+                    .map(OsString::from),
+            ) else {
+                return Err("parse lanes failed".into());
+            };
+            let crate::Command::Lanes(mut command) = invocation.command else {
+                return Err("not lanes".into());
+            };
+            let (listing, _, _) = status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
+                .map_err(|fail| fail.message)?;
+            let rows = listing["lanes"].as_array().ok_or("listing rows")?;
+            assert_eq!(rows.len(), 25);
+            assert!(rows.iter().all(|row| row.get("write_grants").is_none()));
+            assert!(serde_json::to_vec(&listing)?.len() < 1024 * 1024);
+
+            command.id = vec![selected.ok_or("selected lane")?];
+            let (detail, _, _) = status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
+                .map_err(|fail| fail.message)?;
+            let rows = detail["lanes"].as_array().ok_or("detail rows")?;
+            assert_eq!(rows.len(), 1);
+            let retained = rows[0]["write_grants"].as_array().ok_or("detail grants")?;
+            assert_eq!(retained.len(), grants.len());
+            assert!(retained.iter().all(|grant| grant["path"].is_object()));
+            assert!(
+                serde_json::to_vec(retained)?.len() * 25 > 1024 * 1024,
+                "grant evidence alone must reproduce the oversized page"
+            );
+            Ok(())
         },
-    )?;
-    lane.write_grants = (0..600).map(|index| {
-        serde_json::from_value(json!({
-            "source": "tool_write",
-            "path": {"relative_to_root": {"encoding":"utf8", "path": format!("home/fixture/.cache/build/{index}/{}output", "directory/".repeat(8))}},
-            "scope":"subtree"
-        }))
-    }).collect::<Result<_, _>>()?;
-    let lanes = vec![lane.clone(); 25];
-    let (mut data, _) = render_lanes(&lanes, &[], None, Path::new("/state"), None);
-    let full_bytes = serde_json::to_vec(&data)?.len();
-    assert!(
-        full_bytes > 1024 * 1024,
-        "fixture must reproduce the oversized listing: {full_bytes}"
-    );
-    let grants = data["lanes"][0]["write_grants"].clone();
-    assert!(serde_json::to_vec(&grants)?.len() * 25 > 1024 * 1024);
-    let targets = [Target {
-        selection: None,
-        run: Some(lane.run_id),
-        task: None,
-        attempt: Some(lane.attempt_id),
-    }];
-    status::omit_listing_write_grants(&targets, &mut data);
-    assert_eq!(data["lanes"][0]["write_grants"], grants);
-    status::omit_listing_write_grants(&[], &mut data);
-    assert!(
-        data["lanes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row.get("write_grants").is_none())
-    );
-    assert!(serde_json::to_vec(&data)?.len() < 1024 * 1024);
-    Ok(())
+    )?
 }

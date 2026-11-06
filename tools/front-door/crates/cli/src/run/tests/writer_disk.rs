@@ -279,3 +279,53 @@ fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn st
     assert!(!base.join("missing").exists());
     Ok(())
 }
+
+#[test]
+fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(), String> {
+    use provenant_records::run::TerminalCause;
+    let settings = provenant_config::GcSettings {
+        free_floor: Some("100B".into()),
+        ..Default::default()
+    };
+    let check = check_writer_disk_with(
+        &settings,
+        Path::new("/state"),
+        Path::new("/worktree"),
+        Path::new("/home"),
+        |_| Ok(99),
+    )
+    .err()
+    .ok_or("writer accepted insufficient disk")?;
+    let refusal = writer_disk_policy_refusal(check);
+    assert_eq!(refusal.terminal_cause, Some(TerminalCause::DiskFloor));
+    assert_eq!(
+        refusal.terminal_note.as_deref(),
+        Some(
+            "99 bytes available; gc.free_floor is 100 bytes (source: host configuration); bounded GC reported 0 bytes reclaimed"
+        )
+    );
+    assert!(
+        TerminalCause::DiskFloor
+            .reason()
+            .contains("provenant gc --apply")
+    );
+    assert!(!TerminalCause::DiskFloor.reason().contains("access grants"));
+    let unobserved =
+        writer_disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
+    assert_eq!(
+        unobserved.terminal_cause,
+        Some(TerminalCause::DiskObservationUnavailable)
+    );
+    assert!(unobserved.terminal_note.is_none());
+    assert!(
+        !TerminalCause::DiskObservationUnavailable
+            .reason()
+            .contains("HOST_ERROR_SENTINEL")
+    );
+    assert!(
+        TerminalCause::DiskObservationUnavailable
+            .reason()
+            .contains("restore the host disk observation")
+    );
+    Ok(())
+}

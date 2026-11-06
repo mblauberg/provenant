@@ -556,6 +556,8 @@
                       "account_login_required",
                       "route_resolution_refused",
                       "access_policy_refused",
+                      "disk_floor",
+                      "disk_observation_unavailable",
                       "stored_prompt_unreadable",
                       "write_grants_refused",
                       "worktree_busy",

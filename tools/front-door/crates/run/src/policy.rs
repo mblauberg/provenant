@@ -487,11 +487,7 @@ impl RunStore {
         self.queue_ticket(
             tx,
             next,
-            if task.writer.is_some() {
-                LaneClass::Writer
-            } else {
-                LaneClass::ReadOnly
-            },
+            Service::lane_class(task.writer.is_some(), &task.access.write_roots, &[]),
             request.concurrency,
             crate::admission::Allowance {
                 queue_seconds: wait_seconds,

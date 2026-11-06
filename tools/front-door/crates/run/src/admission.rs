@@ -822,6 +822,21 @@ impl RunStore {
                 return Err(RunError::Conflict);
             }
             let mut ticket = self.ticket(tx, id)?;
+            let class = Service::lane_class(
+                ticket.lane_class == LaneClass::Writer,
+                &[],
+                &write_grants.grants,
+            );
+            if class != ticket.lane_class {
+                // Preparation may reveal tool grants or project exceptions
+                // absent from the submitted task. Promote before any claim.
+                ticket.lane_class = class;
+                ticket.startup_spacing_ms =
+                    provenant_config::LaneBuildSettings::read(&self.writer_registry)
+                        .unwrap_or_default()
+                        .start_spacing_ms
+                        .unwrap_or_else(|| self.policy.spacing_ms(class));
+            }
             let mut next = old.clone();
             next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
             next.generation = next.generation.checked_add(1).ok_or(RunError::Conflict)?;

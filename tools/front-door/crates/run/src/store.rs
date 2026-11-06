@@ -637,7 +637,7 @@ impl RunStore {
                 insert_event(tx, &attempt)?;
                 let local_index = input.request.tasks[..index].iter().filter(|task| task.cloud.is_none()).count() as u64;
                 let waves = local_index / input.request.concurrency.max(1);
-                let class = if task.writer.is_some() { LaneClass::Writer } else { LaneClass::ReadOnly };
+                let class = Service::lane_class(task.writer.is_some(), &task.access.write_roots, &[]);
                 if task.cloud.is_none() {
                     self.queue_ticket(tx, &attempt, class, input.request.concurrency, crate::admission::Allowance { queue_seconds: waves.saturating_mul(task.provider_timeout_seconds), runtime_seconds: task.provider_timeout_seconds }, disk_floor_bytes)?;
                 }
@@ -888,10 +888,6 @@ impl RunStore {
         ) {
             return Err(RunError::Validation("withdrawal outcome"));
         }
-        // A rejection must remain actionable even when an older preparation
-        // seam supplies only a display message. That message is never projected.
-        let terminal_cause = terminal_cause
-            .or((outcome == Outcome::Rejected).then_some(TerminalCause::PreparationRefused));
         let defer_writer_cleanup = matches!(expected, AttemptState::Starting { .. });
         let old = self.record(id, call)?;
         let dir = self.run_dir(old.run_id, false)?;

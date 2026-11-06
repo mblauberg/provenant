@@ -425,9 +425,12 @@ impl RunStore {
         let prompt = output_prompt(&base, &attempt.prompt);
         let plan = providers
             .check_policy(task)
-            .map_err(|message| RunError::Input {
-                kind: ErrorKind::ContinuationUnsupported,
-                message,
+            .map_err(|error| match error.terminal_cause {
+                Some(cause) => RunError::ContinuationRefused { cause },
+                None => RunError::Input {
+                    kind: ErrorKind::ContinuationUnsupported,
+                    message: error.to_string(),
+                },
             })
             .and_then(|()| {
                 providers
@@ -523,7 +526,7 @@ pub trait Providers {
     }
     /// Host policy checks before provider preparation. A refusal is task-local;
     /// no provider is prepared and siblings remain eligible to launch.
-    fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), String> {
+    fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
         Ok(())
     }
     /// Prepare one task, trying its fallback routes in order. An error is a
@@ -1772,11 +1775,7 @@ impl RunStore {
             let prepared = providers
                 .check_policy(task)
                 .map(|()| priority)
-                .map_err(|reason| {
-                    let mut refusal = PrepareRefusal::from(reason);
-                    refusal.terminal_cause = Some(TerminalCause::AccessPolicyRefused);
-                    (RefusalKind::Policy, Box::new(refusal))
-                })
+                .map_err(|refusal| (RefusalKind::Policy, Box::new(refusal)))
                 .and_then(|priority| {
                     providers
                         .prepare(
@@ -1809,10 +1808,7 @@ impl RunStore {
                             .or(Some(if outcome == Outcome::AuthRequired {
                                 TerminalCause::AccountLoginRequired
                             } else {
-                                match kind {
-                                    RefusalKind::Policy => TerminalCause::AccessPolicyRefused,
-                                    _ => TerminalCause::PreparationRefused,
-                                }
+                                TerminalCause::PreparationRefused
                             }));
                     let terminal_note = refusal.terminal_note.or_else(|| {
                         refusal.skipped_routes.first().map(|route| {

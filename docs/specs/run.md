@@ -376,8 +376,10 @@ On macOS, Critical kernel memory pressure defers both classes by default.
 `domains.fabric.lanes.memory_pressure_threshold` accepts `critical`, `warning`
 (Warning or Critical) or `never`. An unavailable or unknown pressure sample is
 logged. Low available memory warns on both classes without holding admission.
-The disk floor holds writers; read-only lanes below it warn once with free space,
-the floor and its source, then proceed. Build slots do not gate
+The disk floor holds lanes with write authority, including declared write roots
+and prepared tool or project write grants. Lanes limited to provider bookkeeping
+and private scratch warn once below it with free space, the floor and its source,
+then proceed. Build slots do not gate
 admission: a host-wide build throttle (not a hard cap), by default
 max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) slots, gates each
 compiling cargo command a lane runs (`provenant_os::build_slots`, reached
@@ -403,8 +405,10 @@ reported as a typed refusal.
 Both identity fields are required on every lease. Earlier lease schemas were
 never installed; upgrades retain spacing but discard their lease rows.
 
-Each ticket and host ledger lease records a lane class: `writer` for a
-`worktree-write` lane, `read_only` for every other. Startup spacing is per
+Each ticket and host ledger lease records a lane class: `writer` for a lane
+with write authority (`worktree-write`, declared write roots, or prepared tool or
+project write grants), `read_only` for lanes limited to provider bookkeeping and
+private scratch. Preparation promotes a ticket when it adds write authority. Startup spacing is per
 class and defaults to zero for both classes. `[domains.fabric.lanes] start_spacing_ms`
 sets the spacing in milliseconds for both classes, measured against the last
 start of the same class. A read-only lane never waits behind a writer.
@@ -427,7 +431,8 @@ judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
 `lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
 memory floor (5 %) warns for both classes; the live `gc.free_floor` disk floor
-can refuse writers; read-only lanes below it warn once and proceed.
+can refuse any lane with write authority; lanes limited to provider bookkeeping
+and private scratch warn once below it and proceed.
 The disk default is 10 % of the state volume, with a 50 GiB minimum. A ticket with no class is a writer; opening a version 1 ledger upgrades it in
 place, in one transaction, carrying any wall-time start across as a start of now under the current boot
 for each class, whatever its age and without reading the wall clock, so the
