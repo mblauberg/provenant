@@ -1297,6 +1297,99 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn finished_writer_record_does_not_block_its_worktree_shell() -> Result<(), Box<dyn Error>> {
+    struct Shell;
+    impl WorkerObserver for Shell {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, Occupancy::Observed { process: None }))
+                .collect()
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let path = fixture.root.join(".worktrees/finished-writer");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "finished-writer",
+        path.to_str().ok_or("path")?,
+    ])?;
+    let slot = writer_directory(context.project_state, &path)?;
+    let previous = provenant_supervisor::custody::Scope {
+        run: provenant_core::RunId::from_bytes([21; 16]),
+        attempt: provenant_core::AttemptId::from_bytes([22; 16]),
+        generation: 1,
+    };
+    let clock = context.clock;
+    let acquire = |scope| {
+        provenant_supervisor::fixture::acquire_writer(
+            slot.try_clone()?,
+            scope,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel(),
+            clock,
+        )
+    };
+    let first = acquire(previous)?;
+    let tree = verify_worktree(&fixture.repo, &path)?;
+    let prior = WorktreeOwner {
+        attempt_id: Some(previous.attempt),
+        operation_id: Some("previous-writer".parse()?),
+        branch: "finished-writer".into(),
+        base: fixture.head()?.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    save_owner(&tree, &prior)?;
+    let record = slot
+        .current_path()?
+        .join(previous.attempt.to_string())
+        .join("reservation.json");
+    let bytes = fs::read(&record)?;
+    drop(first);
+    context.workers = &Shell;
+    let lane = list(&context, &cancel())?
+        .into_iter()
+        .find(|lane| lane.path == path)
+        .ok_or("lane")?;
+    assert!(matches!(lane.occupancy, Occupancy::Observed { .. }));
+    let owner = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("finished-writer-claim".parse()?),
+        branch: "finished-writer".into(),
+        base: lane.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    save_lane_owner_when_free(
+        &context,
+        &tree,
+        &owner,
+        lane.head,
+        Some(&prior),
+        true,
+        &cancel(),
+    )?;
+    let successor = provenant_supervisor::custody::Scope {
+        run: provenant_core::RunId::from_bytes([23; 16]),
+        attempt: provenant_core::AttemptId::from_bytes([24; 16]),
+        generation: 1,
+    };
+    let _second = acquire(successor)?;
+    assert_eq!(fs::read(record)?, bytes);
+    Ok(())
+}
+
+#[test]
 fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
