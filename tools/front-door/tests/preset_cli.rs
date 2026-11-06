@@ -228,6 +228,33 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
         .collect();
     let library = provenant_fabric_runtime::graph::TemplateLibrary::bundled();
     assert_eq!(names, library.names().collect::<Vec<_>>());
+    let directory =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/fabric-runtime/assets/templates");
+    let mut expected = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(&directory)? {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .ok_or("template filename")?;
+        if name == "composites" {
+            let composites: std::collections::BTreeMap<String, Value> =
+                toml_edit::de::from_str(&std::fs::read_to_string(path)?)?;
+            expected.extend(composites.into_keys());
+        } else {
+            expected.insert(name.to_owned());
+        }
+    }
+    assert_eq!(
+        names
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected.iter().map(String::as_str).collect()
+    );
     for entry in listed {
         let name = entry["name"].as_str().ok_or("template name")?;
         let (output, shown) = rig.run(&["templates", name])?;
@@ -285,6 +312,53 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
         explained["data"]["document"]["integration_branch"],
         "batch/example"
     );
+    Ok(())
+}
+
+#[test]
+fn review_shape_selects_the_expected_template_nodes() -> Result {
+    fn ids(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(id) = map.get("id").and_then(Value::as_str) {
+                    out.push(id.to_owned());
+                }
+                for child in map.values() {
+                    ids(child, out);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    ids(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let rig = GraphProject::new()?;
+    for (risk, expected) in [("routine", false), ("substantial", true), ("crucial", true)] {
+        let path = rig.document(&json!({
+            "context": {"risk_tier": risk},
+            "nodes": [{"id":"review", "use":"review-panel"}]
+        }))?;
+        let output = rig
+            .command()
+            .args(["run", "--file"])
+            .arg(path)
+            .arg("--explain")
+            .output()?;
+        let result: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(output.status.success(), "{risk}: {result}");
+        let mut found = Vec::new();
+        ids(&result["data"]["document"], &mut found);
+        for stage in ["frame", "verify", "synthesis"] {
+            assert_eq!(
+                found.iter().any(|id| id == stage),
+                expected,
+                "{risk}: {stage}"
+            );
+        }
+    }
     Ok(())
 }
 

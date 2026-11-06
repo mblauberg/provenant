@@ -157,6 +157,8 @@ fn over_binds_item_in_overrides_and_resolves_named_lists() {
 fn review_panel_binds_per_lens_resolver_values() {
     let library = library();
     let resolvers = BTreeMap::from([
+        ("review-topology".to_owned(), vec!["f1-v1-s1".to_owned()]),
+        ("review-verifiers".to_owned(), vec!["1".to_owned()]),
         (
             "review-panel".to_owned(),
             vec!["security".to_owned(), "tests".to_owned()],
@@ -174,11 +176,96 @@ fn review_panel_binds_per_lens_resolver_values() {
     let node = compiler
         .compile(&json!({"id":"panel", "use":"review-panel"}))
         .unwrap();
+    document(vec![node.clone()]).admit(&limits()).unwrap();
     let panel = node.composite.unwrap();
-    let lenses = &panel.nodes[0].composite.as_ref().unwrap().nodes;
+    let selected = panel.nodes[0].composite.as_ref().unwrap();
+    let shape = selected.nodes[0].composite.as_ref().unwrap();
+    let group = shape.nodes.iter().find(|node| node.id == "lenses").unwrap();
+    let lenses = &group.composite.as_ref().unwrap().nodes;
     assert!(!lenses[0].prompt.contains("mutation guidance"));
     assert!(lenses[1].prompt.contains("mutation guidance"));
-    let missing = BTreeMap::from([("review-panel".to_owned(), vec!["tests".to_owned()])]);
+    assert_eq!(group.depends_on, ["frame"]);
+    let verify = shape.nodes.iter().find(|node| node.id == "verify").unwrap();
+    assert_eq!(verify.depends_on, ["lenses"]);
+    let synthesis = shape
+        .nodes
+        .iter()
+        .find(|node| node.id == "synthesis")
+        .unwrap();
+    assert!(synthesis.depends_on.iter().any(|id| id == "verify"));
+    for frame in [0, 1] {
+        for verifier in [0, 1] {
+            for synthesis in [0, 1] {
+                let mut selected = resolvers.clone();
+                selected.insert(
+                    "review-topology".into(),
+                    vec![format!("f{frame}-v{verifier}-s{synthesis}")],
+                );
+                let node = Compiler {
+                    library: &library,
+                    resolvers: &selected,
+                }
+                .compile(&json!({"id":"panel", "use":"review-panel"}))
+                .unwrap();
+                let document = document(vec![node]);
+                document.admit(&limits()).unwrap();
+                let expanded = document.expanded(&limits()).unwrap();
+                for (stage, expected) in [
+                    ("frame", frame),
+                    ("verify", verifier),
+                    ("synthesis", synthesis),
+                ] {
+                    assert_eq!(
+                        expanded
+                            .nodes
+                            .iter()
+                            .any(|node| node.id.ends_with(&format!("--{stage}"))),
+                        expected == 1,
+                        "{frame}/{verifier}/{synthesis}: {stage}"
+                    );
+                }
+            }
+        }
+    }
+    let mut two = resolvers.clone();
+    two.insert("review-verifiers".into(), vec!["1".into(), "2".into()]);
+    let node = Compiler {
+        library: &library,
+        resolvers: &two,
+    }
+    .compile(&json!({"id":"panel", "use":"review-panel"}))
+    .unwrap();
+    let panel = node.composite.unwrap();
+    let selected = panel.nodes[0].composite.as_ref().unwrap();
+    let shape = selected.nodes[0].composite.as_ref().unwrap();
+    let verifier = shape.nodes.iter().find(|node| node.id == "verify").unwrap();
+    assert_eq!(verifier.composite.as_ref().unwrap().nodes.len(), 2);
+    let mut single = resolvers.clone();
+    single.insert("review-topology".into(), vec!["f0-v0-s0".into()]);
+    single.insert("review-panel".into(), vec!["tests".into()]);
+    let mut node = Compiler {
+        library: &library,
+        resolvers: &single,
+    }
+    .compile(&json!({"id":"panel", "use":"review-panel"}))
+    .unwrap();
+    node.source = Some(SourceBinding::Commit {
+        commit: "0123456789abcdef0123456789abcdef01234567".into(),
+    });
+    let expanded = document(vec![node]).expanded(&limits()).unwrap();
+    let leaves: Vec<_> = expanded
+        .nodes
+        .iter()
+        .filter(|node| node.composite.is_none())
+        .collect();
+    assert_eq!(leaves.len(), 1);
+    assert!(
+        matches!(&leaves[0].source, Some(SourceBinding::Commit { commit }) if commit == "0123456789abcdef0123456789abcdef01234567")
+    );
+    let missing = BTreeMap::from([
+        ("review-topology".to_owned(), vec!["f0-v0-s0".to_owned()]),
+        ("review-panel".to_owned(), vec!["tests".to_owned()]),
+    ]);
     assert!(
         Compiler {
             library: &library,
@@ -397,6 +484,8 @@ fn review_templates_record_the_raising_lens() {
 fn delivery_templates_admit_bounded_review_repairs() {
     let bundled = library();
     let resolvers = BTreeMap::from([
+        ("review-topology".to_owned(), vec!["f1-v1-s1".to_owned()]),
+        ("review-verifiers".to_owned(), vec!["1".to_owned()]),
         (
             "review-panel".to_owned(),
             vec!["security".to_owned(), "tests".to_owned()],
