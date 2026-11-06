@@ -402,10 +402,10 @@ never installed; upgrades retain spacing but discard their lease rows.
 
 Each ticket and host ledger lease records a lane class: `writer` for a
 `worktree-write` lane, `read_only` for every other. Startup spacing is per
-class and measured only against the last start of that class: writers wait 20 s
-after the last writer start, and read-only lanes wait 2 s after the last
-read-only start, so a burst of provider launches is still staggered but a
-read-only lane never waits behind a writer. Spacing is measured on the host's
+class and defaults to zero for both classes. `[domains.fabric.lanes] start_spacing_ms`
+sets the spacing in milliseconds for both classes, measured against the last
+start of the same class. A read-only lane never waits behind a writer.
+Build slots (`provenant_os::build_slots`) remain the gate for heavy runs. Spacing is measured on the host's
 monotonic clock since boot (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME` on
 Linux, both counting sleep), never the wall clock. Every process on the host
 shares that clock, and the ledger records each class's last start as a reading
@@ -441,8 +441,9 @@ has.
 
 `lanes` shows each queued or starting lane's `lane_class` and `waiting_for`,
 and uses the latter as its reason: launch not yet handed to a guardian, run
-concurrency, the class's remaining startup spacing, or otherwise host
-capacity. It reads the store and host ledger, from a nested lane too, and names only a wait it can see. `lanes --host` and the other peer
+concurrency, the class's remaining configured startup spacing, or a measured host
+limit. A reached lane cap names its scope and active and limit counts. When no
+check is failing, the reason says `launch preparation: preparing the lane`. It reads the store and host ledger, from a nested lane too, and names only a wait it can see. `lanes --host` and the other peer
 listings show the same two fields: the peer derives them from its own store and
 ledger (peer action `lane_waits`) and an older peer that does not know the
 action simply shows none.

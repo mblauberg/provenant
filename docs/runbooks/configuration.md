@@ -177,9 +177,9 @@ too; a preset does not. An explicit `--concurrency N` (1 to 16) or Fabric
 `concurrency` wins for either. The `economy` preset sets 4 and 8 respectively.
 
 Batch concurrency is separate from host admission. Each lane has a class, and
-spacing is measured only against the last start of the same class: writers
-wait 20 s after the last writer start, read-only lanes 2 s after the last
-read-only start, so a read-only lane never waits behind a writer. Within one
+spacing defaults to zero. Set `[domains.fabric.lanes] start_spacing_ms` to
+space starts of both classes in milliseconds. Spacing is measured against
+the last start of the same class, so a read-only lane never waits behind a writer. Within one
 boot no two lanes of a class start less than one spacing apart, however the
 wall clock changes; a reboot resets spacing, except that the one-time upgrade
 of a version 1 ledger that recorded a start holds each class for one spacing.

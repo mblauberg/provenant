@@ -22,6 +22,7 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 
 | Key | Default | Effect |
 |---|---|---|
+| `start_spacing_ms` | 0 | Milliseconds between starts of the same lane class, for both writers and read-only lanes. Build slots gate heavy runs independently. (0 or more). |
 | `memory_pressure_threshold` | critical | Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The memory and disk floors still apply. (critical, warning or never). |
 | `max_concurrent_builds` | max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) | A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated. (1 to 64 or -1 for auto). |
 | `build_wait_minutes` | 30 | Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error. (1 to 1440 or -1 for auto). |

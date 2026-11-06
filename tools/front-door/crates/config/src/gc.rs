@@ -31,6 +31,8 @@ impl MemoryPressureThreshold {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaneBuildSettings {
+    /// Milliseconds between starts of the same class; zero unless configured.
+    pub start_spacing_ms: Option<u64>,
     /// Kernel pressure threshold for admission; Critical unless set.
     pub memory_pressure_threshold: MemoryPressureThreshold,
     #[serde(default, deserialize_with = "deserialize_auto")]
