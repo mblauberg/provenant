@@ -559,8 +559,8 @@ pub struct LaunchConfinement {
 }
 struct ResolvedLaunchLimits {
     limits: ProfileLimits,
-    grant_origin: &'static str,
-    profile_origin: &'static str,
+    grant_origin: provenant_records::diagnostic::SettingSource,
+    profile_origin: provenant_records::diagnostic::SettingSource,
 }
 
 impl ResolvedLaunchLimits {
@@ -586,9 +586,9 @@ fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
         Ok((config, keys)) => {
             let origin = |key: &str| {
                 if keys.contains(key) {
-                    "host configuration"
+                    provenant_records::diagnostic::SettingSource::Configuration
                 } else {
-                    "compiled default"
+                    provenant_records::diagnostic::SettingSource::ShippedDefault
                 }
             };
             ResolvedLaunchLimits {
@@ -610,8 +610,8 @@ fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
             );
             ResolvedLaunchLimits {
                 limits: defaults,
-                grant_origin: "compiled default",
-                profile_origin: "compiled default",
+                grant_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                profile_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
             }
         }
     }
@@ -2514,12 +2514,18 @@ mod launch_resource_limit_tests {
         let limits = launch_resource_limits(state.path());
         let defaults = ProfileLimits::default();
         assert_eq!(limits.limits.grant_limit, defaults.grant_limit);
-        assert_eq!(limits.grant_origin, "compiled default");
+        assert_eq!(
+            limits.grant_origin,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
         assert_eq!(
             limits.limits.profile_limit_bytes,
             defaults.profile_limit_bytes
         );
-        assert_eq!(limits.profile_origin, "compiled default");
+        assert_eq!(
+            limits.profile_origin,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
         let default_error = limits.annotate(
             provenant_confinement::permissions::PermissionError::GrantLimitExceeded {
                 family: "fixture",
@@ -2536,17 +2542,29 @@ mod launch_resource_limit_tests {
             "schema_version=1\n[domains.run]\ngrant_limit=128\n",
         )?;
         let explicit_default = launch_resource_limits(state.path());
-        assert_eq!(explicit_default.grant_origin, "host configuration");
-        assert_eq!(explicit_default.profile_origin, "compiled default");
+        assert_eq!(
+            explicit_default.grant_origin,
+            provenant_records::diagnostic::SettingSource::Configuration
+        );
+        assert_eq!(
+            explicit_default.profile_origin,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
         std::fs::write(
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=256\nprofile_limit_bytes=1048576\n",
         )?;
         let configured = launch_resource_limits(state.path());
         assert_eq!(configured.limits.grant_limit, 256);
-        assert_eq!(configured.grant_origin, "host configuration");
+        assert_eq!(
+            configured.grant_origin,
+            provenant_records::diagnostic::SettingSource::Configuration
+        );
         assert_eq!(configured.limits.profile_limit_bytes, 1048576);
-        assert_eq!(configured.profile_origin, "host configuration");
+        assert_eq!(
+            configured.profile_origin,
+            provenant_records::diagnostic::SettingSource::Configuration
+        );
         let configured_error = configured.annotate(
             provenant_confinement::permissions::PermissionError::ProfileTooLarge {
                 bytes: 2,

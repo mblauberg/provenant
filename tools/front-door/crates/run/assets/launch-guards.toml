@@ -28,12 +28,14 @@ reason = "Unreadable or invalid resource settings warn and use the compiled doma
 site = "confinement/src/permissions/validation.rs#validate_plan_grant_limit"
 boundary = "configurable_default"
 setting = "domains.run.grant_limit"
+code = "CONFINEMENT"
 reason = "Bounds plan grant counts; the refusal names the effective setting, limit and host or compiled origin."
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#render_with_limit"
 boundary = "configurable_default"
 setting = "domains.run.profile_limit_bytes"
+code = "CONFINEMENT"
 reason = "Bounds rendered sandbox profile size; the refusal identifies the effective setting and its host or compiled origin."
 
 [[guard]]

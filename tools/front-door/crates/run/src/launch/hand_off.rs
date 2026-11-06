@@ -29,6 +29,14 @@ fn typed_local(phase: &str, error: &RunError) -> HandOff {
             fact,
         };
     }
+    if let RunError::Confinement(permission) = error
+        && let Some(fact) = permission.resource_fact()
+    {
+        return HandOff::Resource {
+            message: format!("{phase}: {error}"),
+            fact,
+        };
+    }
     let cause = match error {
         RunError::Confinement(
             provenant_confinement::permissions::PermissionError::BackendNotAvailable(
@@ -53,6 +61,54 @@ fn typed_local(phase: &str, error: &RunError) -> HandOff {
         HandOff::TypedLocal { message, cause }
     } else {
         HandOff::Local(message)
+    }
+}
+
+#[test]
+fn confinement_limit_handoffs_project_setting_and_source() {
+    use provenant_confinement::permissions::PermissionError;
+    use provenant_records::diagnostic::SettingSource;
+    for (error, setting) in [
+        (
+            PermissionError::GrantLimitExceeded {
+                family: "fixture",
+                limit: 3,
+            },
+            "domains.run.grant_limit",
+        ),
+        (
+            PermissionError::ProfileTooLarge { bytes: 5, limit: 4 },
+            "domains.run.profile_limit_bytes",
+        ),
+    ] {
+        let error = RunError::Confinement(PermissionError::ConfigOrigin {
+            source: Box::new(error),
+            origin: SettingSource::Configuration,
+        });
+        let HandOff::Resource { fact, .. } = typed_local("confinement", &error) else {
+            panic!("missing typed resource fact")
+        };
+        let kind = RefusalKind::HandoffResource(fact);
+        let diagnostic = kind.diagnostic().expect("diagnostic");
+        assert_eq!(diagnostic.code, ErrorKind::from(&error).code());
+        let detail = diagnostic.detail.expect("detail");
+        assert!(detail.contains(setting));
+        assert!(detail.contains("host configuration"));
+        let inventory = include_str!("../../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(
+            inventory["guard"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
+                        && row.get("setting").and_then(|v| v.as_str()) == Some(setting)
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                })
+        );
     }
 }
 

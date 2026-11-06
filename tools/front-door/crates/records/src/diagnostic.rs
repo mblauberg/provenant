@@ -114,6 +114,15 @@ pub enum ResourceFact {
         limit: u64,
         origin: SettingSource,
     },
+    GrantLimit {
+        limit: u64,
+        origin: SettingSource,
+    },
+    ProfileLimit {
+        bytes: u64,
+        limit: u64,
+        origin: SettingSource,
+    },
     MemoryPressure {
         level: PressureLevel,
         threshold: PressureThreshold,
@@ -144,6 +153,12 @@ impl ResourceFact {
             Self::WriteGrantLimit { limit, origin } => diagnostic
                 .detail(format!("encoded write grants exceed domains.run.write_grant_limit_bytes ({limit} bytes; source: {})", origin.description()))
                 .next("reduce the write grants or adjust domains.run.write_grant_limit_bytes"),
+            Self::GrantLimit { limit, origin } => diagnostic
+                .detail(format!("grants exceed domains.run.grant_limit ({limit}; source: {})", origin.description()))
+                .next("reduce granted roots or adjust domains.run.grant_limit"),
+            Self::ProfileLimit { bytes, limit, origin } => diagnostic
+                .detail(format!("sandbox profile is {bytes} bytes; domains.run.profile_limit_bytes is {limit} bytes (source: {})", origin.description()))
+                .next("reduce granted roots or adjust domains.run.profile_limit_bytes"),
             Self::MemoryPressure { level, threshold, origin } => diagnostic
                 .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
                 .next("reduce host memory pressure before retrying"),

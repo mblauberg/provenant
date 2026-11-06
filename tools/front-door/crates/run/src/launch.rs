@@ -744,6 +744,9 @@ impl RefusalKind {
             ResourceFact::Disk { .. } => ErrorKind::DiskFloor,
             ResourceFact::ArgvPromptLimit { .. } => ErrorKind::Invalid,
             ResourceFact::WriteGrantLimit { .. } => ErrorKind::Limit,
+            ResourceFact::GrantLimit { .. } | ResourceFact::ProfileLimit { .. } => {
+                ErrorKind::Confinement
+            }
             ResourceFact::MemoryPressure { .. } => ErrorKind::MemoryPressure,
             ResourceFact::Processes { .. } => ErrorKind::Processes,
             ResourceFact::LaneCap { .. } => ErrorKind::LaneCap,

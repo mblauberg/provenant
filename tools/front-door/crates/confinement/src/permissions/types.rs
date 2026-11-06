@@ -72,11 +72,11 @@ pub enum PermissionError {
         "{family} exceeds its effective limit of {limit}; raise domains.run.grant_limit to allow more"
     )]
     GrantLimitExceeded { family: &'static str, limit: usize },
-    #[error("{source} (source: {origin})")]
+    #[error("{source} (source: {})", match origin { provenant_records::diagnostic::SettingSource::Configuration => "host configuration", provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default" })]
     ConfigOrigin {
         #[source]
         source: Box<PermissionError>,
-        origin: &'static str,
+        origin: provenant_records::diagnostic::SettingSource,
     },
     #[error("{family} exceeds its bound of {limit}: {path:?}")]
     BoundExceeded {
@@ -141,6 +141,26 @@ impl PermissionError {
         }
     }
 
+    /// Project configurable sandbox limits only when the effective source is known.
+    pub fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
+        use provenant_records::diagnostic::ResourceFact;
+        let Self::ConfigOrigin { source, origin } = self else {
+            return None;
+        };
+        match source.as_ref() {
+            Self::GrantLimitExceeded { limit, .. } => Some(ResourceFact::GrantLimit {
+                limit: *limit as u64,
+                origin: *origin,
+            }),
+            Self::ProfileTooLarge { bytes, limit } => Some(ResourceFact::ProfileLimit {
+                bytes: *bytes as u64,
+                limit: *limit as u64,
+                origin: *origin,
+            }),
+            _ => None,
+        }
+    }
+
     /// Add the refused path to a credential guard error.
     pub fn with_credential_path(self, path: &Path, home: Option<&Path>) -> Self {
         if matches!(self, Self::CredentialRoot) {
@@ -183,7 +203,7 @@ mod repository_error_tests {
             (
                 PermissionError::ConfigOrigin {
                     source: Box::new(PermissionError::CredentialRoot),
-                    origin: "fixture",
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
                 },
                 B::Credentials,
             ),
