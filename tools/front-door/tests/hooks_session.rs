@@ -69,6 +69,10 @@ fn checkpoint_text(store: &SessionStore) -> Result<String> {
 }
 /// One queued lane in the project's run store.
 fn create_lane(rig: &TestRig) -> Result<String> {
+    create_numbered_lane(rig, 0)
+}
+
+fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<String> {
     use provenant_core::{ActorId, AttemptId, Digest, OperationId, RunId, TaskId};
     use provenant_records::CanonicalV1;
     use provenant_run as run;
@@ -89,14 +93,14 @@ fn create_lane(rig: &TestRig) -> Result<String> {
     };
     let store = run::RunStore::open(&context, &call)?;
     let (run_id, task_id, attempt_id) = (
-        RunId::from_bytes([2; 16]),
-        TaskId::from_bytes([3; 16]),
-        AttemptId::from_bytes([4; 16]),
+        RunId::from_bytes([seed + 2; 16]),
+        TaskId::from_bytes([seed + 3; 16]),
+        AttemptId::from_bytes([seed + 4; 16]),
     );
     store.create(
         &run::PreparedRun {
             run_id,
-            operation_id: OperationId::parse("hook-lane")?,
+            operation_id: OperationId::parse(&format!("hook-lane-{seed}"))?,
             request: run::CanonicalRequest {
                 extra: Default::default(),
                 child_attempt_id_version: None,
@@ -599,6 +603,62 @@ fn session_lane_stream_reports_inventory_rows() -> Result {
         ),
         lane
     );
+    Ok(())
+}
+
+#[test]
+fn session_lane_stream_cursor_preserves_each_inventory_order() -> Result {
+    let rig = TestRig::new()?;
+    let oldest = create_numbered_lane(&rig, 1)?;
+    let newest = create_numbered_lane(&rig, 2)?;
+    let attempt = |id: &str| id.rsplit('/').next().unwrap_or_default().to_owned();
+    let read = |all: bool, cursor: Option<&str>| -> Result<Vec<Value>> {
+        let mut args = vec!["status", "--session-stream", "--limit", "1", "--json"];
+        if all {
+            args.push("--all");
+        }
+        if let Some(cursor) = cursor {
+            args.extend(["--cursor", cursor]);
+        }
+        let output = rig.command(&args)?;
+        assert_eq!(
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        output
+            .stdout
+            .bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).map_err(Into::into))
+            .collect()
+    };
+    for all in [false, true] {
+        let first = read(all, None)?;
+        assert_eq!(first[0]["total"], 1);
+        let cursor = first[0]["next"].as_u64().ok_or("next cursor")?.to_string();
+        let second = read(all, Some(&cursor))?;
+        assert_eq!(second[0]["total"], 1);
+        assert!(second[0]["next"].is_null());
+        let first_id = first[1]["lane"]["attempt_id"]
+            .as_str()
+            .ok_or("first attempt")?;
+        let second_id = second[1]["lane"]["attempt_id"]
+            .as_str()
+            .ok_or("second attempt")?;
+        assert_ne!(first_id, second_id);
+        let expected = if all {
+            [&newest, &oldest]
+        } else {
+            [&oldest, &newest]
+        };
+        assert_eq!(
+            [first_id.to_owned(), second_id.to_owned()],
+            expected.map(|id| attempt(id))
+        );
+    }
     Ok(())
 }
 

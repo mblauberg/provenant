@@ -346,9 +346,9 @@ fn route(lane: &Value) -> String {
 fn next_page(cursor: &str, settled: bool, commands: &CommandPrefix) -> String {
     let cursor: String = cursor.chars().filter(char::is_ascii_digit).collect();
     let mut command = if settled {
-        format!("status --all --limit {LANE_PAGE}")
+        format!("status --session-stream --all --limit {LANE_PAGE}")
     } else {
-        format!("status --limit {LANE_PAGE}")
+        format!("status --session-stream --limit {LANE_PAGE}")
     };
     if !cursor.is_empty() {
         command.push_str(" --cursor ");
@@ -809,24 +809,24 @@ esac
         let commands = |state_dir| CommandPrefix::new(state_dir, cwd);
         let command = next_page(&next.unwrap_or_default(), true, &commands(None));
         assert!(
-            command.starts_with("provenant status --all --limit 100"),
+            command.starts_with("provenant status --session-stream --all --limit 100"),
             "{command}"
         );
         assert!(command.ends_with("--cursor 1042"), "{command}");
         assert_eq!(
             next_page("1; rm -rf /", false, &commands(None)),
-            "provenant status --limit 100 --cursor 1"
+            "provenant status --session-stream --limit 100 --cursor 1"
         );
         // A non-default state directory is repeated, safely quoted.
         let custom = next_page("7", false, &commands(Some(Path::new("/s/it's here"))));
         assert_eq!(
             custom,
-            "provenant --state-dir '/s/it'\\''s here' status --limit 100 --cursor 7"
+            "provenant --state-dir '/s/it'\\''s here' status --session-stream --limit 100 --cursor 7"
         );
         // A relative one is made absolute against the collector's directory.
         assert_eq!(
             next_page("7", false, &commands(Some(Path::new("rel/state")))),
-            "provenant --state-dir '/work/rel/state' status --limit 100 --cursor 7"
+            "provenant --state-dir '/work/rel/state' status --session-stream --limit 100 --cursor 7"
         );
         // Control characters and non-UTF-8 bytes give a note, never a command.
         use std::os::unix::ffi::OsStrExt;
@@ -836,8 +836,9 @@ esac
         ] {
             let note = next_page("7", false, &commands(Some(bad)));
             assert!(
-                note.starts_with("page with: provenant status --limit 100 --cursor 7 and")
-                    && note.contains("--state-dir this hook used")
+                note.starts_with(
+                    "page with: provenant status --session-stream --limit 100 --cursor 7 and"
+                ) && note.contains("--state-dir this hook used")
                     && !note.contains("/s/"),
                 "{note}"
             );
@@ -876,7 +877,7 @@ esac
             "{digest}"
         );
         assert!(
-            digest.contains("this count is partial; run `provenant status --all"),
+            digest.contains("this count is partial; run `provenant status --session-stream --all"),
             "{digest}"
         );
         // A complete listing shows a plain count and no note.
