@@ -528,10 +528,21 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     }
                 }
                 if repair::spec_is_repair(spec) && child.extra.contains_key("repair_lens") {
-                    // The raising lenses are known only after review settles.
-                    // Carry the qualified initial findings to every candidate
-                    // reviewer, whose launch policy selects the needed lenses.
-                    for input in &node.inputs {
+                    // Select from the findings being repaired in this round.
+                    let previous = ["synthesis", "check"]
+                        .into_iter()
+                        .find(|name| spec.body.iter().any(|body| body.id == *name));
+                    let selections = if round > 1 && previous.is_some() {
+                        vec![GraphInput {
+                            extra: Default::default(),
+                            node: id(&node.id, round - 1, previous.unwrap()),
+                            outputs: vec![OutputKind::Findings],
+                            required_outputs: vec![],
+                        }]
+                    } else {
+                        node.inputs.clone()
+                    };
+                    for input in &selections {
                         if !child.inputs.iter().any(|own| own.node == input.node) {
                             child.inputs.push(input.clone());
                         }
