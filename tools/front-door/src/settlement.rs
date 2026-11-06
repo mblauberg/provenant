@@ -19,6 +19,118 @@ use std::path::PathBuf;
 
 type Error = Box<dyn std::error::Error>;
 
+/// Drain a refusal notice on a dispatch response and on an identical replay.
+pub(crate) fn post_dispatch_refusal(
+    edge: &provenant_cli::run::Edge<'_>,
+    reply: &provenant_cli::run::Reply,
+) -> Result<(), Error> {
+    if reply.result.error.is_none() || provenant_cli::fabric::in_lane() {
+        return Ok(());
+    }
+    let Some(id) = reply.result.data["operation_id"].as_str() else {
+        return Ok(());
+    };
+    let context = provenant_cli::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let execution = provenant_run::ExecutionContext {
+        state_root: edge.roots.state.clone(),
+        project_id: context.identity.project,
+        actor_id: context.identity.inbox.actor,
+        read_prompts: false,
+    };
+    let store = provenant_run::RunStore::open(&execution, &call)?;
+    if let Some(record) = store.operation(&id.parse()?, &call)? {
+        if let Some(chair) = &record.refusal_chair {
+            let actor = provenant_cli::workflow::session_actor(&context, None)
+                .map_err(std::io::Error::other)?;
+            if chair.host != context.identity.inbox.host || chair.actor != actor {
+                return Err("refusal chair binding cannot be verified".into());
+            }
+        }
+        post_refusal_notice(&record, edge.roots)?;
+    }
+    Ok(())
+}
+
+/// Post a path-free refusal using a stable message ID and frozen record facts.
+/// Replaying the same operation cannot insert a second message.
+pub(crate) fn post_refusal_notice(
+    record: &provenant_run::OperationRecord,
+    roots: &Roots,
+) -> Result<(), Error> {
+    if record.state != provenant_run::OperationState::Refused {
+        return Ok(());
+    }
+    let Some(chair) = &record.refusal_chair else {
+        return Ok(());
+    };
+    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)?;
+    let notice = record
+        .extra
+        .get("refusal_notice")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            config
+                .knobs
+                .get("chair.refusal_notice")
+                .and_then(|knob| knob.value.as_str())
+        });
+    if notice != Some("inbox") {
+        return Ok(());
+    }
+    let diagnostic = record
+        .refusal
+        .as_ref()
+        .ok_or("refusal diagnostic missing")?;
+    let time = record.refused_at.ok_or("refusal time missing")?;
+    let code = &diagnostic.code;
+    let code = if !code.is_empty()
+        && code.len() <= 128
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        code.as_str()
+    } else {
+        "REFUSED"
+    };
+    let digest = provenant_records::CanonicalV1::record_digest(
+        "refusal-notice",
+        1,
+        &(record.project_id, record.actor_id, &record.operation_id),
+    )?;
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest.as_bytes()[..16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = Store::open(&roots.state, &request)?;
+    let message = Message {
+        extra: Default::default(),
+        header: provenant_records::RecordHeader::V1,
+        project: record.project_id,
+        id: MessageId::from_bytes(id),
+        sender: record.actor_id,
+        recipients: vec![chair.actor],
+        conversation: None,
+        kind: MessageKind::Note,
+        body: format!("operation {} refused: {code}", record.operation_id),
+        artifacts: Vec::new(),
+        reply_to: None,
+        task: None,
+        created_at: time,
+    };
+    Ok(store.send(&message, &request)?)
+}
+
 /// Run the launch and the reactions in the documented order. `launch` calls
 /// its argument at most once: a delayed retry calls it before its wait, so the
 /// reactions are not held behind the wait. If it never does, the reactions run
@@ -431,6 +543,49 @@ mod tests {
             .into_iter()
             .map(|delivery| delivery.message.body)
             .collect()
+    }
+
+    #[test]
+    fn refusal_notice_is_deduplicated_path_free_and_can_be_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp.path().canonicalize().unwrap());
+        let chair = reaction("unused", None).chair.unwrap();
+        let mut record = provenant_run::OperationRecord {
+            extra: Default::default(),
+            schema_version: 1,
+            project_id: ProjectId::from_bytes([3; 16]),
+            actor_id: ActorId::from_bytes([4; 16]),
+            operation_id: OperationId::parse("refused-1").unwrap(),
+            kind: provenant_run::OperationKind::Dispatch,
+            request_digest: provenant_core::Digest::from_bytes([7; 32]),
+            run_id: RunId::from_bytes([8; 16]),
+            state: provenant_run::OperationState::Refused,
+            blocked_reason: None,
+            refusal: Some(provenant_records::diagnostic::Diagnostic::new(
+                "/private/secret",
+            )),
+            worktree: Some("lane".into()),
+            refused_at: Some(provenant_core::WallTime::from_micros(now() * 1_000_000).unwrap()),
+            refusal_chair: Some(chair),
+        };
+        post_refusal_notice(&record, &roots).unwrap();
+        post_refusal_notice(&record, &roots).unwrap();
+        assert_eq!(inbox(&roots), ["operation refused-1 refused: REFUSED"]);
+        record.operation_id = OperationId::parse("refused-override").unwrap();
+        record
+            .extra
+            .insert("refusal_notice".into(), serde_json::json!("off"));
+        post_refusal_notice(&record, &roots).unwrap();
+        assert_eq!(inbox(&roots).len(), 1);
+        record.extra.remove("refusal_notice");
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[knobs]\n'chair.refusal_notice'='off'\n",
+        )
+        .unwrap();
+        record.operation_id = OperationId::parse("refused-2").unwrap();
+        post_refusal_notice(&record, &roots).unwrap();
+        assert_eq!(inbox(&roots).len(), 1);
     }
 
     #[test]

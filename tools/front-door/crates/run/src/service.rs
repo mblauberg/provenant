@@ -103,6 +103,9 @@ impl<'a> Service<'a> {
                 }
                 let mut extra = provenant_records::ExtraFields::default();
                 extra.insert("preflight_digest_version".into(), serde_json::json!(1));
+                if let Some(notice) = task.profile.knobs.get("chair.refusal_notice") {
+                    extra.insert("refusal_notice".into(), notice.clone());
+                }
                 let diagnostic = ErrorKind::from(&error)
                     .diagnostic()
                     .detail(error.to_string());
@@ -130,6 +133,7 @@ impl<'a> Service<'a> {
                             .wall_now()
                             .map_err(|_| RunError::Validation("wall clock"))?,
                     ),
+                    refusal_chair: input.chair.clone(),
                 };
                 let saved = self.store.insert_refusal(record, call)?;
                 if saved.state != OperationState::Refused {

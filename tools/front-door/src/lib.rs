@@ -1038,6 +1038,12 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }
         Command::Run(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::run(*cmd, edge);
+            if settlement::post_dispatch_refusal(edge, &reply).is_err() {
+                reply
+                    .human
+                    .push_str("refusal notice check failed; retry the same operation\n");
+                reply.result.data["refusal_notice_error"] = serde_json::json!(true);
+            }
             if let Err(error) =
                 fabric::settle_dispatched_attempts(edge, &mut reply, process.workers())
             {

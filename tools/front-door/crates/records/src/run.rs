@@ -707,6 +707,9 @@ pub struct OperationRecord {
     pub worktree: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused_at: Option<WallTime>,
+    /// Chair bound at submission, retained for refusal notice recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_chair: Option<ChairBinding>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

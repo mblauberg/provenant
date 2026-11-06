@@ -297,6 +297,18 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Off keeps switching manual; on opens a new chair pane when an explicitly allowed account has headroom."` |
 | `type` | `"bool"` |
 
+## `chair.refusal_notice`
+
+| Field | Value |
+|---|---|
+| `default` | `"inbox"` |
+| `effect` | `"Send the bound chair a notice when a dispatch is refused before admission."` |
+| `reader` | `"tools/front-door/src/settlement.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Off keeps the inbox quiet; inbox makes refusals visible to the chair."` |
+| `type` | `"enum"` |
+| `values` | `["inbox", "off"]` |
+
 ## `chair.switch_accounts`
 
 | Field | Value |

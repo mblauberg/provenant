@@ -17,6 +17,30 @@ fn roots() -> Roots {
 }
 
 #[test]
+fn refusal_notice_defaults_to_inbox_and_accepts_off() {
+    let name = "chair.refusal_notice";
+    let defaults = load::<&[u8]>(&roots(), None).unwrap();
+    assert_eq!(defaults.knobs[name].value, "inbox");
+    assert_eq!(defaults.knobs[name].source, KnobSource::Default);
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["schema_version"] = toml_edit::value(1);
+    KnobEdit::Set { name, value: "off" }
+        .apply(&mut doc)
+        .unwrap();
+    let configured = load(&roots(), Some(doc.to_string().as_bytes())).unwrap();
+    assert_eq!(configured.knobs[name].value, "off");
+    assert_eq!(configured.knobs[name].source, KnobSource::Override);
+    assert!(
+        KnobEdit::Set {
+            name,
+            value: "other"
+        }
+        .apply(&mut doc)
+        .is_err()
+    );
+}
+
+#[test]
 fn census_exclude_ancestors_defaults_true_and_can_be_disabled() {
     let name = "confinement.census_exclude_ancestors";
     let defaults = load::<&[u8]>(&roots(), None).unwrap();

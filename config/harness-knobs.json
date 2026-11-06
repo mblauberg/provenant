@@ -390,6 +390,12 @@
       "effect": "Keep the configuration history file under this many bytes; the oldest entries are dropped first.",
       "trade_off": "A larger bound keeps more history but costs more to read on every config edit."
     },
+    "chair.refusal_notice": {
+      "type": "enum", "values": ["inbox", "off"], "default": "inbox", "status": "wired",
+      "reader": "tools/front-door/src/settlement.rs",
+      "effect": "Send the bound chair a notice when a dispatch is refused before admission.",
+      "trade_off": "Off keeps the inbox quiet; inbox makes refusals visible to the chair."
+    },
     "chair.auto_switch": {
       "strict": true,
       "type": "bool", "default": false, "status": "wired",

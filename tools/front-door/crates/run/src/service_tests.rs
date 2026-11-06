@@ -620,6 +620,16 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let make = |prompt| {
         let mut input = submission(prompt);
+        input.chair = Some(ChairBinding {
+            extra: Default::default(),
+            host: provenant_core::HostId::from_bytes([7; 16]),
+            actor: provenant_core::ActorId::from_bytes([8; 16]),
+            session: Some("original".into()),
+        });
+        input.tasks[0]
+            .profile
+            .knobs
+            .insert("chair.refusal_notice".into(), serde_json::json!("off"));
         input.tasks[0].route = RequestedRoute::Model {
             extra: Default::default(),
             provider: "cursor".into(),
@@ -631,8 +641,10 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
     let first = Service::new(&store)
         .dispatch(make("first"), temp.path(), &call)
         .unwrap_err();
+    let mut replay = make("first");
+    replay.chair.as_mut().unwrap().session = Some("new-session".into());
     let second = Service::new(&store)
-        .dispatch(make("first"), temp.path(), &call)
+        .dispatch(replay, temp.path(), &call)
         .unwrap_err();
     assert_eq!(first.to_string(), second.to_string());
     assert!(
@@ -644,6 +656,14 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
     ));
     assert_eq!(store.recent_refusals(10, &call)?.len(), 1);
     let saved = store.recent_refusals(10, &call)?.remove(0);
+    assert_eq!(
+        saved
+            .refusal_chair
+            .as_ref()
+            .and_then(|chair| chair.session.as_deref()),
+        Some("original")
+    );
+    assert_eq!(saved.extra["refusal_notice"], "off");
     assert!(!serde_json::to_string(&saved)?.contains("first"));
     Ok(())
 }

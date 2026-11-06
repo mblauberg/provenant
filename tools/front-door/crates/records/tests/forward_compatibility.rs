@@ -254,7 +254,7 @@ cases! {
     usage_record_preserves_digest: run::UsageRecord => json!({});
     run_record_preserves_digest: run::RunRecord => json!({"schema_version":1,"run_id":ID,"project_id":ID,"actor_id":ID,"operation_id":"operation","request_digest":digest(),"task_ids":[ID],"children":[],"revision":1,"generation":1,"created_at":NOW,"closure":"open"});
     operation_record_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"run_id":ID,"state":"accepted"});
-    refused_operation_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"run_id":ID,"state":"refused","refusal":{"code":"REFUSED","detail":"not admitted"},"worktree":"lane-branch","refused_at":NOW});
+    refused_operation_preserves_digest: run::OperationRecord => json!({"schema_version":1,"project_id":ID,"actor_id":ID,"operation_id":"operation","kind":"dispatch","request_digest":digest(),"run_id":ID,"state":"refused","refusal":{"code":"REFUSED","detail":"not admitted"},"worktree":"lane-branch","refused_at":NOW,"refusal_chair":{"host":ID,"actor":ID}});
     queued_state_preserves_digest: run::AttemptState => json!({"state":"queued"});
     starting_state_preserves_digest: run::AttemptState => json!({"state":"starting"});
     running_state_preserves_digest: run::AttemptState => json!({"state":"running"});

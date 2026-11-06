@@ -64,6 +64,12 @@ overrides win over configuration. Each sealed task and attempt records the
 profile name, effective knob values and exact dispatch overrides, and
 continuations keep that stamp.
 
+`chair.refusal_notice` accepts `inbox` (the default) or `off`. For a recorded
+pre-admission refusal with a bound chair, the dispatch response posts a
+path-free notice to that chair's inbox. Retrying the same operation reuses the
+message identity. If posting fails, the response reports a notice check error;
+retry the same operation after restoring inbox access.
+
 ## Graph launch retries
 
 `lanes.launch_retry_limit` sets the number of retries after a transient launch

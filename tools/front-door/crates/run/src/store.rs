@@ -125,6 +125,7 @@ impl RunStore {
             refusal: Some(diagnostic),
             worktree,
             refused_at: Some(input.created_at),
+            refusal_chair: input.request.chair.clone(),
         };
         self.insert_refusal(operation, call)
     }
@@ -659,6 +660,7 @@ impl RunStore {
             refusal: None,
             worktree: None,
             refused_at: None,
+            refusal_chair: None,
         };
         let dir = self.run_dir(input.run_id, true)?;
         let _writer = dir.lock(
