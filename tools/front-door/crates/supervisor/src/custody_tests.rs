@@ -235,6 +235,37 @@ fn reconciliation_skips_busy_and_unreadable_slots_without_hiding_other_fences() 
 }
 
 #[test]
+fn cutover_preserves_guardian_identity_for_scoped_observation() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot_path = root.path().join("writer");
+    std::fs::create_dir(&slot_path)?;
+    let slot = Directory::open_anchor(&slot_path)?;
+    let mut record = legacy_reservation(scope(), &slot.metadata()?);
+    record.launch_state = LaunchState::HandingOff;
+    record.attempt_device = Some(slot.metadata()?.device);
+    record.attempt_inode = Some(slot.metadata()?.inode);
+    let guardian = ProcessIdentity {
+        boot: record.boot.clone(),
+        pid: 100,
+        native_start: 1,
+        group_id: 100,
+        session_id: 100,
+    };
+    record.guardian = Some(guardian.clone());
+    publish_reservation(&slot, &record)?;
+    let registry = Directory::open_anchor(root.path())?;
+    cutover_writer_reservations(&registry, &CancelToken::new(), &SystemClock)?;
+    assert_eq!(reservation_guardian(&slot, scope())?, Some(guardian));
+    let mut other = scope();
+    other.generation += 1;
+    assert!(matches!(
+        reservation_guardian(&slot, other),
+        Err(CustodyError::InvalidRecord)
+    ));
+    Ok(())
+}
+
+#[test]
 fn unreadable_slot_reservation_remains_visible_and_fenced() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");
