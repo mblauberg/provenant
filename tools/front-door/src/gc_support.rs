@@ -5,7 +5,7 @@ use provenant_core::{ActorId, CancelToken, Clock, GitOid, Roots, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
-    fs::{Directory, FileKind, LockMode, Metadata, PublishMode, entry_names},
+    fs::{Directory, LockMode, Metadata, PublishMode, entry_names},
 };
 use provenant_run::{AttemptState, ExecutionContext, LaneQuery, RunStore};
 use std::{
@@ -235,7 +235,7 @@ pub(crate) fn fetch_default(
     Ok(Some((reference, oid)))
 }
 
-/// Unknown stores or records protect every candidate. Include child stores so
+/// Unknown stores or records protect every candidate. Observe the host store so
 /// a nested lane is subject to the same terminal-state rule as its parent.
 pub(crate) struct LaneSnapshot {
     states: BTreeMap<PathBuf, bool>,
@@ -269,7 +269,6 @@ struct StoreSnapshot {
     database: Option<Metadata>,
     store: Option<RunStore>,
     version: Option<u64>,
-    children: Option<(Metadata, Vec<OsString>)>,
 }
 
 impl LaneSnapshot {
@@ -281,8 +280,8 @@ impl LaneSnapshot {
         self.is_current() && self.states.get(path).is_none_or(|terminal| *terminal)
     }
 
-    /// Reuse the lane scan only while every observed store and its child-store
-    /// membership remain unchanged. A changed snapshot never becomes valid again.
+    /// Reuse the lane scan only while the observed host store
+    /// remains unchanged. A changed snapshot never becomes valid again.
     pub(crate) fn is_current(&self) -> bool {
         if self.stale.get() {
             return false;
@@ -312,13 +311,6 @@ impl LaneSnapshot {
                 {
                     return Ok(false);
                 }
-                let children = child_membership(&observed.root)?;
-                match (&observed.children, children) {
-                    (None, None) => {}
-                    (Some((before, names)), Some((after, fresh)))
-                        if before.same_identity(&after) && *names == fresh => {}
-                    _ => return Ok(false),
-                }
             }
             Ok(true)
         };
@@ -347,19 +339,6 @@ fn same_optional_identity(before: Option<Metadata>, after: Option<Metadata>) -> 
     }
 }
 
-fn child_membership(
-    root: &Directory,
-) -> Result<Option<(Metadata, Vec<OsString>)>, provenant_os::fs::FsError> {
-    let children = match root.open_verified_directory(OsStr::new("children")) {
-        Ok(children) => children,
-        Err(error) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let mut names = entry_names(&children, 10_000)?;
-    names.sort();
-    Ok(Some((children.metadata()?, names)))
-}
-
 /// A terminal attempt authorises only the worktree instance that existed
 /// when it finished. For linked worktrees, the `.git` file is written when
 /// Git creates the administrative gitdir link and remains stable afterward.
@@ -373,12 +352,12 @@ fn terminal_after_worktree_creation(finished_at: i64, created_at: Option<i128>) 
     created_at.is_some_and(|created| i128::from(finished_at) > created)
 }
 
-/// Lane states under `roots` and its child stores, which bind with the same
+/// Lane states under `roots`, which bind with the same
 /// `home` and `assets` as their parent.
 pub(crate) fn lane_states(
     roots: &Roots,
-    home: &Path,
-    assets: &Path,
+    _home: &Path,
+    _assets: &Path,
     project: provenant_core::ProjectId,
 ) -> Result<LaneSnapshot, Box<dyn std::error::Error>> {
     let context = ExecutionContext {
@@ -393,13 +372,7 @@ pub(crate) fn lane_states(
         stores: Vec::new(),
         stale: std::cell::Cell::new(false),
     };
-    scan_terminal(
-        &context,
-        (home, assets),
-        roots.state.as_path(),
-        &mut snapshot,
-        0,
-    )?;
+    scan_terminal(&context, roots.state.as_path(), &mut snapshot)?;
     for (path, terminal) in &mut snapshot.states {
         if *terminal {
             *terminal = snapshot.terminal_times.get(path).is_some_and(|finished| {
@@ -412,14 +385,9 @@ pub(crate) fn lane_states(
 
 fn scan_terminal(
     context: &ExecutionContext,
-    (home, assets): (&Path, &Path),
     host_state: &Path,
     snapshot: &mut LaneSnapshot,
-    depth: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if depth >= 16 {
-        return Err("child store depth".into());
-    }
     let clock = SystemClock;
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
@@ -438,7 +406,6 @@ fn scan_terminal(
     if !same_optional_identity(database_before, database) {
         return Err("run store changed while opening snapshot".into());
     }
-    let children_before = child_membership(&root)?;
     if let Some(store) = &store {
         let mut query = LaneQuery {
             targets: Vec::new(),
@@ -484,7 +451,7 @@ fn scan_terminal(
     } else {
         // No store and no run records means no submitted lanes. Any partial
         // store, retained records or missing child database is unknown.
-        if depth > 0 || root.metadata_at(OsStr::new("run.sqlite3"), false).is_ok() {
+        if root.metadata_at(OsStr::new("run.sqlite3"), false).is_ok() {
             return Err("unobservable run store".into());
         }
         match root.open_verified_directory(OsStr::new("runs")) {
@@ -496,42 +463,12 @@ fn scan_terminal(
             Err(error) => return Err(error.into()),
         }
     }
-    let children = match root.open_verified_directory(OsStr::new("children")) {
-        Ok(children) => children,
-        Err(error) if error.is_not_found() => {
-            snapshot.stores.push(StoreSnapshot {
-                path: context.state_root.as_path().to_owned(),
-                root,
-                database,
-                store,
-                version,
-                children: children_before,
-            });
-            return Ok(());
-        }
-        Err(error) => return Err(error.into()),
-    };
-    for name in entry_names(&children, 10_000)? {
-        if children.metadata_at(&name, false)?.kind != FileKind::Directory {
-            return Err("unknown child store".into());
-        }
-        children.open_verified_directory(&name)?;
-        let mut child = context.clone();
-        child.state_root = crate::roots::child(
-            home,
-            assets,
-            context.state_root.as_path().join("children").join(name),
-        )?
-        .state;
-        scan_terminal(&child, (home, assets), host_state, snapshot, depth + 1)?;
-    }
     snapshot.stores.push(StoreSnapshot {
         path: context.state_root.as_path().to_owned(),
         root,
         database,
         store,
         version,
-        children: children_before,
     });
     Ok(())
 }

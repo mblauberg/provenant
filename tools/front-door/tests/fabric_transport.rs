@@ -2366,12 +2366,8 @@ fn sandboxed_lane_environment_refuses_mutating_provenant_before_coordination_acc
     let identity = rig.command(&["fabric", "identity", "--json"])?;
     assert_eq!(code(&identity), 0);
     let parent = "11111111111111111111111111111111";
-    let child_state = rig.state.join("children").join(parent);
+    let child_state = rig.state.clone();
     std::fs::create_dir_all(&child_state)?;
-    std::fs::set_permissions(
-        rig.state.join("children"),
-        std::fs::Permissions::from_mode(0o700),
-    )?;
     std::fs::set_permissions(&child_state, std::fs::Permissions::from_mode(0o700))?;
     for (key, value) in &mut rig.env {
         if key == "PROVENANT_AGENT_LABEL" {
@@ -2468,13 +2464,11 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
         };
         let before = cursor()?;
         let parent = "11111111111111111111111111111111";
-        let child_state = rig.state.join("children").join(parent);
-        std::fs::create_dir_all(&child_state)?;
-        std::fs::set_permissions(
-            rig.state.join("children"),
-            std::fs::Permissions::from_mode(0o700),
-        )?;
-        std::fs::set_permissions(&child_state, std::fs::Permissions::from_mode(0o700))?;
+        let child_state = rig.state.clone();
+        let scratch = rig.root.join("lane-tmp");
+        std::fs::create_dir(&scratch)?;
+        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
+        rig.env.push(("TMPDIR".into(), scratch.into()));
         for (key, value) in &mut rig.env {
             if key == "PROVENANT_AGENT_LABEL" {
                 *value = format!("lane-{parent}").into();
@@ -2586,10 +2580,7 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
                 );
             }
         }
-        for id in [100, 102, 103]
-            .into_iter()
-            .chain((depth.is_some() && child_store).then_some(101))
-        {
+        for id in [100, 102, 103].into_iter() {
             let result = &replies.iter().find(|r| r["id"] == id).ok_or("allowed")?["result"];
             assert_ne!(result["isError"], true, "{result}");
         }
@@ -2624,8 +2615,14 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
             );
         }
         if depth.is_some() && child_store {
-            assert!(child_state.join("runs").is_dir());
+            let result = &replies.iter().find(|r| r["id"] == 101).ok_or("child")?["result"];
+            assert_eq!(
+                result["isError"], true,
+                "a child requires its host graph relay: {result}"
+            );
+            assert_eq!(result["structuredContent"]["code"], "owner_unavailable");
         }
+        assert!(!rig.state.join("children").exists());
         assert!(!rig.state.join("runs").exists());
         let output = rig.command(&[
             "fabric",

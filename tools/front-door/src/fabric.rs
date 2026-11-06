@@ -44,26 +44,6 @@ include!("fabric/graph_tests.rs");
 
 use provenant_cli::fabric::Context;
 
-/// Repeat a list-then-read tail lookup until two consecutive passes name the
-/// same attempt, and return the earlier pass's record. The later pass listed
-/// after the earlier one read its state, so agreement proves no successor had
-/// been committed with that state. Bounded by the policy chain ceiling.
-fn confirm_stable_tail<R, K: PartialEq>(
-    mut pass: impl FnMut() -> Result<R, FacadeError>,
-    id: impl Fn(&R) -> K,
-) -> Result<R, FacadeError> {
-    let mut previous: Option<R> = None;
-    for _ in 0..=provenant_run::POLICY_ATTEMPT_CEILING {
-        let tail = pass()?;
-        if let Some(earlier) = previous.take()
-            && id(&earlier) == id(&tail)
-        {
-            return Ok(earlier);
-        }
-        previous = Some(tail);
-    }
-    Err(FacadeError::StateCorrupt)
-}
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_mcp::{
@@ -2083,14 +2063,7 @@ impl Factory {
             }
         };
         let mut first_error = None;
-        for mut target in targets {
-            match owner.graph_policy_tail(target.clone(), budget, cancel) {
-                Ok(tail) => target.attempt = tail.attempt_id,
-                Err(error) => {
-                    // Still ask the known attempt to stop if tail lookup fails.
-                    first_error.get_or_insert(error);
-                }
-            }
+        for target in targets {
             if target.host.is_none_or(|host| host == self.context.identity.host) {
                 let store = owner.store(cancel)?;
                 let call = owner.call(cancel);

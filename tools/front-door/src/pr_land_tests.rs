@@ -1608,9 +1608,8 @@ fn pr_land_writer_cases(cases: &[&str]) -> Result {
     Ok(())
 }
 
-/// Terminal records may live in a child store while recovery evidence remains
-/// in the host exclusion slot. Landing leaves that evidence to Run.
-pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores() -> Result {
+/// Landing leaves terminal writer recovery evidence in the host store to Run.
+pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_host_store() -> Result {
     use provenant_core::{Clock, WaitBudget};
     use provenant_os::fs::Directory;
     use provenant_run::{AttemptState, RouteRecord, RunStore, TerminalPublication};
@@ -1618,27 +1617,16 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_parent_and_child_sto
         ExitObservation, PublicationState, Scope, SettlementEvidence, WriterBinding,
     };
     use std::os::unix::fs::OpenOptionsExt;
-    for child in [false, true] {
+    {
         let landing = landing()?;
         let rig = &landing.rig;
-        let (roots, mut context) = super::worktree_tests::writer_context(rig)?;
+        let (roots, context) = super::worktree_tests::writer_context(rig)?;
         let clock = provenant_os::clock::SystemClock;
         let cancel = provenant_core::CancelToken::new();
         let call = provenant_run::Request {
             clock: &clock,
             cancel: &cancel,
         };
-        // Keep a normal host store beside the nested store, as the snapshot
-        // sees it during a real dispatch from a lane.
-        drop(RunStore::open(&context, &call)?);
-        if child {
-            context.state_root = crate::roots::child(
-                &rig.home,
-                &rig.project,
-                rig.state.join("children").join("retained-writer"),
-            )?
-            .state;
-        }
         let store = RunStore::open(&context, &call)?.with_writer_registry(&rig.state);
         let request = provenant_run::resolve_writer(&rig.state, &rig.project, &landing.worktree)?;
         let input =
@@ -1788,12 +1776,8 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_parent_and_child_sto
                 == Some(&true)
         );
         let value = land(&landing)?;
-        assert_eq!(
-            status(&value, "worktree")?,
-            "done",
-            "child={child}: {value}"
-        );
-        assert_eq!(status(&value, "branch")?, "done", "child={child}: {value}");
+        assert_eq!(status(&value, "worktree")?, "done", "{value}");
+        assert_eq!(status(&value, "branch")?, "done", "{value}");
         assert!(!landing.worktree.exists());
         assert!(!branch_exists(rig, "feat")?);
         assert_eq!(fs::read(&reservation)?, serde_json::to_vec(&fence)?);

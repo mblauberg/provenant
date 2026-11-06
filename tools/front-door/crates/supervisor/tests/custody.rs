@@ -7,7 +7,7 @@ use provenant_os::{
     fs::{Directory, FileHandle, LockMode},
 };
 use provenant_supervisor::{
-    ChildRegistry, ExitPublisher, GuardianHooks, NestedChildStore, RegisteredChild,
+    ChildRegistry, ExitPublisher, GuardianHooks, RegisteredChild,
     census::{Census, CensusError, ProcessIdentity, ProcessObservation, ProcessObserver},
     custody::*,
     fixture,
@@ -1669,17 +1669,6 @@ fn cancel_after_unresolved_exit_republishes_a_settled_exit(root: &Path) -> Resul
     Ok(())
 }
 
-struct FileNestedChildren {
-    home: PathBuf,
-}
-impl NestedChildStore for FileNestedChildren {
-    fn has_no_nested_runs(&self, _: &[u8]) -> bool {
-        match std::fs::read_dir(self.home.join("children/attempt/runs")) {
-            Ok(mut entries) => entries.next().is_none(),
-            Err(error) => error.kind() == io::ErrorKind::NotFound,
-        }
-    }
-}
 struct FileChildRegistry {
     home: PathBuf,
 }
@@ -2939,9 +2928,8 @@ fn main() -> Result<()> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        // The production shape wires no registry; only the host's child store.
+        // The production shape wires no child registry.
         let production_shape = home.join(S2_PRODUCTION_SHAPE).is_file();
-        let store = FileNestedChildren { home: home.clone() };
         let refusal_marker = home.join(S2_REFUSE_ADMISSION);
         let jump_marker = home.join(S2_WALL_JUMP);
         let jump = std::fs::read_to_string(&jump_marker)
@@ -2977,7 +2965,6 @@ fn main() -> Result<()> {
                     .as_ref()
                     .map(|holder| holder as &dyn provenant_supervisor::Holder),
                 children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
-                nested_children: production_shape.then_some(&store as &dyn NestedChildStore),
                 observer: Some(&observer),
                 wall_clock: jump
                     .is_some()

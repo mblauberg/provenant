@@ -19,30 +19,6 @@ use std::path::PathBuf;
 
 type Error = Box<dyn std::error::Error>;
 
-/// Run the launch and the reactions in the documented order. `launch` calls
-/// its argument at most once: a delayed retry calls it before its wait, so the
-/// reactions are not held behind the wait. If it never does, the reactions run
-/// after it, whether or not it failed. The first error in time order is
-/// reported, and neither step prevents the other.
-pub(crate) fn seam(
-    launch: impl FnOnce(&mut dyn FnMut()) -> Result<(), String>,
-    react: impl FnOnce() -> Result<(), Error>,
-) -> Result<(), Error> {
-    let mut react = Some(react);
-    let mut early = None;
-    let launched = launch(&mut || {
-        if let Some(react) = react.take() {
-            early = Some(react());
-        }
-    });
-    let late = react.map(|react| react());
-    if let Some(Err(error)) = early {
-        return Err(error);
-    }
-    launched.map_err(std::io::Error::other)?;
-    late.unwrap_or(Ok(()))
-}
-
 /// Who settled, and where its state lives.
 pub(crate) struct Subject {
     pub home: PathBuf,
@@ -311,68 +287,6 @@ mod tests {
     use provenant_records::run::ChairBinding;
     #[allow(unused_imports)]
     use std::cell::RefCell;
-
-    #[test]
-    fn seam_runs_reactions_once_before_a_delayed_wait() {
-        let calls = RefCell::new(Vec::new());
-        let result = seam(
-            |before| {
-                calls.borrow_mut().push("launch-start");
-                before();
-                calls.borrow_mut().push("launch-wait");
-                Ok(())
-            },
-            || {
-                calls.borrow_mut().push("react");
-                Ok(())
-            },
-        );
-        assert!(result.is_ok());
-        assert_eq!(*calls.borrow(), ["launch-start", "react", "launch-wait"]);
-    }
-
-    #[test]
-    fn seam_runs_reactions_once_without_a_successor() {
-        let count = RefCell::new(0);
-        seam(
-            |_| Ok(()),
-            || {
-                *count.borrow_mut() += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(*count.borrow(), 1);
-    }
-
-    #[test]
-    fn a_failed_launch_still_runs_reactions_and_reports_first() {
-        let count = RefCell::new(0);
-        let error = seam(
-            |_| Err("launch".into()),
-            || {
-                *count.borrow_mut() += 1;
-                Err("react".into())
-            },
-        )
-        .unwrap_err();
-        assert_eq!(*count.borrow(), 1);
-        assert_eq!(error.to_string(), "launch");
-    }
-
-    #[test]
-    fn an_early_reaction_error_is_not_replaced_by_a_later_launch_error() {
-        let error = seam(
-            |before| {
-                before();
-                Err("launch".into())
-            },
-            || Err("react".into()),
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "react");
-    }
-
     fn roots(base: &std::path::Path) -> Roots {
         let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
         inputs.state_dir = Some(base.join("state"));

@@ -1,12 +1,6 @@
 use super::*;
 
-/// The one post-settlement seam. Every settlement, including a partial or
-/// stopped-early one, passes through here once, and crash recovery drains the
-/// same reactions through `settlement::drain_run`. A staged successor launches
-/// around the reactions, and a delayed retry reacts before its wait. A failed
-/// launch or reaction never stops the other, and the first error in time order
-/// is reported. The reactions run in order: graphs advance, the chair is
-/// notified, then the chair log is appended.
+/// Advance graphs and deliver the reactions owed by this settlement.
 pub(crate) fn advance_settled_graphs(
     holder: &provenant_cli::run::HostHolder<'_>,
     workers: &'static dyn WorkerObserver,
@@ -14,22 +8,17 @@ pub(crate) fn advance_settled_graphs(
     let Some(settled) = holder.settled()? else {
         return Ok(());
     };
-    crate::settlement::seam(
-        |before| provenant_cli::run::launch_policy_successor(&settled, before),
-        || {
-            settlement_reactions(
-                &crate::settlement::Subject {
-                    home: settled.roots.home.clone(),
-                    checkout: settled.roots.checkout.clone(),
-                    state_root: settled.roots.state_root.clone(),
-                    project: settled.project_id,
-                    actor: settled.actor_id,
-                    run: settled.run_id,
-                },
-                settled.launch.clone(),
-                workers,
-            )
+    settlement_reactions(
+        &crate::settlement::Subject {
+            home: settled.roots.home.clone(),
+            checkout: settled.roots.checkout.clone(),
+            state_root: settled.roots.state_root.clone(),
+            project: settled.project_id,
+            actor: settled.actor_id,
+            run: settled.run_id,
         },
+        settled.launch.clone(),
+        workers,
     )
 }
 
@@ -305,10 +294,6 @@ pub(crate) fn settle_owned_worktree(
     let store =
         provenant_run::RunStore::open(&context, &call)?.with_writer_registry(roots.state.as_path());
     let record = store.record(settled.attempt_id, &call)?;
-    if store.policy_tail(record.attempt_id, &call)?.attempt_id != record.attempt_id {
-        // The successor owns this writer's remaining work and settlement.
-        return Ok(());
-    }
     if !matches!(record.state, provenant_run::AttemptState::Terminal { .. }) {
         return Ok(());
     }
@@ -744,41 +729,6 @@ pub(crate) fn settle_delivered_attempt(
                 .unwrap_or_default()
         ));
         reply.result.data["worktree_settlement"] = receipt;
-    }
-    Ok(())
-}
-
-pub(crate) fn settle_dispatched_attempts(
-    edge: &provenant_cli::run::Edge<'_>,
-    reply: &mut provenant_cli::run::Reply,
-    workers: &dyn WorkerObserver,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if reply.result.data["worktree"]["owned"] != true {
-        return Ok(());
-    }
-    let ids = reply.result.data["lanes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|lane| lane["attempt_id"].as_str())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut receipts = Vec::new();
-    for id in ids {
-        if let Some(receipt) = settle_attempt(edge, id.parse()?, None, workers)? {
-            reply.human.push_str(&format!(
-                "worktree {}{}\n",
-                receipt["state"].as_str().unwrap_or("unknown"),
-                receipt["reason"]
-                    .as_str()
-                    .map(|reason| format!(": {reason}"))
-                    .unwrap_or_default()
-            ));
-            receipts.push(receipt);
-        }
-    }
-    if !receipts.is_empty() {
-        reply.result.data["worktree_settlements"] = serde_json::json!(receipts);
     }
     Ok(())
 }

@@ -229,7 +229,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "read_only_lane_builds_and_tests_cargo_in_scratch",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
-            "writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source",
+            "writer_graph_output_preserves_lens_diff_base",
             "writer_dispatch_edits_a_linked_worktree",
             "second_writer_is_refused_while_first_holds_the_worktree",
             "writer_terminal_refuses_sequencer_state",
@@ -245,7 +245,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
             "gc_refuses_bare_projects_and_their_linked_checkout_fallback",
-            "provider_state_gc_sweeps_children_and_refuses_replaced_roots",
+            "provider_state_gc_sweeps_host_and_refuses_replaced_roots",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
             "remove_by_name_follows_the_branch_merge_state",
@@ -266,7 +266,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_writer_lock_preserves_dirty_and_output_cases",
             "pr_land_dirty_primary_does_not_block_later_batches",
             "pr_land_recovery_uses_recorded_merged_head",
-            "pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores",
+            "pr_land_preserves_terminal_writer_evidence_in_host_store",
             "pr_land_primary_with_separate_git_directory",
             "pr_land_out_of_tree_with_separate_git_directory",
             "pr_land_refuses_each_unsafe_step_and_reports_the_rest",
@@ -320,8 +320,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                     crate::compose_tests::writer_dispatch_uses_lane_cache_and_narrow_provider_state(
                     )
                 }
-                "writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source" => {
-                    crate::fabric::peer_tests::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source()
+                "writer_graph_output_preserves_lens_diff_base" => {
+                    crate::fabric::peer_tests::writer_graph_output_preserves_lens_diff_base()
                 }
                 "writer_dispatch_edits_a_linked_worktree" => {
                     writer_dispatch_edits_a_linked_worktree()
@@ -353,8 +353,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
                 }
-                "provider_state_gc_sweeps_children_and_refuses_replaced_roots" => {
-                    crate::provider_retention::provider_state_gc_sweeps_children_and_refuses_replaced_roots()
+                "provider_state_gc_sweeps_host_and_refuses_replaced_roots" => {
+                    crate::provider_retention::provider_state_gc_sweeps_host_and_refuses_replaced_roots()
                 }
                 "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
                 "gc_refuses_bare_projects_and_their_linked_checkout_fallback" => gc_refuses_bare_projects_and_their_linked_checkout_fallback(),
@@ -396,7 +396,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_land_writer_lock_preserves_dirty_and_output_cases" => crate::pr_land_tests::pr_land_writer_lock_preserves_dirty_and_output_cases(),
                 "pr_land_dirty_primary_does_not_block_later_batches" => crate::pr_land_tests::pr_land_dirty_primary_does_not_block_later_batches(),
                 "pr_land_recovery_uses_recorded_merged_head" => crate::pr_land_tests::pr_land_recovery_uses_recorded_merged_head(),
-                "pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores" => crate::pr_land_tests::pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores(),
+                "pr_land_preserves_terminal_writer_evidence_in_host_store" => crate::pr_land_tests::pr_land_preserves_terminal_writer_evidence_in_host_store(),
                 "pr_land_refuses_each_unsafe_step_and_reports_the_rest" => {
                     crate::pr_land_tests::pr_land_refuses_each_unsafe_step_and_reports_the_rest()
                 }
@@ -3449,13 +3449,8 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             .ok_or("MCP reply")?["result"];
         assert_eq!(mcp_error_code(result), "lane_depth", "{result}");
         assert!(!roots.state.as_path().join("tmp/results").exists());
-        assert!(
-            rig.state
-                .join("children")
-                .join(paths.attempt_id.to_string())
-                .join("tmp/results")
-                .is_dir()
-        );
+        assert!(permissions.scratch.path.join("results").is_dir());
+        assert!(!rig.state.join("children").exists());
         assert!(!worktree.join("provenant-mcp.json").exists());
         assert!(!worktree.join("provenant-settings.json").exists());
         assert_eq!(
@@ -3470,56 +3465,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             )?,
             ""
         );
-        // Raise the host limit only for a second call. It must create records
-        // in the configured child store without launching in the lane.
-        if adapter == "codex" && !writer {
-            fs::write(rig.state.join("config.toml"), config(2))?;
-            let mut options = provenant_os::exec::ExecOptions::new(
-                &launch.argv,
-                &launch.cwd,
-                Duration::from_secs(10),
-            );
-            options.env = Some(&launch.environment);
-            options.stdin = Some(frames.as_bytes());
-            let output = provenant_os::exec::SystemExecutor::new(1)?.execute(options)?;
-            assert_eq!(
-                code(&output),
-                0,
-                "{}",
-                String::from_utf8_lossy(&output.stderr.bytes)
-            );
-            assert!(
-                rig.state
-                    .join("children")
-                    .join(paths.attempt_id.to_string())
-                    .join("run.sqlite3")
-                    .exists()
-            );
-            let mut inputs = provenant_core::RootInputs::new(home.clone(), rig.project.clone());
-            inputs.state_dir = Some(
-                rig.state
-                    .join("children")
-                    .join(paths.attempt_id.to_string()),
-            );
-            let queued_context = provenant_run::ExecutionContext {
-                state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
-                ..context.clone()
-            };
-            let queued = provenant_run::RunStore::open(&queued_context, &call)?;
-            assert_eq!(
-                queued
-                    .queued_runs(&call, provenant_run::QUEUED_RUNS_PAGE_SIZE)?
-                    .len(),
-                1,
-                "lane launched its own child"
-            );
-            // This depth probe must not consume startup spacing when the
-            // confined fixture raises the host limit again.
-            for run in queued.queued_runs(&call, provenant_run::QUEUED_RUNS_PAGE_SIZE)? {
-                queued.refuse_queued(run, "depth probe only", &call)?;
-            }
-            fs::write(rig.state.join("config.toml"), config(1))?;
-        }
         let parent_context = provenant_run::HolderContext {
             schema_version: 1,
             roots: provenant_run::RootSeed {
@@ -3639,6 +3584,9 @@ pub(crate) fn lane_provider() -> Result {
     // A real provider hands its MCP child a baseline PATH. Mirror that with
     // this fake's own directory first, so the nested dispatch resolves it.
     let mut env = env;
+    if let Some(tmp) = std::env::var_os("TMPDIR") {
+        env.push(("TMPDIR".into(), tmp));
+    }
     if env.iter().all(|(key, _)| key != "PATH") {
         let mut directories = vec![
             std::env::current_exe()?
@@ -3750,7 +3698,7 @@ fn verify_lane_profile(
     attempt: &Path,
     state: &Path,
     frames: &[u8],
-    config: &dyn Fn(u8) -> String,
+    _config: &dyn Fn(u8) -> String,
     parent: &provenant_run::HolderContext,
     probe: Option<Probe>,
 ) -> Result {
@@ -4231,350 +4179,10 @@ if (process.argv[2] === 'child') {
             .ok_or("confined MCP reply")?,
         "lane_depth"
     );
-    // Admission below the limit must also open the isolated child store under
-    // the profile, rather than only exercising the early depth refusal.
-    let child = launch
-        .environment
-        .iter()
-        .find(|(key, _)| key == provenant_core::RUN_STATE_DIRECTORY_ENV)
-        .map(|(_, value)| PathBuf::from(value))
-        .ok_or("child store environment")?;
-    let run_count = || -> Result<usize> {
-        match fs::read_dir(child.join("runs")) {
-            Ok(entries) => Ok(entries.collect::<std::io::Result<Vec<_>>>()?.len()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-            Err(error) => Err(error.into()),
-        }
-    };
-    // Startup spacing is host-wide: the child would otherwise wait out the
-    // default 20 s after the parent's own start, past this test's deadline.
-    // Clear only the last-start time; the lease counts stay real.
-    let ledger = state.join("admission.sqlite3");
-    if ledger.exists() {
-        let db = rusqlite::Connection::open(&ledger)?;
-        db.busy_timeout(Duration::from_secs(5))?;
-        db.execute("DELETE FROM spacing", [])?;
-    }
-    fs::write(state.join("config.toml"), config(2))?;
-    let mut inputs =
-        provenant_core::RootInputs::new(confinement.home.clone(), parent.roots.checkout.clone());
-    inputs.state_dir = Some(child.clone());
-    let child_context = provenant_run::ExecutionContext {
-        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
-        project_id: parent.project_id,
-        actor_id: parent.actor_id,
-        read_prompts: true,
-    };
-    let clock = provenant_os::clock::SystemClock::new();
-    let call = writer_call(&clock, &cancel)?;
-    // Admission is not launch: the host decides from its sealed parent task.
-    let admit = |frames: &str| -> Result<provenant_core::AttemptId> {
-        let before = run_count()?;
-        let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
-        options.env = Some(&launch.environment);
-        options.stdin = Some(frames.as_bytes());
-        let nested = executor.execute(options)?;
-        assert_eq!(
-            code(&nested),
-            0,
-            "{}",
-            String::from_utf8_lossy(&nested.stderr.bytes)
-        );
-        assert!(
-            run_count()? > before,
-            "confined child admission created no run"
-        );
-        // The child must be admitted as a target, not merely leave a record.
-        let accepted = nested
-            .stdout
-            .bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(serde_json::from_slice::<Value>)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let targets = &accepted
-            .iter()
-            .find(|reply| reply["id"] == 1)
-            .ok_or("confined child reply")?["result"]["structuredContent"]["receipt"]["targets"];
-        assert_eq!(
-            targets.as_array().map(Vec::len),
-            Some(1),
-            "confined child was not admitted: {targets}"
-        );
-        Ok(provenant_core::AttemptId::parse(
-            targets[0]["attempt"].as_str().ok_or("child attempt id")?,
-        )?)
-    };
-    let nested_frames =
-        String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
-    if confinement.writer.is_some() {
-        // A writer lane cannot hand a writer child any registered worktree:
-        // the host refuses the proposal before any provider launches.
-        for (name, worktree) in [
-            ("confined-writer", ".worktrees/nested-child"),
-            ("confined-parent-writer", ".worktrees/writer"),
-        ] {
-            let proposal = admit(&nested_frames.replace("confined-child", name).replace(
-                "\"timeout_seconds\":1",
-                &format!(
-                    "\"timeout_seconds\":1,\"access\":\"worktree_write\",\"worktree\":\"{worktree}\""
-                ),
-            ))?;
-            let store = provenant_run::RunStore::open(&child_context, &call)?;
-            let refused = await_terminal(&store, proposal, &call)?;
-            assert_terminal_outcome(&refused, provenant_run::Outcome::Rejected)?;
-            assert_ne!(refused.provider_launched, Some(true), "{worktree}");
-            let provenant_run::AttemptState::Terminal { reason, .. } = &refused.state else {
-                return Err("writer proposal was not terminal".into());
-            };
-            assert!(
-                reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.contains("a lane cannot propose a writer child")),
-                "{worktree}: {reason:?}"
-            );
-        }
-    }
-    let cancel_child =
-        launch.route.provider.as_deref() == Some("codex") && confinement.writer.is_none();
-    let nested_frames = if cancel_child {
-        nested_frames
-            .replace("read only", "wait for host cancellation")
-            .replace("\"timeout_seconds\":1", "\"timeout_seconds\":10")
-    } else {
-        nested_frames
-    };
-    // The host must reach the confined fake child, including when a Claude
-    // parent cannot read Codex credentials.
-    let attempt_id = admit(&nested_frames)?;
-    let store = provenant_run::RunStore::open(&child_context, &call)?;
-    let forged = provenant_core::ActorId::from_bytes([66; 16]);
-    if cancel_child {
-        let run = store.record(attempt_id, &call)?.run_id;
-        let launched = child.join(format!(
-            "runs/{run}/attempts/{attempt_id}/provider-state/candidate-0/fake-child-launched"
-        ));
-        provenant_test_support::wait_for(
-            &format!("confined child launch: {}", launched.display()),
-            Duration::from_secs(8),
-            || launched.exists(),
-            |exists| *exists,
-        )?;
-        // The lane can write its child's store and attempt directory. It
-        // marks the child finished, renames the requester in its launch
-        // summary and plants a stop the guardian ignores. The host must still
-        // stop the child, from the scope and requester it held at hand-off.
-        let attempt = child.join(format!("runs/{run}/attempts/{attempt_id}"));
-        let mut finished = store.record(attempt_id, &call)?;
-        let original = finished.clone();
-        let mut sibling = finished.clone();
-        finished.state = provenant_run::AttemptState::Terminal {
-            extra: Default::default(),
-            outcome: provenant_run::Outcome::Rejected,
-            exit_code: None,
-            finished_at: finished.queued_at,
-            reason: Some("rejected, says the lane".into()),
-        };
-        finished.started_at = None;
-        let mut result = serde_json::to_value(&finished.prompt)?;
-        result["path"]["path"] = format!("attempts/{attempt_id}/result.md").into();
-        finished.result = Some(serde_json::from_value(result)?);
-        rusqlite::Connection::open(child.join("run.sqlite3"))?.execute(
-            "UPDATE attempts SET record=?1, terminal=1 WHERE id=?2",
-            rusqlite::params![
-                provenant_records::CanonicalV1::bytes(&finished)?.as_bytes(),
-                attempt_id.to_string()
-            ],
-        )?;
-        let path = attempt.join("launch.json");
-        let mut summary: Value = serde_json::from_slice(&fs::read(&path)?)?;
-        assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
-        summary["requester"] = serde_json::to_value(forged)?;
-        fs::remove_file(&path)?;
-        fs::write(&path, serde_json::to_vec(&summary)?)?;
-        let scope = &summary["scope"];
-        let planted = serde_json::json!({
-            "schema_version": 1,
-            "scope": scope,
-            "request_id": format!("{run}.{attempt_id}.{}.cancel", scope["generation"]),
-            "requester": forged,
-            "reason": "explicit_cancellation",
-        });
-        fs::write(attempt.join("cancel.json"), serde_json::to_vec(&planted)?)?;
-        // Scan reads of lane-written rows once ended the host's launcher
-        // before its stop. First an undecodable attempt row, then a queued
-        // sibling whose run the lane renames, so the owner check refuses it.
-        let db = rusqlite::Connection::open(child.join("run.sqlite3"))?;
-        let owner: Vec<u8> = db.query_row(
-            "SELECT record FROM runs WHERE id=?1",
-            [run.to_string()],
-            |row| row.get(0),
-        )?;
-        let (project, task): (String, String) = db.query_row(
-            "SELECT project, task FROM attempts WHERE id=?1",
-            [attempt_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let garbage = provenant_core::AttemptId::from_bytes([67; 16]);
-        db.execute(
-            "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,x'00')",
-            rusqlite::params![garbage.to_string(), run.to_string(), project, task],
-        )?;
-        // Several of the launcher's 100 ms scans see it.
-        pause(Duration::from_millis(500));
-        db.execute("DELETE FROM attempts WHERE id=?1", [garbage.to_string()])?;
-        sibling.attempt_id = provenant_core::AttemptId::from_bytes([68; 16]);
-        sibling.state = provenant_run::AttemptState::Queued {
-            extra: Default::default(),
-        };
-        sibling.generation = 0;
-        sibling.attempt_number = 2;
-        sibling.revision = 1;
-        sibling.started_at = None;
-        let mut prompt = serde_json::to_value(&sibling.prompt)?;
-        prompt["path"]["path"] = prompt["path"]["path"]
-            .as_str()
-            .ok_or("prompt path")?
-            .replace(&attempt_id.to_string(), &sibling.attempt_id.to_string())
-            .into();
-        sibling.prompt = serde_json::from_value(prompt)?;
-        let mut renamed = store.run(run, &call)?;
-        renamed.actor_id = forged;
-        db.execute_batch("BEGIN")?;
-        db.execute(
-            "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,?5)",
-            rusqlite::params![
-                sibling.attempt_id.to_string(),
-                run.to_string(),
-                project,
-                task,
-                provenant_records::CanonicalV1::bytes(&sibling)?.as_bytes()
-            ],
-        )?;
-        db.execute(
-            "UPDATE runs SET record=?1 WHERE id=?2",
-            rusqlite::params![
-                provenant_records::CanonicalV1::bytes(&renamed)?.as_bytes(),
-                run.to_string()
-            ],
-        )?;
-        db.execute_batch("COMMIT")?;
-        // Several of the launcher's 100 ms scans see it.
-        pause(Duration::from_millis(500));
-        // The launcher reports the refused read, after it stops the child.
-        let reported = host.provider_exited(
-            &parent.encode()?,
-            Some(provenant_supervisor::machine::StopReason::ExplicitCancellation),
-        );
-        // The forged terminal record stands, so the guardian's own exit is
-        // the evidence. Unstopped, the child would run to its wall deadline.
-        let process_exit = attempt.join("process-exit.json");
-        provenant_test_support::wait_for(
-            &format!("cancelled child process exit: {}", process_exit.display()),
-            Duration::from_secs(8),
-            || process_exit.exists(),
-            |exists| *exists,
-        )?;
-        let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
-        assert_eq!(exit["stop_reason"], "explicit_cancellation", "{exit}");
-        let Err(provenant_supervisor::custody::CustodyError::Io(reported)) = reported else {
-            return Err(format!("launcher hid the refused read: {reported:?}").into());
-        };
-        assert!(
-            reported.to_string().contains("names another owner"),
-            "{reported}"
-        );
-        db.execute(
-            "DELETE FROM attempts WHERE id=?1",
-            [sibling.attempt_id.to_string()],
-        )?;
-        db.execute(
-            "UPDATE runs SET record=?1 WHERE id=?2",
-            rusqlite::params![owner, run.to_string()],
-        )?;
-        // The forged terminal row bypassed Run's terminal transaction, leaving
-        // admission held. Restore the running row so the guardian can settle
-        // it before the next profile starts. Restore the trigger in the same
-        // transaction, before the row is visible again.
-        let trigger: String = db.query_row(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='immutable_terminal_update'",
-            [],
-            |row| row.get(0),
-        )?;
-        db.execute_batch("BEGIN; DROP TRIGGER immutable_terminal_update;")?;
-        db.execute(
-            "UPDATE attempts SET record=?1, terminal=0 WHERE id=?2",
-            rusqlite::params![
-                provenant_records::CanonicalV1::bytes(&original)?.as_bytes(),
-                attempt_id.to_string()
-            ],
-        )?;
-        db.execute_batch(&trigger)?;
-        db.execute_batch("COMMIT")?;
-    }
-    let record = await_terminal(&store, attempt_id, &call)?;
-    let provenant_run::AttemptState::Terminal { reason, .. } = &record.state else {
-        return Err("child attempt was not terminal".into());
-    };
-    let reason = reason.as_deref().unwrap_or_default();
-    // Host setup links the registered credential. The parent's profile has
-    // no cross-provider credential read.
-    assert!(!reason.contains("setup failed"), "{reason}");
-    if launch.route.provider.as_deref() == Some("codex") {
-        let candidates = child.join(format!(
-            "runs/{}/attempts/{attempt_id}/provider-state",
-            record.run_id
-        ));
-        let linked = fs::read_dir(&candidates)?
-            .map(|entry| Ok(fs::read_link(entry?.path().join("auth.json")).ok()))
-            .collect::<Result<Vec<_>>>()?;
-        assert_eq!(
-            linked.into_iter().flatten().collect::<Vec<_>>(),
-            vec![confinement.home.join(".codex/auth.json")],
-            "{reason}"
-        );
-    }
-    if !cancel_child {
-        assert_eq!(record.provider_launched, Some(true), "{reason}");
-    }
-    // The lane's operation keeps its own actor. The host launches for, and
-    // records as owner, the requester sealed in the parent's holder context.
-    let actor: String = rusqlite::Connection::open(child.join("run.sqlite3"))?.query_row(
-        "SELECT actor FROM operations WHERE run=?1",
-        [record.run_id.to_string()],
-        |row| row.get(0),
-    )?;
-    assert_ne!(actor, parent.actor_id.to_string());
-    assert_eq!(store.run(record.run_id, &call)?.actor_id, parent.actor_id);
-    assert_eq!(record.verified_owner, Some(parent.actor_id));
-    if !cancel_child {
-        let summary: Value = serde_json::from_slice(&fs::read(child.join(format!(
-            "runs/{}/attempts/{attempt_id}/launch.json",
-            record.run_id
-        )))?)?;
-        assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
-    }
-    let provider_state = child.join(format!(
-        "runs/{}/attempts/{attempt_id}/provider-state",
-        record.run_id
-    ));
-    assert!(
-        provider_state
-            .join("candidate-0/fake-child-launched")
-            .exists(),
-        "{reason}"
-    );
+    // The child-store submission/scanner has been deleted. Graph child
+    // admission is covered through the host relay fixtures.
     host.provider_exited(&parent.encode()?, None)?;
-    fs::write(state.join("config.toml"), config(1))?;
-    // The in-lane fabric context opens read-only and reaches the host through
-    // the relay, so it creates no git home in the child store.
-    assert!(!child.join("tmp/git-home").exists());
-    // Host probes leave no directory or lease behind once the child launched.
-    let probes: Vec<_> = fs::read_dir(state)?
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter(|name| name.starts_with("probe-"))
-        .collect();
-    assert!(probes.is_empty(), "{probes:?}");
+    assert!(!state.join("children").exists());
     let denied = [
         attempt.join("custody.lock"),
         attempt.join("reserve"),
@@ -4954,16 +4562,8 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
             .get(&path),
         Some(&true)
     );
-    // A queued child lane also blocks output pruning.
-    let mut child_inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
-    child_inputs.state_dir = Some(rig.state.join("children/nested"));
-    let child_context = provenant_run::ExecutionContext {
-        state_root: child_inputs
-            .resolve(&provenant_os::fs::SystemPathResolver)?
-            .state,
-        ..context.clone()
-    };
-    let child_store = open_writer_store(&child_context)?;
+    // A queued child in the host graph also blocks output pruning.
+    let child_store = open_writer_store(&context)?;
     let child_run = writer_run(writer, "gc-child", 111, "nested")?;
     child_store.create(&child_run, &call)?;
     assert!(!before_child.is_current());

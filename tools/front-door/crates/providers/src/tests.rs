@@ -2365,7 +2365,6 @@ pub(super) fn fixture_input<'a>(
             executable: std::path::Path::new("/fixture/provenant/bin/provenant"),
             git: std::path::Path::new("/fixture/git/bin/git"),
             state: std::path::Path::new("/fixture/state"),
-            child_state: std::path::Path::new("/fixture/state/children/attempt"),
             home: std::path::Path::new("/fixture/home"),
             depth: 1,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),

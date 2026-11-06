@@ -1499,18 +1499,6 @@ impl RunStore {
         };
         let id = old.attempt_id;
         let request = self.request(old.run_id, call)?;
-        let successor = self.policy_successor(old, next, call)?;
-        let disk_floor_bytes = if successor.is_some() {
-            provenant_config::GcSettings::read(&self.writer_registry)?
-                .free_floor_bytes(&self.writer_registry)?
-        } else {
-            0
-        };
-        let staged = successor.as_ref().map(|(next, _)| {
-            next.continuation
-                .clone()
-                .unwrap_or_else(|| "successor".into())
-        });
         let reaction = self.freeze_reaction(
             next,
             request
@@ -1518,7 +1506,7 @@ impl RunStore {
                 .iter()
                 .find(|task| task.task_id == old.task_id)
                 .is_some_and(|task| task.writer.is_some()),
-            staged.as_deref(),
+            None,
         )?;
         let attempt = self.attempt_dir(old.run_id, id, false)?;
         let mut receipts = SettlementReceipts {
@@ -1543,7 +1531,6 @@ impl RunStore {
             if next.schema_version >= 2 {
                 tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3)", params![id.to_string(), sql_int(next.generation)?, bytes(&receipts)?])?;
             }
-            if let Some((successor, wait_seconds)) = &successor { self.insert_policy_successor(tx, successor, *wait_seconds, &request, disk_floor_bytes)?; }
             tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
             Self::insert_reaction(tx, &reaction)?;
             insert_event(tx, next)?;
