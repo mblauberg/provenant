@@ -4054,6 +4054,15 @@ pub(crate) fn bind_run_context(
             expansion.document["context"]["shadow_of"] = json!(candidate);
         }
     }
+    if !request.explain
+        && let Some(branch) = expansion.document["integration_branch"]
+            .as_str()
+            .filter(|branch| !branch.starts_with("origin/"))
+    {
+        // Bind the identity to the created head on the first run as well as
+        // on retries; an absent-head digest would otherwise launch twice.
+        composites::ensure_integration_branch(directory, branch)?;
+    }
     expansion.document["graph_id"] = json!("");
     // An integration source resolves at run time, so fold the current head into
     // the identity: a moved branch must never reuse a completed graph.
@@ -5308,20 +5317,6 @@ pub(crate) fn run_with_review(
                 "Repository preset: {}",
                 expansion.repo_files.join(", ")
             );
-        }
-        if let Some(branch) = expansion.document["integration_branch"].as_str() {
-            let prepared = crate::roots::selected_project(globals.project.as_deref(), false)
-                .map_err(|e| e.to_string())
-                .and_then(|directory| composites::ensure_integration_branch(&directory, branch));
-            if let Err(error) = prepared {
-                return crate::fail(
-                    "run",
-                    provenant_records::Outcome::Invalid,
-                    "preset",
-                    &error,
-                    globals,
-                );
-            }
         }
         crate::fabric::run_preset_graph(
             expansion.document,
