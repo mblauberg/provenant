@@ -1,0 +1,5 @@
+doc = "Contract lens."
+
+[parameters.lens]
+type = "string"
+default = "contract"

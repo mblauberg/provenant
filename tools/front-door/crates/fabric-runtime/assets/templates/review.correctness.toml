@@ -1,0 +1,5 @@
+doc = "Correctness lens."
+
+[parameters.lens]
+type = "string"
+default = "correctness"

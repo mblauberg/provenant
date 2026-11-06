@@ -1,0 +1,5 @@
+doc = "Tests lens."
+
+[parameters.lens]
+type = "string"
+default = "tests"

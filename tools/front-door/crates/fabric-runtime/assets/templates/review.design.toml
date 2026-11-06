@@ -1,0 +1,5 @@
+doc = "Design lens."
+
+[parameters.lens]
+type = "string"
+default = "design"

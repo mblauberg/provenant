@@ -59,6 +59,9 @@ pub struct Layers {
     review_bases: std::cell::RefCell<BTreeSet<String>>,
     /// The role library: bundled roles, then user and repository `roles.toml`.
     pub roles: RoleLibrary,
+    templates: Option<provenant_fabric_runtime::graph::TemplateLibrary>,
+    trusted_templates: Option<provenant_fabric_runtime::graph::TemplateLibrary>,
+    has_repo_templates: bool,
     /// Named routes the routing configuration defines. `None` skips the
     /// check that a role's tier names a configured route.
     pub known_routes: Option<BTreeSet<String>>,
@@ -97,12 +100,13 @@ pub struct Expansion {
 /// Decode a lowered node and attach its stage and field to a type error.
 /// The individual-field probes run only on an error, so valid expansions keep
 /// the normal single decode per node.
+#[cfg(test)]
 fn decode_lowered_node(
+    library: &provenant_fabric_runtime::graph::TemplateLibrary,
     value: &Value,
 ) -> Result<provenant_fabric_runtime::graph::GraphNode, String> {
     // Every preset node goes through the template compiler: `use`, `over`
     // and `repeat` lower to compiled nodes, and compiled nodes pass through.
-    let library = bundled_templates();
     let lowered = provenant_fabric_runtime::graph::Compiler::new(library).lower(value)?;
     decode_compiled_node(&lowered)
 }
@@ -305,6 +309,21 @@ impl Layers {
 
     pub fn load(user: &Path, repo: &Path) -> Result<Self, String> {
         let mut layers = Self::empty();
+        let mut templates = provenant_fabric_runtime::graph::TemplateLibrary::bundled();
+        if let Some(parent) = user.parent() {
+            templates.load_dir(
+                provenant_fabric_runtime::graph::Layer::User,
+                &parent.join("templates"),
+            )?;
+        }
+        layers.trusted_templates = Some(templates.clone());
+        if let Some(parent) = repo.parent() {
+            layers.has_repo_templates = templates.load_dir(
+                provenant_fabric_runtime::graph::Layer::Repository,
+                &parent.join("templates"),
+            )? > 0;
+        }
+        layers.templates = Some(templates);
         for (is_repo, dir) in [(false, user), (true, repo)] {
             // `roles.toml` sits beside the `presets` directory.
             if let Some(parent) = dir.parent() {
@@ -1174,15 +1193,16 @@ pub fn expand_with(
     // roles, so they never lower a land tier or add a land that user
     // configuration and the command line did not set.
     let repo_roles = layers.roles.has_repo();
-    let trusted = ((!layers.repo_files.is_empty() || repo_roles) && !layers.exclude_repo.get())
-        .then(|| {
-            layers.exclude_repo.set(true);
-            let trusted = expand_with(layers, name, prompt, params, overrides);
-            layers.exclude_repo.set(false);
-            trusted
-                .ok()
-                .map(|expansion| expansion.document["nodes"].clone())
-        });
+    let trusted = ((!layers.repo_files.is_empty() || repo_roles || layers.has_repo_templates)
+        && !layers.exclude_repo.get())
+    .then(|| {
+        layers.exclude_repo.set(true);
+        let trusted = expand_with(layers, name, prompt, params, overrides);
+        layers.exclude_repo.set(false);
+        trusted
+            .ok()
+            .map(|expansion| expansion.document["nodes"].clone())
+    });
     layers.used_shapes.borrow_mut().clear();
     layers.built_nodes.set(0);
     layers.review_bases.borrow_mut().clear();
@@ -1296,16 +1316,6 @@ pub fn expand_with(
                 || path.ends_with(".inherit_explicit"))
                 && (path.starts_with("parameters.") || path.contains(".parameters.")))
     });
-    if let Some(trusted) = trusted
-        && (!repo_files.is_empty() || repo_roles)
-    {
-        floor_land_tiers(&mut nodes, trusted.as_ref());
-    }
-    let digest = provenant_records::CanonicalV1::file_digest(
-        &serde_json::to_vec(&nodes).map_err(|e| e.to_string())?,
-    )
-    .to_string();
-    let id = format!("preset-{}", &digest[7..39]);
     let bases = layers.review_bases.take();
     if bases.len() > 1 {
         return Err(format!(
@@ -1315,6 +1325,42 @@ pub fn expand_with(
     }
     // The structural and schema checks operate on the typed graph, without
     // decoding a second copy of the fully assembled document.
+    let base_templates = if layers.exclude_repo.get() {
+        layers.trusted_templates.as_ref()
+    } else {
+        layers.templates.as_ref()
+    }
+    .unwrap_or_else(|| bundled_templates());
+    let inline_templates = config
+        .get("templates")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("inline templates: {error}"))?
+        .unwrap_or_default();
+    let library = base_templates.with(
+        provenant_fabric_runtime::graph::Layer::Inline,
+        &inline_templates,
+    )?;
+    let compiler = provenant_fabric_runtime::graph::Compiler::new(&library);
+    nodes = nodes
+        .iter()
+        .map(|node| compiler.lower(node))
+        .collect::<Result<_, _>>()?;
+    if let Some(trusted) = trusted
+        && (!repo_files.is_empty() || repo_roles || layers.has_repo_templates)
+    {
+        floor_land_tiers(&mut nodes, trusted.as_ref());
+    }
+    let compiled_nodes = nodes
+        .iter()
+        .map(decode_compiled_node)
+        .collect::<Result<Vec<_>, _>>()?;
+    let digest = provenant_records::CanonicalV1::file_digest(
+        &serde_json::to_vec(&nodes).map_err(|e| e.to_string())?,
+    )
+    .to_string();
+    let id = format!("preset-{}", &digest[7..39]);
     let mut typed = provenant_fabric_runtime::graph::GraphDocument {
         review_base: bases.into_iter().next(),
         context: Some(provenant_records::run::WorkContext {
@@ -1329,10 +1375,7 @@ pub fn expand_with(
         decision_session: None,
         schema_version: 1,
         graph_id: id,
-        nodes: nodes
-            .iter()
-            .map(decode_lowered_node)
-            .collect::<Result<_, _>>()?,
+        nodes: compiled_nodes,
     };
     let parameters = flatten_parameters(
         name,
@@ -3056,7 +3099,13 @@ impl StageBuilder<'_> {
                 self.prompt,
                 index as usize,
             )?;
-            let (mut node, decorate_wrapper) = if let Some(spec) = object
+            let (mut node, decorate_wrapper) = if object.contains_key("use") {
+                object.insert("id".into(), json!(id));
+                if !deps.is_empty() {
+                    object.insert("depends_on".into(), json!(deps));
+                }
+                (Value::Object(object.clone()), false)
+            } else if let Some(spec) = object
                 .get("loop")
                 .filter(|spec| spec.get("stages").is_some())
                 .cloned()
@@ -5379,8 +5428,77 @@ mod template_lowering_tests {
     use serde_json::json;
 
     #[test]
+    fn expansion_uses_inline_template() {
+        let mut layers = super::Layers::empty();
+        layers
+            .insert(
+                "fixture",
+                "template-fixture",
+                r#"
+stages = [{ id = "x", use = "task" }]
+[templates.task]
+brief = "inline brief"
+tier = "junior"
+"#,
+            )
+            .unwrap();
+        let expansion = super::expand(&layers, "template-fixture", "", &[]).unwrap();
+        assert_eq!(expansion.document["nodes"][0]["prompt"], "inline brief");
+        assert_eq!(expansion.document["nodes"][0]["route"]["alias"], "junior");
+    }
+
+    #[test]
+    fn template_layers_load_in_order() {
+        use provenant_fabric_runtime::graph::{Layer, Template};
+        let temp = tempfile::tempdir().unwrap();
+        let user = temp.path().join("user");
+        let repo = temp.path().join("repo");
+        for dir in [&user, &repo] {
+            std::fs::create_dir_all(dir.join("templates")).unwrap();
+        }
+        std::fs::write(
+            user.join("templates/task.toml"),
+            "brief = 'user'\ntier = 'junior'",
+        )
+        .unwrap();
+        let repo_file = repo.join("templates/task.toml");
+        std::fs::write(&repo_file, "brief = 'repo'\ntier = 'senior'").unwrap();
+        let layers = super::Layers::load(&user.join("presets"), &repo.join("presets")).unwrap();
+        let library = layers.templates.as_ref().unwrap();
+        assert_eq!(
+            super::decode_lowered_node(library, &json!({"id":"x", "use":"task"}))
+                .unwrap()
+                .prompt,
+            "repo"
+        );
+        let inline = std::collections::BTreeMap::from([(
+            "task".to_owned(),
+            Template::from_toml("brief = 'inline'\ntier = 'principal'").unwrap(),
+        )]);
+        let library = library.with(Layer::Inline, &inline).unwrap();
+        assert_eq!(
+            super::decode_lowered_node(&library, &json!({"id":"x", "use":"task"}))
+                .unwrap()
+                .prompt,
+            "inline"
+        );
+        std::fs::remove_file(repo_file).unwrap();
+        let layers = super::Layers::load(&user.join("presets"), &repo.join("presets")).unwrap();
+        assert_eq!(
+            super::decode_lowered_node(
+                layers.templates.as_ref().unwrap(),
+                &json!({"id":"x", "use":"task"})
+            )
+            .unwrap()
+            .prompt,
+            "user"
+        );
+    }
+
+    #[test]
     fn preset_nodes_lower_through_the_template_compiler() {
         let swarm = super::decode_lowered_node(
+            super::bundled_templates(),
             &json!({"id": "map", "use": "explore", "over": ["crates/run", "src"]}),
         )
         .unwrap();
@@ -5388,12 +5506,16 @@ mod template_lowering_tests {
         assert_eq!(members.len(), 2);
         assert!(members[1].prompt.contains("Map src"));
         let raw = super::decode_lowered_node(
+            super::bundled_templates(),
             &json!({"id": "raw", "access": "read_only", "prompt": "as written"}),
         )
         .unwrap();
         assert_eq!(raw.prompt, "as written");
-        let error =
-            super::decode_lowered_node(&json!({"id": "bad", "use": "no-such-template"})).unwrap_err();
+        let error = super::decode_lowered_node(
+            super::bundled_templates(),
+            &json!({"id": "bad", "use": "no-such-template"}),
+        )
+        .unwrap_err();
         assert!(error.contains("no-such-template"), "{error}");
     }
 }
