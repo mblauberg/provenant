@@ -784,4 +784,3 @@ pub(crate) fn settle_attempt(
     };
     Ok(store.worktree_settlement(id, &call)?)
 }
-

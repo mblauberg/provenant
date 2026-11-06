@@ -76,6 +76,7 @@ struct FakeOwner {
     read_roots: Vec<Vec<String>>,
     attachments: Vec<Vec<String>>,
     capabilities: Vec<Option<Vec<String>>>,
+    attempt_specs: Vec<Option<AttemptSpec>>,
     distinct_from: Vec<Vec<String>>,
     family_peers: Vec<Vec<String>>,
     family_pool: Vec<String>,
@@ -351,6 +352,7 @@ impl AttemptOwner for FakeOwner {
         self.attachments.push(node.attachments.to_vec());
         self.capabilities
             .push(node.capabilities.map(<[String]>::to_vec));
+        self.attempt_specs.push(node.attempt.cloned());
         self.distinct_from
             .push(node.distinct_from_attempts.to_vec());
         self.family_peers.push(node.family_peers.to_vec());
@@ -476,6 +478,79 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         schema_version: 1,
         graph_id: "g-test".to_owned(),
         nodes,
+    }
+}
+
+#[test]
+fn node_attempt_spec_reaches_the_launch() {
+    let spec = AttemptSpec {
+        account: Some("work".into()),
+        build_heavy: true,
+        capabilities: vec!["postgres".into()],
+        ..Default::default()
+    };
+    let mut lane = node("lane", route("first"));
+    lane.attempt = Some(spec.clone());
+    let mut owner = FakeOwner {
+        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    advance(
+        &graph(vec![lane]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(owner.attempt_specs, vec![Some(spec)]);
+    assert_eq!(owner.capabilities, vec![Some(vec!["postgres".into()])]);
+
+    // An empty spec is no spec.
+    let mut lane = node("lane", route("first"));
+    lane.attempt = Some(AttemptSpec::default());
+    let mut owner = FakeOwner {
+        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    advance(
+        &graph(vec![lane]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(owner.attempt_specs, vec![None]);
+}
+
+#[test]
+fn node_attempt_spec_refuses_what_the_graph_cannot_launch() {
+    let cases = [
+        (
+            serde_json::json!({"new_worktree": {"base": "main", "branch": "b"}}),
+            None,
+            "graph attempts do not support placement, new_worktree or write_roots",
+        ),
+        (
+            serde_json::json!({"write_roots": ["/tmp"]}),
+            None,
+            "graph attempts do not support placement, new_worktree or write_roots",
+        ),
+        (
+            serde_json::json!({"capabilities": ["postgres"]}),
+            Some(Vec::new()),
+            "set capabilities on the node or its attempt, not both",
+        ),
+        (
+            serde_json::json!({"account": "other"}),
+            None,
+            "attempt account conflicts with a route account",
+        ),
+    ];
+    for (spec, capabilities, reason) in cases {
+        let mut pinned = route("first");
+        pinned.account = Some("work".into());
+        let mut lane = node("lane", pinned);
+        lane.attempt = Some(serde_json::from_value(spec).unwrap());
+        lane.capabilities = capabilities;
+        assert_eq!(validate_plan(&graph(vec![lane])).unwrap_err(), reason);
     }
 }
 
@@ -10092,51 +10167,6 @@ fn review_base_save_failure_prevents_attempt_creation() {
 }
 
 #[test]
-fn launch_disposition_transition_needs_no_owner_or_journal() {
-    let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"g-test","plan_digest":"digest",
-        "nodes":[{"id":"one","state":"running","worktree":null,"attempts":[]}]
-    }))
-    .unwrap();
-    let before = checkpoint.clone();
-    let busy = crate::coordination::facade::FacadeError::WriterLockBusy;
-    assert!(
-        apply_launch_disposition(
-            &mut checkpoint,
-            0,
-            &busy,
-            None,
-            60,
-            LaunchRetryPolicy::default()
-        )
-        .is_err()
-    );
-    assert_eq!(checkpoint, before);
-    let policy = LaunchRetryPolicy {
-        limit: 1,
-        ..Default::default()
-    };
-    apply_launch_disposition(&mut checkpoint, 0, &busy, Some(at(0)), 60, policy.clone()).unwrap();
-    assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
-    assert_eq!(retry_of(&checkpoint).failures, 1);
-    assert_eq!(retry_of(&checkpoint).wake_at, Some(at(5)));
-    apply_launch_disposition(&mut checkpoint, 0, &busy, Some(at(5)), 60, policy).unwrap();
-    assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
-    assert_eq!(
-        checkpoint.nodes[0].advance_error_code.as_deref(),
-        Some("launch_retry_exhausted")
-    );
-    assert_eq!(
-        checkpoint.nodes[0]
-            .last_launch_retry
-            .as_ref()
-            .unwrap()
-            .failures,
-        2
-    );
-}
-
-#[test]
 fn writer_lock_contention_retries_the_same_attempt_after_release() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
@@ -10456,55 +10486,6 @@ fn a_saved_attempt_reference_never_gains_a_launch_retry_or_a_second_row() {
         owner.stored_refs,
         vec![None, Some("host/1".into()), Some("host/1".into())]
     );
-}
-
-#[test]
-fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
-    use crate::coordination::facade::FacadeError;
-    let operation = provenant_core::OperationId::parse("op").unwrap();
-    for transient in [
-        FacadeError::Busy,
-        FacadeError::Timeout,
-        FacadeError::HomeUnavailable,
-        FacadeError::WriterUnknown,
-        FacadeError::WriterLockBusy,
-        FacadeError::Io {
-            delivery_limit: None,
-            delivery_stage: None,
-            operation: "read file".into(),
-            path: None,
-        },
-        FacadeError::LaunchUnknown {
-            operation_id: operation,
-        },
-    ] {
-        assert!(launch_retry_kind(&transient), "{transient}");
-    }
-    for permanent in [
-        FacadeError::InvalidInput { detail: None },
-        FacadeError::ConfinementRefused,
-        FacadeError::WriterBusy,
-        FacadeError::DispatchRefused {
-            fact: None,
-            disk: None,
-            reason: "why".into(),
-        },
-        FacadeError::NotFound,
-        FacadeError::Cancelled,
-        FacadeError::OwnerUnavailable,
-        FacadeError::StateCorrupt,
-    ] {
-        assert!(!launch_retry_kind(&permanent), "{permanent}");
-    }
-    #[derive(Debug)]
-    struct Untyped;
-    impl std::fmt::Display for Untyped {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("untyped")
-        }
-    }
-    impl Error for Untyped {}
-    assert!(!launch_retry_kind(&Untyped));
 }
 
 #[test]

@@ -348,12 +348,12 @@ pub(super) fn lane_access_checked(
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
-    pub cloud: Option<provenant_records::run::CloudPlacement>,
+    /// Placement, account and build weight, described as for a graph node.
+    pub attempt: provenant_fabric_runtime::graph::AttemptSpec,
     /// Require the selected adapter to have its own skill location.
     pub require_skill_location: bool,
     pub settlement_retry_limit: Option<u8>,
     pub context: Option<provenant_records::run::WorkContext>,
-    pub build_heavy: bool,
     pub title: Option<String>,
     pub task_id: TaskId,
     pub prompt: String,
@@ -361,7 +361,6 @@ pub struct Submitted {
     pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
     pub route: run::RequestedRoute,
-    pub account: Option<String>,
     pub fallback: Vec<String>,
     pub provider_timeout: u64,
     pub delivery_id: Option<DeliveryId>,
@@ -660,10 +659,21 @@ fn submit_with_launcher(
             task_profile.settlement_retry_limit = task
                 .settlement_retry_limit
                 .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));
+            let attempt = task.attempt;
+            if attempt.new_worktree.is_some()
+                || !attempt.capabilities.is_empty()
+                || !attempt.write_roots.is_empty()
+            {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "resolve the attempt's new worktree, capabilities and write roots before submission",
+                ));
+            }
             Ok(run::DispatchTask {
-                cloud: task.cloud,
+                cloud: attempt.placement,
                 context: task.context,
-                build_heavy: task.build_heavy,
+                build_heavy: attempt.build_heavy,
                 profile: task_profile,
                 title: task.title,
                 task_id: task.task_id,
@@ -672,7 +682,7 @@ fn submit_with_launcher(
                 pinned_base: task.pinned_base,
                 head: task.head,
                 route: task.route,
-                account: task.account,
+                account: attempt.account,
                 fallback: fallback(&task.fallback)?,
                 timeout_seconds: task.provider_timeout,
                 delivery_id: task.delivery_id,

@@ -56,5 +56,3 @@ pub enum AttemptObservation {
         commit: Option<String>,
     },
 }
-
-

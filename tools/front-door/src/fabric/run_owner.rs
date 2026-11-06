@@ -26,7 +26,10 @@ pub(crate) fn peer_result<T>(
     }
 }
 /// How many leading events fit in a JSON array of at most `max_bytes`.
-pub(crate) fn events_within<T: serde::Serialize>(events: &[T], max_bytes: u64) -> Result<usize, FacadeError> {
+pub(crate) fn events_within<T: serde::Serialize>(
+    events: &[T],
+    max_bytes: u64,
+) -> Result<usize, FacadeError> {
     let mut size = 2;
     for (index, event) in events.iter().enumerate() {
         let len = serde_json::to_vec(event)
@@ -198,7 +201,10 @@ impl BinaryRunOwner<'_> {
             cancel,
         }
     }
-    pub(crate) fn session(&self, cancel: &CancelToken) -> Result<provenant_cli::run::Session, FacadeError> {
+    pub(crate) fn session(
+        &self,
+        cancel: &CancelToken,
+    ) -> Result<provenant_cli::run::Session, FacadeError> {
         let ctx = &self.factory.context;
         let context = provenant_run::ExecutionContext {
             state_root: provenant_cli::run::execution_state(
@@ -216,7 +222,10 @@ impl BinaryRunOwner<'_> {
             .with_host(ctx.identity.host);
         Ok(provenant_cli::run::Session { store, context })
     }
-    pub(crate) fn store(&self, cancel: &CancelToken) -> Result<provenant_run::RunStore, FacadeError> {
+    pub(crate) fn store(
+        &self,
+        cancel: &CancelToken,
+    ) -> Result<provenant_run::RunStore, FacadeError> {
         Ok(self.session(cancel)?.store)
     }
     /// Run the shared launch path with this process's resolved roots.
@@ -751,18 +760,20 @@ impl BinaryRunOwner<'_> {
                 }
             }
             submitted.push(Submitted {
-                cloud: None,
+                attempt: provenant_fabric_runtime::graph::AttemptSpec {
+                    account: task.account,
+                    build_heavy: task.build_heavy,
+                    ..Default::default()
+                },
                 require_skill_location: task.require_skill_location,
                 settlement_retry_limit,
                 context: task.context,
-                build_heavy: task.build_heavy,
                 base: task.base,
                 pinned_base: None,
                 head: task.head,
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
                 title: task.title,
-                account: task.account,
                 route: task.route,
                 fallback: Vec::new(),
                 provider_timeout: task.timeout_seconds,
@@ -1466,4 +1477,3 @@ impl BinaryRunOwner<'_> {
         })
     }
 }
-

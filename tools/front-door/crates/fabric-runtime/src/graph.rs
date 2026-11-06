@@ -33,7 +33,7 @@ mod land;
 mod land_tests;
 mod loops;
 mod model;
-pub mod next_attempt;
+mod next_attempt;
 mod observation;
 mod outputs;
 pub mod patch;
@@ -51,7 +51,7 @@ mod admission_tests;
 use budget::*;
 pub use journal::*;
 pub use model::*;
-pub use next_attempt::*;
+pub(crate) use next_attempt::*;
 pub use observation::*;
 use outputs::*;
 pub(crate) use validation::*;
@@ -562,6 +562,8 @@ struct PlannedNode {
     attachments: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     capabilities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<AttemptSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<SourceBinding>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1877,10 +1879,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         break;
                     }
                     NextAttempt::Fail { code, message } => {
-                        let progress = &mut checkpoint.nodes[node_index];
-                        progress.state = NodeState::Failed;
-                        progress.advance_error_code = code.map(Into::into);
-                        progress.advance_error = message;
+                        fail_node(
+                            &mut checkpoint.nodes[node_index],
+                            code.map(Into::into),
+                            message,
+                        );
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
@@ -2516,6 +2519,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         attachments: &node.attachments,
                         capabilities: node.capabilities.as_deref(),
                         capability_sources: node.extra.get("capability_sources"),
+                        attempt: node.attempt.as_ref(),
                         distinct_from_attempts: &distinct_attempts,
                         require_distinct,
                         source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
@@ -2983,9 +2987,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     ) {
                                         SettlementFallback::Continue => true,
                                         SettlementFallback::Fail { code, message } => {
-                                            progress.advance_error_code = code;
-                                            progress.advance_error = message;
-                                            progress.state = NodeState::Failed;
+                                            fail_node(progress, code, message);
                                             false
                                         }
                                     }
