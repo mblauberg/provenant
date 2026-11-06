@@ -1557,6 +1557,7 @@ fn fragment(
     checkpoint: &GraphCheckpoint,
     json: &str,
     limits: &crate::config::GraphLimits,
+    safe_reason: &mut PlanFailureFact,
 ) -> Result<Expansion, String> {
     let spec = node.plan.as_ref().ok_or("missing plan configuration")?;
     let patch = super::patch::Patch::from_fragment(json)?;
@@ -1596,7 +1597,10 @@ fn fragment(
         &context,
         None,
     )
-    .map_err(|error| error.message)?
+    .map_err(|error| {
+        *safe_reason = error.cause.unwrap_or(PlanFailureFact::InvalidFragment);
+        error.message
+    })?
     {
         super::patch::Prepared::Ready(admission) => {
             let mut expansion = admission.expansion;
@@ -2236,9 +2240,8 @@ pub(super) fn settle(
             })
         };
         json.and_then(|json| {
-            fragment(node, source, document, checkpoint, &json, limits).inspect_err(|_| {
-                safe_reason = PlanFailureFact::InvalidFragment;
-            })
+            safe_reason = PlanFailureFact::InvalidFragment;
+            fragment(node, source, document, checkpoint, &json, limits, &mut safe_reason)
         })
     } else if writer(node) {
         let handoff = capture

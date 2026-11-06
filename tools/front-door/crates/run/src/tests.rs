@@ -1068,6 +1068,10 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
         "profile".into(),
         serde_json::to_value(&input.request.tasks[0].profile)?,
     );
+    // The historic request always wrote fallback, including an empty list.
+    // Construct those persisted bytes explicitly: current tasks no longer
+    // execute policy successors, but their old fields must remain readable.
+    task.insert("fallback".into(), serde_json::json!([]));
     assert_eq!(task.len(), 9);
     let mut raw = crate::db::bytes(&value)?;
     let digest = CanonicalV1::record_digest("run-request", 1, &value)?;
@@ -1084,6 +1088,7 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
     )?;
     let decoded = store.request(input.run_id, &call)?;
     assert_eq!(decoded.tasks[0].profile, input.request.tasks[0].profile);
+    assert_eq!(decoded.tasks[0].extra.get("fallback"), Some(&serde_json::json!([])));
     assert_ne!(decoded.digest()?, digest);
 
     raw[0] ^= 1;

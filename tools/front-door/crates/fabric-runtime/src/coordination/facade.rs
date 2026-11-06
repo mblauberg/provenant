@@ -726,6 +726,7 @@ pub(super) fn safe_input_field(field: &str) -> Option<&str> {
         "deliver",
         "remote",
         "branch",
+        "integration_branch",
         "route",
         "adapter",
         "provider",

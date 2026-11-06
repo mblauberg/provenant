@@ -549,7 +549,7 @@ fn delivery_templates_admit_bounded_review_repairs() {
             let review = expanded
                 .nodes
                 .iter()
-                .find(|node| node.id == "delivery--review--lenses--security")
+                .find(|node| node.id == "delivery--review--selected--f1-v1-s1--lenses--security")
                 .unwrap();
             assert!(
                 matches!(&review.source, Some(SourceBinding::Head { node }) if node == "delivery--implement")

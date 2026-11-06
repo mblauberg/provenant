@@ -292,6 +292,11 @@ impl Factory {
                 "document".into(),
             )));
         }
+        if raw.and_then(|document| document.get("integration_branch"))
+            .is_some_and(|branch| !branch.is_null() && !branch.is_string())
+        {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("integration_branch".into())));
+        }
         let has_overrides = ["brief", "use", "tier", "over"]
             .iter()
             .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
@@ -341,26 +346,8 @@ impl Factory {
                         .map_err(|_| FacadeError::InvalidInput { detail: None })?,
                     ..Default::default()
                 };
-                let mut document =
-                    patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
-                        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-                // Graph-wide settings belong to the document rather than a node.
-                let mut compiled = encode(&document)?;
-                for key in [
-                    "limits",
-                    "integration_branch",
-                    "delivery",
-                    "review_base",
-                    "context",
-                    "decision_session",
-                ] {
-                    if let Some(value) = raw.get(key) {
-                        compiled[key] = value.clone();
-                    }
-                }
-                document = serde_json::from_value(compiled)
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-                document
+                patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
             } else {
                 serde_json::from_value::<GraphDocument>(raw.clone())
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?
@@ -414,18 +401,20 @@ impl Factory {
                 fields.remove("brief");
                 fields.remove("tier");
             }
-            let integration_branch = (node["use"] == "batch"
-                && library.layer("batch") == Some(Layer::Bundled))
-            .then(|| {
-                parameters.get("integration_branch").cloned().or_else(|| {
-                    template
-                        .parameters
-                        .get("integration_branch")?
-                        .default
-                        .clone()
-                })
-            })
-            .flatten();
+            // Node parameters supplied explicitly (including CLI --set) beat
+            // document settings; template defaults are the final fallback.
+            let bundled_batch = node["use"] == "batch"
+                && library.layer("batch") == Some(Layer::Bundled);
+            let integration_branch = bundled_batch
+                .then(|| parameters.get("integration_branch").cloned())
+                .flatten()
+                .or_else(|| raw.and_then(|document| document.get("integration_branch")).filter(|branch| !branch.is_null()).cloned())
+                .or_else(|| bundled_batch
+                    .then(|| template.parameters.get("integration_branch")?.default.clone())
+                    .flatten());
+            if bundled_batch && let Some(branch) = &integration_branch {
+                parameters["integration_branch"] = branch.clone();
+            }
             node["with"] = parameters;
             patch::submit(
                 id,
@@ -439,15 +428,20 @@ impl Factory {
             )
             .map_err(|_| FacadeError::InvalidInput { detail: None })?
         };
-        if let Some(raw) = lane_document.filter(|value| value.get("graph_id").is_some()) {
+        if let Some(raw) = raw {
             let mut compiled = encode(&document)?;
             for key in [
                 "limits",
-                "integration_branch",
                 "delivery",
                 "review_base",
                 "context",
                 "decision_session",
+                "review",
+                "retry",
+                "exclude",
+                "network",
+                "capability",
+                "no_capability",
             ] {
                 if let Some(value) = raw.get(key) {
                     compiled[key] = value.clone();
@@ -455,6 +449,16 @@ impl Factory {
             }
             document = serde_json::from_value(compiled)
                 .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        }
+        // Template compilation selected a schema before document metadata was
+        // applied; a retained review base requires the schema-2 representation.
+        if raw.is_none() || lane_document.is_some()
+            || raw.is_some_and(|document| document.get("templates").is_some()
+                || document["nodes"].as_array().is_some_and(|nodes| nodes.iter().any(|node| node.get("use").is_some())))
+        {
+            document.schema_version = document.schema_version.max(u64::from(
+                provenant_fabric_runtime::graph::minimum_schema_version(&document),
+            ));
         }
         if (raw.is_none() || lane_document.is_some())
             && let Some(tier) = input.get("tier").filter(|value| !value.is_null())
@@ -482,6 +486,13 @@ impl Factory {
             &self.context.config.graph.limits,
         )
         .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        // Patch admission scans nodes and parameters. Graph-wide metadata is
+        // retained separately, so scan the complete bound record before any
+        // preview or publication can expose or persist it.
+        let bound_document = serde_json::to_string(&document)
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        patch::scan_for_secrets(&bound_document)
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if input["explain"] == true {
             return Ok(json!({"document":document}));
         }
@@ -1077,6 +1088,110 @@ mod tests {
                 .graph_document(json!({"op":"run","document":"graph.json"}), budget, &cancel)
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_context_secret_is_rejected_before_preview_publication_or_journal() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let secret = "sk-abcdefghijklmnopqrstuvwx";
+        // A compiled document bypasses template scanning. The credential is
+        // only in graph context, outside submission's nodes and parameters.
+        let document = json!({
+            "schema_version":2, "graph_id":"metadata-secret",
+            "context":{"retained_note":secret},
+            "nodes":[{"id":"inspect", "prompt":"Inspect code", "access":"read_only", "route":{"alias":"junior"}}]
+        });
+        for explain in [true, false] {
+            let error = factory.graph_document(json!({
+                "op":"run", "document":document, "explain":explain
+            }), budget, &cancel).err().ok_or("context credential was accepted")?;
+            assert_eq!(error, FacadeError::InvalidInput { detail: None });
+            assert!(!serde_json::to_string(&error)?.contains(secret));
+            assert!(!serde_json::to_string(&error.diagnostic())?.contains(secret));
+            assert!(!rig.project.join(".provenant/scratch/graphs").exists());
+            assert!(FileJournal::graph_ids(&factory.context.roots.state, factory.context.identity.project)?.is_empty());
+            assert!(FileJournal::event_graph_ids(&factory.context.roots.state, factory.context.identity.project)?.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generated_graph_id_preserves_document_binding_and_settings() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let settings = json!({
+            "integration_branch":"batch/document",
+            "limits":{"nodes":128},
+            "delivery":"none",
+            "review_base":"1111111111111111111111111111111111111111",
+            "context":{"risk_tier":"substantial", "task_kind":"implementation"},
+            "decision_session":"chair-session",
+            "review":{"risk_tier":"substantial"},
+            "retry":{"retries":1},
+            "exclude":["codex/gpt-6-luna"],
+            "network":"off",
+            "capability":["postgres"],
+            "no_capability":[]
+        });
+        let mut source = settings.clone();
+        source["nodes"] = json!([{
+            "id":"inspect", "use":"task", "source":{"type":"integration"}
+        }]);
+        let response = factory.graph_document(
+            json!({"op":"run", "document":source, "explain":true}), budget, &cancel,
+        )?;
+        let compiled = &response["document"];
+        assert!(compiled["graph_id"].as_str().is_some_and(|id| id.starts_with("g-")));
+        for (field, expected) in settings.as_object().ok_or("settings object")? {
+            assert_eq!(&compiled[field], expected, "lost graph setting {field}");
+        }
+        for invalid_branch in [json!(7), json!({"branch":"batch/document"}), json!(["batch/document"])] {
+            let error = factory.graph_document(json!({
+                "op":"run", "explain":true,
+                "document":{"integration_branch":invalid_branch,"nodes":[{"id":"task","use":"task"}]}
+            }), budget, &cancel).err().ok_or("invalid branch was accepted")?;
+            assert_eq!(error, FacadeError::invalid(InvalidInputDetail::Field("integration_branch".into())));
+        }
+        let document: GraphDocument = serde_json::from_value(compiled.clone())?;
+        assert!(document.expanded(&factory.context.config.graph.limits)?.nodes.iter().any(|node| {
+            matches!(node.source, Some(provenant_fabric_runtime::graph::SourceBinding::Integration))
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_batch_node_and_cli_branch_parameters_override_document_binding() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        for (node_parameters, parameters, expected) in [
+            (json!({}), json!({}), "batch/document"),
+            (json!({"integration_branch":"batch/node"}), json!({}), "batch/node"),
+            (json!({"integration_branch":"batch/node"}), json!({"integration_branch":"batch/cli"}), "batch/cli"),
+        ] {
+            let mut bindings = json!({"worktree":rig.project,"write_scope":["."]});
+            bindings.as_object_mut().ok_or("bindings object")?
+                .extend(node_parameters.as_object().ok_or("parameters object")?.clone());
+            let response = factory.graph_document(json!({
+                "op":"run", "explain":true, "set":parameters,
+                "document":{
+                    "use":"batch", "integration_branch":"batch/document",
+                    "with":bindings
+                }
+            }), budget, &cancel)?;
+            assert_eq!(response["document"]["integration_branch"], expected);
+            let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
+            assert!(document.expanded(&factory.context.config.graph.limits)?.nodes.iter().any(|node| {
+                node.delivery == Some(provenant_records::run::DeliveryMode::Integrate(expected.into()))
+            }));
+        }
         Ok(())
     }
 

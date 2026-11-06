@@ -4822,8 +4822,8 @@ fn graph_run_refuses_low_disk_writers() -> Result {
         ],
     )?;
     let value = json(&output)?;
-    assert_eq!(code(&output), 0, "{value}");
-    assert_eq!(value["status"], "ok", "{value}");
+    assert_eq!(code(&output), 1, "{value}");
+    assert_eq!(value["status"], "failed", "{value}");
     assert_eq!(value["data"]["outcome"], "failed", "{value}");
     let node = &value["data"]["checkpoint"]["nodes"][0];
     assert_eq!(node["state"], "blocked", "{value}");
@@ -4841,11 +4841,11 @@ fn graph_run_refuses_low_disk_writers() -> Result {
         serde_json::to_vec(&serde_json::json!({
             "schema_version": 2, "graph_id":"low-disk-reader", "nodes":[{
                 "id":"reader", "prompt":"hello", "access":"read_only",
-                "route":{"adapter":"codex","model":"gpt-6-luna"}
+                "route":{"adapter":"fixture-unavailable","model":"one"}
             }]
         }))?,
     )?;
-    let reader = ok(
+    let reader = command(
         &rig,
         &[
             "run",
@@ -4854,7 +4854,13 @@ fn graph_run_refuses_low_disk_writers() -> Result {
             "--json",
         ],
     )?;
-    assert_eq!(reader["status"], "ok", "{reader}");
+    let reader_value = json(&reader)?;
+    assert_eq!(code(&reader), 1, "{reader_value}");
+    assert_eq!(reader_value["status"], "failed", "{reader_value}");
+    let reader_node = &reader_value["data"]["checkpoint"]["nodes"][0];
+    assert_eq!(reader_node["state"], "failed", "{reader_value}");
+    assert_eq!(reader_node["attempts"][0]["outcome"], "adapter_unavailable", "{reader_value}");
+    assert!(reader_node["attempts"][0]["attempt_ref"].as_str().is_some(), "{reader_value}");
     assert!(rig.state.join("runs").exists());
     Ok(())
 }
