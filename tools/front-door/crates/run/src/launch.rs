@@ -6,7 +6,7 @@ use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId};
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 /// Host-validated identity and the network policy inherited at launch.
