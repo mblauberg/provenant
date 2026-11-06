@@ -235,16 +235,21 @@ impl HostDeliveryContext {
             git: host.executable("git", &writer)?,
             gh: None,
         });
-        host.refuse_protected_target(&writer, target)
+        host.refuse_protected_target(&writer, target, Stage::Prepare)
     }
 
-    fn refuse_protected_target(&self, writer: &WriterRequest, target: &str) -> Result<()> {
+    fn refuse_protected_target(
+        &self,
+        writer: &WriterRequest,
+        target: &str,
+        stage: Stage,
+    ) -> Result<()> {
         if !self
             .command(
                 &writer.worktree,
                 "git",
                 &["symbolic-ref", "--quiet", &format!("refs/heads/{target}")],
-                Stage::Prepare,
+                stage,
             )?
             .is_empty()
         {
@@ -253,7 +258,7 @@ impl HostDeliveryContext {
                 "symbolic branch targets are refused",
             ));
         }
-        let remotes = self.command(&writer.worktree, "git", &["remote"], Stage::Prepare)?;
+        let remotes = self.command(&writer.worktree, "git", &["remote"], stage)?;
         let mut has_default = false;
         let mut protected_default = false;
         for remote in remotes.lines() {
@@ -265,7 +270,7 @@ impl HostDeliveryContext {
                     "--quiet",
                     &format!("refs/remotes/{remote}/HEAD"),
                 ],
-                Stage::Prepare,
+                stage,
             )?;
             if let Some(branch) = default.strip_prefix(&format!("refs/remotes/{remote}/")) {
                 has_default = true;
@@ -277,7 +282,7 @@ impl HostDeliveryContext {
             &writer.worktree,
             "git",
             &["worktree", "list", "--porcelain"],
-            Stage::Prepare,
+            stage,
         )?;
         let primary_branch = trees
             .split("\n\n")
@@ -366,7 +371,7 @@ impl HostDeliveryContext {
             None
         };
         let branch = publication.as_deref().unwrap_or(branch);
-        host.refuse_protected_target(&writer, branch)?;
+        host.refuse_protected_target(&writer, branch, Stage::Push)?;
         let reference = format!("refs/heads/{branch}");
         if local {
             host.refuse_remote_symbolic_target(project, &bound.push_url, branch, Stage::Push)?;
@@ -614,7 +619,7 @@ impl HostDeliveryContext {
         };
         self.tools = Some(HostTools { git, gh });
         let common_git_dir = self.trusted_common_git_dir(writer, stage)?;
-        self.refuse_protected_target(writer, &request.branch)?;
+        self.refuse_protected_target(writer, &request.branch, stage)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
                 &writer.worktree,
@@ -1584,10 +1589,10 @@ impl HostDeliveryContext {
         head: GitOid,
     ) -> Result<()> {
         let stage = Stage::Integrate;
-        self.refuse_protected_target(writer, &request.branch)
+        self.refuse_protected_target(writer, &request.branch, stage)
             .map_err(|error| delivery_stage_error(error, stage))?;
         let bound = self.bound.as_ref().ok_or(RunError::Delivery(stage))?;
-        self.refuse_protected_target(writer, &request.branch)
+        self.refuse_protected_target(writer, &request.branch, stage)
             .map_err(|error| delivery_stage_error(error, stage))?;
         self.verify_objects(writer, head, stage)?;
         self.clean(writer)?;
@@ -1710,7 +1715,7 @@ impl HostDeliveryContext {
             )?;
             GitOid::parse(&commit).map_err(|_| RunError::Delivery(stage))?
         };
-        self.refuse_protected_target(writer, &request.branch)
+        self.refuse_protected_target(writer, &request.branch, stage)
             .map_err(|error| delivery_stage_error(error, stage))?;
         if remote {
             self.refuse_remote_symbolic_target(
@@ -1877,7 +1882,7 @@ impl HostDeliveryContext {
         if self.head(writer)? != head {
             return Err(RunError::Delivery(Stage::Head));
         }
-        self.refuse_protected_target(writer, &request.branch)
+        self.refuse_protected_target(writer, &request.branch, Stage::Push)
             .map_err(|error| match error {
                 RunError::DeliveryLimit { .. } | RunError::DeliveryFact { .. } => error,
                 _ => RunError::Delivery(Stage::Prepare),

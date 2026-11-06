@@ -1896,6 +1896,32 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 }
 
 #[test]
+fn integration_rechecks_primary_checkout_after_preparation()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["branch", "integration"])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+
+    // Preparation caches the initial primary checkout listing in these facts.
+    let facts = provenant_confinement::worktrees::RepoFacts::default();
+    let host = HostDeliveryContext::new(fixture.environment.clone())
+        .with_repo_facts(&facts)
+        .prepare(&fixture.writer, &fixture.request)?;
+
+    fixture.commit(&fixture.writer.worktree, "provider output")?;
+    fixture.git(&["checkout", "integration"])?;
+
+    let head = host.head(&fixture.writer)?;
+    assert!(matches!(
+        host.integrate(&fixture.writer, &fixture.request, head),
+        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
+    ));
+    Ok(())
+}
+
+#[test]
 fn integration_refuses_the_default_branch_of_a_non_origin_remote()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
