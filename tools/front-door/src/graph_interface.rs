@@ -99,7 +99,7 @@ pub(crate) fn run(
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
     let input = (|| {
-        let mut input = json!({"op":"run","explain":request.explain});
+        let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
         if let Some(wait) = request.wait {
             input["wait_seconds"] = json!(wait);
         }
