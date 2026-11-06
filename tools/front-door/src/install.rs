@@ -1622,6 +1622,9 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             "local".into(),
             runner.execute(&local, None, 1_048_576, 3600),
         )];
+        if !results[0].success {
+            return Ok(results);
+        }
         // SSH uses Fabric's validated destination, batch mode and connection deadline.
         for (name, peer) in fabric.peers {
             let (command, input) = if let Some(archive) = &source_archive {
@@ -1662,6 +1665,9 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 name,
                 runner.execute(&argv, Some(input), 1_048_576, 3600),
             ));
+            if !results.last().is_some_and(|host| host.success) {
+                break;
+            }
         }
         Ok(results)
     })();

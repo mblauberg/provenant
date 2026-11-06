@@ -2024,6 +2024,7 @@ esac
         stopped_value["data"][0]["success"], false,
         "{stopped_value}"
     );
+    assert_eq!(stopped_value["data"].as_array().unwrap().len(), 1);
     for expected in ["waiting", "lane-one", "custom.toml"] {
         assert!(
             stopped_value.to_string().contains(expected),
