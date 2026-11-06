@@ -314,7 +314,11 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
         node["with"] = parameters;
         let mut nodes = Vec::new();
         if name == "synthesise" || template["review"] == "synthesis" {
-            let source = if template["review"] == "synthesis" { "review" } else { "task" };
+            let source = if template["review"] == "synthesis" {
+                "review"
+            } else {
+                "task"
+            };
             nodes.push(json!({"id":"source", "use":source}));
             node["after"] = json!(["source"]);
             node["inputs"] = if template["review"] == "synthesis" {
