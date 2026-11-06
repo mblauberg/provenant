@@ -370,71 +370,6 @@ fn writer_preparation_missing_pnpm_names_searched_path() -> Result<(), Box<dyn s
     Ok(())
 }
 
-#[test]
-fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
--> Result<(), Box<dyn std::error::Error>> {
-    use provenant_routing::{
-        Catalogue, Fallback, ModelId, RouteChoice, RouteIntent, RoutingConfig, RoutingContext,
-    };
-    let catalogue = Catalogue::bundled()?;
-    let config = RoutingConfig::default();
-    let model = ModelId::parse("agy/gemini-3.8-flash")?;
-    let route = provenant_routing::resolve(
-        &provenant_routing::RouteRequest {
-            intent: RouteIntent::default(),
-            choice: RouteChoice::Model(model.clone()),
-            effort: None,
-            confidential: false,
-            fallback: Fallback::None,
-        },
-        &RoutingContext {
-            policy_account_hint: None,
-            choice_context: None,
-            catalogue: &catalogue,
-            config: &config,
-            registry: REGISTRY,
-            availability: &[],
-            quota: &[],
-            capacity_cooldowns: &[],
-            accounts: &[],
-            quota_policies: &[],
-            readiness: None,
-            access: &[],
-            now: provenant_core::WallTime::from_micros(0)?,
-            host: "fixture",
-        },
-    )?;
-    let mut input = super::super::tests::trace_run(
-        30,
-        provenant_core::AttemptId::from_bytes([31; 16]),
-        provenant_core::WallTime::from_micros(0)?,
-    )?;
-    let mut task = input.request.tasks.remove(0);
-    task.account = Some("agy-work".into());
-    let policy = config
-        .model_policy
-        .effective(
-            &model,
-            None,
-            provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
-        )
-        .policy;
-    let fallback = super::nested_policy_fallback(&task, &route, &policy)?;
-    assert!(
-        matches!(fallback.route, run::RequestedRoute::Model { ref model, ref effort, .. } if model == "codex/gpt-6-luna" && effort.as_deref() == Some("high"))
-    );
-    assert_eq!(fallback.authority_digest, task.authority_digest);
-    assert_eq!(fallback.access, task.access);
-    assert!(fallback.account.is_none());
-    task.access.write_roots.push("/fixture/work".into());
-    assert_eq!(
-        super::nested_policy_fallback(&task, &route, &policy)
-            .err()
-            .as_deref(),
-        Some("model policy fallback requires read-only authority")
-    );
-    Ok(())
-}
 use super::*;
 
 #[test]
@@ -1669,7 +1604,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             }
         },
         None,
-        false,
         None,
     )?;
     assert_eq!(prepared.route.provider.as_deref(), Some(adapter_name));
@@ -2509,7 +2443,6 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
                 executable: &codex_runtime,
                 git: &git,
                 state: &state,
-                child_state: &state.join("children"),
                 home: &home,
                 depth: 1,
                 attempt: attempt_id,
@@ -3156,180 +3089,6 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     Ok(())
 }
 
-// Exercise the owner-to-preparation path so the dirty refusal regression also
-// fails when launch forgets to mark an unchanged predecessor HEAD.
-fn prepare_policy_writer_successor(
-    registry: &Registry<'_>,
-    task: &run::TaskRequest,
-    prompt: &str,
-    executable: &Path,
-) -> Result<String, Box<dyn std::error::Error>> {
-    use provenant_core::{ActorId, CancelToken, Clock};
-    use provenant_supervisor::custody::{
-        ExitObservation, PublicationState, Scope, SettlementEvidence,
-    };
-    let clock = provenant_os::clock::SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let store = run::RunStore::open(
-        &run::ExecutionContext {
-            state_root: registry.roots.ok_or("roots")?.state.clone(),
-            project_id: registry.project_id.ok_or("project")?,
-            actor_id: ActorId::from_bytes([40; 16]),
-            read_prompts: true,
-        },
-        &call,
-    )?;
-    let mut input = super::super::tests::trace_run(
-        40,
-        provenant_core::AttemptId::from_bytes([39; 16]),
-        clock.wall_now()?,
-    )?;
-    input.request.parent_attempt = None;
-    input.request.tasks = vec![task.clone()];
-    input.request.tasks[0].head = task.source_head.clone();
-    input.request.tasks[0].source_head = None;
-    input.attempts[0].task_id = task.task_id;
-    input.attempts[0].prompt = prompt.into();
-    store.create(&input, &call)?;
-    let old = store.record(input.attempts[0].attempt_id, &call)?;
-    let exit = ExitObservation {
-        publication: PublicationState::Durable,
-        scope: Scope {
-            run: old.run_id,
-            attempt: old.attempt_id,
-            generation: old.generation,
-        },
-        termination: Some(provenant_os::exec::Termination::Exit(0)),
-        never_spawned: false,
-        stop_reason: None,
-        delivered_signals: vec![],
-        reaped: vec![],
-        omitted_reaped: 0,
-        spared: vec![],
-        omitted_spared: 0,
-        cancel_delivered_before_exit: None,
-        warnings: vec![],
-        omitted_warnings: 0,
-        terminal_observed: false,
-        unresolved_cleanup: false,
-        unresolved_pids: vec![],
-        settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
-        stdout: Default::default(),
-        stderr: Default::default(),
-    };
-    let mut wire = serde_json::to_value(&exit)?;
-    wire.as_object_mut().ok_or("exit")?.remove("publication");
-    wire["schema_version"] = 1.into();
-    let attempt = registry
-        .state_root
-        .ok_or("state")?
-        .join(format!("runs/{}/attempts/{}", old.run_id, old.attempt_id));
-    let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
-    for (name, value) in [
-        ("process-exit.json", wire),
-        (
-            "writer-terminal.json",
-            serde_json::json!({"schema_version":1,"head":task.head,"protected_paths":[]}),
-        ),
-    ] {
-        directory
-            .atomic_write(
-                name.as_ref(),
-                ".fixture-",
-                &serde_json::to_vec(&value)?,
-                provenant_os::fs::PublishMode::NoReplace,
-            )?
-            .require_durable()?;
-    }
-    store.stage_policy_retry(
-        &old,
-        &run::PolicyRetry {
-            schema_version: 2,
-            cause: run::PolicyCause::Quota,
-            action: run::PolicyAction::Retry,
-            route: old.requested_route.clone(),
-            resume: false,
-            max_attempts: 2,
-            instruction: "Continue".into(),
-            not_before_unix_seconds: None,
-        },
-        &call,
-    )?;
-    store.publish_terminal(
-        old.attempt_id,
-        old.revision,
-        &run::TerminalPublication {
-            outcome: run::Outcome::QuotaLimited,
-            finished_at: clock.wall_now()?,
-            started_at: None,
-            provider_ms: None,
-            reason: None,
-            result: "quota",
-            complete: false,
-            redacted: false,
-            resolved_route: None,
-            applied_route: None,
-            observed_route: None,
-            usage: Default::default(),
-            session: None,
-            partial_signals: vec![],
-        },
-        &exit,
-        &call,
-    )?;
-    struct Capture<'a, 'b> {
-        registry: &'a Registry<'b>,
-        executable: &'a Path,
-    }
-    impl run::Providers for Capture<'_, '_> {
-        fn prepare(
-            &self,
-            task: &run::TaskRequest,
-            prompt: &str,
-            paths: &run::LaunchPaths,
-            _: Option<&run::AttemptRecord>,
-        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
-            prepare_with(
-                self.registry,
-                task,
-                prompt,
-                paths,
-                None,
-                |_| Ok(self.executable.into()),
-                None,
-            )
-            .map_err(|e| e.to_string().into())
-        }
-        fn decode(
-            &self,
-            _: &run::RouteRecord,
-            _: &[u8],
-            _: &ExitObservation,
-            _: &Path,
-        ) -> Result<run::Decoded, String> {
-            unreachable!()
-        }
-    }
-    let capture = Capture {
-        registry,
-        executable,
-    };
-    let custody = directory.try_lock(
-        std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
-        provenant_os::fs::LockMode::Exclusive,
-    )?;
-    drop(custody);
-    let started = store.start(input.run_id, &capture, &|_, _| unreachable!(), &call)?;
-    match started.as_slice() {
-        [run::Started::Refused { reason, .. }] => Ok(reason.clone()),
-        _ => Err(format!("expected refusal: {started:?}").into()),
-    }
-}
-
 #[test]
 fn writer_continuation_refuses_and_preserves_uncommitted_edits()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -3510,7 +3269,18 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         host: None,
     };
 
-    let reason = prepare_policy_writer_successor(&registry, &task, prompt, &executable)?;
+    let reason = prepare_with(
+        &registry,
+        &task,
+        prompt,
+        &paths,
+        None,
+        |_| Ok(executable.clone()),
+        None,
+    )
+    .err()
+    .ok_or("dirty predecessor accepted")?
+    .to_string();
     assert!(
         reason.contains("uncommitted predecessor edits: uncommitted_leftover.txt"),
         "{reason}"
@@ -3979,7 +3749,6 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                     executable: Path::new("/fixture/provenant/bin/provenant"),
                     git: Path::new("/usr/bin/git"),
                     state: context.state_root.as_path(),
-                    child_state: &base.join("children"),
                     home: &home,
                     depth: 1,
                     attempt: AttemptId::from_bytes([6; 16]),
@@ -4596,7 +4365,6 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
             executable: Path::new("/fixture/provenant/bin/provenant"),
             git: Path::new("/usr/bin/git"),
             state: Path::new("/state"),
-            child_state: Path::new("/state/children"),
             home: Path::new("/home/user"),
             depth: 1,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),

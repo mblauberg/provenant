@@ -2447,28 +2447,14 @@ pub(super) fn lane_dispatch_values(
             Fail::new(
                 Status::Refused,
                 ErrorKind::LaneContext,
-                "lane environment must match its child Run store path",
+                "lane environment must match its host state and include lineage",
             )
         };
-        let relative = run_state.strip_prefix(state).map_err(|_| invalid())?;
-        let mut parts = relative.components();
-        let mut depth = 0;
-        let mut parent = None;
-        while let Some(part) = parts.next() {
-            if part.as_os_str() != "children" {
-                return Err(invalid());
-            }
-            let id = parts
-                .next()
-                .and_then(|part| part.as_os_str().to_str())
-                .ok_or_else(invalid)?;
-            parent = Some(AttemptId::parse(id).map_err(|_| invalid())?);
-            depth += 1;
-        }
-        if depth == 0 || parent_depth != Some(depth) || parent_attempt != parent {
+        // The marker selects the host, never a writable child database. The
+        // relay authenticates lineage from its host-bound attempt socket.
+        if run_state != state || parent_depth.is_none() || parent_attempt.is_none() {
             return Err(invalid());
         }
-        return Ok((run::next_lane_depth(depth, max_depth)?, parent));
     }
     let parent_depth = match (parent_depth, parent_attempt) {
         (None, None) => 0,
@@ -2826,129 +2812,6 @@ pub(super) fn seal_launch_task(
         effective_network: task.access.network(task.writer.is_some()),
         effective_database_ipc: task.access.database_ipc,
     }
-}
-
-/// Called after guardian custody is released. The successor was queued in the
-/// terminal transaction; a crashed launcher leaves it for ordinary recovery.
-/// When the staged retry must wait, `before_wait` runs first so other work,
-/// such as graph advancement, is not held behind the backoff.
-pub fn launch_policy_successor(
-    context: &run::HolderContext,
-    before_wait: impl FnOnce(),
-) -> Result<(), String> {
-    let Some(host) = context.launch.as_ref() else {
-        return Ok(());
-    };
-    if host.configuration_root != context.roots.state_root {
-        return Ok(());
-    }
-    let mut inputs =
-        provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
-    inputs.state_dir = Some(context.roots.state_root.clone());
-    let roots = inputs
-        .resolve(&provenant_os::fs::SystemPathResolver)
-        .map_err(|error| error.to_string())?;
-    let (_, store) =
-        run::HolderContext::open(&context.encode().map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let mut call = request(&clock, &cancel).map_err(|error| error.message)?;
-    let pending = store
-        .pending_attempts(context.run_id, &call)
-        .map_err(|error| error.to_string())?;
-    let successor_pending = |pending: &[run::AttemptRecord]| {
-        pending.iter().any(|attempt| {
-            attempt.retry_of == Some(context.attempt_id)
-                && matches!(
-                    attempt.continuation.as_deref(),
-                    Some("policy_fallback" | "policy_continuation")
-                )
-        })
-    };
-    if !successor_pending(&pending) {
-        return Ok(());
-    }
-    // A capacity retry waits until its recorded time here, in the settled
-    // attempt's guardian, and gives up the wait once the successor is no
-    // longer queued. The time is sealed with the retry and every launcher
-    // defers the successor until then, so a later sweep can launch it if this
-    // guardian dies.
-    use provenant_core::Clock;
-    let backoff = store
-        .record(context.attempt_id, &call)
-        .ok()
-        .and_then(|record| store.staged_policy_retry(&record).ok().flatten())
-        .and_then(|retry| retry.not_before_unix_seconds)
-        .zip(clock.wall_now().ok())
-        .map_or(0, |(not_before, now)| {
-            let now = now.as_micros().div_euclid(1_000_000);
-            u64::try_from(not_before.saturating_sub(now)).unwrap_or(0)
-        });
-    if backoff > 0 {
-        before_wait();
-        let start = clock.mono_now();
-        let deadline = provenant_core::DurationMicros::from_seconds(backoff)
-            .and_then(|wait| start.checked_add(wait))
-            .map_err(|error| error.to_string())?;
-        let mut checked = start;
-        while clock.mono_now() < deadline {
-            provenant_os::sys::wait_pause(std::time::Duration::from_millis(50));
-            let now = clock.mono_now();
-            if now.as_micros().saturating_sub(checked.as_micros()) >= 1_000_000 {
-                checked = now;
-                // Each check, and the launch after the wait, gets its own budget.
-                call = request(&clock, &cancel).map_err(|error| error.message)?;
-                let pending = store
-                    .pending_attempts(context.run_id, &call)
-                    .map_err(|error| error.to_string())?;
-                if !successor_pending(&pending) {
-                    return Ok(());
-                }
-            }
-        }
-        call = request(&clock, &cancel).map_err(|error| error.message)?;
-    }
-    let session = Session {
-        context: run::ExecutionContext {
-            state_root: roots.state.clone(),
-            project_id: context.project_id,
-            actor_id: context.actor_id,
-            read_prompts: true,
-        },
-        store,
-    };
-    let edge = Edge {
-        roots: &roots,
-        home: &context.roots.home,
-        assets: &context.roots.checkout,
-        cwd: &host.cwd,
-    };
-    launch_on_host(
-        &session,
-        context.run_id,
-        &edge,
-        &call,
-        Some(host),
-        None,
-        None,
-    )
-    .map_err(|error| error.message)?;
-    Ok(())
-}
-
-/// A child carries the request `validate_child` returned, which is the only
-/// copy launched from. The store carries its parent's sealed requester.
-pub(super) fn launch_on_host(
-    session: &Session,
-    run: RunId,
-    edge: &Edge<'_>,
-    call: &run::Request<'_>,
-    host: Option<&run::HostLaunchContext>,
-    validated: Option<&run::ValidatedChild>,
-    ready: Option<&run::PreparedStart>,
-) -> Result<Vec<run::Started>, Fail> {
-    launch_on_host_with_wait(session, run, edge, call, host, validated, ready, None)
 }
 
 #[allow(clippy::too_many_arguments)]

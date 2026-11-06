@@ -331,8 +331,6 @@ pub struct LaneRuntime<'a> {
     /// Canonical host-selected Git, also pinned in MCP and hook environments.
     pub git: &'a Path,
     pub state: &'a Path,
-    /// Isolated Run store for this attempt's children; never its own custody.
-    pub child_state: &'a Path,
     pub home: &'a Path,
     pub depth: u64,
     pub attempt: AttemptId,
@@ -358,7 +356,6 @@ impl LaneRuntime<'_> {
             self.git,
             self.state,
             self.assets,
-            self.child_state,
             self.home,
         ]
         .iter()
@@ -372,7 +369,7 @@ impl LaneRuntime<'_> {
             "PROVENANT_AGENT_LABEL": format!("lane-{}", self.attempt),
             "PROVENANT_LANE_DEPTH": self.depth.to_string(),
             "PROVENANT_PARENT_ATTEMPT_ID": self.attempt.to_string(),
-            RUN_STATE_DIRECTORY_ENV: self.child_state,
+            RUN_STATE_DIRECTORY_ENV: self.state,
             "HOME": self.home,
             "PROVENANT_ROOT": self.assets,
             "PROVENANT_GIT": self.git,
@@ -473,7 +470,7 @@ impl LaneRuntime<'_> {
                 "PROVENANT_PARENT_ATTEMPT_ID".into(),
                 self.attempt.to_string().into(),
             ),
-            (RUN_STATE_DIRECTORY_ENV.into(), self.child_state.into()),
+            (RUN_STATE_DIRECTORY_ENV.into(), self.state.into()),
         ]);
         Ok(())
     }
@@ -499,10 +496,6 @@ impl LaneRuntime<'_> {
         profile
             .runtime_reads
             .push(subtree(self.state.join("projects")));
-        // Run databases and custody are private to child_state. Explicit exact
-        // reads include WAL companions; never grant the Fabric directory.
-        setup.push(SetupStep::CreateDir(self.child_state.to_owned()));
-        profile.state_writes.push(subtree(self.child_state));
         for name in [
             "fabric/fabric.sqlite3",
             "fabric/fabric.sqlite3-wal",
@@ -1482,7 +1475,6 @@ mod tests {
                     executable: Path::new("/fixture/provenant"),
                     git: Path::new("/fixture/git"),
                     state: Path::new("/fixture/state"),
-                    child_state: Path::new("/fixture/state/children/attempt"),
                     home: Path::new("/fixture/home"),
                     depth: 1,
                     attempt: AttemptId::from_bytes([byte; 16]),

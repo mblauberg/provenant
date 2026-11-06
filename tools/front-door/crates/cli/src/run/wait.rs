@@ -319,71 +319,22 @@ fn candidates_with_backlog<'a>(
         let mut lanes = Vec::with_capacity(ids.len());
         let mut included = std::collections::BTreeSet::new();
         for id in ids {
-            // Settlement may have queued a successor after the selection read.
-            // Keep the original receipt and wait for its current policy tail.
-            follow_policy_tail::<_, Fail>(
-                id,
-                |id| {
-                    let lane = session.service().status_for_wait(id, &call)?;
-                    if included.insert(id)
-                        && (picks.label.is_none() || lane.verified_owner == Some(picks.owner))
-                    {
-                        lanes.push(lane);
-                    }
-                    Ok(())
-                },
-                |id| Ok(session.store.policy_tail(id, &call)?.attempt_id),
-            )?;
+            let lane = session.service().status_for_wait(id, &call)?;
+            if included.insert(id)
+                && (picks.label.is_none() || lane.verified_owner == Some(picks.owner))
+            {
+                lanes.push(lane);
+            }
         }
         cloud_owner::hydrate(&session.store, &mut lanes, &call)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
-        for lane in &mut lanes {
-            let tail = session.store.policy_tail(lane.attempt_id, &call)?;
-            lane.superseded_by = (tail.attempt_id != lane.attempt_id).then_some(tail.attempt_id);
-        }
         let waits = session.store.lane_waits(&lanes, &call);
         apply_lane_wait_suppression(&mut lanes, &waits);
         Ok(lanes)
     }
 }
 
-/// Visit `id`, then each policy successor after it. Each hop reads the state
-/// before the tail: a terminal state commits its successor in the same
-/// transaction, so the tail read afterwards cannot miss it. A policy chain holds
-/// at most `POLICY_ATTEMPT_CEILING` attempts.
-pub(super) fn follow_policy_tail<K: Copy + PartialEq, E>(
-    mut id: K,
-    mut visit: impl FnMut(K) -> Result<(), E>,
-    mut tail: impl FnMut(K) -> Result<K, E>,
-) -> Result<(), E> {
-    for _ in 0..=provenant_run::POLICY_ATTEMPT_CEILING {
-        visit(id)?;
-        let next = tail(id)?;
-        if next == id {
-            break;
-        }
-        id = next;
-    }
-    Ok(())
-}
-
 pub(super) const LOCAL_POLL: Duration = Duration::from_millis(500);
-
-/// Resolve the sealed policy tail for each displayed receipt.
-pub(super) fn policy_successors(
-    session: &Session,
-    lanes: &[run::AttemptRecord],
-    call: &run::Request<'_>,
-) -> Result<std::collections::BTreeMap<AttemptId, AttemptId>, Fail> {
-    let mut successors = std::collections::BTreeMap::new();
-    for lane in lanes {
-        let tail = session.store.policy_tail(lane.attempt_id, call)?;
-        if tail.attempt_id != lane.attempt_id {
-            successors.insert(lane.attempt_id, tail.attempt_id);
-        }
-    }
-    Ok(successors)
-}
 
 /// The lanes a wait or watch ended on, each unstarted one with what it waits for.
 pub(super) fn render_settled(
@@ -404,7 +355,7 @@ pub(super) fn render_settled(
         clock: &clock,
         cancel: &cancel,
     };
-    let successors = policy_successors(session, lanes, &call)?;
+    let successors = Default::default();
     let (mut data, mut human) = render_lanes_with_lineage(
         lanes,
         &waits,
@@ -708,15 +659,10 @@ pub(super) fn watch_command(
         Duration::from_secs(seconds),
         LOCAL_POLL,
         &mut |lane| {
-            let tail = session
-                .store
-                .policy_tail(lane.attempt_id, &entry)?
-                .attempt_id;
-            let successor = (tail != lane.attempt_id).then_some(tail);
             let text = if json {
-                watch::json_line_with_successor(lane, None, successor)
+                watch::json_line_with_successor(lane, None, None)
             } else {
-                watch::line_with_successor(lane, None, successor)
+                watch::line_with_successor(lane, None, None)
             };
             emit(&format!("{text}\n"))
         },
@@ -734,7 +680,7 @@ pub fn write_line(line: &str) -> Result<(), Fail> {
         .map_err(|_| Fail::new(Status::Error, ErrorKind::Io, "cannot write watch output"))
 }
 
-/// Mixed status waits share lane selection, settlement and policy-tail semantics.
+/// Mixed status waits share lane selection and settlement semantics.
 pub fn status_wait_lanes(
     target: &Target,
     edge: &Edge<'_>,
