@@ -585,7 +585,6 @@ pub(super) fn submit_with_host_and_wait(
                 call,
                 Some(host),
                 None,
-                None,
                 deadline.map(|end| end.saturating_duration_since(Instant::now()).as_secs()),
             )
         } else if let Some(deadline) = deadline {

@@ -2609,16 +2609,7 @@ pub(super) fn launch_prepared_with_wait(
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
         return Ok(Vec::new());
     }
-    launch_on_host_with_wait(
-        session,
-        run,
-        edge,
-        call,
-        None,
-        None,
-        ready,
-        provider_lease_wait,
-    )
+    launch_on_host_with_wait(session, run, edge, call, None, ready, provider_lease_wait)
 }
 
 pub(super) struct PreparedProvider<'a> {
@@ -2827,7 +2818,6 @@ pub(super) fn launch_on_host_with_wait(
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
-    validated: Option<&run::ValidatedChild>,
     ready: Option<&run::PreparedStart>,
     provider_lease_wait: Option<u64>,
 ) -> Result<Vec<run::Started>, Fail> {
@@ -2853,16 +2843,10 @@ pub(super) fn launch_on_host_with_wait(
             fixture_state_write: false,
         },
     };
-    let read;
-    let request = match validated {
-        Some(request) => &**request,
-        None => {
-            read = session.store.request(run, call)?;
-            &read
-        }
-    };
+    let read = session.store.request(run, call)?;
+    let request = &read;
     let request_digest = request.digest().map_err(run::RunError::from)?;
-    if validated.is_none() {
+    {
         if request.parent.is_some() && session.context.state_root != edge.roots.state {
             check_chair_run_id(session, edge.roots, run, request, call)?;
         }
@@ -3007,9 +2991,7 @@ pub(super) fn launch_on_host_with_wait(
             launch: Some(host),
             sealed: Some(seal_launch_task(
                 request_digest,
-                &session
-                    .store
-                    .effective_launch_task(request, task, validated),
+                &session.store.effective_launch_task(request, task, None),
             )),
         }
         .encode()
@@ -3049,7 +3031,7 @@ pub(super) fn launch_on_host_with_wait(
                     call.clock,
                 )
             },
-            validated,
+            None,
             Some(request),
             call,
         )?;
@@ -3058,7 +3040,7 @@ pub(super) fn launch_on_host_with_wait(
     }
     let started = session
         .service()
-        .start(run, &providers, &holder, validated, request, call)?;
+        .start(run, &providers, &holder, request, call)?;
     check_launch_policy(&started)?;
     Ok(started)
 }
