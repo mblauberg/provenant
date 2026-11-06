@@ -565,6 +565,12 @@ impl RunError {
                     ))
                     .fact(DiagnosticFact::CredentialGrant { access });
             }
+            Self::Confinement(error) if error.resource_fact().is_some() => {
+                let fact = error.resource_fact().expect("checked resource fact");
+                diagnostic = fact
+                    .project(diagnostic)
+                    .fact(DiagnosticFact::Resource(fact));
+            }
             Self::WriterProjectMismatch {
                 project, selected, ..
             } => {
@@ -921,6 +927,35 @@ mod diagnostic_projection_tests {
                 == Some("run/src/launch/hand_off.rs#RunStore::hand_off")
                 && guard.get("boundary").and_then(|value| value.as_str()) == Some("authority")
         }));
+    }
+
+    #[test]
+    fn confinement_resource_diagnostic_keeps_code_and_excludes_source_text() {
+        use provenant_confinement::permissions::PermissionError;
+        use provenant_records::diagnostic::{DiagnosticFact, ResourceFact, SettingSource};
+        let error = RunError::Confinement(PermissionError::ConfigOrigin {
+            source: Box::new(PermissionError::GrantLimitExceeded {
+                family: "TOKEN_SENTINEL",
+                limit: 17,
+            }),
+            origin: SettingSource::Configuration,
+        });
+        let diagnostic = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert_eq!(diagnostic.code, ErrorKind::Confinement.code());
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains("domains.run.grant_limit"));
+        assert!(detail.contains("host configuration"));
+        assert!(!detail.contains("TOKEN_SENTINEL"));
+        assert!(matches!(
+            diagnostic.fact,
+            Some(DiagnosticFact::Resource(ResourceFact::GrantLimit {
+                limit: 17,
+                ..
+            }))
+        ));
     }
 
     #[test]
