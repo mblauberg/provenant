@@ -355,10 +355,10 @@ fn node_bound(
             consumer.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true))
                 && consumer.depends_on.contains(&node.id)
         }) {
-        outputs.extra.insert(
-            "repair_design".into(),
-            serde_json::json!({"within_scope":false,"one_way_door":false}),
-        );
+            outputs.extra.insert(
+                "repair_design".into(),
+                serde_json::json!({"within_scope":false,"one_way_door":false}),
+            );
         }
     }
     let mut bytes = canonical_len(&skeleton)
