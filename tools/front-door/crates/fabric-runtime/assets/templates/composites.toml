@@ -31,12 +31,15 @@ items = { type = "list", default = ["the repository"], min = 1 }
 min_ok = { type = "integer", default = 1, min = 1 }
 
 [batch]
+exports = [{ node = "repair", outputs = ["result"] }]
 doc = "Implement named slices into one integration branch, then review it."
 nodes = [
   { id = "slices", use = "implement", over = "${items}", min_ok = "${min_ok}", brief = "Implement slice ${item}: ${brief}", delivery = "integrate:${integration_branch}", worktree = "${worktree}", write_scope = "${write_scope}" },
-  { id = "review", use = "review-panel", after = ["slices"], source = { type = "integration" } },
+  { id = "review", use = "findings-panel", after = ["slices"], source = { type = "integration" } },
+  { id = "repair", use = "review-repair", after = ["review"], inputs = [{ node = "review", outputs = ["findings", "verdict"] }], with = { worktree = "${worktree}", write_scope = "${write_scope}", integration_branch = "${integration_branch}", max_repair_cycles = "${max_repair_cycles}" } },
 ]
 [batch.parameters]
+max_repair_cycles = { type = "integer", default = 3, min = 1, max = 3 }
 items = { type = "list", default = ["implementation"], min = 1 }
 min_ok = { type = "integer", default = 1, min = 1 }
 brief = { type = "string", default = "Meet the acceptance checks." }
@@ -52,12 +55,15 @@ exports = [
 doc = "Implement an approved brief through CI, review and landing."
 nodes = [
   { id = "implement", use = "implement", brief = "${brief}", delivery = "pr", worktree = "${worktree}", write_scope = "${write_scope}" },
-  { id = "ci", kind = "gate", access = "read_only", after = ["implement"], condition = { type = "ci", target = { node = "implement" } } },
-  { id = "review", use = "review-panel", after = ["ci"], source = { type = "node", node = "implement" } },
+  { id = "initial-review", use = "findings-panel", after = ["implement"], source = { type = "node", node = "implement" } },
+  { id = "repair", use = "review-repair", after = ["initial-review"], inputs = [{ node = "initial-review", outputs = ["findings", "verdict"] }], with = { writer = "implement", worktree = "${worktree}", write_scope = "${write_scope}", max_repair_cycles = "${max_repair_cycles}" } },
+  { id = "ci", kind = "gate", access = "read_only", after = ["repair"], condition = { type = "ci", target = { node = "implement" } } },
+  { id = "review", use = "review-panel", after = ["ci"], source = { type = "head", node = "implement" } },
   { id = "accept", kind = "gate", access = "read_only", after = ["review"], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
   { id = "land", kind = "land", access = "read_only", after = ["accept"], land = { node = "implement", tier = "substantial" } },
 ]
 [deliver.parameters]
+max_repair_cycles = { type = "integer", default = 3, min = 1, max = 3 }
 brief = { type = "string", default = "Meet the acceptance checks." }
 worktree = { type = "string", default = "" }
 write_scope = { type = "list", default = [] }
@@ -108,3 +114,27 @@ nodes = [
 brief = { type = "string", default = "Meet the acceptance checks." }
 worktree = { type = "string", default = "" }
 write_scope = { type = "list", default = [] }
+
+[findings-panel]
+doc = "Collect qualified findings without treating reported defects as an execution failure."
+exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
+nodes = [
+  { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}" } },
+  { id = "synthesis", use = "synthesise", after = ["lenses"], require_findings = true, inputs = [{ node = "lenses", outputs = ["result", "findings"] }], brief = "Reconcile every review, retaining every qualified finding with its lens, severity, location, evidence and proposed_fix. End with VERDICT: PASS only when every lens passed and no blocker remains; otherwise VERDICT: FAIL." },
+]
+
+[review-repair]
+doc = "Bounded repairs followed by principal scoping when the design cannot close review."
+exports = [{ node = "cycles", outputs = ["result"] }, { node = "continue", outputs = ["result"] }]
+nodes = [
+  { id = "cycles", use = "repair", repeat = { until = "accepted", max_rounds = "${max_repair_cycles}", review_repair = true }, on_fail = "design", with = { worktree = "${worktree}", write_scope = "${write_scope}", writer = "${writer}", integration_branch = "${integration_branch}", lenses = "${lenses}" } },
+  { id = "design", use = "design", after = ["cycles"], inputs = [{ node = "cycles", outputs = ["result", "findings"] }], brief = "Read only. Diagnose the concrete design defect or recurring finding. Return the root constraint, two or three options with trade-offs and migration implications, the smallest viable slice, and acceptance evidence. State whether that slice stays within approved scope and whether it crosses a one-way door. Record owner notification in the originating graph outcome. Do not change files or widen authority." },
+  { id = "continue", use = "plan", after = ["design"], inputs = [{ node = "design", outputs = ["result"] }], brief = "Turn the principal's smallest viable slice into a graph patch. Within approved scope, continue delivery using the authorised repair-slice template and record owner notification in the graph outcome. If scope changes or a one-way door is needed, put a decide node before any writer and wait for the owner's decision. Re-plan the full panel with @review-panel when risk tier or scope grows. Run verification and independent review of the new head. Keep all writes inside the supplied literal scope. Do not start another three-cycle review repair loop." },
+]
+[review-repair.parameters]
+max_repair_cycles = { type = "integer", default = 3, min = 1, max = 3 }
+worktree = { type = "string", default = "" }
+write_scope = { type = "list", min = 1 }
+writer = { type = "string", default = "" }
+lenses = { type = "list", default = ["correctness", "security", "tests", "contract", "design", "adversarial"], min = 1 }
+integration_branch = { type = "string", default = "" }
