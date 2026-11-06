@@ -1826,20 +1826,42 @@ impl HostDeliveryContext {
         }
         let destination = format!("refs/heads/{}", request.branch);
         self.refuse_remote_symbolic_target(cwd, &bound.push_url, &request.branch, Stage::Push)?;
-        let refspec = format!("{head}:{destination}");
-        self.command(
+        // A previous push may have succeeded before its receipt was saved.
+        let advertised = self.command(
             cwd,
             "git",
-            &[
-                "push",
-                "--no-follow-tags",
-                "--recurse-submodules=no",
-                "--",
-                &bound.push_url,
-                &refspec,
-            ],
+            &["ls-remote", "--", &bound.push_url, &destination],
             Stage::Push,
         )?;
+        let already_pushed = if advertised.is_empty() {
+            false
+        } else {
+            let mut lines = advertised.lines();
+            let (oid, reference) = lines
+                .next()
+                .and_then(|line| line.split_once('\t'))
+                .ok_or(RunError::Delivery(Stage::Push))?;
+            if reference != destination || GitOid::parse(oid).is_err() || lines.next().is_some() {
+                return Err(RunError::Delivery(Stage::Push));
+            }
+            oid == head.to_string()
+        };
+        if !already_pushed {
+            let refspec = format!("{head}:{destination}");
+            self.command(
+                cwd,
+                "git",
+                &[
+                    "push",
+                    "--no-follow-tags",
+                    "--recurse-submodules=no",
+                    "--",
+                    &bound.push_url,
+                    &refspec,
+                ],
+                Stage::Push,
+            )?;
+        }
         let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
         let fetchspec = format!("+{destination}:{tracking}");
         self.refuse_symref_destination(cwd, &tracking, Stage::Fetch)?;
@@ -2400,7 +2422,6 @@ impl crate::RunStore {
         accept_review: bool,
         call: &crate::Request<'_>,
     ) -> Result<WriterDeliveryReceipt> {
-        use provenant_os::fs::LockMode;
         let record = self.record(id, call)?;
         let review_acceptance = match record.state {
             crate::AttemptState::Terminal {
@@ -2485,19 +2506,29 @@ impl crate::RunStore {
         if !self.custody_released(&record, call)? {
             return Err(RunError::Validation("writer custody has not settled"));
         }
-        let mut launch = crate::prepare_writer(&writer, &self.writer_registry, record.project_id)?;
+        let mut launch = crate::prepare_writer_with_facts(
+            &writer,
+            &self.writer_registry,
+            record.project_id,
+            &self.repo_facts,
+        )?;
         let state = launch
             .custody
             .take()
             .ok_or_else(|| RunError::unsafe_path(writer.worktree.clone(), PathCheck::Missing))?
             .0;
-        let _writer = state.lock(
-            OsStr::new("writer.lock"),
-            LockMode::Exclusive,
+        let _writer = provenant_supervisor::custody::lock_writer_exclusion(
+            &state,
             call.lock_budget(),
             call.cancel,
             call.clock,
-        )?;
+        )
+        .map_err(|error| match error {
+            provenant_supervisor::custody::CustodyError::Filesystem(error) => {
+                RunError::Filesystem(error)
+            }
+            other => RunError::Io(std::io::Error::other(other.to_string())),
+        })?;
         let host = host.prepare(&writer, &request)?;
         host.clean(&writer)?;
         if host.head(&writer)? != head {

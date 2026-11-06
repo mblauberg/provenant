@@ -9,6 +9,24 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
+            if let Some(id) = command
+                .id
+                .as_deref()
+                .and_then(|id| id.strip_prefix("operation:"))
+            {
+                let id = OperationId::parse(id).map_err(|error| {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string())
+                })?;
+                let (_, store) = open_read_only(edge, &call)?;
+                let record = store
+                    .as_ref()
+                    .map(|store| store.operation(&id, &call))
+                    .transpose()?
+                    .flatten()
+                    .filter(|record| record.state == run::OperationState::Refused)
+                    .ok_or(run::RunError::NotFound)?;
+                return render_refused_operation(record);
+            }
             if let Some(graph_id) = command.id.as_deref().filter(|id| graph_identifier(id))
                 && let Some((data, human)) = paused_graph_status(edge, &call, graph_id)?
             {
@@ -138,7 +156,8 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let lines: Vec<LaneLine> = rows
                 .iter()
                 .map(|lane| {
-                    let (_, reason) = state_and_reason(&lane.state);
+                    let (_, reason) =
+                        provenant_records::wire::LaneRow::state_and_label(&lane.state);
                     let state = lane_display_state(lane);
                     let reason = reason.or_else(|| {
                         waits
@@ -185,6 +204,18 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             human.push_str(&capabilities);
             data["review_exempt"] = exempt;
             attach_cloud_jobs(&session.store, &rows, &mut data, &mut human, &call)?;
+            if command.id.is_none()
+                && command.cursor.is_none()
+                && append_refused_operations(
+                    &session.store,
+                    command.limit.clamp(1, 100),
+                    &mut data,
+                    &mut human,
+                    &call,
+                )?
+            {
+                summary = None;
+            }
             if append_native_status(native, &mut data, &mut human) {
                 summary = None;
             }
@@ -197,6 +228,81 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
     out.summary = summary;
     out.read_only = true;
     out
+}
+
+fn render_refused_operation(record: run::OperationRecord) -> Result<(Value, String), Fail> {
+    let diagnostic = record
+        .refusal
+        .as_ref()
+        .ok_or(run::RunError::Validation("refusal diagnostic missing"))?;
+    if record.refused_at.is_none() {
+        return Err(run::RunError::Validation("refusal time missing").into());
+    }
+    let mut human = format!(
+        "operation {} refused: {}\n",
+        record.operation_id,
+        plain_text(&diagnostic.code, 1024)
+    );
+    if let Some(detail) = &diagnostic.detail {
+        human.push_str(&format!("{}\n", plain_text(detail, 1024)));
+    }
+    Ok((json!({"operation": record}), human))
+}
+
+#[cfg(test)]
+mod refused_operation_tests {
+    use super::*;
+
+    #[test]
+    fn targeted_refusal_reports_the_stored_diagnostic() {
+        let record: run::OperationRecord = serde_json::from_value(json!({
+            "schema_version":1,
+            "project_id":"11111111111111111111111111111111",
+            "actor_id":"22222222222222222222222222222222",
+            "operation_id":"fixture-op",
+            "kind":"dispatch",
+            "request_digest":format!("sha256:{}", "ab".repeat(32)),
+            "run_id":"33333333333333333333333333333333",
+            "state":"refused",
+            "refusal":{"code":"UNSUPPORTED","detail":"not supported"},
+            "refused_at":"2026-10-29T00:00:00.000000Z"
+        }))
+        .unwrap();
+        let (data, human) = render_refused_operation(record).unwrap();
+        assert_eq!(data["operation"]["refusal"]["code"], "UNSUPPORTED");
+        assert!(human.contains("fixture-op"));
+        assert!(human.contains("not supported"));
+    }
+}
+
+/// Refused dispatches have no attempt; render their durable operation records
+/// separately so they remain visible without inventing a lane identity.
+pub(super) fn append_refused_operations(
+    store: &run::RunStore,
+    limit: u64,
+    data: &mut Value,
+    human: &mut String,
+    call: &run::Request<'_>,
+) -> Result<bool, Fail> {
+    let refusals = store.recent_refusals(limit, call)?;
+    if refusals.is_empty() {
+        return Ok(false);
+    }
+    human.push_str("refused operations:\n");
+    for record in &refusals {
+        let code = record
+            .refusal
+            .as_ref()
+            .map(|value| value.code.as_str())
+            .unwrap_or("REFUSED");
+        human.push_str(&format!(
+            "  {} {}\n",
+            record.operation_id,
+            plain_text(code, 1024)
+        ));
+    }
+    data["refused_operations"] = json!(refusals);
+    Ok(true)
 }
 
 fn append_native_status(
@@ -387,6 +493,35 @@ mod graph_status_tests {
     }
 }
 
+/// Keep recurring disk observations out of compact rows; the full sample stays
+/// available in explicit lane and output detail.
+fn compact_wait_reason(reason: &str) -> &str {
+    if reason.starts_with("host capacity: disk space:") {
+        "disk below gc.free_floor; provenant output ID"
+    } else if reason.starts_with("disk pressure paused builds") {
+        "builds paused for disk; provenant output ID"
+    } else {
+        reason
+    }
+}
+
+fn full_wait_reason(reason: &str) -> String {
+    if reason.starts_with("host capacity: disk space:") {
+        format!("{reason}; free disk space or run `provenant gc --apply`")
+    } else {
+        reason.to_owned()
+    }
+}
+
+pub(super) fn lane_reason(lane: &run::AttemptRecord, waits: &[run::LaneWait]) -> Option<String> {
+    state_and_reason(&lane.state).1.or_else(|| {
+        waits
+            .iter()
+            .find(|wait| wait.attempt_id == lane.attempt_id)
+            .map(|wait| full_wait_reason(&wait.waiting_for))
+    })
+}
+
 /// One lane as the compact views show it.
 pub(super) struct LaneLine {
     id: String,
@@ -448,7 +583,7 @@ pub(super) fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> 
                 &lane.id[..lane.id.len().min(8)],
                 lane.state,
                 plain_text(&lane.model, usize::MAX),
-                plain_text(&lane.reason, usize::MAX)
+                plain_text(compact_wait_reason(&lane.reason), usize::MAX)
             )
             .trim_end()
             .to_owned()
@@ -504,11 +639,22 @@ pub(super) fn lane_lines(data: &Value) -> Vec<LaneLine> {
                             .as_str()
                             .unwrap_or("unresolved")
                             .to_owned(),
-                        reason: row["reason"]
-                            .as_str()
-                            .or_else(|| row["waiting_for"].as_str())
-                            .unwrap_or_default()
-                            .to_owned(),
+                        reason: row
+                            .get("terminal_cause")
+                            .and_then(|value| {
+                                serde_json::from_value::<provenant_records::run::TerminalCause>(
+                                    value.clone(),
+                                )
+                                .ok()
+                            })
+                            .map(|cause| cause.reason().to_owned())
+                            .unwrap_or_else(|| {
+                                row["reason"]
+                                    .as_str()
+                                    .or_else(|| row["waiting_for"].as_str())
+                                    .unwrap_or_default()
+                                    .to_owned()
+                            }),
                         provider_error: row["provider_error"].as_str().map(str::to_owned),
                         result_path: structured_path_text(&row["result_path"]),
                     })
@@ -550,7 +696,7 @@ pub(super) fn compact_status(
     rows.iter()
         .map(|lane| {
             let id = lane.attempt_id.to_string();
-            let (_, reason) = state_and_reason(&lane.state);
+            let (_, reason) = provenant_records::wire::LaneRow::state_and_label(&lane.state);
             let state = lane_display_state(lane);
             let model = lane
                 .applied_route
@@ -581,7 +727,7 @@ pub(super) fn compact_status(
                 "{} {state} {} {age} {}\n",
                 &id[..8],
                 plain_text(model, usize::MAX),
-                plain_text(&reason, usize::MAX)
+                plain_text(compact_wait_reason(&reason), usize::MAX)
             )
         })
         .collect()
@@ -641,6 +787,7 @@ pub(super) fn report(
             }
         }
     }
+    data["started"] = json!(started);
     data["run_id"] = json!(record.run_id);
     data["operation_id"] = json!(record.operation_id);
     let unknown = launch_unknown(started);
@@ -816,7 +963,7 @@ pub fn project_lane(
         })
         .flatten()
         .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
-    provenant_records::wire::LaneRow::project(
+    let mut projected = provenant_records::wire::LaneRow::project(
         lane,
         provenant_records::wire::LaneProjectionFacts {
             superseded_by: successors.get(&lane.attempt_id).copied(),
@@ -833,7 +980,11 @@ pub fn project_lane(
             ),
             ..Default::default()
         },
-    )
+    );
+    if projected.reason == projected.waiting_for {
+        projected.reason = projected.waiting_for.as_deref().map(full_wait_reason);
+    }
+    projected
 }
 
 pub(super) fn render_lanes_with_lineage(
@@ -880,10 +1031,16 @@ pub(super) fn render_lanes_with_view(
                 .map(|a| format!(" account={}", plain_text(a, usize::MAX)))
                 .unwrap_or_default();
             let route_text = plain_text(&route, usize::MAX);
-            let reason = projected.reason.clone();
+            let full = state_and_reason(&lane.state).1;
+            let label = provenant_records::wire::LaneRow::state_and_label(&lane.state).1;
+            let reason = if label != full {
+                label
+            } else {
+                projected.reason.clone()
+            };
             let reason_text = reason
                 .as_deref()
-                .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
+                .map(|r| format!(" ({})", plain_text(compact_wait_reason(r), usize::MAX)))
                 .unwrap_or_default();
             let title_text = lane
                 .title
@@ -1139,6 +1296,7 @@ pub fn lanes_streaming(
     // A watch already printed its events; its final line is its own summary.
     if out.result.error.is_none()
         && out.result.data["lanes"].is_array()
+        && out.result.data.get("refused_operations").is_none()
         && !(command.watch.is_some() && !json)
     {
         out.summary = Some(lane_summary(&lane_lines(&out.result.data), None));
@@ -1444,8 +1602,26 @@ pub(super) fn lanes_inner(
     );
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
+    omit_listing_write_grants(&command.id, &mut data);
     attach_cloud_jobs(&session.store, &lanes, &mut data, &mut human, &call)?;
+    if command.id.is_empty() && command.cursor.is_none() && command.session.is_none() && !filtered {
+        append_refused_operations(&session.store, command.limit, &mut data, &mut human, &call)?;
+    }
     Ok((data, human, false))
+}
+
+/// Full confinement evidence belongs to an explicit lane selection. Large
+/// grant sets otherwise multiply across a page and can exhaust the JSON limit.
+pub(super) fn omit_listing_write_grants(targets: &[Target], data: &mut Value) {
+    if targets.is_empty()
+        && let Some(rows) = data["lanes"].as_array_mut()
+    {
+        for row in rows {
+            if let Some(row) = row.as_object_mut() {
+                row.remove("write_grants");
+            }
+        }
+    }
 }
 
 pub(super) fn attach_cloud_jobs(

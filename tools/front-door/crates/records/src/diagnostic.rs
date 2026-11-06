@@ -411,6 +411,8 @@ impl DeliveryLimit {
 /// captured output, prompts and credentials are not safe facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
@@ -445,6 +447,7 @@ impl From<&Diagnostic> for DiagnosticFields {
 impl Diagnostic {
     pub fn new(code: impl AsRef<str>) -> Self {
         Self {
+            extra: Default::default(),
             code: safe_text(code.as_ref()),
             category: None,
             detail: None,

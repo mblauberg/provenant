@@ -74,10 +74,10 @@ fn collect_impl(
         if policy.dry_run {
             match snapshot {
                 Some(entries) => entries,
-                None => context.facts.read_inventory(context, cancel)?,
+                None => context.facts.fresh_inventory(context, cancel)?,
             }
         } else {
-            context.facts.read_inventory(context, cancel)?
+            context.facts.fresh_inventory(context, cancel)?
         }
     };
     // Preview all candidates against one census snapshot. Applying still
@@ -431,7 +431,7 @@ fn prune_unknown_output(
             tree_unchanged(preview_entries, entry, lane.head)?;
         } else {
             tree_unchanged(
-                &context.facts.read_inventory(context, cancel)?,
+                &context.facts.fresh_inventory(context, cancel)?,
                 entry,
                 lane.head,
             )?;

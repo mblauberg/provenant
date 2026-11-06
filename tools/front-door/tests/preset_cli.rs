@@ -790,6 +790,59 @@ prompt = "Look at ${prompt}"
     Ok(())
 }
 
+/// Reentrant integration-test process: only this test executable can opt into
+/// scoped admission without provider launch. The installed CLI has no override.
+#[test]
+fn deferred_fixture_cli_child() {
+    let Ok(arguments) = std::env::var("PRESET_FIXTURE_CLI_ARGUMENTS") else {
+        return;
+    };
+    let arguments: Vec<String> = serde_json::from_str(&arguments).expect("fixture arguments");
+    let code = provenant_cli::run::with_deferred_provider_launch(|| {
+        provenant::dispatch(
+            provenant_cli::parse(arguments.into_iter().map(std::ffi::OsString::from)),
+            &provenant::System,
+        )
+    });
+    std::process::exit(i32::from(code));
+}
+
+fn deferred_fixture_cli(
+    directory: &std::path::Path,
+    home: &std::path::Path,
+    assets: &std::path::Path,
+    state: &std::path::Path,
+    config: &std::path::Path,
+    arguments: &[&str],
+) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+    let mut args = vec!["--json", "--state-dir", state.to_str().ok_or("state path")?];
+    args.extend_from_slice(arguments);
+    let mut output = scrubbed(std::env::current_exe()?.to_str().ok_or("test binary")?)
+        .current_dir(directory)
+        .env("HOME", home)
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("PATH", "/usr/bin:/bin")
+        .env("PROVENANT_ROOT", assets)
+        .env("XDG_CONFIG_HOME", config)
+        .env(
+            "PRESET_FIXTURE_CLI_ARGUMENTS",
+            serde_json::to_string(&args)?,
+        )
+        .args([
+            "--quiet",
+            "--exact",
+            "deferred_fixture_cli_child",
+            "--nocapture",
+        ])
+        .output()?;
+    // libtest writes its one-line test count before entering the child helper;
+    // process exit leaves the command's JSON as the final complete envelope.
+    if let Some(start) = output.stdout.iter().position(|byte| *byte == b'{') {
+        output.stdout.drain(..start);
+    }
+    Ok(output)
+}
+
 fn fixture_cli() -> Command {
     scrubbed(env!("CARGO_BIN_EXE_provenant"))
 }
@@ -3133,24 +3186,21 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
         state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='1B'\n",
     )?;
-    let run_cli = |args: &[&str]| -> std::io::Result<std::process::Output> {
-        fixture_cli()
-            .current_dir(&project)
-            .env("HOME", &home)
-            .env("CODEX_HOME", home.join(".codex"))
-            .env("PATH", "/usr/bin:/bin")
-            .env("PROVENANT_ROOT", &root)
-            .env("XDG_CONFIG_HOME", temp.path().join("config"))
-            .args(["--json", "--state-dir"])
-            .arg(&state)
-            .args(args)
-            .output()
+    let run_cli = |args: &[&str]| {
+        deferred_fixture_cli(
+            &project,
+            &home,
+            &root,
+            &state,
+            &temp.path().join("config"),
+            args,
+        )
     };
 
     // Create a lane-owned worktree and let its initial attempt settle. This
     // also makes the fixture robust on hosts with an incomplete process census.
     let initial = run_cli(&[
-        "run",
+        "dispatch",
         "--model",
         "codex/gpt-6-luna",
         "--mode",
@@ -3161,13 +3211,22 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
         "none",
         "--prompt-file",
         prompt.to_str().unwrap(),
-        "--wait",
-        "10s",
     ])?;
+    assert!(
+        initial.status.success(),
+        "initial admission failed: {}",
+        String::from_utf8_lossy(&initial.stdout)
+    );
     let initial_json: serde_json::Value = serde_json::from_slice(&initial.stdout)?;
     let run_id = initial_json["data"]["run_id"]
         .as_str()
         .ok_or_else(|| format!("initial writer not admitted: {initial_json}"))?;
+    let cancelled = run_cli(&["cancel", run_id])?;
+    assert!(
+        cancelled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cancelled.stdout)
+    );
     let settled = run_cli(&["lanes", "--id", run_id, "--all", "--wait", "10s"])?;
     assert!(
         settled.status.success(),
@@ -3272,13 +3331,13 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
         presets.join("gate-only.toml"),
         worktree_presets.join("gate-only.toml"),
     )?;
-    let run_in_worktree = fixture_cli()
-        .current_dir(&worktree)
-        .env("PROVENANT_ROOT", &root)
-        .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .args(["--json", "--state-dir"])
-        .arg(&state)
-        .args([
+    let run_in_worktree = deferred_fixture_cli(
+        &worktree,
+        &home,
+        &root,
+        &state,
+        &temp.path().join("config"),
+        &[
             "run",
             "--preset",
             "gate-only",
@@ -3288,8 +3347,8 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
             &format!("parameters.worktree='{}'", worktree.display()),
             "--wait",
             "1s",
-        ])
-        .output()?;
+        ],
+    )?;
     assert!(
         run_in_worktree.status.success(),
         "run inside bound worktree failed: stdout: {}\nstderr: {}",
@@ -3451,16 +3510,7 @@ fn preset_reuses_one_worktree_inventory_for_planning_and_spec()
         Ok(())
     };
     git(&["init", "-q"])?;
-    git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "initial",
-    ])?;
+    git(&["commit", "--allow-empty", "-qm", "initial"])?;
     for index in 0..100 {
         let path = temp.path().join(format!("worktree-{index}"));
         git(&[
@@ -4140,13 +4190,30 @@ fn preset_bound_path_is_not_a_secret_but_prompt_is() -> Result<(), Box<dyn std::
             } else if explain {
                 assert!(output.status.success(), "{result}");
             } else {
-                // The graph starts; the isolated fixture has no provider adapter.
                 assert!(result["data"]["graph_id"].is_string(), "{result}");
+                let node = &result["data"]["graph"]["checkpoint"]["nodes"][0];
                 assert_eq!(
-                    result["data"]["graph"]["checkpoint"]["nodes"][0]["attempts"][0]["outcome"],
-                    "adapter_unavailable",
+                    node["attempts"][0]["outcome"], "adapter_unavailable",
                     "{result}"
                 );
+                assert!(node["attempts"][0]["attempt_ref"].is_string(), "{result}");
+                let database = rusqlite::Connection::open_with_flags(
+                    temp.path().join("state/run.sqlite3"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                let mut statement = database.prepare("SELECT record FROM attempts")?;
+                let records = statement
+                    .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert!(!records.is_empty());
+                for raw in records {
+                    let lane: provenant_records::run::AttemptRecord = serde_json::from_slice(&raw)?;
+                    assert_eq!(lane.provider_launched, Some(false));
+                    assert_eq!(
+                        lane.settlement_reason,
+                        Some(provenant_records::run::SettlementReason::PreLaunchRefusal)
+                    );
+                }
             }
         }
     }

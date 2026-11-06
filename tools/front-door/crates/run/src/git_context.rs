@@ -187,7 +187,9 @@ fn read_git_within(
         .collect();
     let mut options = ExecOptions::new(&argv, cwd, timeout);
     options.env = Some(env);
-    options.stdout = StreamPolicy::Capture { limit };
+    options.stdout = StreamPolicy::Capture {
+        limit: provenant_os::git::fact_capture_limit(args, limit),
+    };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     options.stop_on_output_limit = true;
     let mut out = executor.execute(options).map_err(execution_error)?;
@@ -434,6 +436,23 @@ pub fn resolve_git_base(git: &Path, cwd: &Path, base: &str) -> Result<String> {
     let env = repository_environment(&executor, git, cwd)
         .map_err(|_| RunError::InvalidBase(base.to_owned()))?;
     resolve_fetching(&executor, git, cwd, base, &env)
+}
+
+/// Resolve a graph base with the command's caps while retaining the read-only
+/// resolver's support for native alternates and nonstandard Git directories.
+pub fn resolve_git_base_with_facts(
+    git: &Path,
+    cwd: &Path,
+    base: &str,
+    facts: &provenant_confinement::worktrees::RepoFacts,
+    cancel: &provenant_core::CancelToken,
+) -> Result<String> {
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    facts.with_executor(&executor, cancel, |executor| {
+        let env = repository_environment(executor, git, cwd)
+            .map_err(|_| RunError::InvalidBase(base.to_owned()))?;
+        resolve_fetching(executor, git, cwd, base, &env)
+    })
 }
 
 /// Create the local branch `branch` at `start` (default `HEAD`) when it does
@@ -1268,7 +1287,8 @@ mod tests {
     }
 
     fn git(executor: &SystemExecutor, binary: &Path, cwd: &Path, args: &[&str]) -> TestResult {
-        read_git(executor, binary, cwd, args, 4096)?;
+        let _ = (executor, binary);
+        provenant_os::fixture::run_git(cwd, args)?;
         Ok(())
     }
 
@@ -1301,7 +1321,7 @@ mod tests {
         } = small_history()?;
         std::fs::write(
             root.join(".mailmap"),
-            "Rewritten <rewritten@example.test> Fixture <fixture@example.test>\n",
+            "Rewritten <rewritten@example.test> Fixture <fixture@example.invalid>\n",
         )?;
         let range = format!("{base}..HEAD");
         let control = read_git(
@@ -1315,7 +1335,7 @@ mod tests {
         let context = GitContext::capture(&binary, &root, &base)?;
         assert!(
             String::from_utf8_lossy(&context.log.bytes)
-                .contains("Author: Fixture <fixture@example.test>")
+                .contains("Author: Fixture <fixture@example.invalid>")
         );
         Ok(())
     }
@@ -1342,10 +1362,6 @@ mod tests {
                 &binary,
                 &root,
                 &[
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.test",
                     "-c",
                     "commit.gpgsign=false",
                     "commit",
@@ -1416,10 +1432,6 @@ mod tests {
             &upstream.binary,
             &upstream.root,
             &[
-                "-c",
-                "user.name=Moved",
-                "-c",
-                "user.email=moved@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -1629,10 +1641,6 @@ mod tests {
                 &root,
                 &[
                     "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.test",
-                    "-c",
                     "commit.gpgsign=false",
                     "commit",
                     "--quiet",
@@ -1658,10 +1666,6 @@ mod tests {
             &binary,
             &root,
             &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",
@@ -1891,10 +1895,6 @@ mod tests {
             &fixture.binary,
             &fixture.root,
             &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
                 "-c",
                 "commit.gpgsign=false",
                 "commit",

@@ -754,8 +754,10 @@ fn worktree_access_readers_leave_existing_writer_lease_untouched()
                     "--prompt-file",
                     prompt.to_str().ok_or("prompt")?,
                 ])?;
-                let reply = dispatch(command, edge);
+                let reply =
+                    super::submit::with_cancelled_provider_launch(|| dispatch(command, edge));
                 assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+                assert_eq!(reply.result.data["lanes"][0]["state"], "cancelled");
                 let id = reply.result.data["run_id"]
                     .as_str()
                     .ok_or("run id")?
@@ -3177,12 +3179,24 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
         &cancel,
         None,
     );
+    let busy = busy.expect_err("a second writer must not enter a held worktree");
     assert!(matches!(
-        busy,
-        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
-            worktrees::WorktreeError::WriterBusy { holder: Some(holder) }
-        ))) if holder == provenant_core::AttemptId::from_bytes([42; 16])
+        &busy,
+        super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::WriterBusy { holder: Some(actual) }
+        )) if *actual == holder
     ));
+    let refusal = super::Fail::from(busy);
+    let error = super::command_error(&refusal);
+    assert_eq!(refusal.status, Status::Refused);
+    assert_eq!(error.code, "WRITER_BUSY");
+    assert!(error.message.contains(&holder.to_string()));
+    assert!(
+        error
+            .cause
+            .as_deref()
+            .is_some_and(|detail| detail.contains(&holder.to_string()))
+    );
     drop(held);
 
     // Exercise the actual owned-run admission boundary for an existing,
@@ -3381,6 +3395,11 @@ fn worktree_census_warning_includes_scope_and_evidence() -> Result<(), Box<dyn s
 #[test]
 fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
 -> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane(
+        "run::tests::own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer",
+    )? {
+        return Ok(());
+    }
     use provenant_confinement::worktrees::{
         self, CensusPolicyWorkers, ObservedProcess, Occupancy, WorkerObserver, WorktreeCreate,
     };
@@ -3588,6 +3607,15 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
     drop(held);
     let replay_with_bystander = attempt_claim()?;
     assert_eq!(replay_with_bystander.0.path, path);
+    assert!(matches!(
+        replay_with_bystander.0.occupancy,
+        Occupancy::Observed { .. }
+    ));
+    assert!(matches!(
+        replay_with_bystander.0.owner,
+        Ok(Some(worktrees::WorktreeOwner { operation_id: Some(operation), .. }))
+            if operation == claim_operation
+    ));
     let owner_path = git_dir.join("provenant-owner.json");
     let saved_owner = std::fs::read(&owner_path)?;
     std::fs::write(&owner_path, b"invalid owner record")?;
@@ -3628,7 +3656,27 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
     )?;
     assert_eq!(replay.0.path, path);
 
-    let attempt = provenant_core::AttemptId::from_bytes([42; 16]);
+    let call = request(&clock, &cancel).map_err(|error| error.message)?;
+    let session = open(&edge_inside, &call).map_err(|error| error.message)?;
+    let prepared = trace_run(40, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+    let attempt = prepared.attempts[0].attempt_id;
+    session.store.create(&prepared, &call)?;
+    let queued = session.store.record(attempt, &call)?;
+    session
+        .store
+        .withdraw(
+            attempt,
+            queued.state,
+            run::Outcome::Cancelled,
+            "fixture cancelled before launch",
+            clock.wall_now()?,
+            &call,
+        )?
+        .ok_or("attempt did not finish")?;
+    assert!(matches!(
+        session.store.record(attempt, &call)?.state,
+        run::AttemptState::Terminal { .. }
+    ));
     worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
         let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
         let mut owner =
@@ -3636,6 +3684,39 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         owner.attempt_id = Some(attempt);
         worktrees::save_owner(&tree, &owner)
     })?;
+    // The finished attempt can leave both its owner row and a reservation
+    // behind. Only a held lease or a retained-import fence excludes the shell;
+    // the stale reservation alone must not turn advisory cwd evidence into a lock.
+    let reservation_path =
+        worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+            drop(
+                worktrees::cache_writer_guard(context.project_state, &path)
+                    .map_err(|_| worktrees::WorktreeError::UnknownWriter)?,
+            );
+            let slot = context
+                .project_state
+                .open_verified_directory(&worktrees::state_dir_name(&path))?;
+            let scope = provenant_supervisor::custody::Scope {
+                run: provenant_core::RunId::from_bytes([41; 16]),
+                attempt,
+                generation: 1,
+            };
+            let lease = provenant_supervisor::fixture::acquire_writer(
+                slot.try_clone()?,
+                scope,
+                provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+                &cancel,
+                &clock,
+            )
+            .map_err(|_| worktrees::WorktreeError::UnknownWriter)?;
+            let reservation = slot
+                .current_path()?
+                .join(attempt.to_string())
+                .join("reservation.json");
+            drop(lease);
+            Ok(reservation)
+        })?;
+    let stale_reservation = std::fs::read(&reservation_path)?;
     let admitted_after_terminal = super::own_worktree(
         &super::OwnedWorktree {
             branch: branch.into(),
@@ -3646,13 +3727,29 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         &OperationId::parse("after-terminal")?,
         &edge_inside,
         &ordinary,
-        |id| id == attempt,
+        |id| {
+            session
+                .store
+                .record(id, &call)
+                .is_ok_and(|record| matches!(record.state, run::AttemptState::Terminal { .. }))
+        },
         &mut None,
         &clock,
         &cancel,
         None,
     )?;
     assert_eq!(admitted_after_terminal.0.path, path);
+    assert_eq!(std::fs::read(&reservation_path)?, stale_reservation);
+    worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
+        let owner = worktrees::load_owner(&tree)?.ok_or(worktrees::WorktreeError::UnknownWriter)?;
+        assert_eq!(
+            owner.operation_id,
+            Some(OperationId::parse("after-terminal").unwrap())
+        );
+        assert_eq!(owner.attempt_id, None);
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -4277,6 +4374,46 @@ fn trace_store(
         read_prompts: true,
     };
     Ok(run::RunStore::open(&context, call)?)
+}
+
+#[test]
+fn refused_operations_are_rendered_without_an_attempt() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = trace_store(&temp, &call)?;
+    let input = trace_run(
+        30,
+        AttemptId::from_bytes([2; 16]),
+        now(&clock).map_err(|e| e.message)?,
+    )?;
+    store.record_refusal(
+        &input,
+        ErrorKind::Unsupported.diagnostic(),
+        Some("writer".into()),
+        &call,
+    )?;
+    let mut data = json!({"lanes": []});
+    let mut human = String::new();
+    assert!(
+        status::append_refused_operations(&store, 20, &mut data, &mut human, &call)
+            .map_err(|e| e.message)?
+    );
+    assert_eq!(
+        data["refused_operations"][0]["operation_id"],
+        input.operation_id.as_str()
+    );
+    assert_eq!(
+        data["refused_operations"][0]["refusal"]["code"],
+        "UNSUPPORTED"
+    );
+    assert!(human.contains(input.operation_id.as_str()));
+    assert!(data["lanes"].as_array().is_some_and(Vec::is_empty));
+    Ok(())
 }
 
 #[test]
@@ -6371,6 +6508,7 @@ fn quota_reason_uses_safe_fact_without_provider_message() {
         project_id: None,
         host: None,
         cancel: None,
+        repo_facts: Default::default(),
     };
     for (message, _expected) in [
         (
@@ -7278,6 +7416,7 @@ fn codex_rollout_error_reaches_the_decoded_reason() {
         project_id: None,
         host: None,
         cancel: None,
+        repo_facts: Default::default(),
     };
     let stream = [
         json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),
@@ -8252,8 +8391,11 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
             // A wait shorter than the contention must not refuse the lane.
             cmd.wait = Some(1);
 
-            let reply = dispatch_with_workers(cmd, edge, &Free);
+            let reply = super::submit::with_cancelled_provider_launch(|| {
+                dispatch_with_workers(cmd, edge, &Free)
+            });
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+            assert_eq!(reply.result.data["lanes"][0]["state"], "cancelled");
             holder.join().unwrap();
 
             // Check that admission window exists and wake_at was updated during retry!
@@ -8453,8 +8595,12 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
             };
             let workers = Counting(AtomicUsize::new(0));
             let start = clock.mono_now();
-            let reply = dispatch_with_workers(make("restart-wake")?, edge, &workers);
+            let command = make("restart-wake")?;
+            let reply = super::submit::with_cancelled_provider_launch(|| {
+                dispatch_with_workers(command, edge, &workers)
+            });
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+            assert_eq!(reply.result.data["lanes"][0]["state"], "cancelled");
             assert!(
                 clock
                     .mono_now()
@@ -8953,4 +9099,427 @@ fn malformed_claude_result_preserves_provider_error_in_settlement() {
             assert_eq!(decoded.reason.as_deref(), Some(reason.as_str()));
         }
     }
+}
+
+#[test]
+fn lane_listing_omits_large_grants_but_id_retains_them() -> Result<(), Box<dyn std::error::Error>> {
+    use std::ffi::OsString;
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let grants: Vec<run::WriteGrantRecord> = (0..600).map(|index| {
+            serde_json::from_value(json!({
+                "source": "tool_write",
+                "path": {"relative_to_root": {"encoding":"utf8", "path": format!("home/fixture/.cache/build/{index}/{}output", "directory/".repeat(8))}},
+                "scope":"subtree"
+            }))
+        }).collect::<Result<_, _>>()?;
+            let database = rusqlite::Connection::open(
+                session.context.state_root.as_path().join("run.sqlite3"),
+            )?;
+            let mut selected = None;
+            for number in 1..=25 {
+                let prepared =
+                    trace_run(number, AttemptId::from_bytes([99; 16]), clock.wall_now()?)?;
+                session.store.create(&prepared, &call)?;
+                let mut lane = session
+                    .store
+                    .record(prepared.attempts[0].attempt_id, &call)?;
+                lane.write_grants = grants.clone();
+                // Seed retained launch evidence without starting 25 native providers.
+                // The command still opens the store and reads its ordinary lane query.
+                assert_eq!(
+                    database.execute(
+                        "UPDATE attempts SET record=?1 WHERE id=?2",
+                        rusqlite::params![serde_json::to_vec(&lane)?, lane.attempt_id.to_string()]
+                    )?,
+                    1
+                );
+                selected = Some(Target {
+                    selection: None,
+                    run: Some(lane.run_id),
+                    task: None,
+                    attempt: Some(lane.attempt_id),
+                });
+            }
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(
+                ["lanes", "--all", "--limit", "25"]
+                    .into_iter()
+                    .map(OsString::from),
+            ) else {
+                return Err("parse lanes failed".into());
+            };
+            let crate::Command::Lanes(mut command) = invocation.command else {
+                return Err("not lanes".into());
+            };
+            let (listing, _, _) = status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
+                .map_err(|fail| fail.message)?;
+            let rows = listing["lanes"].as_array().ok_or("listing rows")?;
+            assert_eq!(rows.len(), 25);
+            assert!(rows.iter().all(|row| row.get("write_grants").is_none()));
+            assert!(serde_json::to_vec(&listing)?.len() < 1024 * 1024);
+
+            command.id = vec![selected.ok_or("selected lane")?];
+            let (detail, _, _) = status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
+                .map_err(|fail| fail.message)?;
+            let rows = detail["lanes"].as_array().ok_or("detail rows")?;
+            assert_eq!(rows.len(), 1);
+            let retained = rows[0]["write_grants"].as_array().ok_or("detail grants")?;
+            assert_eq!(retained.len(), grants.len());
+            assert!(retained.iter().all(|grant| grant["path"].is_object()));
+            assert!(
+                serde_json::to_vec(retained)?.len() * 25 > 1024 * 1024,
+                "grant evidence alone must reproduce the oversized page"
+            );
+            Ok(())
+        },
+    )?
+}
+
+#[test]
+fn lane_detail_and_output_retain_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Error>> {
+    struct Refusing {
+        note: String,
+    }
+    impl run::Providers for Refusing {
+        fn prepare(
+            &self,
+            _: &run::TaskRequest,
+            _: &str,
+            _: &run::LaunchPaths,
+            _: Option<&run::AttemptRecord>,
+        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+            Err(run::PrepareRefusal {
+                terminal_cause: Some(provenant_records::run::TerminalCause::AccessPolicyRefused),
+                terminal_note: Some(self.note.clone()),
+                message: "PROVIDER_SENTINEL must not become a public diagnostic".into(),
+                skipped_routes: Vec::new(),
+                fallback_outcome: None,
+            })
+        }
+        fn decode(
+            &self,
+            _: &run::RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &Path,
+        ) -> Result<run::Decoded, String> {
+            unreachable!("a refused launch never reaches a provider")
+        }
+    }
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let prepared = trace_run(10, AttemptId::from_bytes([99; 16]), clock.wall_now()?)?;
+            session.store.create(&prepared, &call)?;
+            let note = format!(
+                "configured access boundary: {} END_SAFE_NOTE",
+                "fixture setting ".repeat(24)
+            );
+            assert!(note.len() > 160);
+            session.store.start(
+                prepared.run_id,
+                &Refusing { note: note.clone() },
+                &|_, _| unreachable!(),
+                &call,
+            )?;
+            let target = Target {
+                selection: None,
+                run: Some(prepared.run_id),
+                task: None,
+                attempt: Some(prepared.attempts[0].attempt_id),
+            };
+            let crate::ParseOutcome::Invocation(invocation) =
+                crate::parse(["lanes", "--all"].into_iter().map(std::ffi::OsString::from))
+            else {
+                return Err("parse lanes failed".into());
+            };
+            let crate::Command::Lanes(mut command) = invocation.command else {
+                return Err("not lanes".into());
+            };
+            let (listing, human, _) =
+                status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
+                    .map_err(|fail| fail.message)?;
+            let expected = format!(
+                "{}; {note}",
+                provenant_records::run::TerminalCause::AccessPolicyRefused.detail()
+            );
+            assert_eq!(listing["lanes"][0]["reason"], expected);
+            assert!(
+                human.contains(provenant_records::run::TerminalCause::AccessPolicyRefused.reason()),
+                "{human}"
+            );
+            assert!(!human.contains(&note), "{human}");
+            for text in [serde_json::to_string(&listing)?, human] {
+                assert!(!text.contains("PROVIDER_SENTINEL"), "{text}");
+            }
+            let listing_reply =
+                status::lanes_streaming(command.clone(), edge, false, &mut |_| Ok(()));
+            let listing_summary = listing_reply
+                .summary
+                .as_ref()
+                .ok_or("listing summary")?
+                .lines
+                .join("\n");
+            assert!(
+                listing_summary
+                    .contains(provenant_records::run::TerminalCause::AccessPolicyRefused.reason()),
+                "{listing_summary}"
+            );
+            assert!(!listing_summary.contains(&note), "{listing_summary}");
+            let crate::ParseOutcome::Invocation(invocation) =
+                crate::parse(["status"].into_iter().map(std::ffi::OsString::from))
+            else {
+                return Err("parse status failed".into());
+            };
+            let crate::Command::Status(status_command) = invocation.command else {
+                return Err("not status".into());
+            };
+            let status_reply = status::status(status_command, true, edge);
+            assert_eq!(status_reply.result.data["lanes"][0]["reason"], expected);
+            let status_summary = status_reply
+                .summary
+                .as_ref()
+                .ok_or("status summary")?
+                .lines
+                .join("\n");
+            assert!(
+                status_summary
+                    .contains(provenant_records::run::TerminalCause::AccessPolicyRefused.reason()),
+                "{status_summary}"
+            );
+            assert!(!status_summary.contains(&note), "{status_summary}");
+            assert!(
+                !serde_json::to_string(&status_reply.result.data)?.contains("PROVIDER_SENTINEL")
+            );
+            command.id = vec![target.clone()];
+            let (detail, human, _) =
+                status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
+                    .map_err(|fail| fail.message)?;
+            assert_eq!(detail["lanes"][0]["reason"], expected);
+            assert!(
+                human.contains(provenant_records::run::TerminalCause::AccessPolicyRefused.reason()),
+                "{human}"
+            );
+            assert!(!human.contains(&note), "{human}");
+            let explicit = status::lanes_streaming(command, edge, false, &mut |_| Ok(()));
+            let explicit_summary = explicit
+                .summary
+                .as_ref()
+                .ok_or("explicit summary")?
+                .lines
+                .join("\n");
+            assert!(
+                explicit_summary
+                    .contains(provenant_records::run::TerminalCause::AccessPolicyRefused.reason()),
+                "{explicit_summary}"
+            );
+            assert!(!explicit_summary.contains(&note), "{explicit_summary}");
+            let output_command = || Output {
+                attempt: crate::Attempt(target.clone()),
+                host: None,
+                part: Part::Result,
+                to: None,
+                path: false,
+                offset: 0,
+                tail: None,
+                max_bytes: 65_536,
+                trace: false,
+            };
+            let (data, text) =
+                output::output_inner(output_command(), edge, None).map_err(|fail| fail.message)?;
+            assert_eq!(data["reason"], expected);
+            assert!(text.contains(&expected));
+            assert!(!serde_json::to_string(&data)?.contains("PROVIDER_SENTINEL"));
+            let reply = output::output(output_command(), edge);
+            let mut bytes = Vec::new();
+            crate::render(
+                &reply.result,
+                crate::RenderMode::Compact {
+                    text: &reply.human,
+                    read_only: true,
+                    summary: reply.summary.as_ref(),
+                },
+                &mut bytes,
+            )?;
+            let default = String::from_utf8(bytes)?;
+            assert!(default.contains(&expected), "{default}");
+            assert_eq!(default.matches("END_SAFE_NOTE").count(), 1, "{default}");
+            assert!(!default.contains("PROVIDER_SENTINEL"));
+            Ok(())
+        },
+    )?
+}
+
+#[test]
+fn disk_wait_rows_stay_compact_and_explicit_output_keeps_the_sample()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let now = WallTime::from_micros(100)?;
+    let reason = "host capacity: disk space: 23622320128 bytes available; gc.free_floor is 32212254720 bytes (source: host configuration)";
+    let lanes: Vec<_> = (1..=20)
+        .map(|number| {
+            lane_fixture(
+                number,
+                number,
+                run::AttemptState::Starting {
+                    extra: Default::default(),
+                },
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    let waits: Vec<_> = lanes
+        .iter()
+        .map(|lane| run::LaneWait {
+            extra: Default::default(),
+            attempt_id: lane.attempt_id,
+            lane_class: run::LaneClass::Writer,
+            waiting_for: reason.into(),
+        })
+        .collect();
+    let compact = status::compact_status(&lanes, &waits, now);
+    assert!(compact.len() <= 2048, "{compact}");
+    assert!(compact.contains("disk below gc.free_floor; provenant output ID"));
+    assert!(!compact.contains("23622320128"));
+    let (data, _) = render_lanes(&lanes, &waits, None, Path::new("/state"), None);
+    assert!(
+        data["lanes"]
+            .as_array()
+            .ok_or("rows")?
+            .iter()
+            .all(|row| row["waiting_for"] == reason)
+    );
+    let summary = status::lane_summary(&status::lane_lines(&data), None);
+    let mut bytes = Vec::new();
+    crate::render(
+        &CommandResult::new("status", Status::Ok, data),
+        crate::RenderMode::Compact {
+            text: &compact,
+            read_only: true,
+            summary: Some(&summary),
+        },
+        &mut bytes,
+    )?;
+    assert!(bytes.len() <= 2048, "{}", String::from_utf8_lossy(&bytes));
+
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            std::fs::write(
+                edge.roots.state.as_path().join("config.toml"),
+                "schema_version=1\n[gc]\nfree_floor='32212254720B'\n",
+            )?;
+            let mut prepared = trace_run(10, AttemptId::from_bytes([99; 16]), clock.wall_now()?)?;
+            prepared.request.tasks[0].writer = Some(run::WriterRequest {
+                extra: Default::default(),
+                project: fixture.project.clone(),
+                worktree: fixture.tree.clone(),
+            });
+            session.store.create(&prepared, &call)?;
+            let mut lane = session
+                .store
+                .record(prepared.attempts[0].attempt_id, &call)?;
+            lane.state = run::AttemptState::Starting {
+                extra: Default::default(),
+            };
+            let database = rusqlite::Connection::open(
+                session.context.state_root.as_path().join("run.sqlite3"),
+            )?;
+            assert_eq!(
+                database.execute(
+                    "UPDATE attempts SET record=?1 WHERE id=?2",
+                    rusqlite::params![serde_json::to_vec(&lane)?, lane.attempt_id.to_string()]
+                )?,
+                1
+            );
+            // Admission reads private guardian checkpoints. Match their mode
+            // rather than inheriting the test runner's umask.
+            let mut sample = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(artifact(
+                    session.context.state_root.as_path(),
+                    &lane,
+                    "admission-disk.json",
+                ))?;
+            std::io::Write::write_all(
+                &mut sample,
+                &serde_json::to_vec(&json!({"generation":lane.generation,"free":23622320128_u64}))?,
+            )?;
+            drop(sample);
+            let target = Target {
+                selection: None,
+                run: Some(lane.run_id),
+                task: None,
+                attempt: Some(lane.attempt_id),
+            };
+            let command = || Output {
+                attempt: crate::Attempt(target.clone()),
+                host: None,
+                part: Part::Result,
+                to: None,
+                path: false,
+                offset: 0,
+                tail: None,
+                max_bytes: 65_536,
+                trace: false,
+            };
+            let (data, text) =
+                output::output_inner(command(), edge, None).map_err(|fail| fail.message)?;
+            let expected = format!("{reason}; free disk space or run `provenant gc --apply`");
+            assert_eq!(data["reason"], expected);
+            assert!(text.contains(&expected), "{text}");
+            let selection = format!("{}/{}", lane.run_id, lane.attempt_id);
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(
+                ["lanes", "--id", selection.as_str()]
+                    .into_iter()
+                    .map(std::ffi::OsString::from),
+            ) else {
+                return Err("parse lanes failed".into());
+            };
+            let crate::Command::Lanes(detail_command) = invocation.command else {
+                return Err("not lanes".into());
+            };
+            let (detail, human, _) =
+                status::lanes_inner(&detail_command, edge, true, &mut |_| Ok(()), None)
+                    .map_err(|fail| fail.message)?;
+            assert_eq!(detail["lanes"][0]["reason"], expected);
+            assert!(
+                human.contains("disk below gc.free_floor; provenant output ID"),
+                "{human}"
+            );
+            assert!(!human.contains("23622320128"), "{human}");
+            for field in ["length", "digest", "complete", "clipped"] {
+                assert!(data[field].is_null(), "{field}: {data}");
+            }
+            assert_eq!(data["bytes"]["data"], "");
+            let destination = fixture.root.join("preserved.txt");
+            std::fs::write(&destination, "existing content")?;
+            let mut save = command();
+            save.to = Some(destination.clone());
+            let reply = output::output(save, edge);
+            assert!(reply.result.error.is_some(), "{:?}", reply.result);
+            assert_eq!(std::fs::read_to_string(destination)?, "existing content");
+            Ok(())
+        },
+    )?
 }

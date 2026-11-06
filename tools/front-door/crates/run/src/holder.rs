@@ -619,7 +619,12 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .and_then(|task| task.writer.as_ref())
             .ok_or(RunError::Validation("land writer request missing"))?;
-        let launch = crate::prepare_writer(writer, &self.writer_registry, record.project_id)?;
+        let launch = crate::prepare_writer_with_facts(
+            writer,
+            &self.writer_registry,
+            record.project_id,
+            &self.repo_facts,
+        )?;
         recovery
             .writer_base(
                 launch.worktree.repo().root_dir(),
@@ -717,23 +722,23 @@ impl RunStore {
                 .as_ref()
                 .ok_or(RunError::Validation("pending import lacks writer"))?;
             let cancel = driver.cancellation();
-            let imported = crate::prepare_writer(writer, &self.writer_registry, record.project_id)
-                .and_then(|launch| {
-                    crate::settlement::with_cancellation(
+            let imported = crate::prepare_writer_with_facts(
+                writer,
+                &self.writer_registry,
+                record.project_id,
+                &self.repo_facts,
+            )
+            .and_then(|launch| {
+                crate::settlement::with_cancellation(attempt, Self::scope(&record), &cancel, || {
+                    launch.terminal(
+                        self.context.state_root.as_path(),
                         attempt,
-                        Self::scope(&record),
-                        &cancel,
-                        || {
-                            launch.terminal(
-                                self.context.state_root.as_path(),
-                                attempt,
-                                recovery,
-                                &mut driver,
-                                false, // Budget commit was attempted before recording terminal state.
-                            )
-                        },
+                        recovery,
+                        &mut driver,
+                        false, // Budget commit was attempted before recording terminal state.
                     )
-                });
+                })
+            });
             if let Err(error) = &imported {
                 driver.record_failure(&error.to_string())?;
             }
@@ -931,6 +936,11 @@ impl RunStore {
                 } else {
                     None
                 };
+                let observation = slot
+                    .as_ref()
+                    .map(provenant_supervisor::custody::writer_admission_guard)
+                    .transpose()
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
                 let _writer = match slot.as_ref().map(|slot| {
                     slot.try_lock(
                         std::ffi::OsStr::new("writer.lock"),
@@ -942,6 +952,7 @@ impl RunStore {
                     Some(Err(error)) => return Err(error.into()),
                     None => None,
                 };
+                drop(observation);
                 let cancel = CancelToken::new();
                 let host = match completion {
                     Completion::Live {
@@ -1345,9 +1356,13 @@ impl RunStore {
             if let Some(p) = provider
                 && !crate::token_budget::enforces(p)
             {
-                let note = format!(
-                    "token budget is not enforced for provider {p}: mid-turn usage is not reported"
-                );
+                let note = if p == "codex" {
+                    "token budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame; there is no further turn to stop".to_owned()
+                } else {
+                    format!(
+                        "token budget is not enforced for provider {p}: usage is not reported while it runs"
+                    )
+                };
                 decoded.reason = Some(match decoded.reason.take() {
                     Some(existing) => format!("{existing}; {note}"),
                     None => note,
@@ -1384,23 +1399,26 @@ impl RunStore {
                 decoded.reason = Some(reason);
                 Ok(())
             } else {
-                crate::prepare_writer(writer, &self.writer_registry, record.project_id).and_then(
-                    |writer| {
-                        let driver = settlement.as_mut().ok_or(RunError::Contention)?;
-                        let cancel = driver.cancellation();
-                        crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
-                            writer.terminal(
-                                self.context.state_root.as_path(),
-                                attempt,
-                                recovery.ok_or(RunError::Validation(
-                                    "writer terminal custody missing",
-                                ))?,
-                                driver,
-                                exit.stop_reason == Some(StopReason::TokenBudget),
-                            )
-                        })
-                    },
+                crate::prepare_writer_with_facts(
+                    writer,
+                    &self.writer_registry,
+                    record.project_id,
+                    &self.repo_facts,
                 )
+                .and_then(|writer| {
+                    let driver = settlement.as_mut().ok_or(RunError::Contention)?;
+                    let cancel = driver.cancellation();
+                    crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
+                        writer.terminal(
+                            self.context.state_root.as_path(),
+                            attempt,
+                            recovery
+                                .ok_or(RunError::Validation("writer terminal custody missing"))?,
+                            driver,
+                            exit.stop_reason == Some(StopReason::TokenBudget),
+                        )
+                    })
+                })
             };
             if let Some(bytes) = read_sealed(attempt, "budget-commit.json", RECORD_LIMIT)? {
                 let result: serde_json::Value = crate::db::decode(&bytes)?;
@@ -1570,27 +1588,26 @@ impl RunStore {
                 }
                 Ok(_) if decoded.outcome == Outcome::Succeeded => {
                     // Edits with no commit are not a success, and nothing is delivered.
-                    let left =
-                        crate::prepare_writer(writer, &self.writer_registry, record.project_id)
-                            .and_then(|launch| {
-                                let cancel = settlement
-                                    .as_ref()
-                                    .map_or_else(CancelToken::new, |driver| driver.cancellation());
-                                crate::settlement::with_cancellation(
-                                    attempt,
-                                    exit.scope,
-                                    &cancel,
-                                    || {
-                                        launch.uncommitted(
-                                            self.context.state_root.as_path(),
-                                            recovery.ok_or(RunError::Validation(
-                                                "writer terminal custody missing",
-                                            ))?,
-                                            &cancel,
-                                        )
-                                    },
-                                )
-                            });
+                    let left = crate::prepare_writer_with_facts(
+                        writer,
+                        &self.writer_registry,
+                        record.project_id,
+                        &self.repo_facts,
+                    )
+                    .and_then(|launch| {
+                        let cancel = settlement
+                            .as_ref()
+                            .map_or_else(CancelToken::new, |driver| driver.cancellation());
+                        crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
+                            launch.uncommitted(
+                                self.context.state_root.as_path(),
+                                recovery.ok_or(RunError::Validation(
+                                    "writer terminal custody missing",
+                                ))?,
+                                &cancel,
+                            )
+                        })
+                    });
                     let note = match left {
                         Ok(None) => None,
                         Ok(Some(reason)) => {
@@ -2904,8 +2921,34 @@ mod writer_recovery_tests {
         budget_stop_case(BudgetStopCase::SymlinkObjects)
     }
 
+    #[test]
+    fn writer_token_budget_commit_leaves_a_cherry_pick_uncommitted()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        budget_stop_case(BudgetStopCase::InProgress("cherry-pick"))
+    }
+
+    #[test]
+    fn writer_token_budget_commit_leaves_a_rebase_uncommitted()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        budget_stop_case(BudgetStopCase::InProgress("rebase"))
+    }
+
+    #[test]
+    fn writer_token_budget_commit_leaves_a_revert_uncommitted()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        budget_stop_case(BudgetStopCase::InProgress("revert"))
+    }
+
+    #[test]
+    fn writer_token_budget_commit_leaves_an_apply_rebase_uncommitted()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        budget_stop_case(BudgetStopCase::InProgress("rebase-apply"))
+    }
+
     #[derive(Clone, Copy)]
     enum BudgetStopCase {
+        /// An operation Git left in progress.
+        InProgress(&'static str),
         Commit,
         CommitFailure,
         CustodyPresent,
@@ -3117,6 +3160,21 @@ mod writer_recovery_tests {
                 b"existing Git lock",
             )?;
         }
+        if let BudgetStopCase::InProgress(operation) = case {
+            let git_dir = candidate.join("git-common");
+            match operation {
+                "rebase" => std::fs::create_dir(git_dir.join("rebase-merge"))?,
+                "rebase-apply" => std::fs::create_dir(git_dir.join("rebase-apply"))?,
+                operation => std::fs::write(
+                    git_dir.join(if operation == "revert" {
+                        "REVERT_HEAD"
+                    } else {
+                        "CHERRY_PICK_HEAD"
+                    }),
+                    format!("{}\n", launch.base),
+                )?,
+            }
+        }
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         observed.stop_reason = Some(StopReason::TokenBudget);
@@ -3144,6 +3202,28 @@ mod writer_recovery_tests {
             reason_text.contains("token budget reached: provider stopped after passing"),
             "reason: {reason_text}"
         );
+        if let BudgetStopCase::InProgress(operation) = case {
+            let operation = if operation == "rebase-apply" {
+                "rebase"
+            } else {
+                operation
+            };
+            assert!(
+                reason_text.contains(&format!(
+                    "budget commit skipped: in-progress {operation} left uncommitted"
+                )),
+                "reason: {reason_text}"
+            );
+            assert_eq!(
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?,
+                launch.base
+            );
+            assert_eq!(
+                std::fs::read_to_string(fixture.writer.worktree.join("budget-work.txt"))?,
+                "uncommitted work before budget stop\n"
+            );
+            return Ok(());
+        }
         if matches!(case, BudgetStopCase::CommitFailure) {
             assert!(
                 reason_text.contains("budget commit failed:"),

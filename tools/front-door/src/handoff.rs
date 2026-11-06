@@ -106,7 +106,7 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     let mut options = ExecOptions::new(&argv, dir, timeout);
     options.env = Some(&environment);
     options.stdin = Some(b"");
-    let limit = 64 * 1024;
+    let limit = provenant_os::git::fact_capture_limit(args, 64 * 1024);
     options.stdout = StreamPolicy::Capture { limit };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let out = SystemExecutor::new(1)?.execute(options)?;
@@ -144,12 +144,13 @@ fn inspect(
     workers: &dyn WorkerObserver,
     facts: &worktrees::RepoFacts,
 ) -> Result<Vec<Tree>, Refusal> {
-    crate::worktrees::with_context(
+    crate::worktrees::with_context_using_facts(
         &src.roots,
         &src.home,
         &src.cwd,
         GIT_TIMEOUT,
         workers,
+        facts,
         |context, cancel| inspect_context(context, facts, cancel),
     )
     .map_err(|error| {
@@ -288,14 +289,14 @@ fn with_wip_custody(
     tree: &Tree,
     action: impl FnOnce() -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
-    crate::worktrees::with_context(
+    crate::worktrees::with_context_using_facts(
         roots,
         home,
         project,
         GIT_TIMEOUT,
         workers,
+        facts,
         |context, cancel| {
-            let context = &worktrees::WorktreeContext { facts, ..*context };
             let verified = provenant_confinement::verify_worktree(context.repo, &tree.path)
                 .map_err(worktrees::WorktreeError::from)?;
             let _writer = worktrees::cache_writer_guard(context.project_state, verified.path())
@@ -1131,17 +1132,14 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                 return failed("the peer call budget ran out".into());
             }
             let base = fetch_recreation_base(&mut fetched, |fetch| {
-                crate::worktrees::with_context(
+                crate::worktrees::with_context_using_facts(
                     &target.context.roots,
                     target.home,
                     target.cwd,
                     remaining(),
                     target.workers,
+                    &facts,
                     |context, cancel| {
-                        let context = &worktrees::WorktreeContext {
-                            facts: &facts,
-                            ..*context
-                        };
                         Ok(crate::fabric::remote_base(
                             context,
                             &format!("origin/{branch}"),
@@ -1158,17 +1156,14 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                 Ok(base) => base,
                 Err(error) => return failed(format!("origin/{branch}: {error}")),
             };
-            let made = crate::worktrees::with_context(
+            let made = crate::worktrees::with_context_using_facts(
                 &target.context.roots,
                 target.home,
                 target.cwd,
                 remaining(),
                 target.workers,
+                &facts,
                 |context, cancel| {
-                    let context = &worktrees::WorktreeContext {
-                        facts: &facts,
-                        ..*context
-                    };
                     if let Some(info) = worktrees::list_cached(context, cancel)?
                         .into_iter()
                         .find(|w| w.branch.as_deref().map(short_branch).as_ref() == Some(branch))
@@ -1700,6 +1695,7 @@ mod tests {
     fn reused_worktrees_name_a_differing_head_or_dirty_tree() {
         let base = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
         let mut info = worktrees::WorktreeInfo {
+            warnings: Vec::new(),
             path: "/repo/.worktrees/x".into(),
             branch: Some("feat/x".into()),
             head: base,

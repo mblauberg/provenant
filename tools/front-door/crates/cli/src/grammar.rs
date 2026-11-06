@@ -1337,6 +1337,11 @@ pub enum Worktree {
     },
     /// List worktrees
     List,
+    /// Explain a worktree's state and suggest one repair command
+    Doctor {
+        /// Checkout path, relative to the selected project when not absolute
+        path: std::path::PathBuf,
+    },
     /// Stream advisory worktree inventory for the SessionStart collector.
     #[command(hide = true)]
     SessionList,
@@ -1669,7 +1674,7 @@ pub struct Status {
     /// Wait for mixed targets (no value uses domains.wait.timeout_seconds)
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", catalog_status_wait(), conflicts_with_all = ["all", "cursor"])]
     pub wait: Option<u64>,
-    /// Observe lane:ID, graph:ID, pr:NUMBER or land:NUMBER (repeatable; land only observes)
+    /// Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)
     #[arg(long, catalog_requires = "wait")]
     pub target: Vec<String>,
     /// Return on any transition or when all targets are terminal
@@ -1678,7 +1683,7 @@ pub struct Status {
     /// Stream transitions until all targets are terminal or the wait expires
     #[arg(long, catalog_requires = "wait")]
     pub follow: bool,
-    /// Show this run, task, attempt or graph ID, including settled records
+    /// Show a run, task, attempt or graph ID, or operation:ID for a refusal
     pub id: Option<String>,
     /// Maximum full records per page
     #[arg(long, hide = true, default_value = "50", catalog_u64_range = 1..=100)]

@@ -32,6 +32,278 @@ use std::fs;
 
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn create_defaults_to_fetched_remote_head_and_preserves_existing_and_explicit_bases()
+-> Result<(), Box<dyn Error>> {
+    let source = Fixture::new()?;
+    source.run(&["branch", "-M", "trunk"])?;
+    let mut fixture = Fixture::new()?;
+    let clone = fixture._temp.path().join("clone-default");
+    fixture.run(&[
+        "clone",
+        source.root.to_str().ok_or("source path")?,
+        clone.to_str().ok_or("clone path")?,
+    ])?;
+    fixture.root = clone;
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    let old = fixture.head()?;
+    fixture.run(&["branch", "existing"])?;
+    source.run(&["commit", "--allow-empty", "-m", "new remote tip"])?;
+    let latest = source.head()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let new = create(
+        &context,
+        WorktreeCreate {
+            branch: "new-default".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(new.head, latest);
+    assert!(new.warnings.is_empty());
+    let existing = create(
+        &context,
+        WorktreeCreate {
+            branch: "existing".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(existing.head, old);
+    assert!(existing.warnings.is_empty());
+    let explicit = create(
+        &context,
+        WorktreeCreate {
+            branch: "explicit".into(),
+            base: Some("HEAD".into()),
+        },
+        &cancel(),
+    )?;
+    assert_eq!(explicit.head, old);
+    assert!(explicit.warnings.is_empty());
+    Ok(())
+}
+
+#[test]
+fn create_defaults_to_local_head_when_remote_unavailable_or_head_missing()
+-> Result<(), Box<dyn Error>> {
+    let source = Fixture::new()?;
+    let mut fixture = Fixture::new()?;
+    fixture.run(&[
+        "remote",
+        "add",
+        "origin",
+        source.root.to_str().ok_or("source path")?,
+    ])?;
+    source.run(&["symbolic-ref", "HEAD", "refs/heads/missing"])?;
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let head = fixture.head()?;
+    let missing = create(
+        &context,
+        WorktreeCreate {
+            branch: "missing-default".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(missing.head, head);
+    assert_eq!(missing.warnings.len(), 1);
+    assert!(missing.warnings[0].contains(&head.to_string()));
+    let mut offline_fixture = Fixture::new()?;
+    offline_fixture.run(&["remote", "add", "origin", "/nonexistent/provenant-2998"])?;
+    offline_fixture.repo = offline_fixture.runtime.open_repo(
+        &offline_fixture.executor,
+        &offline_fixture.root,
+        offline_fixture.budget()?,
+        &cancel(),
+    )?;
+    let offline_head = offline_fixture.head()?;
+    let test = TestContext::new(&offline_fixture)?;
+    let context = test.context();
+    let offline = create(
+        &context,
+        WorktreeCreate {
+            branch: "offline-default".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(offline.head, offline_head);
+    assert_eq!(offline.warnings.len(), 1);
+    let receipt = serde_json::to_value(&offline)?;
+    assert_eq!(receipt["warnings"][0], offline.warnings[0]);
+    let mut warning = Vec::new();
+    lifecycle::write_default_base_warning(&mut warning, head)?;
+    let warning = String::from_utf8(warning)?;
+    assert!(warning.contains("local HEAD"));
+    assert!(warning.contains(&head.to_string()));
+    Ok(())
+}
+
+#[test]
+fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_tip()
+-> Result<(), Box<dyn Error>> {
+    struct FailedFetch<'a> {
+        inner: &'a dyn Executor,
+        project_state: &'a Directory,
+        calls: std::sync::atomic::AtomicUsize,
+        mutation_timeout: std::time::Duration,
+    }
+    impl Executor for FailedFetch<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options
+                .argv
+                .iter()
+                .any(|word| word == "fetch" || word == "ls-remote")
+            {
+                let guard = self
+                    .project_state
+                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+                    .expect("remote discovery must not own the registry lock");
+                drop(guard);
+                assert_eq!(options.timeout, self.mutation_timeout);
+            }
+            if options.argv.iter().any(|word| word == "fetch") {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(ExecOutcome {
+                    termination: Termination::Exit(1),
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                });
+            }
+            self.inner.execute(options)
+        }
+    }
+    let source = Fixture::new()?;
+    let mut fixture = Fixture::new()?;
+    fixture.run(&[
+        "remote",
+        "add",
+        "origin",
+        source.root.to_str().ok_or("source")?,
+    ])?;
+    fixture.run(&["fetch", "origin"])?;
+    let source_branch = source.run(&["symbolic-ref", "--short", "HEAD"])?;
+    let source_branch = std::str::from_utf8(&source_branch.stdout.bytes)?.trim();
+    fixture.run(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        &format!("refs/remotes/origin/{source_branch}"),
+    ])?;
+    fixture.run(&["commit", "--allow-empty", "-m", "local-only work"])?;
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    let local = fixture.head()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let mutation_timeout = std::time::Duration::from_secs(120);
+    context.mutation_budget = UtilityBudget::bounded(mutation_timeout)?;
+    let failed = FailedFetch {
+        inner: context.executor,
+        project_state: context.project_state,
+        calls: Default::default(),
+        mutation_timeout,
+    };
+    context.executor = &failed;
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "offline-with-cache".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(
+        created.head, local,
+        "a stale cached remote tip cannot replace local HEAD after fetch failure"
+    );
+    assert_eq!(failed.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(created.warnings.len(), 1);
+    assert!(created.warnings[0].contains(&local.to_string()));
+    Ok(())
+}
+
+#[test]
+fn gc_legacy_observer_gate_preview_is_read_only_and_apply_initialises_it()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = gc_merged_worktree(&fixture, &context, "gc-legacy-gate")?;
+    let slot = writer_directory(context.project_state, &lane.path)?;
+    drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
+    let gate = slot.current_path()?.join("writer-probe.lock");
+    fs::remove_file(&gate)?;
+    let policy = WorktreeGcPolicy {
+        upstream: Some(fixture.head()?),
+        terminal: &|_| false,
+        no_live_lanes: &|_| true,
+        regenerable: &[],
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: true,
+        foreign_merged_clean: true,
+    };
+    let preview = collect(&context, std::slice::from_ref(&lane), &policy, &cancel())?;
+    assert!(preview.worktrees.removed.is_empty());
+    assert_eq!(
+        preview.worktrees.retained,
+        vec![RetainedBranch {
+            branch: "gc-legacy-gate".into(),
+            reason: RetainReason::UnknownWriter,
+            detail: None,
+        }]
+    );
+    assert!(
+        matches!(
+            cache_writer_probe(context.project_state, &lane.path),
+            Err(Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody })
+                if scope == lane.path && evidence.contains("writer-probe.lock")
+        ),
+        "the missing observer gate must be the specific custody uncertainty"
+    );
+    assert!(!gate.exists(), "preview cannot upgrade custody state");
+    assert!(lane.path.is_dir());
+    let applied = collect(
+        &context,
+        std::slice::from_ref(&lane),
+        &WorktreeGcPolicy {
+            dry_run: false,
+            ..policy
+        },
+        &cancel(),
+    )?;
+    assert_eq!(applied.worktrees.removed.len(), 1, "{applied:?}");
+    assert!(gate.is_file(), "mutation upgrades legacy observation gates");
+    assert!(!lane.path.exists());
+    Ok(())
+}
+
 pub(super) struct FreeWorkers;
 
 #[test]
@@ -507,11 +779,82 @@ fn cached_inventory_is_reused_until_a_worktree_mutation() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn doctor_admission_and_list_share_one_inventory_with_100_worktrees() -> Result<(), Box<dyn Error>>
+{
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingGit<'a> {
+        inner: &'a dyn Executor,
+        listings: AtomicUsize,
+    }
+    impl Executor for CountingGit<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
+            {
+                self.listings.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.execute(options)
+        }
+    }
+    let fixture = Fixture::new()?;
+    for index in 1..100 {
+        let path = fixture._temp.path().join(format!("inventory-{index}"));
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            &format!("inventory-{index}"),
+            path.to_str().ok_or("path")?,
+        ])?;
+    }
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let git = CountingGit {
+        inner: context.executor,
+        listings: AtomicUsize::new(0),
+    };
+    context.executor = &git;
+    let path = fixture._temp.path().join("inventory-1");
+    assert_eq!(
+        doctor(&context, &path, &cancel())?.state,
+        WorktreeDiagnosisState::Clean
+    );
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    assert_eq!(list(&context, &cancel())?.len(), 100);
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    let tree = verify_worktree(context.repo, &path)?;
+    let branch = GitRefName::branch("inventory-1")?;
+    let _custody = writer_custody(
+        context.project_state,
+        &tree,
+        &branch,
+        fixture.head()?,
+        || {
+            context.facts.writer_inventory(
+                context.repo,
+                context.executor,
+                context.utility,
+                context.utility_budget,
+                &cancel(),
+            )
+        },
+    )?;
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[test]
 fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountingGit<'a> {
         inner: &'a dyn Executor,
         calls: AtomicUsize,
+        listings: AtomicUsize,
     }
     impl Executor for CountingGit<'_> {
         fn execute(
@@ -519,22 +862,32 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
             options: provenant_os::exec::ExecOptions<'_>,
         ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if options
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
+            {
+                self.listings.fetch_add(1, Ordering::SeqCst);
+            }
             self.inner.execute(options)
         }
     }
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    for index in 0..100 {
+    // The primary plus 99 linked checkouts form a 100-worktree command.
+    for index in 0..99 {
         let path = fixture.root.join(format!("foreign-{index}"));
         fixture.run(&["worktree", "add", "--detach", path.to_str().ok_or("path")?])?;
     }
     let git = CountingGit {
         inner: context.executor,
         calls: AtomicUsize::new(0),
+        listings: AtomicUsize::new(0),
     };
     context.executor = &git;
     let lanes = list_for_gc(&context, &cancel())?;
+    assert_eq!(lanes.len(), 100);
     let report = collect_lazy(
         &context,
         &lanes,
@@ -553,6 +906,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     assert!(report.worktrees.removed.is_empty());
     // A single command-scoped inventory serves both phases of a preview.
     assert_eq!(git.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
     let lanes = list_for_gc(&context, &cancel())?;
     collect_lazy(
         &context,
@@ -2866,19 +3220,7 @@ fn gc_protects_nested_repositories_under_ignored_directories() -> Result<(), Box
             fs::create_dir(nested.join("build"))?;
             fs::write(nested.join("build/source"), "committed")?;
             run_in_worktree(&fixture, &nested, &["add", "-f", "build/source"])?;
-            run_in_worktree(
-                &fixture,
-                &nested,
-                &[
-                    "-c",
-                    "user.name=Test",
-                    "-c",
-                    "user.email=test@example.test",
-                    "commit",
-                    "-m",
-                    "nested source",
-                ],
-            )?;
+            run_in_worktree(&fixture, &nested, &["commit", "-m", "nested source"])?;
             fs::write(nested.join("build/source"), "uncommitted edit")?;
             let report = collect(
                 &context,
@@ -5379,16 +5721,7 @@ fn named_removal_refuses_a_head_that_moved_after_the_callers_check() -> Result<(
     run_in_worktree(
         &fixture,
         &created.path,
-        &[
-            "-c",
-            "user.name=raced",
-            "-c",
-            "user.email=raced@example.test",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "after the check",
-        ],
+        &["commit", "--allow-empty", "-m", "after the check"],
     )?;
     let branch = GitRefName::branch("feature/raced")?;
     let moved = read_branch_tips(&context, &cancellation)?

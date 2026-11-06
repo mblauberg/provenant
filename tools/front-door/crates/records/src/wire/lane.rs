@@ -53,7 +53,6 @@ lane_row! {
         partial_signals: Value => any();
         usage: Value => any();
         delivery_id: Option<String> => nullable(string());
-        write_grants: Value => nullable(array(grant_schema()));
         read_only_writable: Value => nullable(array(nullable(super::schema::worktree_path())));
         git_grants_digest: Option<String> => nullable(string());
         head: Option<String> => nullable(string());
@@ -65,7 +64,8 @@ lane_row! {
         transcript: Option<LaneTranscript> => nullable(object(&[("adapter", string()), ("session", string()), ("path", nullable(super::schema::worktree_path()))], &[]));
     }
     optional {
-        terminal_cause: crate::run::TerminalCause => choices(&["unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved"]);
+        write_grants: Value => nullable(array(grant_schema()));
+        terminal_cause: crate::run::TerminalCause => choices(&["preparation_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved"]);
         host: String => string();
         resolved_route: Value => any();
         title: String => string();
@@ -87,8 +87,20 @@ pub(super) fn grant_schema() -> Value {
 }
 
 impl LaneRow {
-    /// Project the recorded state without rewriting missing history.
+    /// Project the full safe cause, remedy and note for structured results.
     pub fn state_and_reason(state: &crate::run::AttemptState) -> (String, Option<String>) {
+        Self::state_diagnostic(state, true)
+    }
+
+    /// Project a short label for human status rows, without per-lane notes.
+    pub fn state_and_label(state: &crate::run::AttemptState) -> (String, Option<String>) {
+        Self::state_diagnostic(state, false)
+    }
+
+    fn state_diagnostic(
+        state: &crate::run::AttemptState,
+        detail: bool,
+    ) -> (String, Option<String>) {
         use crate::run::AttemptState;
         match state {
             AttemptState::Terminal {
@@ -106,7 +118,14 @@ impl LaneRow {
                     .and_then(|value| {
                         serde_json::from_value::<crate::run::TerminalCause>(value.clone()).ok()
                     })
-                    .map(|cause| cause.reason().to_owned())
+                    .map(|cause| {
+                        if detail {
+                            cause.detail()
+                        } else {
+                            cause.reason()
+                        }
+                        .to_owned()
+                    })
                     .or_else(|| {
                         (reason.is_some() || *outcome != crate::run::Outcome::Succeeded)
                             .then(|| outcome.diagnostic_reason().to_owned())
@@ -115,7 +134,7 @@ impl LaneRow {
                     // decision or a configured executable), never provider output.
                     .map(
                         |safe| match extra.get("terminal_note").and_then(Value::as_str) {
-                            Some(note) if !note.is_empty() => {
+                            Some(note) if detail && !note.is_empty() => {
                                 format!("{safe}; {}", crate::diagnostic::safe_text(note))
                             }
                             _ => safe,
@@ -365,7 +384,7 @@ impl LaneRow {
             partial_signals: json!(lane.partial_signals),
             usage: json!(lane.usage),
             delivery_id: lane.delivery_id.map(|id| id.to_string()),
-            write_grants: json!(write_grants),
+            write_grants: Some(json!(write_grants)),
             read_only_writable: json!(read_only_writable),
             git_grants_digest: lane.git_grants_digest.map(|digest| digest.to_string()),
             head: lane.head.map(|head| head.to_string()),
@@ -463,6 +482,17 @@ mod terminal_cause_tests {
     #[test]
     fn terminal_reasons_use_typed_causes_without_provider_text() {
         for cause in [
+            TerminalCause::PreparationRefused,
+            TerminalCause::AccountLoginRequired,
+            TerminalCause::RouteResolutionRefused,
+            TerminalCause::AccessPolicyRefused,
+            TerminalCause::DiskFloor,
+            TerminalCause::DiskObservationUnavailable,
+            TerminalCause::StoredPromptUnreadable,
+            TerminalCause::WriteGrantsRefused,
+            TerminalCause::WorktreeBusy,
+            TerminalCause::HandoffRefused,
+            TerminalCause::RetainedWriterImport,
             TerminalCause::UnsupportedPlatform,
             TerminalCause::UnknownPacingAccount,
             TerminalCause::UnregisteredAccount,
@@ -481,6 +511,10 @@ mod terminal_cause_tests {
                 "terminal_cause".into(),
                 serde_json::to_value(cause).unwrap(),
             );
+            extra.insert(
+                "terminal_note".into(),
+                Value::String("fixture scoped note".into()),
+            );
             let state = AttemptState::Terminal {
                 extra,
                 outcome: Outcome::Failed,
@@ -489,9 +523,17 @@ mod terminal_cause_tests {
                 reason: Some("secret provider text".into()),
             };
             let (_, reason) = LaneRow::state_and_reason(&state);
-            assert_eq!(reason.as_deref(), Some(cause.reason()));
-            assert!(!reason.unwrap().contains("secret"));
+            let reason = reason.unwrap();
+            assert_eq!(reason, format!("{}; fixture scoped note", cause.detail()));
+            assert!(!reason.contains("secret"));
+            let (_, label) = LaneRow::state_and_label(&state);
+            assert_eq!(label.as_deref(), Some(cause.reason()));
+            let label = label.unwrap();
+            assert!(label.len() <= 60, "{cause:?}: {label}");
+            assert!(label.contains("provenant output ID"), "{label}");
+            assert!(!label.contains("fixture scoped note"), "{label}");
+            assert!(!label.contains("secret"));
         }
-        assert!(TerminalCause::FreePoolQuota.reason().contains("paid route"));
+        assert!(TerminalCause::FreePoolQuota.detail().contains("paid route"));
     }
 }

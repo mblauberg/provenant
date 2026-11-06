@@ -470,19 +470,51 @@ fn secret_input_is_refused_before_publication() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let input = submission("sk-abcdefghijklmnopqrstuvwxyz123456");
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+    let input = submission(secret);
     let operation = input.operation_id.clone();
     let error = Service::new(&store)
         .dispatch(input, temp.path(), &call)
         .unwrap_err();
     assert!(matches!(
         error,
-        RunError::Input {
-            kind: ErrorKind::SecretInput,
-            ..
-        }
+        RunError::RecordedRefusal(ref diagnostic) if diagnostic.code == ErrorKind::SecretInput.code()
     ));
-    assert!(store.operation(&operation, &call)?.is_none());
+    let saved = store
+        .operation(&operation, &call)?
+        .ok_or("missing refusal")?;
+    assert!(!serde_json::to_string(&saved)?.contains(secret));
+    assert!(matches!(
+        Service::new(&store).dispatch(submission(secret), temp.path(), &call),
+        Err(RunError::RecordedRefusal(_))
+    ));
+    assert!(matches!(
+        Service::new(&store).dispatch(submission("changed"), temp.path(), &call),
+        Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
+
+#[test]
+fn later_secret_is_refused_before_preparing_any_writer() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = submission("ordinary first task");
+    // A missing writer would fail if preparation ran before the later scan.
+    input.tasks[0].worktree = Some(temp.path().join("missing-writer"));
+    let mut later = submission("sk-abcdefghijklmnopqrstuvwxyz123456")
+        .tasks
+        .remove(0);
+    later.task_id = TaskId::from_bytes([4; 16]);
+    input.tasks.push(later);
+    let operation = input.operation_id.clone();
+    assert!(matches!(
+        Service::new(&store).dispatch(input, temp.path(), &call),
+        Err(RunError::RecordedRefusal(ref diagnostic)) if diagnostic.code == ErrorKind::SecretInput.code()
+    ));
+    assert!(store.operation(&operation, &call)?.is_some());
     Ok(())
 }
 
@@ -526,14 +558,26 @@ fn command_write_is_refused_before_preparing_a_worktree() -> TestResult {
         name: "fmt-check".into(),
     };
     input.tasks[0].worktree = Some(temp.path().join("not-a-worktree"));
-    assert!(matches!(
-        Service::new(&store).dispatch(input, temp.path(), &call),
-        Err(RunError::Input {
-            kind: ErrorKind::Unsupported,
-            ..
-        })
-    ));
-    assert!(store.operation(&operation, &call)?.is_none());
+    let error = Service::new(&store)
+        .dispatch(input, temp.path(), &call)
+        .unwrap_err();
+    assert_eq!(ErrorKind::from(&error), ErrorKind::Unsupported);
+    assert!(
+        matches!(&error, RunError::RecordedRefusal(diagnostic) if diagnostic.code == ErrorKind::Unsupported.code())
+    );
+    let saved = store
+        .operation(&operation, &call)?
+        .ok_or("refusal receipt missing")?;
+    assert_eq!(saved.state, OperationState::Refused);
+    assert_eq!(
+        saved
+            .refusal
+            .as_ref()
+            .map(|diagnostic| diagnostic.code.as_str()),
+        Some(ErrorKind::Unsupported.code())
+    );
+    assert!(!store.has_runs(&call)?);
+    assert!(!temp.path().join("not-a-worktree").exists());
     Ok(())
 }
 
@@ -601,10 +645,7 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
         let result = Service::new(&store).dispatch(input, temp.path(), &call);
         let recorded = store.operation(&operation, &call)?.is_some();
         assert_eq!(result.is_ok(), accepted, "{provider} {effort:?}");
-        assert_eq!(
-            recorded, accepted,
-            "{provider} {effort:?} left an operation"
-        );
+        assert!(recorded, "{provider} {effort:?} left no operation");
         if let Err(error) = result {
             assert_eq!(
                 error.to_string(),
@@ -612,6 +653,126 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let make = |prompt| {
+        let mut input = submission(prompt);
+        input.chair = Some(ChairBinding {
+            extra: Default::default(),
+            host: provenant_core::HostId::from_bytes([7; 16]),
+            actor: provenant_core::ActorId::from_bytes([8; 16]),
+            session: Some("original".into()),
+        });
+        input.tasks[0]
+            .profile
+            .knobs
+            .insert("chair.refusal_notice".into(), serde_json::json!("off"));
+        input.tasks[0].route = RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "cursor".into(),
+            model: "cursor/m".into(),
+            effort: Some("high".into()),
+        };
+        input
+    };
+    let first = Service::new(&store)
+        .dispatch(make("first"), temp.path(), &call)
+        .unwrap_err();
+    let mut replay = make("first");
+    replay.chair.as_mut().unwrap().session = Some("new-session".into());
+    let second = Service::new(&store)
+        .dispatch(replay, temp.path(), &call)
+        .unwrap_err();
+    assert_eq!(first.to_string(), second.to_string());
+    assert!(
+        matches!(second, RunError::RecordedRefusal(ref diagnostic) if diagnostic.code == "UNSUPPORTED")
+    );
+    assert!(matches!(
+        Service::new(&store).dispatch(make("changed"), temp.path(), &call),
+        Err(RunError::OperationConflict)
+    ));
+    assert_eq!(store.recent_refusals(10, &call)?.len(), 1);
+    let saved = store.recent_refusals(10, &call)?.remove(0);
+    assert_eq!(
+        saved
+            .refusal_chair
+            .as_ref()
+            .and_then(|chair| chair.session.as_deref()),
+        Some("original")
+    );
+    assert_eq!(saved.extra["refusal_notice"], "off");
+    assert!(!serde_json::to_string(&saved)?.contains("first"));
+    Ok(())
+}
+
+#[test]
+fn nested_preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let make = |prompt| {
+        let mut input = submission(prompt);
+        input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
+        input.lane_depth = 2;
+        input.tasks[0].route = RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "cursor".into(),
+            model: "cursor/m".into(),
+            effort: Some("high".into()),
+        };
+        input
+    };
+    let operation = make("first").operation_id;
+    let first = Service::new(&store)
+        .dispatch(make("first"), temp.path(), &call)
+        .unwrap_err();
+    let saved = store
+        .operation(&operation, &call)?
+        .ok_or("missing refusal")?;
+    assert!(matches!(first, RunError::RecordedRefusal(_)));
+    assert!(matches!(
+        Service::new(&store).dispatch(make("first"), temp.path(), &call),
+        Err(RunError::RecordedRefusal(_))
+    ));
+    assert_eq!(
+        store.operation(&operation, &call)?.unwrap().run_id,
+        saved.run_id
+    );
+    assert!(matches!(
+        Service::new(&store).dispatch(make("changed"), temp.path(), &call),
+        Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
+
+#[test]
+fn nested_secret_refusal_does_not_store_prompt() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let secret = concat!("sk-", "abcdefghijklmnopqrstuvwxyz123456");
+    let mut input = submission(secret);
+    input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
+    input.lane_depth = 2;
+    let operation = input.operation_id.clone();
+    let result = Service::new(&store).dispatch(input, temp.path(), &call);
+    assert!(
+        matches!(result, Err(RunError::RecordedRefusal(_))),
+        "{result:?}"
+    );
+    let saved = store
+        .operation(&operation, &call)?
+        .ok_or("missing refusal")?;
+    assert!(!serde_json::to_string(&saved)?.contains(secret));
     Ok(())
 }
 
@@ -649,7 +810,7 @@ fn explicit_skill_location_is_rechecked_before_dispatch() -> TestResult {
             accepted,
             "{provider} required={required}: {result:?}"
         );
-        assert_eq!(store.operation(&operation, &call)?.is_some(), accepted);
+        assert!(store.operation(&operation, &call)?.is_some());
         if let Err(error) = result {
             assert_eq!(error.to_string(), "command does not support skill location");
         }
@@ -682,7 +843,13 @@ fn every_task_is_checked_before_any_writer_is_prepared() -> TestResult {
         .dispatch(input, temp.path(), &call)
         .unwrap_err();
     assert_eq!(error.to_string(), "cursor does not support effort");
-    assert!(store.operation(&operation, &call)?.is_none());
+    assert_eq!(
+        store
+            .operation(&operation, &call)?
+            .ok_or("missing operation")?
+            .state,
+        OperationState::Refused
+    );
     Ok(())
 }
 

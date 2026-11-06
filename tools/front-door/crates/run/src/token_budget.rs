@@ -8,16 +8,17 @@ pub enum Verdict {
     Off,
     /// Usage is within the budget; `used` tokens so far.
     Within { used: u64 },
-    /// Usage has passed the budget: end the attempt with its work committed
-    /// and pushed so a continuation can pick it up.
+    /// Usage has passed the budget: end the attempt and attempt to commit its
+    /// work so a continuation can pick it up.
     Over { used: u64, budget: u64 },
     /// The provider reported no usage. Warn; never refuse.
     Unreported,
 }
 
-/// Whether `provider` reports live token usage while running, allowing
-/// the guardian to enforce a writer token budget. Codex exec reports usage only
-/// at turn completion, after the opportunity to stop this launch.
+/// Whether `provider` reports live token usage while running, allowing the
+/// guardian to enforce a writer token budget. Codex exec runs one turn per
+/// launch and reports usage only at its final `turn.completed` frame: there
+/// is no further turn to stop.
 pub fn enforces(provider: &str) -> bool {
     provider == "claude"
 }
@@ -118,11 +119,15 @@ mod tests {
     }
 
     #[test]
-    fn budget_capture_disables_completion_only_usage_for_the_applied_provider() {
+    fn budget_capture_applies_the_budget_for_enforcing_providers_only() {
         let input = crate::tests::input();
         let task = &input.request.tasks[0];
         assert_eq!(
             crate::launch::capture_plan(task, 60, 500, "codex").token_budget,
+            0
+        );
+        assert_eq!(
+            crate::launch::capture_plan(task, 60, 500, "opencode").token_budget,
             0
         );
         assert_eq!(
@@ -132,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn budget_enforcement_requires_mid_turn_usage() {
+    fn budget_enforcement_requires_usage_reported_while_running() {
         assert!(enforces("claude"));
         assert!(!enforces("codex"));
         assert!(!enforces("opencode"));

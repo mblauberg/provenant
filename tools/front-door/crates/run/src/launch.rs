@@ -269,7 +269,7 @@ impl From<String> for PrepareRefusal {
             boundary_class: provenant_records::diagnostic::BoundaryClass::None,
             resource: None,
             message,
-            terminal_cause: None,
+            terminal_cause: Some(TerminalCause::PreparationRefused),
             terminal_note: None,
             skipped_routes: Vec::new(),
             fallback_outcome: None,
@@ -623,9 +623,12 @@ impl RunStore {
         let prompt = output_prompt(&base, &attempt.prompt);
         let plan = providers
             .check_policy(task)
-            .map_err(|refusal| RunError::Input {
-                kind: ErrorKind::ContinuationUnsupported,
-                message: refusal.message,
+            .map_err(|error| match error.terminal_cause {
+                Some(cause) => RunError::ContinuationRefused { cause },
+                None => RunError::Input {
+                    kind: ErrorKind::ContinuationUnsupported,
+                    message: error.to_string(),
+                },
             })
             .and_then(|()| {
                 providers
@@ -1834,14 +1837,19 @@ impl RunStore {
                 None
             };
             if let Some(reason) = child_reason {
-                match self.withdraw(
+                match self.withdraw_with_preparation_failure(
                     id,
-                    AttemptState::Queued {
-                        extra: Default::default(),
+                    crate::store::Withdrawal {
+                        expected: AttemptState::Queued {
+                            extra: Default::default(),
+                        },
+                        outcome: Outcome::Rejected,
+                        reason,
+                        finished_at: now()?,
+                        failure: None,
+                        terminal_cause: Some(TerminalCause::AccessPolicyRefused),
+                        terminal_note: None,
                     },
-                    Outcome::Rejected,
-                    reason,
-                    now()?,
                     call,
                 ) {
                     Ok(Some(_)) => {}
@@ -1971,14 +1979,19 @@ impl RunStore {
                     // leaving it Queued would meet the same unreadable input on
                     // every later start.
                     let reason = format!("stored prompt unreadable: {error}");
-                    match self.withdraw(
+                    match self.withdraw_with_preparation_failure(
                         id,
-                        AttemptState::Queued {
-                            extra: Default::default(),
+                        crate::store::Withdrawal {
+                            expected: AttemptState::Queued {
+                                extra: Default::default(),
+                            },
+                            outcome: Outcome::Rejected,
+                            reason: &reason,
+                            finished_at: now()?,
+                            failure: None,
+                            terminal_cause: Some(TerminalCause::StoredPromptUnreadable),
+                            terminal_note: None,
                         },
-                        Outcome::Rejected,
-                        &reason,
-                        now()?,
                         call,
                     ) {
                         Ok(Some(_)) => {}
@@ -2073,6 +2086,24 @@ impl RunStore {
                     } else {
                         Outcome::Rejected
                     };
+                    let terminal_cause =
+                        refusal
+                            .terminal_cause
+                            .or(Some(if outcome == Outcome::AuthRequired {
+                                TerminalCause::AccountLoginRequired
+                            } else {
+                                TerminalCause::PreparationRefused
+                            }));
+                    let terminal_note = refusal.terminal_note.or_else(|| {
+                        refusal.skipped_routes.first().map(|route| {
+                            let diagnostic = route.diagnostic();
+                            format!(
+                                "first candidate: {}; {}",
+                                diagnostic.detail.unwrap_or_default(),
+                                diagnostic.next.unwrap_or_default()
+                            )
+                        })
+                    });
                     let reason = refusal.message;
                     match self.withdraw_with_preparation_failure(
                         id,
@@ -2084,8 +2115,8 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: refusal.fallback_outcome,
-                            terminal_cause: refusal.terminal_cause,
-                            terminal_note: refusal.terminal_note,
+                            terminal_cause,
+                            terminal_note,
                         },
                         call,
                     ) {
@@ -2134,14 +2165,19 @@ impl RunStore {
                         ),
                     };
                     let reason = error.to_string();
-                    match self.withdraw(
+                    match self.withdraw_with_preparation_failure(
                         id,
-                        AttemptState::Queued {
-                            extra: Default::default(),
+                        crate::store::Withdrawal {
+                            expected: AttemptState::Queued {
+                                extra: Default::default(),
+                            },
+                            outcome: Outcome::Rejected,
+                            reason: &reason,
+                            finished_at: now()?,
+                            failure: None,
+                            terminal_cause: Some(TerminalCause::WriteGrantsRefused),
+                            terminal_note: None,
                         },
-                        Outcome::Rejected,
-                        &reason,
-                        now()?,
                         call,
                     ) {
                         Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt)?,
@@ -2208,8 +2244,14 @@ impl RunStore {
                     ) => {
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
-                            HandOff::Boundary { cause, .. } => *cause,
-                            _ => None,
+                            HandOff::Boundary { cause, .. } => {
+                                cause.or(Some(TerminalCause::HandoffRefused))
+                            }
+                            HandOff::Busy => Some(TerminalCause::WorktreeBusy),
+                            HandOff::RetainedImport { .. } => {
+                                Some(TerminalCause::RetainedWriterImport)
+                            }
+                            _ => Some(TerminalCause::HandoffRefused),
                         };
                         let (reason, kind) = match error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
@@ -2244,13 +2286,26 @@ impl RunStore {
                             ),
                             _ => unreachable!(),
                         };
-                        self.withdraw_with_preparation_failure(
+                        // Cancellation decides the outcome, but an independent
+                        // preparation failure remains evidence for the chair.
+                        let cancelled = self.attempt_dir(run, id, false).is_ok_and(|attempt| {
+                            crate::store::cancel_requested(&attempt, Self::scope(&record))
+                        });
+                        let (outcome, reason) = if cancelled {
+                            (
+                                Outcome::Cancelled,
+                                format!("cancelled before launch; {reason}"),
+                            )
+                        } else {
+                            (Outcome::Rejected, reason.clone())
+                        };
+                        match self.withdraw_with_preparation_failure(
                             id,
                             crate::store::Withdrawal {
                                 expected: AttemptState::Starting {
                                     extra: Default::default(),
                                 },
-                                outcome: Outcome::Rejected,
+                                outcome,
                                 reason: &reason,
                                 finished_at: now()?,
                                 failure: None,
@@ -2258,7 +2313,12 @@ impl RunStore {
                                 terminal_note: None,
                             },
                             call,
-                        )?;
+                        ) {
+                            // Cancel already settled it from the other side.
+                            Ok(_) | Err(RunError::Conflict) if cancelled => {}
+                            Ok(_) => {}
+                            Err(error) => return Err(error),
+                        }
                         Started::Refused {
                             attempt: id,
                             reason,

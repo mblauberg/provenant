@@ -228,7 +228,10 @@ pub(super) fn writer_directory(
         Err(error) if error.is_exists() => {}
         Err(error) => return Err(error.into()),
     }
-    Ok(project_state.open_verified_directory(&name)?)
+    let directory = project_state.open_verified_directory(&name)?;
+    provenant_supervisor::custody::prepare_writer_observation(&directory)
+        .map_err(|_| WorktreeError::UnknownWriter)?;
+    Ok(directory)
 }
 
 /// Verify a registered worktree and probe its own effective Git configuration,
@@ -305,6 +308,8 @@ pub(super) fn lock_worktree(
         cache_writer_probe(context.project_state, verified.path()).map_err(custody_refusal)?
     } else {
         let state = writer_directory(context.project_state, verified.path())?;
+        let observation = provenant_supervisor::custody::writer_admission_guard(&state)
+            .map_err(|_| WorktreeError::UnknownWriter)?;
         let writer = match state.lock(
             OsStr::new(WRITER_LOCK),
             LockMode::Exclusive,
@@ -317,6 +322,7 @@ pub(super) fn lock_worktree(
             Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
             Err(_) => return Err(WorktreeError::UnknownWriter),
         };
+        drop(observation);
         match retained_import(&state) {
             Ok(true) => {
                 return Err(WorktreeError::UnknownOccupancy {
@@ -440,16 +446,80 @@ pub fn writer_holder(project_state: &Directory, path: &Path) -> Option<provenant
     matches.next().is_none().then_some(holder)
 }
 
-/// Observe exclusion without creating state during listing or disk reports.
+/// Initialise a selected admission slot's observer gate, including legacy
+/// slots. Read-only inventory never calls this mutating upgrade.
+pub fn prepare_writer_probe(project_state: &Directory, path: &Path) -> Result<(), WorktreeError> {
+    writer_directory(project_state, path).map(|_| ())
+}
+
+/// Observe exclusion under the short probe gate. Writer acquisition waits for
+/// this gate rather than mistaking the observer for a live writer.
 pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> Occupancy {
-    match cache_writer_probe(project_state, path) {
-        Ok(_) => Occupancy::Available,
+    let directory = match project_state.open_verified_directory(&state_dir_name(path)) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Occupancy::Available,
+        Err(error) => return Occupancy::custody_unknown(path.to_path_buf(), error.to_string()),
+    };
+    // Retained imports remain fences even when no writer inode survived.
+    match retained_import(&directory) {
+        Ok(true) => {
+            return Occupancy::custody_unknown(
+                path.to_path_buf(),
+                "unresolved retained import fence",
+            );
+        }
+        Ok(false) => {}
+        Err(detail) => return Occupancy::custody_unknown(path.to_path_buf(), detail),
+    }
+    if directory
+        .metadata_at(OsStr::new(WRITER_LOCK), false)
+        .is_err_and(|error| error.is_not_found())
+    {
+        return Occupancy::Available;
+    }
+    let _probe = match provenant_supervisor::custody::writer_observation_guard(&directory) {
+        Ok(guard) => guard,
+        Err(error) => return Occupancy::custody_unknown(path.to_path_buf(), error.to_string()),
+    };
+    match cache_writer_probe_under_gate(project_state, path) {
+        Ok(guard) => {
+            drop(guard);
+            Occupancy::Available
+        }
         Err(state) => state,
     }
 }
 
 /// Probe an existing exclusion slot without creating state during preview.
 pub fn cache_writer_probe(
+    project_state: &Directory,
+    path: &Path,
+) -> Result<Option<LockGuard>, Occupancy> {
+    let unknown = |detail: String| Occupancy::custody_unknown(path.to_path_buf(), detail);
+    let directory = match project_state.open_verified_directory(&state_dir_name(path)) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(unknown(error.to_string())),
+    };
+    // No inode to probe means no short-lived observer can conflict with us.
+    // Still scan retained evidence in the ordinary raw helper.
+    let gate = match directory.metadata_at(OsStr::new(WRITER_LOCK), false) {
+        Err(error) if error.is_not_found() => {
+            return match retained_import(&directory).map_err(unknown)? {
+                true => Err(unknown("unresolved retained import fence".into())),
+                false => Ok(None),
+            };
+        }
+        Err(error) => return Err(unknown(error.to_string())),
+        Ok(_) => provenant_supervisor::custody::writer_observation_guard(&directory)
+            .map_err(|error| unknown(error.to_string()))?,
+    };
+    let result = cache_writer_probe_under_gate(project_state, path);
+    drop(gate);
+    result
+}
+
+fn cache_writer_probe_under_gate(
     project_state: &Directory,
     path: &Path,
 ) -> Result<Option<LockGuard>, Occupancy> {
@@ -521,12 +591,15 @@ pub fn cache_writer_guard(project_state: &Directory, path: &Path) -> Result<Lock
     let unknown = |detail: String| Occupancy::custody_unknown(path.to_path_buf(), detail);
     let directory = writer_directory(project_state, path)
         .map_err(|error| unknown(format!("writer slot could not be opened: {error}")))?;
+    let observation = provenant_supervisor::custody::writer_admission_guard(&directory)
+        .map_err(|error| unknown(error.to_string()))?;
     let guard = directory
         .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
         .map_err(|error| match error {
             FsError::LockTimeout { .. } => Occupancy::Held,
             error => unknown(format!("writer lock could not be acquired: {error}")),
         })?;
+    drop(observation);
     if retained_import(&directory).map_err(unknown)? {
         return Err(unknown("unresolved retained import fence".into()));
     }

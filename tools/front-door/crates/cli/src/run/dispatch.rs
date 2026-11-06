@@ -143,7 +143,7 @@ fn local_session(edge: &Edge<'_>) -> Option<Session> {
 
 pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     result.result.command = "run".into();
-    if result.result.error.is_some() {
+    if result.result.error.is_some() && result.result.data.get("started").is_none() {
         return result;
     }
     if let Some(jobs) = result.result.data["cloud_jobs"].as_array() {
@@ -194,6 +194,22 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         result.human = human;
         result.read_only = false;
         return result;
+    }
+    let started = result
+        .result
+        .data
+        .get("started")
+        .and_then(|value| serde_json::from_value::<Vec<run::Started>>(value.clone()).ok())
+        .unwrap_or_default();
+    let has_started_sibling = started.iter().any(|item| {
+        !matches!(
+            item,
+            run::Started::Refused { .. } | run::Started::Blocked { .. }
+        )
+    });
+    if let Err(failure) = check_launch_policy(&started) {
+        result.result.status = failure.status;
+        result.result.error = Some(command_error(&failure));
     }
     let rows = result.result.data["lanes"]
         .as_array()
@@ -309,9 +325,27 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                 next = Some(format!("provenant output {id}"));
             }
         }
+        let refused_sibling = has_started_sibling
+            && started.iter().any(|item| match item {
+                run::Started::Refused { attempt, .. } | run::Started::Blocked { attempt, .. } => {
+                    row["attempt_id"] == attempt.to_string()
+                }
+                _ => false,
+            });
         if !timed_out
+            && result.result.error.is_none()
+            && !refused_sibling
             && !row["superseded_by"].is_string()
-            && !matches!(state, "succeeded" | "review_required" | "input_required")
+            && !matches!(
+                state,
+                "queued"
+                    | "starting"
+                    | "running"
+                    | "settling"
+                    | "succeeded"
+                    | "review_required"
+                    | "input_required"
+            )
         {
             result.result.status = Status::Failed;
         }
@@ -348,11 +382,12 @@ pub(super) fn dispatch_with_workers(
 ) -> Reply {
     let operation_id = command.operation_id.clone();
     let mut created = None;
-    let mut result = dispatch_inner(command, edge, &mut created, workers);
+    let facts = provenant_confinement::worktrees::RepoFacts::default();
+    let mut result = dispatch_inner(command, edge, &mut created, workers, &facts);
     if let (Err(fail), Some((path, branch))) = (&mut result, created) {
         // A failed launch can follow admission. Those trees belong to the
         // accepted run and must remain available for resume.
-        let cleanup = (|| -> Result<(), Fail> {
+        let cleanup = (|| -> Result<Option<String>, Fail> {
             let workers = provenant_confinement::worktrees::CensusPolicyWorkers::from_roots(
                 workers, edge.roots,
             )
@@ -361,17 +396,19 @@ pub(super) fn dispatch_with_workers(
             let census = provenant_confinement::worktrees::CensusSession::new(&workers, &clock);
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let session = open(edge, &call)?;
+            let mut session = open(edge, &call)?;
+            session.store = session.store.with_repo_facts(&facts);
             if session.store.operation(&operation_id, &call)?.is_some() {
-                return Ok(());
+                return Ok(None);
             }
-            provenant_confinement::worktrees::with_context_using_workers(
+            let retained = provenant_confinement::worktrees::with_context_using_workers_and_facts(
                 edge.roots,
                 edge.home,
                 edge.cwd,
                 &clock,
                 &cancel,
                 &census,
+                &facts,
                 |context| {
                     use provenant_confinement::worktrees;
                     let info = worktrees::list(context, &cancel)?
@@ -381,7 +418,7 @@ pub(super) fn dispatch_with_workers(
                     if info.dirty != worktrees::WorktreeCondition::Clean
                         || !info.occupancy.is_available()
                     {
-                        return Err(worktrees::WorktreeError::Dirty(String::new()));
+                        return Ok(Some(created_tree_state(info.dirty, &info.occupancy)));
                     }
                     let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
                     if worktrees::load_owner(&tree)?.is_none_or(|owner| {
@@ -397,23 +434,69 @@ pub(super) fn dispatch_with_workers(
                         &operation_id,
                         &cancel,
                     )?;
-                    Ok(())
+                    Ok(None)
                 },
             )
             .map_err(run::RunError::from)?;
-            Ok(())
+            Ok(retained)
         })();
-        if let Err(error) = cleanup {
-            fail.message.push_str(&format!(
-                "; new managed worktree retained for gc at {}: {}",
-                path.display(),
+        let retained = match cleanup {
+            Ok(note) => note,
+            Err(error) => Some(format!(
+                "cleanup could not verify removal: {}",
                 error.message
+            )),
+        };
+        if let Some(note) = retained {
+            fail.message.push_str(&format!(
+                "; new managed worktree retained at {}: {}",
+                path.display(),
+                note
             ));
         }
     }
     let mut out = reply_waited("dispatch", result);
     operation_reply(&mut out, &operation_id);
     out
+}
+
+pub(super) fn created_tree_state(
+    condition: provenant_confinement::worktrees::WorktreeCondition,
+    occupancy: &provenant_confinement::worktrees::Occupancy,
+) -> String {
+    use provenant_confinement::worktrees::{Occupancy, WorktreeCondition};
+    let condition = match condition {
+        WorktreeCondition::Clean => "clean checkout",
+        WorktreeCondition::Ignored => "ignored files present",
+        WorktreeCondition::Dirty => "uncommitted edits present",
+        WorktreeCondition::GitOperationInProgress => "Git operation in progress",
+        WorktreeCondition::Unknown => "cleanliness unknown",
+    };
+    let occupancy = match occupancy {
+        Occupancy::Available => "writer custody free".into(),
+        Occupancy::Held => "writer custody held".into(),
+        Occupancy::Observed { .. } => "writer process observed".into(),
+        Occupancy::Unknown {
+            scope, evidence, ..
+        } => format!(
+            "writer occupancy unknown at {}: {}",
+            scope.display(),
+            plain_text(evidence, 1024)
+        ),
+    };
+    format!("{condition}; {occupancy}")
+}
+
+/// Project launch policy after constructing the receipt, so no lane facts are lost.
+pub(super) fn apply_launch_policy(out: &mut Reply) {
+    if out.result.error.is_none()
+        && let Some(started) = out.result.data.get("started")
+        && let Ok(started) = serde_json::from_value::<Vec<run::Started>>(started.clone())
+        && let Err(failure) = check_launch_policy(&started)
+    {
+        out.result.status = failure.status;
+        out.result.error = Some(command_error(&failure));
+    }
 }
 
 pub(super) fn operation_reply(reply: &mut Reply, id: &OperationId) {
@@ -702,6 +785,7 @@ pub(super) fn dispatch_inner(
     edge: &Edge<'_>,
     created: &mut Option<(PathBuf, String)>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    facts: &provenant_confinement::worktrees::RepoFacts,
 ) -> Result<(Value, String, bool), Fail> {
     // Resolve the project default before admission, so child authority checks
     // see the same effective capabilities as the provider.
@@ -830,7 +914,7 @@ pub(super) fn dispatch_inner(
                         text.push_str("token budget: off\n");
                     } else {
                         text.push_str(&format!(
-                            "token budget: {} tokens ({}); enforced for {}, which report usage while running; not enforced for other providers\n",
+                            "token budget: {} tokens ({}); enforced for {}, which report usage while running; does not stop Codex writers: codex exec reports usage only at its final turn.completed frame; there is no further turn to stop; not enforced for other providers\n",
                             budget.tokens,
                             budget.source.as_str(),
                             enforced.join(", ")
@@ -1028,7 +1112,8 @@ pub(super) fn dispatch_inner(
         let cancel = CancelToken::new();
         // Initialise the state before entering the shared confinement context.
         let call = request(&clock, &cancel)?;
-        let session = open(edge, &call)?;
+        let mut session = open(edge, &call)?;
+        session.store = session.store.with_repo_facts(facts);
         if let Some(replayed) = replay_owned_dispatch(
             &command,
             edge,
@@ -1140,10 +1225,11 @@ pub(super) fn dispatch_inner(
     if let Some(mode) = &command.deliver {
         let branch = if let Some(path) = &command.access.worktree {
             let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
-            run::prepare_writer(
+            run::prepare_writer_with_facts(
                 &writer,
                 edge.roots.state.as_path(),
                 execution_context(edge)?.project_id,
+                facts,
             )?
             .branch
             .as_str()
@@ -1369,6 +1455,7 @@ pub(super) fn dispatch_inner(
         return Ok((data, human, timed_out));
     }
     let mut session = open(edge, &call)?;
+    session.store = session.store.with_repo_facts(facts);
     // Protection governs new admission. Service::dispatch still compares the
     // immutable inputs when an existing operation is replayed.
     if session
@@ -1477,6 +1564,7 @@ pub(super) fn dispatch_inner(
     let mut pinned_base = None;
     let live_reader =
         matches!(command.access.mode, Some(Mode::ReadOnly)) && command.access.worktree.is_some();
+    let mut worktree_warnings = Vec::new();
     let worktree = if live_reader {
         let path = command.access.worktree.as_deref().ok_or_else(|| {
             Fail::new(
@@ -1554,12 +1642,13 @@ pub(super) fn dispatch_inner(
             );
             let res: Result<(Value, Option<provenant_core::GitOid>), WorktreeAdmissionError> =
                 if let Some(owned) = &owned {
-                    match own_worktree(
+                    match own_worktree_using_facts(
                         owned,
                         command.base.as_deref(),
                         &command.operation_id,
                         edge,
                         workers,
+                        facts,
                         |attempt| {
                             session.store.record(attempt, &call).is_ok_and(|record| {
                                 matches!(record.state, run::AttemptState::Terminal { .. })
@@ -1571,6 +1660,7 @@ pub(super) fn dispatch_inner(
                         Some(lock_budget),
                     ) {
                         Ok((info, base)) => {
+                            worktree_warnings.extend(info.warnings.iter().cloned());
                             command.access.worktree = Some(info.path.clone());
                             match self::lane_access(
                                 &command.access,
@@ -1597,13 +1687,14 @@ pub(super) fn dispatch_inner(
                         .operation(&command.operation_id, &call)
                         .map_err(WorktreeAdmissionError::Run)?
                         .is_some();
-                    provenant_confinement::worktrees::with_context_using_workers(
+                    provenant_confinement::worktrees::with_context_using_workers_and_facts(
                         edge.roots,
                         edge.home,
                         &writer.project,
                         &clock,
                         &cancel,
                         workers,
+                        facts,
                         |context| {
                             use provenant_confinement::worktrees;
                             let context = &worktrees::WorktreeContext {
@@ -1611,6 +1702,10 @@ pub(super) fn dispatch_inner(
                                 lock_budget,
                                 ..*context
                             };
+                            worktrees::prepare_writer_probe(
+                                context.project_state,
+                                &writer.worktree,
+                            )?;
                             let observation = worktrees::list(context, &cancel)?
                                 .into_iter()
                                 .find(|tree| tree.path == writer.worktree)
@@ -1802,6 +1897,7 @@ pub(super) fn dispatch_inner(
                 .map(|_| (task.task_id, task.prompt.clone()))
         })
         .collect();
+    brief_warnings.extend(worktree_warnings);
     brief_warnings.extend(capability_warnings);
     if matches!(command.access.mode(), Mode::WorktreeWrite) {
         let budget = config
@@ -1825,9 +1921,12 @@ pub(super) fn dispatch_inner(
                 if let Some(p) = provider
                     && !enforced.contains(&p)
                 {
-                    brief_warnings.push(format!(
-                        "token budget is not enforced for provider {p}: mid-turn usage is not reported"
-                    ));
+                    brief_warnings.push(
+                        provenant_records::AdapterSpec::get(p)
+                            .and_then(|spec| spec.token_budget_notice)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("token budget is not enforced for provider {p}: usage is not reported while it runs")),
+                    );
                 }
             }
         }
@@ -2241,13 +2340,14 @@ pub(super) fn replay_owned_dispatch(
     }
     let mut settlement = None;
     let owned = if writer.worktree.exists() {
-        provenant_confinement::worktrees::with_context_using_workers(
+        provenant_confinement::worktrees::with_context_using_workers_and_facts(
             edge.roots,
             edge.home,
             &writer.project,
             call.clock,
             call.cancel,
             workers,
+            session.store.repo_facts(),
             |context| {
                 let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
                 Ok(
@@ -3081,6 +3181,7 @@ pub(super) fn launch_on_host_with_wait(
         // continue to use their sealed host executable authority.
         host: inherited_host.then_some(&host),
         cancel: Some(call.cancel),
+        repo_facts: session.store.repo_facts().clone(),
     };
     let providers = PreparedProvider {
         fallback: &registry,
@@ -3109,13 +3210,11 @@ pub(super) fn launch_on_host_with_wait(
             Some(request),
             call,
         )?;
-        check_launch_policy(&started)?;
         return Ok(started);
     }
     let started = session
         .service()
         .start(run, &providers, &holder, validated, request, call)?;
-    check_launch_policy(&started)?;
     Ok(started)
 }
 
@@ -3129,7 +3228,8 @@ pub(super) fn launch_unknown(started: &[run::Started]) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
+/// Classify a launch batch without discarding its durable receipt.
+pub fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
     if !started.is_empty()
         && started.iter().all(|item| {
             matches!(
@@ -3180,18 +3280,12 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         }
         .into());
     }
-    // Promote policy and typed pacing refusals; other preparation refusals
-    // remain in the per-attempt receipt.
+    // Report any all-refused batch using its typed diagnostic where available.
     if let Some((attempt, reason, kind)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
             attempt,
             reason,
-            kind:
-                kind @ (run::RefusalKind::Policy
-                | run::RefusalKind::PolicyBoundary(_)
-                | run::RefusalKind::PolicyResource(_)
-                | run::RefusalKind::PacingReserve
-                | run::RefusalKind::PacingReserveResource(_)),
+            kind,
         } => Some((attempt, reason, kind)),
         _ => None,
     }) {

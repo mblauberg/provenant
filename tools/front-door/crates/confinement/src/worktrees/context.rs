@@ -12,9 +12,25 @@ pub fn with_context<T>(
     cancel: &CancelToken,
     action: impl FnOnce(&WorktreeContext<'_>) -> Result<T, WorktreeError>,
 ) -> Result<T, WorktreeError> {
+    let facts = RepoFacts::default();
+    with_context_using_facts(roots, home, project, clock, cancel, &facts, action)
+}
+
+/// Use the ordinary command census with an existing facts session.
+pub fn with_context_using_facts<T>(
+    roots: &Roots,
+    home: &Path,
+    project: &Path,
+    clock: &(dyn Clock + Sync),
+    cancel: &CancelToken,
+    facts: &RepoFacts,
+    action: impl FnOnce(&WorktreeContext<'_>) -> Result<T, WorktreeError>,
+) -> Result<T, WorktreeError> {
     let policy_workers = CensusPolicyWorkers::from_roots(&SystemWorkerObserver, roots)?;
     let workers = CensusSession::new(&policy_workers, clock);
-    with_context_using_workers(roots, home, project, clock, cancel, &workers, action)
+    with_context_using_workers_and_facts(
+        roots, home, project, clock, cancel, &workers, facts, action,
+    )
 }
 
 /// Build the ordinary worktree context around a caller-owned command census.
@@ -26,6 +42,24 @@ pub fn with_context_using_workers<T>(
     clock: &(dyn Clock + Sync),
     cancel: &CancelToken,
     workers: &dyn WorkerObserver,
+    action: impl FnOnce(&WorktreeContext<'_>) -> Result<T, WorktreeError>,
+) -> Result<T, WorktreeError> {
+    let facts = RepoFacts::default();
+    with_context_using_workers_and_facts(
+        roots, home, project, clock, cancel, workers, &facts, action,
+    )
+}
+
+/// Reuse the command's repository facts across contexts and census epochs.
+#[allow(clippy::too_many_arguments)]
+pub fn with_context_using_workers_and_facts<T>(
+    roots: &Roots,
+    home: &Path,
+    project: &Path,
+    clock: &(dyn Clock + Sync),
+    cancel: &CancelToken,
+    workers: &dyn WorkerObserver,
+    facts: &RepoFacts,
     action: impl FnOnce(&WorktreeContext<'_>) -> Result<T, WorktreeError>,
 ) -> Result<T, WorktreeError> {
     fn child(parent: &Directory, name: &OsStr) -> Result<Directory, WorktreeError> {
@@ -68,7 +102,6 @@ pub fn with_context_using_workers<T>(
     let project_state = child(&registry, OsStr::new(&binding.project_id().to_string()))?;
     let lock_budget =
         WaitBudget::cli(clock.mono_now(), 5).map_err(|_| WorktreeError::InvalidRequest)?;
-    let facts = RepoFacts::default();
     action(&WorktreeContext {
         home,
         repo: &repo,
@@ -76,7 +109,7 @@ pub fn with_context_using_workers<T>(
         project_state: &project_state,
         executor: &executor,
         utility: &runtime,
-        facts: &facts,
+        facts,
         workers,
         clock,
         utility_budget: budget,

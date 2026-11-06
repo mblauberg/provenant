@@ -1,7 +1,7 @@
 //! Durable settlement progress. Kernel locks protect only journal updates.
 use crate::{AdmissionError, RECORD_LIMIT, Result, RunError, artifacts::read_sealed};
 use provenant_core::retry::Backoff;
-use provenant_core::{CancelToken, Clock, GitOid};
+use provenant_core::{CancelToken, Clock, DurationMicros, GitOid};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use provenant_supervisor::{
     census::{ProcessIdentity, ProcessObservation, SystemProcessObserver},
@@ -166,6 +166,7 @@ fn alive(owner: &ProcessIdentity, since_ms: u64, now_ms: u64) -> bool {
 
 /// Attribute a state only when the recorded identity matches on both sides of the probe.
 fn identity_stalled_with(
+    clock: &dyn Clock,
     identity: &ProcessIdentity,
     observe: &dyn Fn(i64) -> ProcessObservation,
     probe: &dyn Fn(
@@ -176,15 +177,38 @@ fn identity_stalled_with(
     >,
 ) -> bool {
     let matches = || matches!(observe(identity.pid), ProcessObservation::Present(fact) if fact.identity == *identity && !fact.zombie);
-    matches()
-        && matches!(
-            probe(identity.pid),
-            Ok(provenant_os::pid::ProcessState::Uninterruptible)
-        )
-        && matches()
+    // A healthy process passes through uninterruptible sleep during ordinary
+    // disk and network waits. Only a state that persists across the samples,
+    // with the same identity throughout, is a stall.
+    for sample in 0..STALL_SAMPLES {
+        if sample > 0
+            && clock
+                .mono_now()
+                .checked_add(STALL_INTERVAL)
+                .and_then(|deadline| clock.wait_until(deadline))
+                .is_err()
+        {
+            return false;
+        }
+        if !(matches()
+            && matches!(
+                probe(identity.pid),
+                Ok(provenant_os::pid::ProcessState::Uninterruptible)
+            )
+            && matches())
+        {
+            return false;
+        }
+    }
+    true
 }
 
+/// Consecutive observations that must all find the process uninterruptible.
+const STALL_SAMPLES: u32 = 3;
+const STALL_INTERVAL: DurationMicros = DurationMicros::from_micros(150_000);
+
 pub(crate) fn host_stalled(attempt: &Directory, scope: Scope) -> bool {
+    let clock = provenant_os::clock::SystemClock::new();
     let observer = |pid| SystemProcessObserver.observe(pid);
     let probe = process_state;
     // Probe observations need no durability barrier. Keep the same private-file
@@ -203,7 +227,7 @@ pub(crate) fn host_stalled(attempt: &Directory, scope: Scope) -> bool {
         .and_then(|raw| crate::db::decode::<Journal>(&raw).ok())
         .filter(|journal| journal.scope == scope && journal.attempts <= LIMIT)
         .and_then(|journal| journal.owner)
-        .is_some_and(|owner| identity_stalled_with(&owner, &observer, &probe))
+        .is_some_and(|owner| identity_stalled_with(&clock, &owner, &observer, &probe))
     {
         return true;
     }
@@ -222,7 +246,7 @@ pub(crate) fn host_stalled(attempt: &Directory, scope: Scope) -> bool {
         && checkpoint
             .guardian
             .as_ref()
-            .is_some_and(|guardian| identity_stalled_with(guardian, &observer, &probe))
+            .is_some_and(|guardian| identity_stalled_with(&clock, guardian, &observer, &probe))
 }
 
 impl crate::RunStore {
@@ -232,13 +256,14 @@ impl crate::RunStore {
         if host_stalled(attempt, scope) {
             return true;
         }
+        let clock = provenant_os::clock::SystemClock::new();
         let observer = |pid| SystemProcessObserver.observe(pid);
         let probe = process_state;
         let check = |directory: &Directory| {
             provenant_supervisor::custody::reservation_guardian(directory, scope)
                 .ok()
                 .flatten()
-                .is_some_and(|identity| identity_stalled_with(&identity, &observer, &probe))
+                .is_some_and(|identity| identity_stalled_with(&clock, &identity, &observer, &probe))
         };
         if check(attempt) {
             return true;
@@ -605,6 +630,48 @@ mod tests {
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     #[test]
+    fn one_uninterruptible_observation_is_not_a_stall() {
+        use provenant_supervisor::census::ProcessFact;
+        let identity = ProcessIdentity {
+            boot: "fixture".into(),
+            pid: 42,
+            native_start: 1,
+            group_id: 42,
+            session_id: 42,
+        };
+        let fact = ProcessFact {
+            identity: identity.clone(),
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let observe = |_| ProcessObservation::Present(fact.clone());
+        let calls = std::cell::Cell::new(0);
+        let transient = |_| {
+            calls.set(calls.get() + 1);
+            Ok(if calls.get() == 1 {
+                provenant_os::pid::ProcessState::Uninterruptible
+            } else {
+                provenant_os::pid::ProcessState::Running
+            })
+        };
+        assert!(!identity_stalled_with(
+            &clock(),
+            &identity,
+            &observe,
+            &transient
+        ));
+        let persistent = |_| Ok(provenant_os::pid::ProcessState::Uninterruptible);
+        assert!(identity_stalled_with(
+            &clock(),
+            &identity,
+            &observe,
+            &persistent
+        ));
+    }
+
+    #[test]
     fn stalled_probe_requires_matching_identity_before_and_after() {
         use provenant_supervisor::census::ProcessFact;
         let identity = ProcessIdentity {
@@ -623,12 +690,14 @@ mod tests {
         };
         let probe = |_| Ok(provenant_os::pid::ProcessState::Uninterruptible);
         assert!(identity_stalled_with(
+            &clock(),
             &identity,
             &|_| ProcessObservation::Present(fact.clone()),
             &probe
         ));
         let calls = std::cell::Cell::new(0);
         assert!(!identity_stalled_with(
+            &clock(),
             &identity,
             &|_| {
                 calls.set(calls.get() + 1);
@@ -641,6 +710,7 @@ mod tests {
             &probe
         ));
         assert!(!identity_stalled_with(
+            &clock(),
             &identity,
             &|_| ProcessObservation::Present(fact.clone()),
             &|_| Ok(provenant_os::pid::ProcessState::Running)

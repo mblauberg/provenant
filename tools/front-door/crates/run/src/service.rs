@@ -1,6 +1,6 @@
 //! One typed execution API for command and MCP edges.
 use crate::*;
-use provenant_core::{AttemptId, OperationId, RunId};
+use provenant_core::{AttemptId, CancelToken, OperationId, RunId};
 use provenant_records::CanonicalV1;
 use std::path::Path;
 
@@ -11,6 +11,30 @@ impl Service<'_> {
     /// Whether the lane access grants any write authority.
     pub fn has_writes(writer: bool, write_roots: &[std::path::PathBuf]) -> bool {
         writer || !write_roots.is_empty()
+    }
+
+    /// Admission treats declared writes and prepared tool/project exceptions
+    /// alike. Provider bookkeeping and private scratch remain advisory.
+    pub(crate) fn lane_class(
+        writer: bool,
+        write_roots: &[std::path::PathBuf],
+        grants: &[WriteGrantRecord],
+    ) -> LaneClass {
+        use provenant_records::run::WriteSource;
+        let explicit_writes = grants.iter().any(|grant| {
+            matches!(
+                grant.source,
+                WriteSource::WriteRoot
+                    | WriteSource::ToolWrite
+                    | WriteSource::ReadOnlyException
+                    | WriteSource::LaneCache
+            )
+        });
+        if Self::has_writes(writer || explicit_writes, write_roots) {
+            LaneClass::Writer
+        } else {
+            LaneClass::ReadOnly
+        }
     }
 
     /// Resolve a bare ID, accepting runs only where the operation allows them.
@@ -64,7 +88,22 @@ impl<'a> Service<'a> {
         // Reuse the originally resolved boundary before consulting Git. Retrying
         // the same operation must work even after its caller-supplied ref vanishes.
         let operation = self.store.operation(&input.operation_id, call)?;
+        if let Some(operation) = &operation
+            && operation.state == OperationState::Refused
+            && operation.extra.get("preflight_digest_version") == Some(&serde_json::json!(1))
+        {
+            if operation.request_digest != preflight_digest(&input, cwd)? {
+                return Err(RunError::OperationConflict);
+            }
+            return Err(RunError::RecordedRefusal(Box::new(
+                operation
+                    .refusal
+                    .clone()
+                    .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+            )));
+        }
         let previous = match &operation {
+            Some(operation) if operation.state == OperationState::Refused => None,
             Some(operation) => match self.store.request(operation.run_id, call) {
                 Ok(request) => Some(request),
                 // A prepared operation may have crashed before request publication;
@@ -77,10 +116,26 @@ impl<'a> Service<'a> {
         let mut requests = Vec::new();
         let mut attempts = Vec::new();
         let mut contribution_branches = std::collections::BTreeMap::new();
+        let mut nested_refusal = None;
         // Refuse every task's unsupported launch before any task prepares a writer.
         for task in &input.tasks {
             let route = Self::route(task.route.clone())?;
-            check_launch_capabilities(task, &route)?;
+            if let Err(error) = check_launch_capabilities(task, &route) {
+                if input.parent_attempt.is_none() {
+                    return self.preflight_refusal(&input, task, cwd, error, call);
+                }
+                nested_refusal.get_or_insert((error, task.worktree.clone()));
+            }
+        }
+        // Scan every prompt before preparing any writer. A later task must not
+        // leave an earlier task's writer behind when its input is refused.
+        for task in &input.tasks {
+            if let Err(error) = Self::scan(&task.prompt) {
+                if input.parent_attempt.is_none() {
+                    return self.preflight_refusal(&input, task, cwd, error, call);
+                }
+                nested_refusal.get_or_insert((error, task.worktree.clone()));
+            }
         }
         for mut task in input.tasks {
             if task
@@ -91,7 +146,6 @@ impl<'a> Service<'a> {
                 return Err(input_error(ErrorKind::Invalid, "invalid work context"));
             }
             task.route = Self::route(task.route)?;
-            Self::scan(&task.prompt)?;
             if let Some(title) = &task.title {
                 provenant_core::validate_task_title(title)
                     .map_err(|message| RunError::InvalidTaskTitle(message.into()))?;
@@ -133,10 +187,11 @@ impl<'a> Service<'a> {
             if input.parent_attempt.is_none() {
                 let branch = match &writer {
                     Some(writer) => Some(
-                        prepare_writer(
+                        prepare_writer_with_facts(
                             writer,
                             self.store.writer_registry(),
                             self.store.context.project_id,
+                            self.store.repo_facts(),
                         )?
                         .branch,
                     ),
@@ -148,6 +203,7 @@ impl<'a> Service<'a> {
                             .as_deref()
                             .filter(|_| task.access.source_live)
                             .unwrap_or(cwd),
+                        self.store.repo_facts(),
                     )?,
                 };
                 if let Some(branch) = branch {
@@ -194,7 +250,14 @@ impl<'a> Service<'a> {
                     })?;
                     let git =
                         provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-                    let resolved = resolve_git_base(&git, git_cwd, sha).map_err(|_| {
+                    let resolved = resolve_git_base_with_facts(
+                        &git,
+                        git_cwd,
+                        sha,
+                        self.store.repo_facts(),
+                        &CancelToken::new(),
+                    )
+                    .map_err(|_| {
                         input_error(
                             ErrorKind::Invalid,
                             format!("invalid Git {label}: expected a resolvable commit SHA"),
@@ -230,7 +293,13 @@ impl<'a> Service<'a> {
                     .map(|base| {
                         let git =
                             provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-                        resolve_git_base(&git, git_cwd, base)
+                        resolve_git_base_with_facts(
+                            &git,
+                            git_cwd,
+                            base,
+                            self.store.repo_facts(),
+                            &CancelToken::new(),
+                        )
                     })
                     .transpose()?
             };
@@ -340,6 +409,27 @@ impl<'a> Service<'a> {
                 attempt.attempt_id = id;
             }
         }
+        if let Some((error, worktree)) = nested_refusal {
+            let diagnostic = ErrorKind::from(&error)
+                .diagnostic()
+                .detail(error.to_string());
+            let worktree = worktree
+                .as_deref()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::to_owned);
+            let saved = self
+                .store
+                .record_refusal(&prepared, diagnostic, worktree, call)?;
+            if saved.state != OperationState::Refused {
+                return Err(RunError::OperationConflict);
+            }
+            return Err(RunError::RecordedRefusal(Box::new(
+                saved
+                    .refusal
+                    .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+            )));
+        }
         let record = self.store.create(&prepared, call)?;
         if !contribution_branches.is_empty() {
             let captured = (|| {
@@ -356,6 +446,56 @@ impl<'a> Service<'a> {
             self.store.contribution_diagnostic(record.run_id, captured);
         }
         Ok(record)
+    }
+    fn preflight_refusal(
+        &self,
+        input: &DispatchRequest,
+        task: &DispatchTask,
+        cwd: &Path,
+        error: RunError,
+        call: &Request<'_>,
+    ) -> Result<RunRecord> {
+        let mut extra = provenant_records::ExtraFields::default();
+        extra.insert("preflight_digest_version".into(), serde_json::json!(1));
+        if let Some(notice) = task.profile.knobs.get("chair.refusal_notice") {
+            extra.insert("refusal_notice".into(), notice.clone());
+        }
+        let diagnostic = ErrorKind::from(&error)
+            .diagnostic()
+            .detail(error.to_string());
+        let worktree = task
+            .worktree
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
+        let record = OperationRecord {
+            extra,
+            schema_version: 1,
+            project_id: self.store.context.project_id,
+            actor_id: self.store.context.actor_id,
+            operation_id: input.operation_id.clone(),
+            kind: OperationKind::Dispatch,
+            request_digest: preflight_digest(input, cwd)?,
+            run_id: fresh(RunId::from_bytes)?,
+            state: OperationState::Refused,
+            blocked_reason: None,
+            refusal: Some(diagnostic),
+            worktree,
+            refused_at: Some(
+                call.clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?,
+            ),
+            refusal_chair: input.chair.clone(),
+        };
+        let saved = self.store.insert_refusal(record, call)?;
+        if saved.state != OperationState::Refused {
+            return Err(RunError::OperationConflict);
+        }
+        Err(RunError::RecordedRefusal(Box::new(saved.refusal.ok_or(
+            RunError::Validation("refusal diagnostic missing"),
+        )?)))
     }
     /// Canonical model IDs carry the provider prefix in every stored request.
     pub fn route(route: RequestedRoute) -> Result<RequestedRoute> {
@@ -789,6 +929,11 @@ impl From<&RunError> for ErrorKind {
             ) => Self::CredentialRoot,
             RunError::Confinement(_) => Self::Confinement,
             RunError::Refused => Self::Refused,
+            RunError::RecordedRefusal(diagnostic) => Self::ALL
+                .iter()
+                .copied()
+                .find(|kind| kind.code() == diagnostic.code)
+                .unwrap_or(Self::Refused),
             RunError::Admission(AdmissionError::Disk { .. }) => Self::DiskFloor,
             RunError::Admission(AdmissionError::MemoryPressure { .. }) => Self::MemoryPressure,
             RunError::Admission(AdmissionError::Processes { .. }) => Self::Processes,
@@ -826,6 +971,7 @@ impl From<&RunError> for ErrorKind {
 }
 
 /// Prepared transport-independent dispatch input.
+#[derive(serde::Serialize)]
 pub struct DispatchTask {
     pub cloud: Option<provenant_records::run::CloudPlacement>,
     pub context: Option<provenant_records::run::WorkContext>,
@@ -854,6 +1000,20 @@ pub struct DispatchRequest {
     pub concurrency: u64,
     pub lane_depth: u64,
     pub parent_attempt: Option<AttemptId>,
+}
+/// Bind an early refusal to all supplied inputs without persisting prompt bytes.
+fn preflight_digest(input: &DispatchRequest, cwd: &Path) -> Result<provenant_core::Digest> {
+    Ok(CanonicalV1::record_digest(
+        "dispatch-preflight",
+        1,
+        &(
+            &input.tasks,
+            input.concurrency,
+            input.lane_depth,
+            input.parent_attempt,
+            cwd,
+        ),
+    )?)
 }
 fn input_error(kind: ErrorKind, message: impl Into<String>) -> RunError {
     RunError::Input {

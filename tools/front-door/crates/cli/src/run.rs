@@ -180,6 +180,7 @@ fn reply_waited(command: &str, outcome: Result<(Value, String, bool), Fail>) -> 
     } else if expired {
         out.result.status = Status::Timeout;
     }
+    dispatch::apply_launch_policy(&mut out);
     out
 }
 fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
@@ -215,6 +216,7 @@ pub struct Registry<'a> {
     pub project_id: Option<provenant_core::ProjectId>,
     pub host: Option<&'a run::HostLaunchContext>,
     pub cancel: Option<&'a CancelToken>,
+    pub repo_facts: provenant_confinement::worktrees::RepoFacts,
 }
 impl Registry<'_> {
     fn prepare_with_wait(
@@ -315,7 +317,12 @@ fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
         }),
         DiskCheck::Unobserved(_) => None,
     };
+    let cause = match &error {
+        DiskCheck::Low { .. } => provenant_records::run::TerminalCause::DiskFloor,
+        DiskCheck::Unobserved(_) => provenant_records::run::TerminalCause::DiskObservationUnavailable,
+    };
     let mut refusal = run::PrepareRefusal::from(String::from(error));
+    refusal.terminal_cause = Some(cause);
     refusal.resource = resource;
     refusal
 }

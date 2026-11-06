@@ -342,6 +342,124 @@ impl RunStore {
         })
         .transpose()
     }
+
+    /// Read the submitting actor's recent refused operations, newest first.
+    /// A refusal has no attempt row and therefore cannot appear in lane queries.
+    pub fn recent_refusals(&self, limit: u64, call: &Request<'_>) -> Result<Vec<OperationRecord>> {
+        call.check()?;
+        if !(1..=100).contains(&limit) {
+            return Err(RunError::Validation("refusal page limit"));
+        }
+        let mut statement = self.db.prepare(
+            "SELECT operation,record FROM operations WHERE project=?1 AND actor=?2 AND json_extract(CAST(record AS TEXT),'$.state')='refused' ORDER BY rowid DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![
+                self.context.project_id.to_string(),
+                self.context.actor_id.to_string(),
+                sql_int(limit)?
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )?;
+        let mut refusals = Vec::new();
+        for row in rows {
+            call.check()?;
+            let (id, raw) = row?;
+            let record: OperationRecord = decode(&raw)?;
+            if record.project_id != self.context.project_id
+                || record.actor_id != self.context.actor_id
+                || record.operation_id.as_str() != id
+                || record.state != OperationState::Refused
+                || record.refusal.is_none()
+                || record.refused_at.is_none()
+            {
+                return Err(RunError::Validation("refusal index identity"));
+            }
+            refusals.push(record);
+        }
+        Ok(refusals)
+    }
+
+    /// A bounded page of this actor's refusal notices still owed to a chair.
+    pub fn pending_refusal_notices(
+        &self,
+        limit: u64,
+        call: &Request<'_>,
+    ) -> Result<Vec<OperationRecord>> {
+        Ok(self
+            .pending_refusal_notices_after(limit, 0, call)?
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect())
+    }
+
+    /// Page by the immutable SQLite row ID, so failed notices cannot starve later rows.
+    pub fn pending_refusal_notices_after(
+        &self,
+        limit: u64,
+        after: i64,
+        call: &Request<'_>,
+    ) -> Result<Vec<(i64, OperationRecord)>> {
+        call.check()?;
+        if !(1..=100).contains(&limit) {
+            return Err(RunError::Validation("refusal page limit"));
+        }
+        let mut statement = self.db.prepare(
+            "SELECT rowid,operation,record FROM operations WHERE project=?1 AND actor=?2 AND CASE WHEN json_valid(CAST(record AS TEXT)) THEN json_extract(CAST(record AS TEXT),'$.state')='refused' AND json_type(CAST(record AS TEXT),'$.refusal_chair')='object' AND COALESCE(json_extract(CAST(record AS TEXT),'$.refusal_notice_done'),0) != 1 ELSE 0 END AND rowid > ?4 ORDER BY rowid LIMIT ?3",
+        )?;
+        let mut records = Vec::new();
+        let mut cursor = after;
+        loop {
+            call.check()?;
+            let rows = statement.query_map(
+                params![
+                    self.context.project_id.to_string(),
+                    self.context.actor_id.to_string(),
+                    sql_int(limit)?,
+                    cursor
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )?;
+            let mut scanned = 0;
+            for row in rows {
+                call.check()?;
+                let (rowid, operation, raw) = row?;
+                cursor = rowid;
+                scanned += 1;
+                // Corrupt evidence cannot produce a notice. Advance by its raw
+                // row ID so a full page of it cannot hide later valid notices.
+                let Ok(id) = OperationId::parse(&operation) else {
+                    continue;
+                };
+                let Ok(record) = decode::<OperationRecord>(&raw) else {
+                    continue;
+                };
+                if record.project_id != self.context.project_id
+                    || record.actor_id != self.context.actor_id
+                    || record.operation_id != id
+                    || record.state != OperationState::Refused
+                    || record.refusal.is_none()
+                    || record.refused_at.is_none()
+                    || record.refusal_chair.is_none()
+                {
+                    continue;
+                }
+                records.push((rowid, record));
+                if records.len() as u64 == limit {
+                    return Ok(records);
+                }
+            }
+            if scanned < limit {
+                return Ok(records);
+            }
+        }
+    }
     /// Whether the store holds any run record.
     pub fn has_runs(&self, call: &Request<'_>) -> Result<bool> {
         call.check()?;

@@ -672,6 +672,8 @@ pub enum OperationState {
     Prepared,
     Accepted,
     Terminal,
+    /// Dispatch was refused before a run was admitted.
+    Refused,
     LaunchUnknown,
     /// Launch preparation failed and custody could not be released.
     Blocked,
@@ -697,6 +699,17 @@ pub struct OperationRecord {
     pub state: OperationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
+    /// Safe diagnostic retained for a pre-admission refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<crate::diagnostic::Diagnostic>,
+    /// Worktree identifier, not an absolute host path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_at: Option<WallTime>,
+    /// Chair bound at submission, retained for refusal notice recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_chair: Option<ChairBinding>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -786,6 +799,17 @@ impl From<Outcome> for crate::AttemptOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalCause {
+    PreparationRefused,
+    AccountLoginRequired,
+    RouteResolutionRefused,
+    AccessPolicyRefused,
+    DiskFloor,
+    DiskObservationUnavailable,
+    StoredPromptUnreadable,
+    WriteGrantsRefused,
+    WorktreeBusy,
+    HandoffRefused,
+    RetainedWriterImport,
     UnsupportedPlatform,
     UnknownPacingAccount,
     UnregisteredAccount,
@@ -801,9 +825,76 @@ pub enum TerminalCause {
 }
 
 impl TerminalCause {
+    /// Bounded label for human status rows. Structured results use `detail`.
     pub fn reason(self) -> &'static str {
         match self {
-            Self::UnsupportedPlatform => "sandbox backend is unavailable: UnsupportedPlatform",
+            Self::PreparationRefused => "preparation refused; provenant output ID",
+            Self::AccountLoginRequired => "login required; provenant output ID",
+            Self::RouteResolutionRefused => "route refused; provenant output ID",
+            Self::AccessPolicyRefused => "access policy refused; provenant output ID",
+            Self::DiskFloor => "disk below gc.free_floor; provenant output ID",
+            Self::DiskObservationUnavailable => "disk probe unavailable; provenant output ID",
+            Self::StoredPromptUnreadable => "stored prompt unreadable; provenant output ID",
+            Self::WriteGrantsRefused => "write grants refused; provenant output ID",
+            Self::WorktreeBusy => "worktree busy; provenant output ID",
+            Self::HandoffRefused => "launch handoff refused; provenant output ID",
+            Self::RetainedWriterImport => "writer import retained; provenant output ID",
+            Self::UnsupportedPlatform => "sandbox unavailable; provenant output ID",
+            Self::UnknownPacingAccount => "pacing account unknown; provenant output ID",
+            Self::UnregisteredAccount => "account unregistered; provenant output ID",
+            Self::DeliveryPrepareCredentialHelper => {
+                "Prepare (credential helper) failed; provenant output ID"
+            }
+            Self::SpawnFailure => "provider spawn failed; provenant output ID",
+            Self::ProcessCrash => "provider crashed; provenant output ID",
+            Self::SettlementFailure => "settlement failed; provenant output ID",
+            Self::ProviderEarlyStop => "provider stopped early; provenant output ID",
+            Self::FreePoolQuota => "free-pool quota exhausted; provenant output ID",
+            Self::CommandUnavailable => "command unavailable; provenant output ID",
+            Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",
+            Self::IdentityUnobserved => "provider identity unobserved; provenant output ID",
+        }
+    }
+
+    /// Full safe cause and remedy for structured results and error responses.
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::AccountLoginRequired => {
+                crate::diagnostic::ProviderFailureFact::AuthRequired.reason()
+            }
+            Self::PreparationRefused => {
+                "local launch preparation refused the lane; inspect route and account configuration and local launch evidence before retrying"
+            }
+            Self::RouteResolutionRefused => {
+                "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"
+            }
+            Self::DiskFloor => {
+                "the host writer disk precheck refused launch below gc.free_floor; free disk space or run `provenant gc --apply` before retrying"
+            }
+            Self::DiskObservationUnavailable => {
+                "the host writer disk precheck could not observe free space; restore the host disk observation before retrying"
+            }
+            Self::AccessPolicyRefused => {
+                "launch access policy refused the lane; correct the request and declared access grants before retrying"
+            }
+            Self::StoredPromptUnreadable => {
+                "launch preparation could not read the stored prompt; inspect the run's local files and resubmit the request"
+            }
+            Self::WriteGrantsRefused => {
+                "launch preparation refused the write grants; check grant paths and domains.run.write_grant_limit_bytes before retrying"
+            }
+            Self::WorktreeBusy => {
+                "the worktree is busy; wait for its writer to finish or select another worktree"
+            }
+            Self::HandoffRefused => {
+                "the host refused the launch handoff; inspect local launch evidence and host configuration before retrying"
+            }
+            Self::RetainedWriterImport => {
+                "a retained writer import blocks launch; reconcile the earlier writer's import before retrying"
+            }
+            Self::UnsupportedPlatform => {
+                "sandbox backend is unavailable: UnsupportedPlatform; select a host with a supported sandbox backend before retrying"
+            }
             Self::UnknownPacingAccount => {
                 "pacing configuration references an unregistered account; correct the pacing profile"
             }

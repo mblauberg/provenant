@@ -183,6 +183,12 @@ pub fn main() -> std::process::ExitCode {
                 Err(error) => exit("land race", Err(error)),
             }
         }
+        Some("--admission-only") => {
+            let args = args.into_iter().skip(1);
+            ExitCode::from(provenant_cli::run::with_deferred_provider_launch(|| {
+                crate::dispatch(provenant_cli::parse(args), &Fixture)
+            }))
+        }
         Some("--state-dir" | "internal") => {
             let code = crate::dispatch(provenant_cli::parse(args), &Fixture);
             // A fixture-only observation after the real command has rendered.
@@ -2421,6 +2427,18 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
                 && tree["owner"] == "unowned")
     );
     assert!(trees.iter().any(|tree| tree["owner"] == "primary"));
+    let diagnosis = ok(
+        &rig,
+        &["worktree", "doctor", ".worktrees/feature-topic", "--json"],
+    )?;
+    assert_eq!(diagnosis["command"], "worktree doctor");
+    assert_eq!(diagnosis["data"]["state"], "clean");
+    assert_eq!(diagnosis["data"]["path"], created["data"]["path"]);
+    assert!(
+        diagnosis["data"]["repair"]
+            .as_str()
+            .is_some_and(|repair| { repair.starts_with("provenant worktree doctor ") })
+    );
     let cache = prepare_lane_cache(
         &rig,
         &rig.project.join(".worktrees/feature-topic"),
@@ -3328,6 +3346,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             project_id: Some(context.project_id),
             host: None,
             cancel: None,
+            repo_facts: Default::default(),
         };
         let clock = provenant_os::clock::SystemClock::new();
         let cancel = provenant_core::CancelToken::new();
@@ -4125,6 +4144,9 @@ if (process.argv[2] === 'child') {
                     "unlink \"$lane_root/.fixture-git-probe\""
                 ),
             ),
+            // This is a native confined-shell probe of the lane's PATH Git
+            // wrapper. fixture::run_git deliberately bypasses that wrapper and
+            // cannot establish this boundary behaviour.
             (
                 "git commit",
                 concat!(
@@ -5276,21 +5298,38 @@ fn dispatch_refuses_low_disk_writers() -> Result {
         "{value}"
     );
     assert!(!rig.state.join("runs").exists());
-    let reader = ok(
-        &rig,
-        &[
-            "dispatch",
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt")?,
-            "--model",
-            "codex/gpt-6-luna",
-            "--operation-id",
-            "low-disk-reader",
-            "--json",
-        ],
-    )?;
+    // Exercise read-only admission with the real command edge, stopping before
+    // provider preparation: neither native sandboxing nor account readiness is
+    // the disk-floor subject of this test.
+    let args: Vec<OsString> = ["--admission-only", "--state-dir"]
+        .into_iter()
+        .map(OsString::from)
+        .chain(std::iter::once(rig.state.as_os_str().to_owned()))
+        .chain(
+            [
+                "dispatch",
+                "--prompt-file",
+                prompt.to_str().ok_or("prompt")?,
+                "--model",
+                "codex/gpt-6-luna",
+                "--operation-id",
+                "low-disk-reader",
+                "--json",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .collect();
+    let output = rig.execute_os(&std::env::current_exe()?, &args, None)?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let reader = json(&output)?;
     assert_eq!(reader["status"], "ok", "{reader}");
     assert!(rig.state.join("runs").exists());
+    let run = reader["data"]["run_id"].as_str().ok_or("reader run")?;
+    let request: Value = serde_json::from_slice(&fs::read(
+        rig.state.join("runs").join(run).join("request.json"),
+    )?)?;
+    assert!(request["tasks"][0]["writer"].is_null(), "{request}");
     Ok(())
 }
 

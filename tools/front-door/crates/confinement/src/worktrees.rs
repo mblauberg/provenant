@@ -3,13 +3,20 @@
 mod census;
 mod context;
 mod custody;
+mod doctor;
+#[cfg(test)]
+mod doctor_tests;
 mod gc;
 mod inventory;
 mod lifecycle;
 mod owner;
 pub use census::*;
-pub use context::{with_context, with_context_using_workers};
+pub use context::{
+    with_context, with_context_using_facts, with_context_using_workers,
+    with_context_using_workers_and_facts,
+};
 pub use custody::*;
+pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, doctor};
 pub use gc::{OutputEntry, WorktreeGcPolicy, WorktreeGcReport, collect, collect_lazy};
 pub use inventory::*;
 pub use lifecycle::*;
@@ -496,6 +503,8 @@ pub enum OccupancyUnknownSource {
 /// the explicit root-plus-PathWire envelope below, never lossy `Path::display`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeInfo {
+    /// Bounded host-authored notices produced while creating this checkout.
+    pub warnings: Vec<String>,
     pub path: PathBuf,
     pub branch: Option<String>,
     pub head: GitOid,
@@ -530,7 +539,11 @@ impl Serialize for WorktreeInfo {
         S: Serializer,
     {
         let path = StructuredPathWire::from_path(&self.path).map_err(serde::ser::Error::custom)?;
-        let mut state = serializer.serialize_struct("WorktreeInfo", 7)?;
+        let fields = 6 + usize::from(self.is_unowned()) + usize::from(!self.warnings.is_empty());
+        let mut state = serializer.serialize_struct("WorktreeInfo", fields)?;
+        if !self.warnings.is_empty() {
+            state.serialize_field("warnings", &self.warnings)?;
+        }
         state.serialize_field("path", &path)?;
         state.serialize_field("branch", &self.branch)?;
         state.serialize_field("head", &self.head)?;

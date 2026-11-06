@@ -297,6 +297,18 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Off keeps switching manual; on opens a new chair pane when an explicitly allowed account has headroom."` |
 | `type` | `"bool"` |
 
+## `chair.refusal_notice`
+
+| Field | Value |
+|---|---|
+| `default` | `"inbox"` |
+| `effect` | `"Send the bound chair a notice when a dispatch is refused before admission."` |
+| `reader` | `"tools/front-door/src/settlement.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Off keeps the inbox quiet; inbox makes refusals visible to the chair."` |
+| `type` | `"enum"` |
+| `values` | `["inbox", "off"]` |
+
 ## `chair.switch_accounts`
 
 | Field | Value |
@@ -681,7 +693,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
       "writer_token_budget": {
         "allowed": "0 or more tokens",
         "default": "500000",
-        "effect": "Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. Cache reads do not count. Enforced for Claude from live usage. Codex exec reports usage only at turn.completed, so its budget is not enforced; other providers without live usage are also not enforced. Launch warnings or receipt notes say so. Current lane adapters cannot receive a live steer: the 90% warning records an unsupported control receipt. After custody is absent the host attempts a bounded commit; an in-progress merge is preserved for stopped-merge handling, and a commit failure is reported without replacing the budget outcome. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget.",
+        "effect": "Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended so a continuation can pick it up. The host then attempts to commit and publish the lane's work; it does not when custody is not absent, when a merge, cherry-pick, revert or rebase is in progress, or when the commit fails, and settlement notes say which. 0 turns the budget off. Cache reads do not count. Enforced for Claude from live usage. The budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame, with no further turn to stop. Other providers without live usage are also not enforced. Launch warnings or receipt notes say so. Current lane adapters cannot receive a live steer: the 90% warning records an unsupported control receipt. After custody is absent the host attempts a bounded commit; an in-progress merge is preserved for stopped-merge handling, a cherry-pick, revert or rebase in progress is left uncommitted, and a skipped or failed commit is reported without replacing the budget outcome. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget.",
         "type": "int"
       }
     }
