@@ -439,28 +439,86 @@ fn loop_redo_restarts_rounds_after_checkpoint_before_launch_crash() {
     }
 }
 
-#[test]
-fn container_redo_refuses_dynamic_descendants_without_changing_the_checkpoint() {
-    let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version":1,"graph_id":"redo-dynamic-container","nodes":[{
+fn planner_container(graph_id: &str) -> GraphDocument {
+    serde_json::from_value(json!({
+        "schema_version":1,"graph_id":graph_id,"nodes":[{
             "id":"work","kind":"composite","access":"read_only","composite":{
                 "nodes":[{"id":"planner","kind":"plan","access":"read_only","prompt":"Plan work",
                     "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4}}],
                 "exports":[{"node":"planner","outputs":["result"]}]
             }
-        }]
+        },{"id":"sibling","prompt":"Other work","access":"read_only","depends_on":["work"],"route":{"alias":"junior"}}]
     }))
-    .unwrap();
-    let fragment = format!(
+    .unwrap()
+}
+
+fn slice_fragment(id: &str) -> String {
+    format!(
         "```fragment\n{}\n```",
         json!({
-            "schema_version":1,"nodes":[{"id":"slice","goal":"Do work","acceptance_checks":["Verify work"],"access":"read_only"}]
+            "schema_version":1,"nodes":[{"id":id,"goal":"Do work","acceptance_checks":["Verify work"],"access":"read_only"}]
         })
+    )
+}
+
+#[test]
+fn dynamic_composite_redo_retires_its_expansion_and_recovers_after_checkpoint_crash() {
+    let checkpoint = redo_container_after_checkpoint_crash(
+        planner_container("redo-dynamic-crash"),
+        "work",
+        "work--planner--slice",
+        vec![
+            terminal_from(&slice_fragment("slice"), "planner-old"),
+            terminal_from("old slice", "slice-old"),
+            done_as("sibling-old"),
+        ],
+        vec![terminal_from(&slice_fragment("slice"), "planner-new")],
+        vec![terminal_from("new slice", "slice-new")],
+        &["work--planner--slice"],
     );
+    let live: Vec<_> = checkpoint
+        .expansions
+        .iter()
+        .filter(|expansion| !expansion.nodes.is_empty())
+        .collect();
+    assert_eq!(live.len(), 1, "the old generation must not stay live");
+    assert_eq!(live[0].source, "work--planner");
+    assert_eq!(
+        checkpoint
+            .expansions
+            .iter()
+            .filter(|expansion| expansion.retired())
+            .count(),
+        1
+    );
+    let slices: Vec<_> = checkpoint
+        .nodes
+        .iter()
+        .filter(|node| node.id == "work--planner--slice")
+        .collect();
+    assert_eq!(slices.len(), 1);
+    assert_eq!(slices[0].attempts.len(), 1);
+    let result = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "work")
+        .unwrap()
+        .outputs
+        .as_ref()
+        .unwrap()
+        .result
+        .as_ref()
+        .unwrap();
+    assert!(result.excerpt.contains("new slice") && !result.excerpt.contains("old slice"));
+}
+
+#[test]
+fn dynamic_composite_redo_drops_stale_failed_dependencies_and_launches_once() {
+    let document = planner_container("redo-dynamic-failed");
     let mut owner = FakeOwner {
         observations: [
-            terminal_from(&fragment, "planner-old"),
-            done_as("slice-old"),
+            terminal_from(&slice_fragment("broken"), "planner-old"),
+            terminal_with_result(AttemptOutcome::TaskFailed, "broken"),
         ]
         .into(),
         ..Default::default()
@@ -468,17 +526,66 @@ fn container_redo_refuses_dynamic_descendants_without_changing_the_checkpoint() 
     let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
         .unwrap()
         .checkpoint;
-    assert!(checkpoint.successful());
-    assert!(
+    let state = |checkpoint: &GraphCheckpoint, id: &str| {
         checkpoint
             .nodes
             .iter()
-            .any(|node| node.id == "work--planner--slice")
+            .find(|node| node.id == id)
+            .map(|node| node.state)
+    };
+    assert_eq!(
+        state(&checkpoint, "work--planner--broken"),
+        Some(NodeState::Failed)
     );
-    let before = checkpoint.clone();
-    let error = retry_id(&document, &mut checkpoint, "work", None, &|_| Ok(()), None).unwrap_err();
-    assert_eq!(error.code, "redo_dynamic_subtree");
-    assert_eq!(checkpoint, before);
+    assert!(!checkpoint.successful());
+    let revision = patch::revision(&checkpoint);
+    retry_id(&document, &mut checkpoint, "work", None, &|_| Ok(()), None).unwrap();
+    assert_eq!(patch::revision(&checkpoint), revision + 1);
+    assert_eq!(state(&checkpoint, "work--planner--broken"), None);
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_from(&slice_fragment("fixed"), "planner-new"),
+            done_as("fixed"),
+            done_as("sibling"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal(Some(checkpoint));
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(state(&run.checkpoint, "work--planner--broken"), None);
+    assert_eq!(
+        owner
+            .calls
+            .iter()
+            .map(|(key, _)| key.node_id.as_str())
+            .collect::<Vec<_>>(),
+        ["work--planner", "work--planner--fixed", "sibling"]
+    );
+    // The redone container can be redone again, and the reloaded journal
+    // replays without relaunching anything.
+    let reloaded: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&run.checkpoint).unwrap()).unwrap();
+    let mut replay = FakeOwner::default();
+    assert_eq!(
+        advance(&document, &mut replay, &mut MemoryJournal(Some(reloaded.clone())))
+            .unwrap()
+            .checkpoint,
+        reloaded
+    );
+    assert!(replay.calls.is_empty());
+    let mut again = reloaded;
+    retry_id(&document, &mut again, "work", None, &|_| Ok(()), None).unwrap();
+    assert_eq!(
+        again
+            .expansions
+            .iter()
+            .filter(|expansion| expansion.retired())
+            .count(),
+        2
+    );
 }
 
 #[test]
