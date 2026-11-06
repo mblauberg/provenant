@@ -20,7 +20,7 @@ provenant run --use review --file BRIEF.md --explain
 
 Pin the base, subject commit and spec in the brief. Use `review` by default;
 a dotted flavour such as `review.security` selects a specific lens. A composite
-runs `review` over a panel resolved at launch, then `verify` and `synthesise`
+runs `review` over a panel resolved at launch, then `review.verify` and `review.synthesis`
 where needed. The planner chooses lenses and tiers from risk, changed paths
 and author tier; the chair checks HARNESS floors and adds missing coverage.
 Review each slice lightly and the integrated head with the full required panel.
@@ -58,8 +58,7 @@ impossible, style that lint covers, and scope growth. A structural alternative
 blocks only when tied to a defect. A file over 1,000 lines is a prompt to look
 for a cohesion defect, not a finding.
 
-End with one final-line declaration using the
-[review wire grammar](../../docs/specs/fabric.md#typed-node-outputs).
+The template engine owns the findings and verdict contract.
 The author marks each
 finding accepted, rejected (with evidence) or deferred. A separate writer repairs
 accepted findings; the lenses that raised them re-review the delta. Follow the

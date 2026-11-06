@@ -1769,6 +1769,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
 
 #[test]
 fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities() {
+    for verifying in [false, true] {
     let input = |id: &str| GraphInput {
         required_outputs: Vec::new(),
         extra: Default::default(),
@@ -1804,14 +1805,18 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
     let mut synthesis = node("synthesis", route("first"));
     synthesis.depends_on = (0..20).map(|i| format!("verifier{i}")).collect();
     synthesis.inputs = synthesis.depends_on.iter().map(|id| input(id)).collect();
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    if verifying {
+        synthesis.extra.insert("review_behaviour".into(), "verify".into());
+    } else {
+        synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    }
     nodes.push(synthesis);
     let mut next = node("next", route("first"));
     next.depends_on = vec!["synthesis".into()];
     next.inputs = vec![input("synthesis")];
     nodes.push(next);
     let decisions =
-        serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail"});
+        serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail", "verification":"upheld"});
     observations.push_back(terminal_with_result(
         AttemptOutcome::Succeeded,
         &findings_text(&format!(
@@ -1922,6 +1927,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         advance(&document, &mut FakeOwner::default(), &mut journal),
         Err(GraphError::BadCheckpoint { .. })
     ));
+    }
 }
 
 #[test]
@@ -11280,4 +11286,69 @@ fn template_review_admission_rejects_expanded_ids_over_the_limit() {
             .unwrap(),
     ];
     assert!(boundary.admit(&Default::default()).is_err());
+}
+
+#[test]
+fn typed_review_synthesis_retains_omitted_findings_and_refuses_pass() {
+    let bundled = template::TemplateLibrary::bundled();
+    let mut synthesis = template::Compiler::new(&bundled).compile(&serde_json::json!({
+        "id":"synthesis", "use":"review.synthesis", "after":["lens"],
+        "inputs":[{"node":"lens","outputs":["findings"]}]
+    })).unwrap();
+    synthesis.route = Some(route("fixture"));
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS"),
+        ].into(),
+        ..Default::default()
+    };
+    let run = advance(&graph(vec![node("lens", route("fixture")), synthesis]), &mut owner, &mut MemoryJournal::default()).unwrap();
+    let synthesis = &run.checkpoint.nodes[1];
+    assert_eq!(synthesis.state, NodeState::Failed);
+    assert_eq!(synthesis.outputs.as_ref().unwrap().findings.len(), 1);
+    assert_eq!(synthesis.advance_error_code.as_deref(), Some("disposition_count"));
+}
+
+#[test]
+fn typed_review_cannot_pass_open_blockers_or_incomplete_findings() {
+    let bundled = template::TemplateLibrary::bundled();
+    for (findings, verdict) in [
+        (entry(""), "VERDICT: FAIL"),
+        (format!("{},{{}}", entry("")), "VERDICT: INCONCLUSIVE"),
+        (String::new(), "VERDICT: PASS"),
+    ] {
+        let review = template::Compiler::new(&bundled).compile(&serde_json::json!({
+            "id":"review", "use":"review.tests", "route":{"alias":"fixture"}
+        })).unwrap();
+        let text = findings_text(&findings);
+        let mut owner = FakeOwner {
+            observations: [terminal_with_result(AttemptOutcome::Succeeded, &text)].into(),
+            ..Default::default()
+        };
+        let run = advance(&graph(vec![review]), &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().verdict.as_deref(), Some(verdict));
+    }
+}
+
+#[test]
+fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
+    let bundled = template::TemplateLibrary::bundled();
+    let verify = template::Compiler::new(&bundled).compile(&serde_json::json!({
+        "id":"verify", "use":"review.verify", "route":{"alias":"fixture"}, "after":["prior"],
+        "inputs":[{"node":"prior","outputs":["findings"]}]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(",\"verification\":\"upheld\""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(r#"{"id":"F1","verification":"falsified","reason":"Delta removed the failing path"}"#)),
+        ].into(),
+        ..Default::default()
+    };
+    let run = advance(&graph(vec![node("prior", route("fixture")), verify]), &mut owner, &mut MemoryJournal::default()).unwrap();
+    let output = run.checkpoint.nodes[1].outputs.as_ref().unwrap();
+    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Succeeded);
+    assert_eq!(output.findings[0].extra["verification"], "falsified");
+    assert_eq!(output.findings[0].extra["propagates"], "prior:F1");
+    assert_eq!(output.verdict.as_deref(), Some("VERDICT: PASS"));
 }
