@@ -185,6 +185,18 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             human.push_str(&capabilities);
             data["review_exempt"] = exempt;
             attach_cloud_jobs(&session.store, &rows, &mut data, &mut human, &call)?;
+            if command.id.is_none()
+                && command.cursor.is_none()
+                && append_refused_operations(
+                    &session.store,
+                    command.limit.min(100).max(1),
+                    &mut data,
+                    &mut human,
+                    &call,
+                )?
+            {
+                summary = None;
+            }
             if append_native_status(native, &mut data, &mut human) {
                 summary = None;
             }
@@ -197,6 +209,36 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
     out.summary = summary;
     out.read_only = true;
     out
+}
+
+/// Refused dispatches have no attempt; render their durable operation records
+/// separately so they remain visible without inventing a lane identity.
+fn append_refused_operations(
+    store: &run::RunStore,
+    limit: u64,
+    data: &mut Value,
+    human: &mut String,
+    call: &run::Request<'_>,
+) -> Result<bool, Fail> {
+    let refusals = store.recent_refusals(limit, call)?;
+    if refusals.is_empty() {
+        return Ok(false);
+    }
+    human.push_str("refused operations:\n");
+    for record in &refusals {
+        let code = record
+            .refusal
+            .as_ref()
+            .map(|value| value.code.as_str())
+            .unwrap_or("REFUSED");
+        human.push_str(&format!(
+            "  {} {}\n",
+            record.operation_id,
+            plain_text(code, 1024)
+        ));
+    }
+    data["refused_operations"] = json!(refusals);
+    Ok(true)
 }
 
 fn append_native_status(
@@ -1139,6 +1181,7 @@ pub fn lanes_streaming(
     // A watch already printed its events; its final line is its own summary.
     if out.result.error.is_none()
         && out.result.data["lanes"].is_array()
+        && out.result.data.get("refused_operations").is_none()
         && !(command.watch.is_some() && !json)
     {
         out.summary = Some(lane_summary(&lane_lines(&out.result.data), None));
@@ -1445,6 +1488,9 @@ pub(super) fn lanes_inner(
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
     attach_cloud_jobs(&session.store, &lanes, &mut data, &mut human, &call)?;
+    if command.id.is_empty() && command.cursor.is_none() && command.session.is_none() && !filtered {
+        append_refused_operations(&session.store, command.limit, &mut data, &mut human, &call)?;
+    }
     Ok((data, human, false))
 }
 

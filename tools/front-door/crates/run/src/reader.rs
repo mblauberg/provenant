@@ -342,6 +342,43 @@ impl RunStore {
         })
         .transpose()
     }
+
+    /// Read the submitting actor's recent refused operations, newest first.
+    /// A refusal has no attempt row and therefore cannot appear in lane queries.
+    pub fn recent_refusals(&self, limit: u64, call: &Request<'_>) -> Result<Vec<OperationRecord>> {
+        call.check()?;
+        if !(1..=100).contains(&limit) {
+            return Err(RunError::Validation("refusal page limit"));
+        }
+        let mut statement = self.db.prepare(
+            "SELECT operation,record FROM operations WHERE project=?1 AND actor=?2 AND json_extract(CAST(record AS TEXT),'$.state')='refused' ORDER BY rowid DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![
+                self.context.project_id.to_string(),
+                self.context.actor_id.to_string(),
+                sql_int(limit)?
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )?;
+        let mut refusals = Vec::new();
+        for row in rows {
+            call.check()?;
+            let (id, raw) = row?;
+            let record: OperationRecord = decode(&raw)?;
+            if record.project_id != self.context.project_id
+                || record.actor_id != self.context.actor_id
+                || record.operation_id.as_str() != id
+                || record.state != OperationState::Refused
+                || record.refusal.is_none()
+                || record.refused_at.is_none()
+            {
+                return Err(RunError::Validation("refusal index identity"));
+            }
+            refusals.push(record);
+        }
+        Ok(refusals)
+    }
     /// Whether the store holds any run record.
     pub fn has_runs(&self, call: &Request<'_>) -> Result<bool> {
         call.check()?;

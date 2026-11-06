@@ -423,6 +423,12 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
         .ok_or("missing refusal")?;
     assert_eq!(replayed.refusal, Some(diagnostic.clone()));
     assert_eq!(replayed.worktree.as_deref(), Some("lane"));
+    assert_eq!(store.recent_refusals(10, &call)?, vec![replayed.clone()]);
+    let mut other_context = context.clone();
+    other_context.actor_id = ActorId::from_bytes([9; 16]);
+    let other = RunStore::open(&other_context, &call)?;
+    assert!(other.recent_refusals(10, &call)?.is_empty());
+    assert!(store.recent_refusals(0, &call).is_err());
     let duplicate = store.record_refusal(
         &input,
         provenant_records::diagnostic::Diagnostic::new("OTHER"),
