@@ -32,6 +32,13 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
     Outcome::Ok
 }
 
+fn input_diagnostic(error: impl std::fmt::Display) -> provenant_records::diagnostic::Diagnostic {
+    provenant_fabric_runtime::coordination::facade::FacadeError::invalid(
+        provenant_fabric_runtime::coordination::facade::InvalidInputDetail::graph_reason(error),
+    )
+    .diagnostic()
+}
+
 fn invoke(
     command: &str,
     input: Result<Value, String>,
@@ -42,27 +49,9 @@ fn invoke(
         let input = input?;
         if command == "run" && std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some() {
             let factory = fabric::read_factory(globals, workers)?;
-            let request = provenant_fabric_runtime::graph::relay::RelayOp::Add(
-                factory.child_request(&input)?,
-            );
-            if input["explain"] == true {
-                return Ok(serde_json::to_value(request)?);
-            }
-            let cancel = CancelToken::new();
-            let within =
-                std::time::Duration::from_secs(input["wait_seconds"].as_u64().unwrap_or(55));
-            let mut receipt =
-                provenant_cli::fabric::graph_relay::from_lane(&request, &cancel, within)?;
-            if let Some(seconds) = input["wait_seconds"].as_u64() {
-                match provenant_cli::fabric::graph_relay::wait_for_children(
-                    &cancel,
-                    std::time::Duration::from_secs(seconds),
-                ) {
-                    Ok(children) => receipt["children"] = children,
-                    Err(error) => receipt["observation_error"] = json!(error.to_string()),
-                }
-            }
-            return Ok(receipt);
+            let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55).max(55);
+            let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
+            return Ok(factory.relay_document(&input, budget, &CancelToken::new())?);
         }
         let factory =
             if input["explain"] == true || matches!(command, "templates" | "status" | "stats") {
@@ -92,7 +81,8 @@ fn invoke(
                     error
                         .downcast_ref::<provenant_cli::fabric::EdgeError>()
                         .and_then(provenant_cli::fabric::edge_diagnostic)
-                });
+                })
+                .unwrap_or_else(|| input_diagnostic(&error));
             let outcome = error
                 .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
                 .map_or(
@@ -101,17 +91,14 @@ fn invoke(
                 );
             let mut result = CommandResult::new(command, outcome, Value::Null);
             result.error = Some(provenant_records::CommandError {
-                diagnostic: projection.as_ref().map(Into::into),
-                code: projection
-                    .as_ref()
-                    .map_or("GRAPH_INTERFACE", |value| value.code.as_str())
-                    .into(),
+                diagnostic: Some((&projection).into()),
+                code: projection.code.as_str().into(),
                 message: projection
-                    .as_ref()
-                    .and_then(|value| value.detail.clone())
+                    .detail
+                    .clone()
                     .unwrap_or_else(|| "graph input could not be processed".into()),
                 cause: None,
-                repair: projection.and_then(|value| value.next),
+                repair: projection.next,
             });
             crate::emit(&result, globals, "", false)
         }
@@ -190,7 +177,8 @@ fn run_input(request: GraphRunArgs) -> Result<Value, String> {
             input["brief"] = json!(brief);
         }
         if let Some(path) = request.file {
-            let text = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| format!("--file {}: {error}", path.display()))?;
             match decode(&text) {
                 Ok(value) if value.is_object() => input["document"] = value,
                 Ok(_)
@@ -261,6 +249,71 @@ pub(crate) fn stats(
 )]
 mod tests {
     use super::*;
+
+    #[allow(
+        dead_code,
+        reason = "the custom worktree driver omits libtest functions"
+    )]
+    fn run_request() -> GraphRunArgs {
+        GraphRunArgs {
+            host: None,
+            model: None,
+            effort: None,
+            account: None,
+            operation_id: None,
+            brief: None,
+            template: None,
+            tier: None,
+            mode: None,
+            worktree: None,
+            branch: None,
+            base: None,
+            write_scope: Vec::new(),
+            over: Vec::new(),
+            set: Vec::new(),
+            file: None,
+            detached: false,
+            explain: false,
+            wait: None,
+        }
+    }
+
+    #[test]
+    fn malformed_set_and_missing_file_preserve_input_detail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (setting, detail) in [
+            ("broken", "--set expects NAME=TOML_VALUE"),
+            ("=1", "--set parameter name is empty"),
+            ("count=", "TOML"),
+        ] {
+            let mut request = run_request();
+            request.set.push(setting.into());
+            let error = run_input(request).err().ok_or("invalid set was accepted")?;
+            let diagnostic = input_diagnostic(error);
+            assert_eq!(diagnostic.code, "invalid_input");
+            assert!(
+                diagnostic
+                    .detail
+                    .as_deref()
+                    .is_some_and(|text| text.contains(detail))
+            );
+        }
+        let directory = tempfile::tempdir()?;
+        let mut request = run_request();
+        request.file = Some(directory.path().join("missing.json"));
+        let error = run_input(request)
+            .err()
+            .ok_or("missing file was accepted")?;
+        let diagnostic = input_diagnostic(error);
+        assert_eq!(diagnostic.code, "invalid_input");
+        assert!(
+            diagnostic
+                .detail
+                .as_deref()
+                .is_some_and(|text| text.contains("--file") && text.contains("missing.json"))
+        );
+        Ok(())
+    }
 
     #[test]
     fn run_flags_and_attempt_settings_reach_the_graph_request() {

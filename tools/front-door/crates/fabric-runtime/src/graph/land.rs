@@ -9,7 +9,7 @@
 use super::*;
 use crate::config::{LandChoice, LandPolicy, LandSource};
 use provenant_records::run::DeliveryMode;
-use provenant_records::workflow::RiskTier;
+use provenant_records::workflow::{ReviewVerdict, RiskTier};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Land the pull request of `node`, a writer that delivers `pr`.
@@ -397,7 +397,8 @@ pub(super) fn chain_attempts(
 
 /// Why no passing verdict gate after `writer` accepted `head`, if none did.
 /// Landing needs a gate that passed and whose every input reviewed `head`; a
-/// failed gate whose `on_fail` reaches the land is not acceptance.
+/// failed gate whose `on_fail` reaches the land is not acceptance. A gate
+/// replaced with a condition accepting rejection is not approval either.
 fn acceptance_error(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
@@ -411,9 +412,14 @@ fn acceptance_error(
     for index in ancestors(&plan.nodes, positions, land) {
         let gate = &plan.nodes[index];
         let progress = &checkpoint.nodes[index];
-        if !matches!(gate.condition, Some(GateCondition::Verdict { .. }))
-            || !writer_index
-                .is_some_and(|writer| ancestors(&plan.nodes, positions, &gate.id).contains(&writer))
+        if !matches!(
+            &gate.condition,
+            Some(GateCondition::Verdict { expected, .. })
+                if matches!(ReviewVerdict::from_token(expected),
+                    Some(ReviewVerdict::Approve
+                        | ReviewVerdict::ApproveWithNits))
+        ) || !writer_index
+            .is_some_and(|writer| ancestors(&plan.nodes, positions, &gate.id).contains(&writer))
             || progress.state != NodeState::Succeeded
             || !progress.gate.as_ref().is_some_and(|gate| gate.passed)
         {
@@ -438,7 +444,7 @@ fn acceptance_error(
         reviewed.push(format!("{} passed {}", gate.id, subjects.join(", ")));
     }
     let evidence = if reviewed.is_empty() {
-        "no verdict gate after the writer passed".to_owned()
+        "no approval verdict gate after the writer passed".to_owned()
     } else {
         reviewed.join("; ")
     };

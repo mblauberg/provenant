@@ -233,6 +233,8 @@ pub fn serve(
                     .map_err(|error| refused("invalid_config", error.to_string()))?;
             let resolvers = launch_resolvers(&config.domains.routing.review, &document)
                 .map_err(|error| refused("invalid_review", error))?;
+            // The ID selects this graph; prepare checks each skip/replace target
+            // against the calling parent's subtree, with the planner exemption.
             let admitted = provenant_fabric_runtime::graph::patch::admit_patch(
                 &mut LiveGraph {
                     document: &document,
@@ -1245,6 +1247,86 @@ mod provisioning_tests {
                 matches!(serve(&context, "caller", fresh, budget, &cancel, &clock),
                 Err(ServiceError::Cli { code, .. }) if code == "graph_relay_unavailable")
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lane_edit_refuses_skip_and_replace_outside_its_subtree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphDocument, GraphExecution};
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let context = Context::open(
+            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+            &home,
+            &project,
+        )?;
+        let cancel = CancelToken::new();
+        let clock = provenant_os::clock::SystemClock::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"edit-scope",
+            "nodes":[
+                {"id":"writer","access":"read_only","prompt":"Write","route":{"alias":"senior"}},
+                {"id":"review","access":"read_only","prompt":"Review","route":{"alias":"senior"}}
+            ]
+        }))?;
+        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"edit-scope","plan_digest":"fixture",
+            "nodes":[
+                {"id":"writer","state":"running","worktree":null,"attempts":[{
+                    "launched":true,"key":{"graph_id":"edit-scope","node_id":"writer","route_index":0},
+                    "route":{"alias":"senior"},"state":"running",
+                    "attempt_ref":format!("{}/caller",context.identity.host),"outcome":null,"launch_actor":"fixture"
+                }]},
+                {"id":"review","state":"pending","worktree":null,"attempts":[]}
+            ]
+        }))?;
+        {
+            let mut journal = FileJournal::open(
+                &context.roots.state,
+                context.identity.project,
+                "edit-scope",
+                budget,
+                &cancel,
+                &clock,
+            )?;
+            journal.bind(GraphExecution {
+                review_base: None,
+                extra: Default::default(),
+                integration_base: None,
+                directory: project.clone(),
+                document,
+            })?;
+            journal.save(&checkpoint)?;
+        }
+        for edit in [
+            json!({"skip":["review"]}),
+            json!({"replace":[{"id":"review","access":"read_only","prompt":"Bypass review","route":{"alias":"senior"}}]}),
+        ] {
+            let mut patch = edit;
+            patch["schema_version"] = json!(1);
+            let result = serve(
+                &context,
+                "caller",
+                json!({"op":"edit","id":"edit-scope","patch":patch}),
+                budget,
+                &cancel,
+                &clock,
+            );
+            assert!(matches!(result, Err(ServiceError::Cli { code, .. }) if code == "edit_scope"));
+            let saved = FileJournal::read_checkpoint(
+                &context.roots.state,
+                context.identity.project,
+                "edit-scope",
+            )?
+            .ok_or("missing checkpoint")?;
+            assert_eq!(saved, checkpoint);
         }
         Ok(())
     }

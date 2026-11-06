@@ -165,7 +165,7 @@ pub const PARENT_NODE_FIELD: &str = "parent_node";
 #[error("{message}")]
 pub struct PatchError {
     /// Stable cause: `stale_revision`, `idempotency_conflict`, `cycle`,
-    /// `conflict`, `started`, `secret`, `journal` or `invalid`.
+    /// `conflict`, `started`, `edit_scope`, `secret`, `journal` or `invalid`.
     pub code: &'static str,
     pub message: String,
     /// Closed diagnostic fact retained when a planner uses this admission path.
@@ -1153,6 +1153,21 @@ pub(super) fn prepare(
 
     // Edits of unstarted nodes.
     let unstarted = |id: &str| -> Result<(), PatchError> {
+        if let Some(parent) = parent
+            && parent.plan.is_none()
+            && parent
+                .extra
+                .get(template::TEMPLATE_FIELD)
+                .and_then(Value::as_str)
+                != Some("plan")
+            && id != parent.id
+            && !id.starts_with(&format!("{}--", parent.id))
+        {
+            return Err(PatchError::new(
+                "edit_scope",
+                format!("node {id}: a lane may edit only its own subtree"),
+            ));
+        }
         let progress = checkpoint
             .nodes
             .iter()

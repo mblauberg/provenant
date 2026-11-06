@@ -1096,7 +1096,8 @@ pub fn coordination_outcome(
     use provenant_fabric_runtime::coordination::facade::FacadeError;
     match error {
         FacadeError::InvalidInput { .. } | FacadeError::NotFound => Outcome::Invalid,
-        FacadeError::StaleFence
+        FacadeError::GraphRelayRefused { .. }
+        | FacadeError::StaleFence
         | FacadeError::GenerationConflict { .. }
         | FacadeError::Conflict
         | FacadeError::LaneCoordinationRefused
