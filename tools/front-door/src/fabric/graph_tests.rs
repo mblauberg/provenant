@@ -360,6 +360,66 @@ mod graph_writer_admission_tests {
             assert_eq!(owner.calls, 1);
         }
     }
+
+    #[test]
+    fn invalid_fake_launch_reaches_human_and_machine_graph_status() {
+        use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
+        use provenant_fabric_runtime::graph::{AttemptKey, AttemptObservation, AttemptOwner, GraphDocument, GraphRoute, NodeInput, Replay, AccessMode};
+        struct Refuse(FacadeError);
+        impl AttemptOwner for Refuse {
+            type Error = FacadeError;
+            fn actor(&self) -> String { "fixture".into() }
+            fn wall_now(&self) -> Option<provenant_core::WallTime> {
+                provenant_core::WallTime::from_micros(1).ok()
+            }
+            fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
+                provenant_fabric_runtime::graph::LaunchRetryPolicy { limit: 0, ..Default::default() }
+            }
+            fn observe_or_start(&mut self, _: &AttemptKey, _: NodeInput<'_>, _: &GraphRoute, _: AccessMode, _: Option<&str>, _: Replay<'_>) -> Result<AttemptObservation, FacadeError> { Err(self.0.clone()) }
+        }
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"invalid-fixture","nodes":[{
+                "id":"one","access":"read_only","prompt":"fixture",
+                "route":{"adapter":"mock","model":"mock-model"}
+            }]
+        })).unwrap();
+        for detail in [Some(InvalidInputDetail::FieldTooLarge { field:"tasks[0].prompt".into(), limit:1_048_576 }), None] {
+            let cause = FacadeError::InvalidInput { detail };
+            let projection = cause.diagnostic();
+            let run = advance(&document, &mut Refuse(cause), &mut MemoryJournal::default()).unwrap();
+            let target = super::unified::GraphTarget { graph:"invalid-fixture".into(), node:None, attempt:None };
+            let rows = super::unified::status_rows(&run, &target);
+            let machine = serde_json::to_string(&rows).unwrap();
+            let human = super::unified::render_graph_status(&rows);
+            for output in [&machine, &human] {
+                assert!(output.contains(&projection.code), "{output}");
+                assert!(output.contains(projection.detail.as_deref().unwrap()), "{output}");
+                assert!(output.contains(projection.next.as_deref().unwrap()), "{output}");
+            }
+        }
+        use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+        use provenant_records::diagnostic::{PressureLevel, PressureThreshold, ResourceFact, SettingSource};
+        for cause in [
+            FacadeError::DispatchRefused { fact: Some(DispatchRefusalFact::DirtyWriter), disk: None, reason: "TOKEN_SENTINEL".into() },
+            FacadeError::ConfinementRefused { resource: Some(ResourceFact::MemoryPressure { level: PressureLevel::Critical, threshold: PressureThreshold::Critical, origin: SettingSource::Configuration }) },
+            FacadeError::LaunchUnknown { operation_id: provenant_core::OperationId::parse("dispatch-17").unwrap() },
+        ] {
+            let projection = cause.diagnostic();
+            let uncertain = matches!(cause, FacadeError::LaunchUnknown { .. });
+            let run = advance(&document, &mut Refuse(cause), &mut MemoryJournal::default()).unwrap();
+            let target = super::unified::GraphTarget { graph: "invalid-fixture".into(), node: None, attempt: None };
+            let rows = super::unified::status_rows(&run, &target);
+            let node = rows.iter().find(|row| row["kind"] == "node").unwrap();
+            let reason = node["reason"].as_str().unwrap();
+            assert!(reason.contains(&projection.code));
+            assert!(reason.contains(projection.next.as_deref().unwrap()));
+            assert!(!reason.contains("TOKEN_SENTINEL"));
+            if uncertain {
+                assert!(reason.contains("dispatch-17"));
+                assert!(!reason.contains("provenant retry"));
+            }
+        }
+    }
     #[test]
     fn graph_accepts_preparation_failure_and_advances_fallback()
     -> Result<(), Box<dyn std::error::Error>> {
