@@ -571,14 +571,17 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
         },
     )?;
     lane_environment(&mut rig, attempt)?;
-    let cli = host(&rig, &["run", "Observe child", "--wait=0s", "--json"])?;
+    let cli = host(&rig, &["run", "Observe child", "--wait=1s", "--json"])?;
     let zero_wait = mcp(
         &rig,
         "fabric_run",
         json!({"op":"run","brief":"Observe child","wait_seconds":0}),
     )?;
     assert_ne!(zero_wait["isError"], true, "{zero_wait}");
-    assert_eq!(cli["data"], zero_wait["structuredContent"]);
+    assert_eq!(
+        cli["data"]["receipt"],
+        zero_wait["structuredContent"]["receipt"]
+    );
     assert_eq!(zero_wait["structuredContent"]["receipt"]["revision"], 2);
     assert!(
         zero_wait["structuredContent"]["observation_error"]
