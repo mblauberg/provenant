@@ -4190,16 +4190,13 @@ fn preset_bound_path_is_not_a_secret_but_prompt_is() -> Result<(), Box<dyn std::
             } else if explain {
                 assert!(output.status.success(), "{result}");
             } else {
-                // The isolated fixture refuses preparation before accepting
-                // a launch; the graph must retain that durable launch refusal.
                 assert!(result["data"]["graph_id"].is_string(), "{result}");
                 let node = &result["data"]["graph"]["checkpoint"]["nodes"][0];
-                assert_eq!(node["state"], "blocked", "{result}");
-                assert_eq!(node["advance_error_code"], "launch_refused", "{result}");
-                assert!(node["attempts"][0]["attempt_ref"].is_null(), "{result}");
-                // Graph `launched` seals dispatch intent before owner entry;
-                // the lane's durable evidence decides whether a provider ran.
-                assert_eq!(node["attempts"][0]["launched"], true, "{result}");
+                assert_eq!(
+                    node["attempts"][0]["outcome"], "adapter_unavailable",
+                    "{result}"
+                );
+                assert!(node["attempts"][0]["attempt_ref"].is_string(), "{result}");
                 let database = rusqlite::Connection::open_with_flags(
                     temp.path().join("state/run.sqlite3"),
                     rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

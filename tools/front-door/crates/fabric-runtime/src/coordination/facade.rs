@@ -596,6 +596,11 @@ impl FacadeError {
                 projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; gc.free_floor from {}; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.origin.description(), disk.reclaimed))
                     .next(format!("run `provenant gc --free-floor {}B` before dispatching a writer", disk.floor));
             }
+            Self::DispatchRefused { reason, .. } => {
+                projected = projected.detail(provenant_records::diagnostic::safe_text(
+                    &crate::hosts::plain_text(reason, 4096),
+                ));
+            }
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
             Self::HostDeliveryStage { stage } | Self::Io { delivery_stage: Some(stage), .. } => projected = projected.detail(format!("host writer delivery failed at {stage:?}")).next("inspect host delivery before retrying"),
             Self::Io { resource: Some(fact), .. } if matches!(fact.as_ref(), provenant_records::diagnostic::ResourceFact::Processes { .. }) => projected = fact.project(projected),
@@ -1243,6 +1248,19 @@ mod diagnostic_tests {
             !serde_json::to_string(&projected)
                 .unwrap()
                 .contains("TOKEN_SENTINEL")
+        );
+    }
+
+    #[test]
+    fn dispatch_refusal_projects_per_attempt_detail_safely() {
+        let error = FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: "attempt-7: policy refused\u{1b}".into(),
+        };
+        assert_eq!(
+            error.diagnostic().detail.as_deref(),
+            Some("attempt-7: policy refused")
         );
     }
 

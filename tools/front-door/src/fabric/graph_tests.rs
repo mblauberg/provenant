@@ -279,11 +279,11 @@ mod graph_writer_admission_tests {
         }
     }
     #[test]
-    fn graph_records_preparation_refusal_without_accepting_a_launch()
+    fn graph_accepts_preparation_failure_and_advances_fallback()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
         use provenant_fabric_runtime::graph::{self, GraphJournal, NodeState};
-        if super::peer_tests::host_test("fabric::graph_writer_admission_tests::graph_records_preparation_refusal_without_accepting_a_launch")? {
+        if super::peer_tests::host_test("fabric::graph_writer_admission_tests::graph_accepts_preparation_failure_and_advances_fallback")? {
             return Ok(());
         }
         struct Free;
@@ -306,7 +306,7 @@ mod graph_writer_admission_tests {
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":"refused-preparation", "nodes":[{
                 "id":"worker", "prompt":"review the fixture", "access":"read_only",
-                "route":{"adapter":"codex","model":"codex/gpt-6-luna","account":"unregistered-fixture"}
+                "routes":[{"adapter":"codex","model":"codex/gpt-6-luna","account":"unregistered-fixture"},{"adapter":"codex","model":"codex/gpt-6","account":"unregistered-fixture"}]
             }]
         }))?;
         let mut journal = graph::FileJournal::open(&roots.state, project, &document.graph_id, budget, &cancel, &factory.clock)?;
@@ -321,15 +321,18 @@ mod graph_writer_admission_tests {
         };
         let first = advance(&document, &mut owner, &mut journal)?;
         let node = &first.checkpoint.nodes[0];
-        assert_eq!(node.state, NodeState::Blocked);
-        assert_eq!(node.advance_error_code.as_deref(), Some("launch_refused"));
+        assert_eq!(node.state, NodeState::Failed);
+        assert_ne!(node.advance_error_code.as_deref(), Some("launch_refused"));
+        assert_eq!(node.attempts.len(), 2);
+        assert_eq!(node.attempts[0].key.route_index, 0);
+        assert_eq!(node.attempts[1].key.route_index, 1);
         assert!(node.launch_retry.is_none());
         // The graph seals dispatch intent before calling the owner. Provider
         // execution is proved separately by the durable run-lane record.
-        assert!(node.attempts.iter().all(|attempt| attempt.launched && attempt.attempt_ref.is_none()));
+        assert!(node.attempts.iter().all(|attempt| attempt.attempt_ref.is_some()));
         drop(journal);
         let saved = graph::FileJournal::read_checkpoint(&roots.state, project, &document.graph_id)?.ok_or("checkpoint")?;
-        assert_eq!(saved.nodes[0].state, NodeState::Blocked);
+        assert_eq!(saved.nodes[0].state, NodeState::Failed);
         assert_eq!(saved.nodes[0].advance_error_code, node.advance_error_code);
         let operation_id = graph_operation("graph-attempt-operation", &node.attempts[0].key)?;
         let binary = BinaryRunOwner { factory:&factory, allow_remote:true, actor:None, chair:None };
@@ -338,16 +341,41 @@ mod graph_writer_admission_tests {
         let operation = session.store.operation(&operation_id, &call)?.ok_or("durable operation")?;
         let run = session.store.run(operation.run_id, &call)?;
         // start() skips this saved terminal attempt, so an identical replay
-        // has an empty Started batch and must still refuse by durable evidence.
+        // has an empty Started batch and still accepts its terminal target.
         let replayed = binary.with_edge(|edge| provenant_cli::run::launch(&session, run.run_id, edge, &call))?;
         assert!(replayed.is_empty());
-        assert!(matches!(binary.receipt(&session, operation_id.clone(), &run, &replayed, &call), Err(FacadeError::DispatchRefused { .. })));
+        let replay_receipt = binary.receipt(&session, operation_id.clone(), &run, &replayed, &call)?;
+        assert!(!replay_receipt.targets.is_empty());
         let lanes = session.service().lanes(&provenant_run::LaneQuery {
             targets:vec![provenant_run::LaneTarget {run:run.run_id,task:None,attempt:None}],
             all:true,limit:100,after:0,newest_first:false,owner:None,unseen_after:None,
         }, &call)?.lanes;
-        assert!(durable_launch_refusal(&lanes).is_some());
+        assert!(durable_launch_refusal(&lanes).is_none());
         assert!(lanes.iter().all(|lane| lane.provider_launched == Some(false)));
+        for cause in [provenant_records::run::TerminalCause::DiskFloor, provenant_records::run::TerminalCause::DiskObservationUnavailable, provenant_records::run::TerminalCause::RetainedWriterImport] {
+            let mut refused = lanes[0].clone();
+            if let provenant_records::run::AttemptState::Terminal { extra, .. } = &mut refused.state {
+                extra.insert("terminal_cause".into(), serde_json::to_value(cause)?);
+            }
+            assert!(durable_launch_refusal(&[refused.clone()]).is_some());
+            assert!(durable_launch_refusal(&[refused, lanes[0].clone()]).is_none());
+        }
+        let mut pacing = lanes[0].clone();
+        pacing.skipped_routes.push(provenant_records::run::SkippedRoute {
+            extra: Default::default(), route: "codex/gpt-6-luna".into(),
+            kind: provenant_records::run::SkipKind::Unavailable,
+            cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
+            detail: "pacing reserve".into(),
+        });
+        assert!(durable_launch_refusal(&[pacing.clone()]).is_some());
+        assert!(durable_launch_refusal(&[pacing, lanes[0].clone()]).is_none());
+        // child_reason is a Preparation refusal even though its cause names
+        // access policy. Persist that exact producer shape and replay it.
+        let mut child_preparation = lanes[0].clone();
+        if let provenant_records::run::AttemptState::Terminal { extra, .. } = &mut child_preparation.state {
+            extra.insert("terminal_cause".into(), serde_json::to_value(provenant_records::run::TerminalCause::AccessPolicyRefused)?);
+        }
+        assert!(durable_launch_refusal(&[child_preparation.clone()]).is_none());
         let mut launched_failure = lanes[0].clone();
         launched_failure.provider_launched = Some(true);
         if let provenant_records::run::AttemptState::Terminal { outcome, .. } = &mut launched_failure.state {
@@ -363,7 +391,7 @@ mod graph_writer_admission_tests {
             provenant_run::RefusalKind::RetainedImport { run:run.run_id, attempt, worktree:rig.project.clone() },
         ] {
             let started = [provenant_run::Started::Refused { attempt, reason:"typed refusal".into(), kind }];
-            assert!(matches!(binary.receipt(&session, operation_id.clone(), &run, &started, &call), Err(FacadeError::DispatchRefused { .. })));
+            assert!(matches!(binary.receipt(&session, operation_id.clone(), &run, &started, &call), Err(FacadeError::DispatchRefused { reason, .. }) if reason.contains("typed refusal") || reason.contains("retained")));
         }
         let blocked = [provenant_run::Started::Blocked { attempt, error:"custody retained".into() }];
         assert!(matches!(binary.receipt(&session, operation_id.clone(), &run, &blocked, &call), Err(FacadeError::DispatchRefused { .. })));
