@@ -110,7 +110,7 @@ fn composite_batch_keeps_each_lanes_route_and_binding() {
     let expansion = expand_composite(
         &layers,
         "big-batch",
-        &json!({"integration_branch":"batch/feature"}),
+        &json!({"integration_branch":"batch/feature", "worktree":"/repo/integration", "write_scope":["src/core", "src/api"]}),
         &lanes,
         &resolvers(),
     )
@@ -122,6 +122,7 @@ fn composite_batch_keeps_each_lanes_route_and_binding() {
     assert_eq!(members[1]["worktree"], "/repo/api");
     assert_eq!(members[1]["prompt"], "Implement the API");
     assert_eq!(members[0]["delivery"], "integrate:batch/feature");
+    assert_batch_repair_binding(&expansion.document);
 }
 
 #[test]
@@ -275,6 +276,8 @@ fn production_selection_uses_composites_parameters_and_host_panel_routes() {
             .contains("Review this brief")
     );
     let mut params = params;
+    params.push(("worktree".into(), json!("/repo/integration")));
+    params.push(("write_scope".into(), json!(["src/core", "src/api"])));
     params.push((
         "lanes".into(),
         json!([
@@ -298,6 +301,16 @@ fn production_selection_uses_composites_parameters_and_host_panel_routes() {
         ["nodes"];
     assert_eq!(panel[0]["route"]["alias"], "principal");
     assert_eq!(panel[1]["route"]["alias"], "junior");
+    assert_batch_repair_binding(&batch.document);
+}
+
+fn assert_batch_repair_binding(document: &Value) {
+    let repair = &document["nodes"][0]["composite"]["nodes"][2];
+    assert_eq!(repair["id"], "repair");
+    let fix = &repair["composite"]["nodes"][0]["loop"]["body"][0];
+    assert_eq!(fix["id"], "fix");
+    assert_eq!(fix["worktree"], "/repo/integration");
+    assert_eq!(fix["write_scope"], json!(["src/core", "src/api"]));
 }
 
 #[test]
