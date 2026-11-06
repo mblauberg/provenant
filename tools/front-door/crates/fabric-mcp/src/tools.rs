@@ -141,6 +141,20 @@ impl ChairInput {
 }
 
 pub trait McpFacade: F3Facade {
+    /// A lane launch is a graph mutation owned by its host. Production composition
+    /// forwards this to the CLI's `graph_relay::from_lane`.
+    fn add_from_lane(
+        &mut self,
+        _operation: &provenant_fabric_runtime::graph::relay::RelayOp,
+        _cancel: &CancelToken,
+        _within: std::time::Duration,
+    ) -> Result<Value, ServiceError> {
+        Err(ServiceError::Cli {
+            code: "graph_relay_unavailable".into(),
+            message: "lane graph relay unavailable".into(),
+            data: Value::Null,
+        })
+    }
     fn inbox_owner(
         &mut self,
         input: InboxInput,
@@ -842,6 +856,24 @@ impl ToolCall {
                 .map_err(ServiceError::Invalid)?;
         }
         if service.in_lane
+            && let Self::Submit(input) | Self::SubmitWait(input, ..) = &self
+        {
+            let operations = lane_children(input)?;
+            let mut children = Vec::with_capacity(operations.len());
+            for operation in operations {
+                children.push(service.facade.add_from_lane(
+                    &operation,
+                    cancel,
+                    std::time::Duration::from_secs(crate::MAX_WAIT_SECONDS),
+                )?);
+            }
+            return service.limit_response(
+                response(self.name(), serde_json::json!({"children": children})),
+                true,
+                false,
+            );
+        }
+        if service.in_lane
             && service.lane_relay_reads
             && self.lane_observation()
             && service.lane_relay.is_none()
@@ -1493,6 +1525,77 @@ impl ServiceError {
         );
         detail
     }
+}
+
+/// Validate the whole submission before the first host mutation. Each task has
+/// a stable local ID and key, so retrying after a lost reply cannot add it twice.
+fn lane_children(
+    input: &SubmitInput,
+) -> Result<Vec<provenant_fabric_runtime::graph::relay::RelayOp>, ServiceError> {
+    use provenant_fabric_runtime::graph::{
+        AccessMode,
+        relay::{ChildRequest, RelayOp},
+    };
+    use provenant_records::run::RequestedRoute;
+    let SubmitInput::Submit {
+        operation_id,
+        tasks,
+        host,
+        knobs,
+        concurrency,
+        ..
+    } = input;
+    let invalid = || ServiceError::Cli {
+        code: "invalid_input".into(),
+        message: "unsupported lane launch controls; use a named tier and host-managed worktree"
+            .into(),
+        data: Value::Null,
+    };
+    if host.is_some() || !knobs.is_empty() || concurrency.is_some() {
+        return Err(invalid());
+    }
+    let digest =
+        provenant_records::CanonicalV1::file_digest(operation_id.as_str().as_bytes()).to_string();
+    tasks
+        .iter()
+        .enumerate()
+        .map(|(index, task)| {
+            let RequestedRoute::Named {
+                name, effort: None, ..
+            } = &task.route
+            else {
+                return Err(invalid());
+            };
+            if !task.extra.is_empty()
+                || !task.capability_sources.is_empty()
+                || task.account.is_some()
+                || task.capabilities.is_some()
+                || task.worktree.is_some()
+                || task.new_worktree.is_some()
+                || task.deliver.is_some()
+                || task.delivery_id.is_some()
+                || task.build_heavy
+                || task.require_skill_location
+                || task.context.is_some()
+                || task.base.is_some()
+                || task.head.is_some()
+            {
+                return Err(invalid());
+            }
+            Ok(RelayOp::Add(ChildRequest {
+                id: format!("child-{}-{index}", &digest[7..23]),
+                template: "task".into(),
+                brief: task.prompt.clone(),
+                tier: Some(name.clone()),
+                timeout_seconds: Some(task.timeout_seconds),
+                writer: task.access == AccessMode::WorktreeWrite,
+                write_scope: Vec::new(),
+                detached: false,
+                idempotency_key: format!("fabric-run-{}-{index}", &digest[7..]),
+                reason: Some("fabric_run".into()),
+            }))
+        })
+        .collect()
 }
 
 fn new_operation_id() -> Result<String, provenant_fabric_runtime::coordination::CoordinationError> {

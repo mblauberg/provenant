@@ -37,8 +37,14 @@ pub fn host_budget(
 pub const GRAPH_TOOL: &str = "graph";
 
 /// Host handler for graph frames: arguments, cancellation, caller budget.
-pub trait GraphHandler: Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync {}
-impl<T: Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync> GraphHandler for T {}
+pub trait GraphHandler:
+    Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync
+{
+}
+impl<T: Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync> GraphHandler
+    for T
+{
+}
 
 fn no_graph(_: Value, _: &CancelToken, _: Duration) -> Result<Value, ServiceError> {
     Err(ServiceError::Cli {
@@ -616,7 +622,10 @@ mod tests {
             let id = arguments["id"].as_str().unwrap_or_default();
             Ok(serde_json::json!({"node": format!("a--{id}"), "replayed": false}))
         };
-        let call = |id: &str, graph_handler: &(dyn Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync)| {
+        let call = |id: &str,
+                    graph_handler: &(
+                         dyn Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync
+                     )| {
             let (mut client, mut server) = UnixStream::pair()?;
             thread::scope(|scope| {
                 let serving = scope.spawn(|| {
@@ -624,7 +633,9 @@ mod tests {
                         &mut server,
                         provenant_records::Limits::CONFIG,
                         &|_, _, _| Err(FacadeError::StateCorrupt.into()),
-                        &|arguments, cancel: &CancelToken, within| graph_handler(arguments, cancel, within),
+                        &|arguments, cancel: &CancelToken, within| {
+                            graph_handler(arguments, cancel, within)
+                        },
                         &CancelToken::new(),
                     )
                 });
@@ -638,9 +649,15 @@ mod tests {
             })
         };
         assert_eq!(call("fix", &graph_handler)??["node"], "a--fix");
-        assert_eq!(call("deep", &graph_handler)?.unwrap_err().code(), "child_depth");
+        assert_eq!(
+            call("deep", &graph_handler)?.unwrap_err().code(),
+            "child_depth"
+        );
         // A relay without a graph refuses graph frames before any effect.
-        assert_eq!(call("fix", &no_graph)?.unwrap_err().code(), "graph_relay_unavailable");
+        assert_eq!(
+            call("fix", &no_graph)?.unwrap_err().code(),
+            "graph_relay_unavailable"
+        );
         Ok(())
     }
 
