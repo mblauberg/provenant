@@ -606,6 +606,13 @@ fn grant_exec_path(git: &Path, spec: &mut LaunchSpec) {
         Some(core) => {
             spec.profile.spec.runtime_reads.push(subtree(&core));
             spec.profile.spec.tool_exec_roots.push(subtree(core));
+            if let Some(git) = crate::lane::developer_git_for_exec_path(&raw) {
+                if let Some(bin) = git.parent() {
+                    spec.profile.spec.runtime_reads.push(subtree(bin));
+                    spec.profile.spec.tool_exec_roots.push(subtree(bin));
+                }
+                spec.profile.spec.process_executables.push(exact(git));
+            }
         }
         None => {
             if !spec
