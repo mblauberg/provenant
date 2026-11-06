@@ -83,10 +83,6 @@ struct FakeOwner {
     family_pool: Vec<String>,
     prior_attempts: Vec<Vec<String>>,
     models: std::collections::BTreeMap<String, String>,
-    review_expansion: Option<Expansion>,
-    review_calls: usize,
-    simple_review: bool,
-    review_requested_bases: Vec<Option<String>>,
     require_distinct: Vec<bool>,
     skill_requirements: Vec<bool>,
     deadlines: Vec<Option<u64>>,
@@ -179,36 +175,6 @@ impl AttemptOwner for FakeOwner {
         Ok(self.fallback_cause.clone())
     }
 
-    fn resolve_review(
-        &mut self,
-        node: &GraphNode,
-        _subject: &str,
-    ) -> Result<Expansion, ReviewResolveError> {
-        self.review_calls += 1;
-        self.review_requested_bases.push(
-            node.extra
-                .get("review_base")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
-        );
-        if self.simple_review {
-            let root = format!("{}--r", node.id);
-            let group = format!("{root}--p");
-            let lens = format!("{group}--lens");
-            return serde_json::from_value(serde_json::json!({
-                "source":node.id, "continuation":false, "patterns":[],
-                "review":{"subject":_subject,"base":"2".repeat(40),"measured_size":"small","shape":"quick","source":"fixture"},
-                "nodes":[
-                    {"id":root,"kind":"composite","access":"read_only","depends_on":node.depends_on,"composite":{"nodes":[],"exports":[{"node":group,"outputs":["result","findings","verdict","commit"]}]}},
-                    {"id":group,"kind":"composite","access":"read_only","depends_on":node.depends_on,"composite":{"nodes":[],"min_successful":1,"reduce_verdict":true,"exports":[{"node":lens,"outputs":["result","findings","commit"]}]}},
-                    {"id":lens,"access":"read_only","prompt":"review","depends_on":node.depends_on,"source":{"type":"commit","commit":_subject},"route":{"alias":"senior"}}
-                ]
-            })).map_err(|error| ReviewResolveError::Failed(error.to_string()));
-        }
-        self.review_expansion
-            .clone()
-            .ok_or(ReviewResolveError::Unsupported)
-    }
     fn bind_writer_worktree(
         &mut self,
         worktree: &str,
@@ -435,7 +401,6 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
     GraphNode {
         attempt: None,
         attachments: Vec::new(),
-        review: None,
         family_group: None,
         context: None,
         extra: Default::default(),
@@ -758,413 +723,6 @@ fn separation_run(
     )
     .unwrap();
     (owner, run.checkpoint)
-}
-
-// A graph admitted near the checkpoint boundary must also fit the first
-// deferred panel. The padding makes the boundary reproducible without pinning
-// an incidental estimate or the number of bytes in a particular preset.
-#[test]
-fn admitted_deferred_review_fits_checkpoint_after_expansion() {
-    let oid = "1".repeat(40);
-    let mut review = node("review", route("first"));
-    review.kind = Some(NodeKind::Plan);
-    review.route = None;
-    review.source = Some(SourceBinding::Commit {
-        commit: oid.clone(),
-    });
-    review.review = Some(ReviewSpec {
-        shape: None,
-        risk_tier: Some("crucial".into()),
-        kind: None,
-        size: None,
-        risk_tags: vec![],
-        worktree: None,
-        lenses: vec![],
-        min_successful: Some(1),
-        reduce_verdict: false,
-        export_first: vec![],
-        max_nodes: 2,
-    });
-    let mut nodes = vec![review];
-    for i in 0..9 {
-        let mut item = node(&format!("disposition-{i}"), route("first"));
-        item.dispositions = vec!["accepted".into()];
-        nodes.push(item);
-    }
-    let mut document = graph(nodes);
-    document.schema_version = 2;
-    document
-        .extra
-        .insert("padding".into(), serde_json::json!(""));
-    let limits = crate::config::GraphLimits::default();
-    let expanded = loops::expand(&document, &[], &limits).unwrap();
-    let plan = validate_flat_plan(&expanded, &limits).unwrap().0;
-    let initial = envelope::checkpoint_bound(&document, &[], &[], &plan);
-    let padding = (MAX_CHECKPOINT_BYTES as usize)
-        .checked_sub(initial + 1)
-        .unwrap();
-    document
-        .extra
-        .insert("padding".into(), serde_json::json!("x".repeat(padding)));
-
-    document.admit(&limits).unwrap();
-    let mut root = node("review--review", route("first"));
-    root.kind = Some(NodeKind::Composite);
-    root.route = None;
-    root.prompt.clear();
-    let mut lens = node("lens", route("first"));
-    lens.source = Some(SourceBinding::Commit {
-        commit: oid.clone(),
-    });
-    root.composite = Some(CompositeSpec {
-        reduce_verdict: false,
-        min_successful: Some(1),
-        nodes: vec![lens],
-        exports: vec![GraphInput {
-            required_outputs: Vec::new(),
-            extra: Default::default(),
-            node: "lens".into(),
-            outputs: vec![OutputKind::Result],
-        }],
-    });
-    let expansion = Expansion {
-        review: Some(ReviewResolution {
-            subject: oid.parse().unwrap(),
-            base: oid.parse().unwrap(),
-            measured_size: "small".into(),
-            shape: "deep".into(),
-            source: "fixture".into(),
-            substitutions: Vec::new(),
-        }),
-        extra: Default::default(),
-        source: "review".into(),
-        continuation: false,
-        nodes: composites::expand(&graph(vec![root]), &plans::generous())
-            .unwrap()
-            .nodes,
-        uses: vec![],
-        patch: None,
-    };
-    let mut owner = FakeOwner {
-        review_expansion: Some(expansion),
-        family_pool: vec!["fixture".into()],
-        ..Default::default()
-    };
-    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    let review = run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "review")
-        .unwrap();
-    assert!(review.advance_error.is_none(), "{:?}", review.advance_error);
-    assert!(
-        run.checkpoint
-            .expansions
-            .iter()
-            .any(|expansion| expansion.source == "review")
-    );
-}
-
-#[test]
-fn deferred_review_journals_and_replays_without_resolving_again() {
-    let oid = "1".repeat(40);
-    let mut review = node("review", route("first"));
-    review.kind = Some(NodeKind::Plan);
-    review.route = None;
-    review.source = Some(SourceBinding::Commit {
-        commit: oid.clone(),
-    });
-    review.review = Some(ReviewSpec {
-        shape: None,
-        risk_tier: None,
-        kind: None,
-        size: None,
-        risk_tags: vec![],
-        worktree: None,
-        lenses: vec![],
-        min_successful: Some(1),
-        reduce_verdict: false,
-        export_first: vec![],
-        max_nodes: 3,
-    });
-    let mut outer = node("outer", route("first"));
-    outer.kind = Some(NodeKind::Composite);
-    outer.route = None;
-    outer.prompt.clear();
-    outer.composite = Some(CompositeSpec {
-        reduce_verdict: false,
-        min_successful: Some(1),
-        nodes: vec![review],
-        exports: vec![GraphInput {
-            required_outputs: Vec::new(),
-            extra: Default::default(),
-            node: "review".into(),
-            outputs: vec![OutputKind::Result, OutputKind::Findings],
-        }],
-    });
-    let mut synthesis = node("synthesis", route("first"));
-    synthesis.depends_on = vec!["outer".into()];
-    synthesis.inputs = vec![GraphInput {
-        required_outputs: Vec::new(),
-        extra: Default::default(),
-        node: "outer".into(),
-        outputs: vec![OutputKind::Findings],
-    }];
-    synthesis.dispositions = vec!["accepted".into()];
-    let mut document = graph(vec![outer, synthesis]);
-    document.schema_version = 2;
-    let unsupported = advance(
-        &document,
-        &mut FakeOwner::default(),
-        &mut MemoryJournal::default(),
-    )
-    .unwrap();
-    let failed = unsupported
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "outer--review")
-        .unwrap();
-    assert_eq!(
-        failed.advance_error_code.as_deref(),
-        Some("review_resolution_unsupported")
-    );
-    let mut root = node("outer--review--review", route("first"));
-    root.kind = Some(NodeKind::Composite);
-    root.route = None;
-    root.prompt.clear();
-    let mut lens = node("lens", route("first"));
-    lens.source = Some(SourceBinding::Commit {
-        commit: oid.clone(),
-    });
-    root.composite = Some(CompositeSpec {
-        reduce_verdict: false,
-        min_successful: Some(1),
-        nodes: vec![lens],
-        exports: vec![GraphInput {
-            required_outputs: Vec::new(),
-            extra: Default::default(),
-            node: "lens".into(),
-            outputs: vec![OutputKind::Result, OutputKind::Findings],
-        }],
-    });
-    let expanded = composites::expand(&graph(vec![root]), &plans::generous()).unwrap();
-    let mut addition = Expansion {
-        review: Some(ReviewResolution {
-            subject: oid.parse().unwrap(),
-            base: oid.parse().unwrap(),
-            measured_size: "small".into(),
-            shape: "quick".into(),
-            source: "fixture".into(),
-            substitutions: Vec::new(),
-        }),
-        extra: Default::default(),
-        source: "outer--review".into(),
-        continuation: false,
-        nodes: expanded.nodes,
-        uses: vec![],
-        patch: None,
-    };
-    let mut invalid = addition.clone();
-    invalid.review = None;
-    let invalid_run = advance(
-        &document,
-        &mut FakeOwner {
-            review_expansion: Some(invalid),
-            ..Default::default()
-        },
-        &mut MemoryJournal::default(),
-    )
-    .unwrap();
-    let failed = invalid_run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "outer--review")
-        .unwrap();
-    assert_eq!(
-        failed.advance_error_code.as_deref(),
-        Some("review_resolution_failed")
-    );
-    assert!(invalid_run.checkpoint.expansions.is_empty());
-    // An independently resolved panel can exceed the remaining checkpoint
-    // budget; its error must retain the projection and the remedy.
-    let mut oversized = addition.clone();
-    oversized
-        .nodes
-        .iter_mut()
-        .find(|node| node.composite.is_none())
-        .unwrap()
-        .extra
-        .insert(
-            "fixture_padding".into(),
-            serde_json::json!(vec!["x".repeat(4096); MAX_CHECKPOINT_BYTES as usize / 4096]),
-        );
-    let invalid_run = advance(
-        &document,
-        &mut FakeOwner {
-            review_expansion: Some(oversized),
-            ..Default::default()
-        },
-        &mut MemoryJournal::default(),
-    )
-    .unwrap();
-    let error = invalid_run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "outer--review")
-        .unwrap()
-        .advance_error
-        .as_deref()
-        .unwrap();
-    assert!(error.contains("node outer--review:"), "{error}");
-    let projected = error
-        .split_once("graph checkpoint could reach ")
-        .and_then(|(_, rest)| rest.split_once(" bytes"))
-        .and_then(|(size, _)| size.parse::<u64>().ok())
-        .expect("the error names the projected checkpoint size");
-    assert!(projected > MAX_CHECKPOINT_BYTES, "{error}");
-    assert!(
-        error.contains(&format!("{MAX_CHECKPOINT_BYTES}-byte limit")),
-        "{error}"
-    );
-    assert!(
-        error.contains("split the graph into smaller batches"),
-        "{error}"
-    );
-
-    let mut too_long = addition.clone();
-    let long_id = format!("outer--review--review--{}", "x".repeat(200));
-    too_long
-        .nodes
-        .iter_mut()
-        .find(|node| node.composite.is_none())
-        .unwrap()
-        .id = long_id.clone();
-    too_long
-        .nodes
-        .iter_mut()
-        .find_map(|node| node.composite.as_mut())
-        .unwrap()
-        .exports[0]
-        .node = long_id.clone();
-    let invalid_run = advance(
-        &document,
-        &mut FakeOwner {
-            review_expansion: Some(too_long),
-            ..Default::default()
-        },
-        &mut MemoryJournal::default(),
-    )
-    .unwrap();
-    let error = invalid_run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "outer--review")
-        .unwrap()
-        .advance_error
-        .as_deref()
-        .unwrap();
-    assert!(error.contains(&long_id), "{error}");
-    assert!(error.contains("200 ASCII"), "{error}");
-    assert!(error.contains("shorten"), "{error}");
-
-    let mut duplicate = addition.clone();
-    duplicate.nodes.push(
-        duplicate
-            .nodes
-            .iter()
-            .find(|node| node.composite.is_none())
-            .unwrap()
-            .clone(),
-    );
-    let invalid_run = advance(
-        &document,
-        &mut FakeOwner {
-            review_expansion: Some(duplicate),
-            ..Default::default()
-        },
-        &mut MemoryJournal::default(),
-    )
-    .unwrap();
-    let error = invalid_run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "outer--review")
-        .unwrap()
-        .advance_error
-        .as_deref()
-        .unwrap();
-    assert!(error.contains("outer--review--review--lens"), "{error}");
-    assert!(error.contains("duplicated"), "{error}");
-
-    addition.review.as_mut().unwrap().source = "\u{1}".repeat(MAX_ADVANCE_ERROR_BYTES);
-    let mut owner = FakeOwner {
-        review_expansion: Some(addition),
-        observations: [
-            AttemptObservation::Pending {
-                attempt_ref: Some("h/1".into()),
-            },
-            terminal_from(&findings_text(&entry("")), "h/1"),
-            terminal_with_result(
-                AttemptOutcome::Succeeded,
-                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
-            ),
-        ]
-        .into(),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    let first = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(first.checkpoint.expansions.len(), 1);
-    let source = &first.checkpoint.expansions[0]
-        .review
-        .as_ref()
-        .unwrap()
-        .source;
-    assert!(source.ends_with("[truncated]"));
-    assert!(encoded_len(source) <= MAX_ADVANCE_ERROR_BYTES);
-    assert_eq!(owner.review_calls, 1);
-    journal.0 = Some(
-        serde_json::from_str(&serde_json::to_string(journal.0.as_ref().unwrap()).unwrap()).unwrap(),
-    );
-    let completed = resume(&document, &mut owner, &mut journal).unwrap();
-    assert!(completed.checkpoint.successful());
-    let outer = completed
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "outer")
-        .unwrap();
-    assert_eq!(
-        outer
-            .outputs
-            .as_ref()
-            .unwrap()
-            .result
-            .as_ref()
-            .unwrap()
-            .excerpt,
-        findings_text(&entry(""))
-    );
-    let synthesis = completed
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "synthesis")
-        .unwrap();
-    let finding = &synthesis.outputs.as_ref().unwrap().findings[0];
-    assert_eq!(
-        (finding.file.as_str(), finding.summary.as_str()),
-        ("a.rs", "s")
-    );
-    assert_eq!(finding.disposition.as_deref(), Some("accepted"));
-    assert_eq!(finding.reason.as_deref(), Some("verified"));
-    assert_eq!(owner.review_calls, 1);
 }
 
 #[test]
@@ -5857,7 +5415,6 @@ fn gate_only_graph_obeys_structural_limits_before_evaluating() {
             extra: Default::default(),
         }),
         GraphNode {
-            review: None,
             family_group: None,
             id: "second".into(),
             ..gate_node(GateCondition::Budget {
@@ -7193,7 +6750,6 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
     let document = graph(vec![GraphNode {
         attempt: None,
         attachments: Vec::new(),
-        review: None,
         family_group: None,
         context: None,
         extra: Default::default(),
@@ -7471,7 +7027,6 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
         let document = graph(vec![GraphNode {
             attempt: None,
             attachments: Vec::new(),
-            review: None,
             family_group: None,
             context: None,
             extra: Default::default(),
@@ -8110,7 +7665,6 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
     let document = graph(vec![GraphNode {
         attempt: None,
         attachments: Vec::new(),
-        review: None,
         family_group: None,
         context: None,
         extra: Default::default(),
@@ -8280,188 +7834,6 @@ fn uncertain_review_launch_does_not_substitute() {
     assert_eq!(
         run.checkpoint.nodes[0].attempts[0].state,
         AttemptState::Unresolved
-    );
-}
-
-#[test]
-fn deferred_lens_substitution_keeps_panel_topology() {
-    let oid = "1".repeat(40);
-    let mut review = node("review", route("first"));
-    review.kind = Some(NodeKind::Plan);
-    review.route = None;
-    review.source = Some(SourceBinding::Commit {
-        commit: oid.clone(),
-    });
-    review.review = Some(ReviewSpec {
-        shape: None,
-        risk_tier: None,
-        kind: None,
-        size: None,
-        risk_tags: vec![],
-        worktree: None,
-        lenses: vec![],
-        min_successful: Some(1),
-        reduce_verdict: false,
-        export_first: vec![],
-        max_nodes: 2,
-    });
-    let mut verifier = node("verify", route("first"));
-    verifier.role = Some("review.verify".into());
-    verifier.route = None;
-    verifier.routes = Some(vec![route("first"), route("second")]);
-    verifier.depends_on.push("review".into());
-    let mut document = graph(vec![review, verifier]);
-    document.schema_version = 2;
-    let mut root = node("review--review", route("first"));
-    root.kind = Some(NodeKind::Composite);
-    root.route = None;
-    root.prompt.clear();
-    let mut lens = node("lens", route("first"));
-    lens.role = Some("lens.tests".into());
-    lens.route = None;
-    lens.routes = Some(vec![route("first"), route("second")]);
-    lens.source = Some(SourceBinding::Commit {
-        commit: oid.clone(),
-    });
-    root.composite = Some(CompositeSpec {
-        min_successful: Some(1),
-        reduce_verdict: false,
-        nodes: vec![lens],
-        exports: vec![GraphInput {
-            extra: Default::default(),
-            node: "lens".into(),
-            outputs: vec![OutputKind::Result],
-            required_outputs: Vec::new(),
-        }],
-    });
-    let expansion = Expansion {
-        review: Some(ReviewResolution {
-            subject: oid.parse().unwrap(),
-            base: oid.parse().unwrap(),
-            measured_size: "small".into(),
-            shape: "quick".into(),
-            source: "fixture".into(),
-            substitutions: Vec::new(),
-        }),
-        extra: Default::default(),
-        source: "review".into(),
-        continuation: false,
-        nodes: composites::expand(&graph(vec![root]), &plans::generous())
-            .unwrap()
-            .nodes,
-        uses: vec![],
-        patch: None,
-    };
-    let count = expansion.nodes.len();
-    let mut forged = expansion.clone();
-    forged
-        .review
-        .as_mut()
-        .unwrap()
-        .substitutions
-        .push(ReviewSubstitution {
-            member: "review--review--lens".into(),
-            route_index: 1,
-        });
-    let rejected = advance(
-        &document,
-        &mut FakeOwner {
-            review_expansion: Some(forged),
-            ..Default::default()
-        },
-        &mut MemoryJournal::default(),
-    )
-    .unwrap();
-    assert_eq!(
-        rejected.checkpoint.nodes[0].advance_error_code.as_deref(),
-        Some("review_resolution_failed")
-    );
-    let mut owner = FakeOwner {
-        review_expansion: Some(expansion),
-        observations: VecDeque::from([
-            terminal(AttemptOutcome::TaskFailed),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
-            terminal(AttemptOutcome::TaskFailed),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
-        ]),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.checkpoint.expansions[0].nodes.len(), count);
-    let expanded = plans::expand(
-        &document,
-        &[],
-        &run.checkpoint.expansions,
-        &plans::generous(),
-    )
-    .unwrap();
-    let (plan, _) = validate_flat_plan(&expanded, &plans::generous()).unwrap();
-    assert!(
-        canonical_len(&run.checkpoint)
-            <= graph_envelope_bound(&document, &run.checkpoint.expansions, &[], &plan)
-    );
-    let lens = run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id.ends_with("--lens"))
-        .unwrap();
-    assert_eq!(lens.state, NodeState::Succeeded);
-    assert_eq!(lens.attempts.len(), 2);
-    assert!(lens.attempts[1].review_substitution);
-    assert_eq!(
-        run.checkpoint.expansions[0]
-            .review
-            .as_ref()
-            .unwrap()
-            .substitutions,
-        vec![
-            ReviewSubstitution {
-                member: lens.id.clone(),
-                route_index: 1
-            },
-            ReviewSubstitution {
-                member: "verify".into(),
-                route_index: 1
-            }
-        ]
-    );
-    assert_eq!(
-        advance(&document, &mut FakeOwner::default(), &mut journal)
-            .unwrap()
-            .checkpoint,
-        run.checkpoint
-    );
-    journal.0.as_mut().unwrap().expansions[0]
-        .review
-        .as_mut()
-        .unwrap()
-        .substitutions
-        .clear();
-    assert!(advance(&document, &mut FakeOwner::default(), &mut journal).is_err());
-    let mut expansion = run.checkpoint.expansions[0].clone();
-    expansion.review.as_mut().unwrap().substitutions.clear();
-    let mut owner = FakeOwner {
-        review_expansion: Some(expansion),
-        observations: VecDeque::from([
-            preparation_refusal("host/first", AttemptOutcome::AdapterUnavailable),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
-        ]),
-        ..Default::default()
-    };
-    let prepared = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(
-        prepared.checkpoint.expansions[0]
-            .review
-            .as_ref()
-            .unwrap()
-            .substitutions,
-        vec![ReviewSubstitution {
-            member: lens.id.clone(),
-            route_index: 1
-        }]
     );
 }
 
@@ -11152,330 +10524,6 @@ fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
 }
 
 #[test]
-fn review_plan_schema_validation() {
-    let mut reader = node("reader", route("first"));
-    reader.kind = Some(NodeKind::Plan);
-    reader.source = Some(SourceBinding::Commit {
-        commit: "1".repeat(40),
-    });
-    reader.review = Some(ReviewSpec {
-        shape: None,
-        risk_tier: None,
-        kind: None,
-        size: None,
-        risk_tags: vec![],
-        worktree: None,
-        lenses: vec![],
-        min_successful: None,
-        reduce_verdict: false,
-        export_first: vec![],
-        max_nodes: 4,
-    });
-    let mut document = graph(vec![reader]);
-    assert!(validate_plan(&document).is_err());
-    document.schema_version = 2;
-    assert!(validate_plan(&document).is_ok());
-    document.nodes[0].source = None;
-    assert!(validate_plan(&document).is_err());
-    document.nodes[0].source = Some(SourceBinding::Commit {
-        commit: "1".repeat(40),
-    });
-    document.nodes[0].kind = None;
-    assert!(validate_plan(&document).is_err());
-}
-
-#[test]
-fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_lens() {
-    let oid = "1".repeat(40);
-    for invalid in [false, true] {
-        let mut review = node("review", route("first"));
-        review.kind = Some(NodeKind::Plan);
-        review.extra.insert(
-            "review_base".into(),
-            serde_json::json!("moving-review-base"),
-        );
-        review.route = None;
-        review.source = Some(SourceBinding::Commit {
-            commit: oid.clone(),
-        });
-        review.review = Some(ReviewSpec {
-            shape: None,
-            risk_tier: None,
-            kind: None,
-            size: None,
-            risk_tags: vec![],
-            worktree: None,
-            lenses: vec![],
-            min_successful: Some(0),
-            reduce_verdict: false,
-            export_first: vec![],
-            max_nodes: 9,
-        });
-        let mut root = node("review--review", route("first"));
-        root.kind = Some(NodeKind::Composite);
-        root.route = None;
-        root.prompt.clear();
-        let lenses: Vec<_> = (0..8)
-            .map(|i| {
-                let mut lens = node(&format!("lens-{i}"), route("first"));
-                lens.require_findings = true;
-                lens
-            })
-            .collect();
-        root.composite = Some(CompositeSpec {
-            reduce_verdict: false,
-            min_successful: Some(7),
-            exports: lenses
-                .iter()
-                .map(|lens| GraphInput {
-                    required_outputs: Vec::new(),
-                    extra: Default::default(),
-                    node: lens.id.clone(),
-                    outputs: vec![OutputKind::Result, OutputKind::Findings],
-                })
-                .collect(),
-            nodes: lenses,
-        });
-        let mut nodes = composites::expand(&graph(vec![root]), &plans::generous())
-            .unwrap()
-            .nodes;
-        for member in nodes.iter_mut().filter(|member| member.composite.is_none()) {
-            member.source = Some(SourceBinding::Commit {
-                commit: oid.clone(),
-            });
-        }
-        let addition = Expansion {
-            review: Some(ReviewResolution {
-                subject: oid.parse().unwrap(),
-                base: "2".repeat(40).parse().unwrap(),
-                measured_size: "small".into(),
-                shape: "deep".into(),
-                source: "fixture".into(),
-                substitutions: Vec::new(),
-            }),
-            extra: Default::default(),
-            source: "review".into(),
-            continuation: false,
-            nodes,
-            uses: vec![],
-            patch: None,
-        };
-        let mut evaluate = node("evaluate", route("first"));
-        evaluate.depends_on = vec!["review".into()];
-        evaluate.inputs = vec![GraphInput {
-            required_outputs: Vec::new(),
-            extra: Default::default(),
-            node: "review".into(),
-            outputs: vec![OutputKind::Findings],
-        }];
-        let mut document = graph(vec![review, evaluate]);
-        document.schema_version = 2;
-        let large = format!("{}\n{}", "x".repeat(250_000), findings_text(&entry("")));
-        let bad = "```findings\nnot json\n```";
-        let mut observations: VecDeque<_> = (0..8)
-            .map(|i| {
-                terminal_with_result(
-                    AttemptOutcome::Succeeded,
-                    if invalid && i == 0 { bad } else { &large },
-                )
-            })
-            .collect();
-        observations.push_back(terminal_with_result(AttemptOutcome::Succeeded, "evaluated"));
-        let mut owner = FakeOwner {
-            observations,
-            review_expansion: Some(addition),
-            resolved_review_base: Some("2".repeat(40)),
-            materialise: Some(|requests| MaterialisedInputs {
-                directory: Some("/inputs".into()),
-                index: Some("/inputs/index.json".into()),
-                entries: requests
-                    .iter()
-                    .map(|request| MaterialisedInput::File {
-                        label: request.label.clone(),
-                        path: format!("/inputs/{}.md", request.label).into(),
-                        bytes: 250_000,
-                        omitted: 0,
-                    })
-                    .collect(),
-            }),
-            ..Default::default()
-        };
-        let limits = crate::config::GraphLimits {
-            node_prompt_bytes: 256 * 1024,
-            ..plans::generous()
-        };
-        let run = advance_with_budget(
-            &document,
-            &mut owner,
-            &mut MemoryJournal::default(),
-            &limits,
-            &Default::default(),
-        )
-        .unwrap();
-        assert_eq!(owner.review_requested_bases, vec![Some("2".repeat(40))]);
-        assert_eq!(
-            run.checkpoint
-                .nodes
-                .iter()
-                .find(|n| n.id == "evaluate")
-                .unwrap()
-                .state,
-            NodeState::Succeeded
-        );
-        let prompt = owner.prompts.last().unwrap();
-        assert!(prompt.len() <= limits.node_prompt_bytes);
-        for i in usize::from(invalid)..8 {
-            assert!(
-                prompt.contains(&format!("/inputs/review--review--lens-{i}.md")),
-                "{prompt}"
-            );
-            assert!(
-                prompt.contains(&format!("review--review--lens-{i}:F1")),
-                "{prompt}"
-            );
-        }
-        if invalid {
-            assert!(
-                prompt.contains("unavailable review--review--lens-0"),
-                "{prompt}"
-            );
-        }
-    }
-}
-
-/// A resolved review lens is pinned to a commit, yet it still finds the writer
-/// through the deferred node it expanded from, so family separation holds.
-#[test]
-fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
-    let oid = "3".repeat(40);
-    let mut write = node("write", route("first"));
-    write.access = AccessMode::WorktreeWrite;
-    write.worktree = Some(".worktrees/write".into());
-    let mut review = node("review", route("first"));
-    review.kind = Some(NodeKind::Plan);
-    review.route = None;
-    review.depends_on = vec!["write".into()];
-    review.source = Some(SourceBinding::Node {
-        node: "write".into(),
-    });
-    review.review = Some(ReviewSpec {
-        shape: None,
-        risk_tier: None,
-        kind: None,
-        size: None,
-        risk_tags: vec![],
-        worktree: None,
-        lenses: vec![],
-        min_successful: Some(1),
-        reduce_verdict: false,
-        export_first: vec![],
-        max_nodes: 3,
-    });
-    let mut root = node("review--review", route("first"));
-    root.kind = Some(NodeKind::Composite);
-    root.route = None;
-    root.prompt.clear();
-    let mut lens = node("lens", route("first"));
-    lens.distinct_from = Some(DistinctFrom::Writer);
-    lens.distinct_strength = Some(FamilyStrength::Require);
-    root.composite = Some(CompositeSpec {
-        reduce_verdict: false,
-        min_successful: Some(1),
-        nodes: vec![lens],
-        exports: vec![GraphInput {
-            required_outputs: Vec::new(),
-            extra: Default::default(),
-            node: "lens".into(),
-            outputs: vec![OutputKind::Result],
-        }],
-    });
-    let expanded = composites::expand(&graph(vec![root]), &plans::generous()).unwrap();
-    let mut nodes = expanded.nodes;
-    for member in &mut nodes {
-        member.depends_on = vec!["write".into()];
-    }
-    for member in nodes.iter_mut().filter(|member| member.composite.is_none()) {
-        member.source = Some(SourceBinding::Commit {
-            commit: oid.clone(),
-        });
-    }
-    let addition = Expansion {
-        review: Some(ReviewResolution {
-            subject: oid.parse().unwrap(),
-            base: "2".repeat(40).parse().unwrap(),
-            measured_size: "small".into(),
-            shape: "quick".into(),
-            source: "fixture".into(),
-            substitutions: Vec::new(),
-        }),
-        extra: Default::default(),
-        source: "review".into(),
-        continuation: false,
-        nodes,
-        uses: vec![],
-        patch: None,
-    };
-    let mut document = graph(vec![write, review]);
-    document.schema_version = 2;
-    // Every attempt in a deferred panel must review the resolved subject.
-    let mut wrong_subject = addition.clone();
-    wrong_subject
-        .nodes
-        .iter_mut()
-        .find(|node| node.composite.is_none())
-        .unwrap()
-        .source = Some(SourceBinding::Commit {
-        commit: "4".repeat(40),
-    });
-    assert!(plans::validate_review_addition(&document, &wrong_subject).is_err());
-    let mut wider_root = addition.clone();
-    wider_root
-        .nodes
-        .iter_mut()
-        .find(|node| node.composite.is_none())
-        .unwrap()
-        .read_roots
-        .push("/outside".into());
-    assert!(plans::validate_review_addition(&document, &wider_root).is_err());
-
-    let mut changed_reduction = addition.clone();
-    changed_reduction
-        .nodes
-        .iter_mut()
-        .find(|node| node.id == "review--review")
-        .unwrap()
-        .composite
-        .as_mut()
-        .unwrap()
-        .reduce_verdict = true;
-    assert!(plans::validate_review_addition(&document, &changed_reduction).is_err());
-    let mut declared_reduction = document.clone();
-    declared_reduction.nodes[1]
-        .review
-        .as_mut()
-        .unwrap()
-        .reduce_verdict = true;
-    assert!(plans::validate_review_addition(&declared_reduction, &changed_reduction).is_ok());
-    let writer_done = AttemptObservation::Terminal {
-        attempt_ref: Some("host/7".into()),
-        outcome: AttemptOutcome::Succeeded,
-        launched: true,
-        result: None,
-        result_warning: None,
-        result_path: None,
-        branch: Some("writer".into()),
-        commit: Some(oid.clone()),
-    };
-    let mut owner = FakeOwner {
-        observations: [writer_done, terminal(AttemptOutcome::Succeeded)].into(),
-        review_expansion: Some(addition),
-        ..Default::default()
-    };
-    advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(owner.distinct_from.last(), Some(&vec!["host/7".to_owned()]));
-}
-
-#[test]
 fn equal_review_range_cannot_pass_a_reduced_panel_gate() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "empty-quick-review", "nodes": [
@@ -11893,36 +10941,6 @@ fn graph_advance_preserves_typed_admission_refusal() {
 }
 
 #[test]
-fn deferred_panel_replay_keeps_the_recorded_reduction() {
-    let subject = "3".repeat(40);
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version": 2, "graph_id": "review-replay",
-        "nodes": [{"id":"review", "kind":"plan", "access":"read_only", "prompt":"review",
-            "source":{"type":"commit","commit":subject},
-            "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"lenses":[],"min_successful":1,"max_nodes":3},
-            "panel_templates":{}, "panel_shapes":{"quick":{"frame":false,"verifiers":0,"synthesis":"reduce"}}}]
-    })).unwrap();
-    let addition: Expansion = serde_json::from_value(serde_json::json!({
-        "source":"review", "continuation":false, "patterns":[],
-        "review":{"subject":subject,"base":"2".repeat(40),"measured_size":"small","shape":"quick","source":"fixture"},
-        "nodes":[
-            {"id":"review--r","kind":"composite","access":"read_only","composite":{"nodes":[],"exports":[{"node":"review--r--p","outputs":["result","findings","verdict","commit"]}]}},
-            {"id":"review--r--p","kind":"composite","access":"read_only","composite":{"nodes":[],"min_successful":1,"reduce_verdict":true,"exports":[{"node":"review--r--p--lens","outputs":["result","findings","commit"]}]}},
-            {"id":"review--r--p--lens","access":"read_only","prompt":"review","source":{"type":"commit","commit":subject},"route":{"alias":"senior"}}
-        ]
-    })).unwrap();
-    assert!(plans::validate_review_addition(&document, &addition).is_ok());
-    let mut changed = addition.clone();
-    changed.nodes[1].composite.as_mut().unwrap().reduce_verdict = false;
-    assert!(plans::validate_review_addition(&document, &changed).is_err());
-    let mut changed = addition;
-    changed.nodes[2].source = Some(SourceBinding::Commit {
-        commit: "4".repeat(40),
-    });
-    assert!(plans::validate_review_addition(&document, &changed).is_err());
-}
-
-#[test]
 fn failed_parent_waits_for_sibling_before_blocking_join() {
     let first = node("first", route("fixture"));
     let second = node("second", route("fixture"));
@@ -12038,23 +11056,6 @@ fn launched_reader_fallback_reopens_file_checkpoint() {
     assert_eq!(replay.checkpoint.nodes[0].state, NodeState::Succeeded);
 }
 
-#[test]
-fn admission_rejects_review_without_space_for_expanded_ids() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":2,"graph_id":"review-id-bound","nodes":[{
-            "id":"x".repeat(170),"kind":"plan","access":"read_only","prompt":"review",
-            "source":{"type":"commit","commit":"1".repeat(40)},
-            "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"lenses":[],"min_successful":1,"max_nodes":3},
-            "lens_templates":{"lens":{"id":"a".repeat(30)}}
-        }]
-    })).unwrap();
-    let error = document.admit(&Default::default()).unwrap_err();
-    assert!(matches!(
-        error,
-        AdmissionError::Plan(reason) if reason.contains("insufficient room for expanded review ids")
-    ));
-}
-
 mod retry_tests {
     include!("retry_tests.rs");
 }
@@ -12130,4 +11131,52 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
             }
         }
     }
+}
+
+#[test]
+fn independent_template_review_bases_are_pinned_and_replayed() {
+    let library = template::TemplateLibrary::bundled();
+    let compiler = template::Compiler::new(&library);
+    let subject = "1".repeat(40);
+    let bases = ["2".repeat(40), "3".repeat(40)];
+    let nodes = bases.iter().enumerate().map(|(index, base)| compiler.compile(&serde_json::json!({
+        "id": format!("review-{index}"), "use": "review",
+        "source": {"type":"commit", "commit":subject}, "review_base":base
+    })).unwrap()).collect();
+    let mut document = graph(nodes);
+    document.schema_version = 2;
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""))].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(owner.review_base_resolutions, 2);
+    for (node, base) in run.checkpoint.nodes.iter().zip(&bases) {
+        assert_eq!(node.source_commit.as_deref(), Some(subject.as_str()));
+        assert_eq!(node.review_base.as_deref(), Some(base.as_str()));
+        assert_eq!(node.attempts[0].input_manifest.as_ref().unwrap().review_base.as_deref(), Some(base.as_str()));
+    }
+    journal.0 = Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());
+    owner.resolved_review_base = Some("4".repeat(40));
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(replay.status, GraphStatus::Complete);
+    assert_eq!(replay.checkpoint.nodes, run.checkpoint.nodes);
+    assert_eq!(owner.review_base_resolutions, 2);
+}
+
+#[test]
+fn template_review_admission_rejects_expanded_ids_over_the_limit() {
+    let library = template::TemplateLibrary::bundled();
+    let compiler = template::Compiler::new(&library);
+    let mut boundary = graph(vec![compiler.compile(&serde_json::json!({
+        "id":"x".repeat(190),"use":"review","over":["security"]
+    })).unwrap()]);
+    boundary.admit(&Default::default()).unwrap();
+    boundary.nodes = vec![compiler.compile(&serde_json::json!({
+        "id":"x".repeat(191),"use":"review","over":["security"]
+    })).unwrap()];
+    assert!(boundary.admit(&Default::default()).is_err());
 }

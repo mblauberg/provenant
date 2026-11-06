@@ -470,7 +470,6 @@ mod tests {
         .unwrap();
         let mut after = before.clone();
         after.expansions.push(Expansion {
-            review: None,
             extra: Default::default(),
             source: "planner".into(),
             continuation: false,
@@ -521,7 +520,6 @@ mod tests {
         .unwrap();
         let mut after = before.clone();
         after.expansions.push(Expansion {
-            review: None,
             extra: Default::default(),
             source: "host".into(),
             continuation: false,

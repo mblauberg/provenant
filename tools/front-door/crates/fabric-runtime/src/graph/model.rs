@@ -164,51 +164,6 @@ pub enum SeparationOutcome {
     Unconstrained,
 }
 
-/// Deferred review configuration supplied to the host resolver.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewSpec {
-    pub shape: Option<String>,
-    pub risk_tier: Option<String>,
-    pub kind: Option<String>,
-    pub size: Option<String>,
-    #[serde(default)]
-    pub risk_tags: Vec<String>,
-    pub worktree: Option<String>,
-    #[serde(default)]
-    pub lenses: Vec<ReviewLens>,
-    pub min_successful: Option<usize>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub reduce_verdict: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub export_first: Vec<OutputKind>,
-    pub max_nodes: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewLens {
-    pub name: String,
-    pub when: Option<String>,
-    pub tier: serde_json::Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewResolution {
-    pub subject: provenant_core::GitOid,
-    pub base: provenant_core::GitOid,
-    pub measured_size: String,
-    pub shape: String,
-    pub source: String,
-    /// Replacement attempts made for members of this resolved panel.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub substitutions: Vec<ReviewSubstitution>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ReviewSubstitution {
-    pub member: String,
-    pub route_index: u16,
-}
-
 // Wire presence is transient decoding metadata, not part of node identity.
 #[derive(Clone, Debug, Default)]
 pub(super) struct TopologyPresence(pub [bool; 2]);
@@ -261,8 +216,6 @@ pub struct GraphNode {
     /// Attempt specification carrying placement, new worktree, account, capability, build weight and write roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<AttemptSpec>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review: Option<ReviewSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -536,34 +489,6 @@ impl GraphDocument {
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
         let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)?;
-        for node in &expanded.nodes {
-            if node.review.is_some() {
-                let longest_lens = node
-                    .extra
-                    .get("lens_templates")
-                    .and_then(serde_json::Value::as_object)
-                    .into_iter()
-                    .flat_map(|templates| templates.values())
-                    .filter_map(|template| template.get("id").and_then(serde_json::Value::as_str))
-                    .map(str::len)
-                    .max()
-                    .unwrap_or(0);
-                // The host prefixes each lens with `--r--p--`; reserve room
-                // for panel-generated identities even when no lens is selected.
-                if node
-                    .id
-                    .len()
-                    .saturating_add(8)
-                    .saturating_add(longest_lens.max(32))
-                    > 200
-                {
-                    return Err(AdmissionError::Plan(
-                        "deferred review node id leaves insufficient room for expanded review ids"
-                            .into(),
-                    ));
-                }
-            }
-        }
         if let Some(reason) = structural_limit(&expanded, &plan, limits) {
             return Err(AdmissionError::StructuralLimit(reason));
         }

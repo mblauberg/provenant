@@ -94,21 +94,6 @@ pub struct PlanSpec {
 }
 
 impl PlanSpec {
-    /// Bind review catalogue leaves to the commit resolved at review launch.
-    /// The catalogue is host-authored, but it may have been captured before the
-    /// writer's head existed. A lens must never inherit a framing node as its
-    /// source or retain the writer's moving head binding.
-    pub fn pin_review_subject(&mut self, commit: &str) -> Result<(), String> {
-        for template in &mut self.templates {
-            let name = template.name.clone().unwrap_or_default();
-            for node in &mut template.nodes {
-                pin_review_node(node, commit)
-                    .map_err(|error| format!("review template {name}: {error}"))?;
-            }
-        }
-        Ok(())
-    }
-
     fn template(&self, name: &str) -> Option<&Template> {
         self.templates
             .iter()
@@ -116,30 +101,10 @@ impl PlanSpec {
     }
 }
 
-fn pin_review_node(node: &mut serde_json::Value, commit: &str) -> Result<(), &'static str> {
-    let object = node.as_object_mut().ok_or("node must be an object")?;
-    object.insert(
-        "source".into(),
-        serde_json::json!({"type":"commit", "commit":commit}),
-    );
-    if let Some(children) = object
-        .get_mut("composite")
-        .and_then(|composite| composite.get_mut("nodes"))
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for child in children {
-            pin_review_node(child, commit)?;
-        }
-    }
-    Ok(())
-}
-
 /// Only validated, normalised additions enter the checkpoint. The original
 /// document remains the digest authority, just as it does for loop rounds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Expansion {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review: Option<ReviewResolution>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub source: String,
@@ -408,9 +373,6 @@ pub(super) fn expand(
         if !valid {
             return Err("invalid expansion source".into());
         }
-        if !addition.source.is_empty() {
-            validate_review_addition(&expanded, addition)?;
-        }
         append(&mut expanded, addition);
     }
     Ok(expanded)
@@ -431,16 +393,6 @@ pub(super) fn validate_persisted_topology(
         )
     })?;
     for addition in expansions.iter().filter(|addition| !addition.retired()) {
-        // A deferred review is resolved by the host, not derived from a planner
-        // specification; its topology has always been persisted with it.
-        if expanded
-            .nodes
-            .iter()
-            .any(|node| node.id == addition.source && node.review.is_some())
-        {
-            append(&mut expanded, addition);
-            continue;
-        }
         if addition.patch.is_some() {
             check_patch_topology(&expanded, addition)?;
             append(&mut expanded, addition);
@@ -674,32 +626,23 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
         });
     for node in &mut document.nodes {
         if node.dependencies().any(|name| name == &expansion.source) {
-            if expansion.review.is_some() {
-                // The review boundary settles after its members and owns their
-                // success threshold; consumers must not require every leaf.
-                if let Some(root) = exported.first() {
-                    node.after_expansion.push(root.node.clone());
-                }
-            } else {
-                node.after_expansion.extend(
-                    expansion
-                        .nodes
-                        .iter()
-                        .filter(|n| {
-                            !expansion.nodes.iter().any(|root| {
-                                root.extra.get(super::relay::DETACHED)
-                                    == Some(&serde_json::Value::Bool(true))
-                                    && (n.id == root.id
-                                        || n.id.starts_with(&format!("{}--", root.id)))
-                            })
+            node.after_expansion.extend(
+                expansion
+                    .nodes
+                    .iter()
+                    .filter(|n| {
+                        !expansion.nodes.iter().any(|root| {
+                            root.extra.get(super::relay::DETACHED)
+                                == Some(&serde_json::Value::Bool(true))
+                                && (n.id == root.id || n.id.starts_with(&format!("{}--", root.id)))
                         })
-                        .map(|n| n.id.clone()),
-                );
-            }
+                    })
+                    .map(|n| n.id.clone()),
+            );
+
             if !expansion.continuation {
                 wire_exports(node, &expansion.source, &exported);
-                if expansion.review.is_none()
-                    && let Some(composite) = &mut node.composite
+                if let Some(composite) = &mut node.composite
                     && (composite.reduce_verdict || review_minimum.is_some())
                     && composite
                         .exports
@@ -727,26 +670,6 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                     node.composite_members
                         .extend(exported.iter().map(|item| item.node.clone()));
                 }
-                if expansion.review.is_some() {
-                    // A resolved review is a structural node, not an agent
-                    // attempt, and has no result of its own to consume.
-                    node.inputs.retain(|input| input.node != expansion.source);
-                }
-                if expansion.review.is_some()
-                    && let Some(root) = exported.first()
-                    && let Some(composite) = &mut node.composite
-                {
-                    for export in &mut composite.exports {
-                        if export.node == expansion.source {
-                            export.node = root.node.clone();
-                        }
-                    }
-                    for member in &mut node.composite_members {
-                        if *member == expansion.source {
-                            *member = root.node.clone();
-                        }
-                    }
-                }
             }
             if expansion.continuation {
                 if let Some(composite) = &mut node.composite {
@@ -770,34 +693,6 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
     document
         .nodes
         .extend(expansion.nodes.iter().cloned().map(|mut child| {
-            if expansion.review.is_some()
-                && child.composite.is_some()
-                && child.composite_members.is_empty()
-            {
-                let prefix = format!("{}--", child.id);
-                child.composite_members = expansion
-                    .nodes
-                    .iter()
-                    .filter_map(|member| {
-                        member
-                            .id
-                            .strip_prefix(&prefix)
-                            .filter(|_| {
-                                !expansion.nodes.iter().any(|parent| {
-                                    parent.composite.is_some()
-                                        && parent.id != child.id
-                                        && parent.id != member.id
-                                        && parent.id.starts_with(&prefix)
-                                        && member.id.starts_with(&format!("{}--", parent.id))
-                                })
-                            })
-                            .map(|_| member.id.clone())
-                    })
-                    .collect();
-                child
-                    .after_expansion
-                    .extend(child.composite_members.clone());
-            }
             child.round = round.clone().map(|mut round| {
                 round.until = false;
                 round.node_id = child.id.clone();
@@ -852,364 +747,9 @@ fn restore_patch_rounds(document: &mut GraphDocument, expansion: &Expansion) {
     }
 }
 
-/// Check the host's review fragment before publication and again on replay.
-pub(super) fn validate_review_addition(
-    document: &GraphDocument,
-    addition: &Expansion,
-) -> Result<(), String> {
-    let source = document
-        .nodes
-        .iter()
-        .find(|node| node.id == addition.source)
-        .ok_or("invalid expansion source")?;
-    let Some(spec) = &source.review else {
-        return if addition.review.is_none() {
-            Ok(())
-        } else {
-            Err("review expansion has no review source".into())
-        };
-    };
-    let root = addition
-        .nodes
-        .iter()
-        .find(|root| {
-            root.composite.is_some()
-                && root.id.starts_with(&format!("{}--", source.id))
-                && addition.nodes.iter().all(|node| {
-                    node.id == root.id || node.id.starts_with(&format!("{}--", root.id))
-                })
-        })
-        .ok_or("review composite root missing")?;
-    let subject = addition
-        .review
-        .as_ref()
-        .map(|review| review.subject.to_string());
-    let whole_panel = source.extra.contains_key("panel_templates");
-    let planned = source.extra.contains_key("review_planner");
-    let lenses = if whole_panel {
-        addition
-            .nodes
-            .iter()
-            .find(|node| node.id == format!("{}--p", root.id))
-    } else {
-        Some(root)
-    };
-    let shape_matches = if whole_panel {
-        addition
-            .review
-            .as_ref()
-            .and_then(|resolution| source.extra.get("panel_shapes")?.get(&resolution.shape))
-            .is_some_and(|shape| {
-                let frame = shape.get("frame").and_then(serde_json::Value::as_bool);
-                let verifiers = source
-                    .extra
-                    .get("panel_verifiers")
-                    .or_else(|| shape.get("verifiers"))
-                    .and_then(serde_json::Value::as_u64);
-                let synthesis = shape.get("synthesis").and_then(serde_json::Value::as_str);
-                let expected_frame = format!("{}--f", root.id);
-                let expected_synthesis = format!("{}--s", root.id);
-                let actual_verifiers = addition
-                    .nodes
-                    .iter()
-                    .filter(|node| node.id.starts_with(&format!("{}--v-", root.id)))
-                    .count();
-                let ordered = lenses.is_some_and(|group| {
-                    let mut previous = group.id.clone();
-                    if frame == Some(true) {
-                        let Some(framing) =
-                            addition.nodes.iter().find(|node| node.id == expected_frame)
-                        else {
-                            return false;
-                        };
-                        if !group.depends_on.contains(&expected_frame)
-                            || source
-                                .depends_on
-                                .iter()
-                                .any(|parent| !framing.depends_on.contains(parent))
-                        {
-                            return false;
-                        }
-                    } else if source
-                        .depends_on
-                        .iter()
-                        .any(|parent| !group.depends_on.contains(parent))
-                    {
-                        return false;
-                    }
-                    let members = addition
-                        .nodes
-                        .iter()
-                        .filter(|node| node.id.starts_with(&format!("{}--", group.id)));
-                    for member in members {
-                        if frame == Some(true) {
-                            if !member.depends_on.contains(&expected_frame)
-                                || !member.inputs.iter().any(|input| {
-                                    input.node == expected_frame
-                                        && input.outputs.contains(&OutputKind::Result)
-                                })
-                            {
-                                return false;
-                            }
-                        } else if source
-                            .depends_on
-                            .iter()
-                            .any(|parent| !member.depends_on.contains(parent))
-                        {
-                            return false;
-                        }
-                    }
-                    for index in 0..actual_verifiers {
-                        let id = format!("{}--v-{}", root.id, index + 1);
-                        let Some(verifier) = addition.nodes.iter().find(|node| node.id == id)
-                        else {
-                            return false;
-                        };
-                        if !verifier.depends_on.contains(&previous)
-                            || !verifier.inputs.iter().any(|input| {
-                                input.node == previous
-                                    && input.outputs.contains(&OutputKind::Findings)
-                            })
-                        {
-                            return false;
-                        }
-                        previous = id;
-                    }
-                    if synthesis == Some("model") {
-                        let Some(final_node) = addition
-                            .nodes
-                            .iter()
-                            .find(|node| node.id == expected_synthesis)
-                        else {
-                            return false;
-                        };
-                        if !final_node.depends_on.contains(&group.id)
-                            || !final_node.depends_on.contains(&previous)
-                            || !final_node.inputs.iter().any(|input| {
-                                input.node == group.id
-                                    && input.outputs.contains(&OutputKind::Findings)
-                            })
-                            || (previous != group.id
-                                && !final_node.inputs.iter().any(|input| {
-                                    input.node == previous
-                                        && input.outputs.contains(&OutputKind::Findings)
-                                }))
-                        {
-                            return false;
-                        }
-                    }
-                    true
-                });
-                ordered
-                    && frame.is_some_and(|frame| {
-                        frame == addition.nodes.iter().any(|node| node.id == expected_frame)
-                    })
-                    && verifiers
-                        .is_some_and(|count| usize::try_from(count).ok() == Some(actual_verifiers))
-                    && synthesis.is_some_and(|mode| match mode {
-                        "reduce" => {
-                            lenses
-                                .and_then(|node| node.composite.as_ref())
-                                .is_some_and(|group| group.reduce_verdict)
-                                && !addition
-                                    .nodes
-                                    .iter()
-                                    .any(|node| node.id == expected_synthesis)
-                        }
-                        "model" => {
-                            lenses
-                                .and_then(|node| node.composite.as_ref())
-                                .is_some_and(|group| !group.reduce_verdict)
-                                && addition
-                                    .nodes
-                                    .iter()
-                                    .any(|node| node.id == expected_synthesis)
-                        }
-                        _ => false,
-                    })
-            })
-    } else {
-        true
-    };
-    let Some(lens_root) = lenses else {
-        return Err("invalid review expansion".into());
-    };
-    if addition.review.is_none()
-        || !shape_matches
-        || addition.nodes.iter().filter(|node| node.composite.is_none()).any(|node| !matches!(&node.source, Some(SourceBinding::Commit { commit }) if Some(commit) == subject.as_ref()))
-        || addition.continuation
-        || !addition.uses.is_empty()
-        || addition.patch.is_some()
-        || addition.nodes.len() < 2
-        || addition.nodes.len() > spec.max_nodes
-        || lens_root.composite.as_ref().is_none_or(|composite| {
-            let mut exported = std::collections::BTreeSet::new();
-            (!whole_panel && composite.reduce_verdict != spec.reduce_verdict)
-                || composite.min_successful != if planned { Some(1) } else { spec.min_successful.map(|n| if n == 0 { composite.exports.len().saturating_sub(1).max(1) } else { n }) }
-                || composite.exports.is_empty()
-                || composite.exports.first().is_none_or(|first| spec.export_first.iter().any(|output| !first.outputs.contains(output)))
-                || (whole_panel && addition.nodes.iter().filter(|member| member.id.starts_with(&format!("{}--", lens_root.id))).count() != composite.exports.len())
-                || composite.exports.iter().any(|export| {
-                    export.outputs.is_empty() || !exported.insert(&export.node)
-                        || !addition.nodes.iter().any(|member| member.id == export.node && member.id != lens_root.id && member.id.starts_with(&format!("{}--", lens_root.id)))
-                        || addition.nodes.iter().any(|parent| parent.id != root.id && parent.id != lens_root.id && parent.id != export.node && parent.composite.is_some() && export.node.starts_with(&format!("{}--", parent.id)))
-                })
-        })
-        || (whole_panel && root.composite.as_ref().is_none_or(|composite| {
-            let lens = lens_root;
-            let reduced = lens.composite.as_ref().is_some_and(|group| group.reduce_verdict);
-            let output = if reduced { lens.id.clone() } else { format!("{}--s", root.id) };
-            let verifier_count = addition.nodes.iter().filter(|node| node.id.starts_with(&format!("{}--v-", root.id))).count();
-            let expected_exports = if reduced && verifier_count > 0 { 2 } else { 1 };
-            composite.reduce_verdict || composite.min_successful.is_some()
-                || composite.exports.len() != expected_exports || composite.exports[0].node != output
-                || [OutputKind::Result, OutputKind::Findings, OutputKind::Verdict, OutputKind::Commit].iter().any(|kind| !composite.exports[0].outputs.contains(kind))
-                || (expected_exports == 2 && (composite.exports[1].node != format!("{}--v-{verifier_count}", root.id)
-                    || composite.exports[1].outputs != [OutputKind::Result, OutputKind::Findings]))
-                || !addition.nodes.iter().any(|node| node.id == output)
-        }))
-        || addition
-            .nodes
-            .iter()
-            .any(|node| node.access != AccessMode::ReadOnly || node.review.is_some()
-                || node.read_roots.iter().any(|root| !source.read_roots.contains(root))
-                || node.attachments.iter().any(|path| !source.attachments.contains(path)))
-        || (planned && !addition.nodes.iter().any(|node| {
-            node.id == format!("{}--plan", lens_root.id)
-                && node.plan.as_ref().is_some_and(|plan| {
-                    review_fallback_pinned(plan, subject.as_deref())
-                        && plan.extra.get("planned_review").and_then(serde_json::Value::as_bool) == Some(true)
-                        && review_catalogue_matches(source, plan, subject.as_deref(), node.extra.get("review_base"))
-                })
-        }))
-    {
-        return Err("invalid review expansion".into());
-    }
-    Ok(())
-}
-
-fn review_fallback_pinned(plan: &PlanSpec, commit: Option<&str>) -> bool {
-    fn pinned(node: &GraphNode, commit: &str) -> bool {
-        node.access == AccessMode::ReadOnly
-            && node.review.is_none()
-            && node.plan.is_none()
-            && node
-                .kind
-                .is_none_or(|kind| matches!(kind, NodeKind::Task | NodeKind::Composite))
-            && if let Some(composite) = &node.composite {
-                composite.nodes.iter().all(|child| pinned(child, commit))
-            } else {
-                matches!(&node.source, Some(SourceBinding::Commit { commit: actual }) if actual == commit)
-            }
-    }
-    commit
-        .zip(plan.fallback.as_ref())
-        .is_some_and(|(commit, fallback)| {
-            !fallback.nodes.is_empty() && fallback.nodes.iter().all(|node| pinned(node, commit))
-        })
-}
-
-/// The host may narrow the captured catalogue and set each tier default at
-/// launch. Everything else, including the pinned source, remains fixed.
-fn review_catalogue_matches(
-    source: &GraphNode,
-    plan: &PlanSpec,
-    commit: Option<&str>,
-    base: Option<&serde_json::Value>,
-) -> bool {
-    let Some(commit) = commit else { return false };
-    let Some(catalogue) = source
-        .extra
-        .get("review_planner")
-        .and_then(|value| value.pointer("/catalogue/patterns"))
-        .and_then(serde_json::Value::as_array)
-    else {
-        return false;
-    };
-    let mut names = std::collections::BTreeSet::new();
-    !plan.templates.is_empty()
-        && plan.templates.iter().all(|pattern| {
-            let Some(name) = pattern.name.as_deref() else {
-                return false;
-            };
-            if !names.insert(name) {
-                return false;
-            }
-            let Some(raw) = catalogue
-                .iter()
-                .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
-            else {
-                return false;
-            };
-            let Ok(mut expected) = serde_json::from_value::<Template>(raw.clone()) else {
-                return false;
-            };
-            for (node, actual) in expected.nodes.iter_mut().zip(&pattern.nodes) {
-                if pin_review_node(node, commit).is_err() {
-                    return false;
-                }
-                let Some(object) = node.as_object_mut() else {
-                    return false;
-                };
-                if let Some(base) = base {
-                    object.insert("review_base".into(), base.clone());
-                }
-                if let Some(group) = actual.get("family_group") {
-                    object.insert("family_group".into(), group.clone());
-                }
-            }
-            if let (Some(expected_tier), Some(actual_tier)) = (
-                expected.parameters.get_mut("tier"),
-                pattern.parameters.get("tier"),
-            ) {
-                expected_tier.default = actual_tier.default.clone();
-                if let Some(default) = &actual_tier.default
-                    && !expected_tier.allowed.contains(default)
-                {
-                    expected_tier.allowed.push(default.clone());
-                }
-            }
-            &expected == pattern
-        })
-}
-
 /// The flat nodes and outputs that a fragment's pattern instances export, in
 /// instantiation order. Instance IDs are already namespaced by the planner.
 fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<GraphInput> {
-    if expansion.review.is_some()
-        && let Some(root) = expansion.nodes.iter().find(|root| {
-            root.composite.is_some()
-                && expansion.nodes.iter().all(|node| {
-                    node.id == root.id || node.id.starts_with(&format!("{}--", root.id))
-                })
-        })
-    {
-        let mut outputs = Vec::new();
-        for output in root
-            .composite
-            .iter()
-            .flat_map(|spec| &spec.exports)
-            .flat_map(|export| &export.outputs)
-        {
-            if !outputs.contains(output) {
-                outputs.push(*output);
-            }
-        }
-        if root
-            .composite
-            .as_ref()
-            .is_some_and(|spec| spec.reduce_verdict)
-            && !outputs.contains(&OutputKind::Verdict)
-        {
-            outputs.push(OutputKind::Verdict);
-        }
-        return vec![GraphInput {
-            required_outputs: Vec::new(),
-            extra: Default::default(),
-            node: root.id.clone(),
-            outputs,
-        }];
-    }
     let Some(spec) = document
         .nodes
         .iter()
@@ -1444,12 +984,6 @@ fn prepare_nested(
         for member in &mut body.body {
             prepare_nested(member, node, spec, document, trusted, true)?;
         }
-    }
-    if trusted && nested && child.review.is_some() {
-        if child.access != AccessMode::ReadOnly {
-            return Err("review expansion must be read-only".into());
-        }
-        return Ok(());
     }
     // Fixed read-only preset leaves already carry their authored prompts;
     // a leaf with acceptance checks still gets them appended below.
@@ -2049,7 +1583,6 @@ fn continuation(
     }
     child.round = None;
     Ok(Expansion {
-        review: None,
         extra: Default::default(),
         source: node.id.clone(),
         continuation: true,
@@ -2068,26 +1601,11 @@ pub(super) fn remaining(
     if document
         .nodes
         .iter()
-        .any(|n| n.plan.is_some() || n.review.is_some() || n.access == AccessMode::WorktreeWrite)
+        .any(|n| n.plan.is_some() || n.access == AccessMode::WorktreeWrite)
     {
         checkpoint.remaining = Some(RemainingBudgets {
             extra: Default::default(),
-            nodes: limits.nodes.saturating_sub(
-                document
-                    .nodes
-                    .iter()
-                    .filter_map(|node| {
-                        node.review.as_ref().filter(|_| {
-                            !checkpoint
-                                .expansions
-                                .iter()
-                                .any(|expansion| expansion.source == node.id)
-                        })
-                    })
-                    .fold(document.nodes.len(), |count, review| {
-                        count.saturating_add(review.max_nodes)
-                    }),
-            ),
+            nodes: limits.nodes.saturating_sub(document.nodes.len()),
             edges: limits.edges.saturating_sub(
                 document
                     .nodes
@@ -2497,7 +2015,6 @@ pub(super) fn fallback_expansion(
     let expanded = composites::expand(&with_root, &generous())
         .map_err(|error| format!("fallback stage does not expand: {error}"))?;
     Ok(Expansion {
-        review: None,
         extra: Default::default(),
         source: node_id.to_owned(),
         continuation: false,

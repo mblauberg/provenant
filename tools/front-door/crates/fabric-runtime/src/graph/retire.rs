@@ -61,7 +61,6 @@ pub(super) fn dynamic_subtree(
                 "progress": serde_json::to_value(progress).map_err(|e| e.to_string())?,
             });
             *expansion = Expansion {
-                review: None,
                 extra: [(RETIRED.to_owned(), record)].into_iter().collect(),
                 source: String::new(),
                 continuation: false,
