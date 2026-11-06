@@ -1722,9 +1722,9 @@ pub(super) fn flatten_fragment(
             }
         };
         for child in &mut nodes {
-            if id(&child.id).len() > 64 {
+            if id(&child.id).len() > 200 {
                 return Err(format!(
-                    "child {} of planner {} exceeds the namespaced node ID limit of 64 bytes; shorten either ID",
+                    "child {} of planner {} exceeds the namespaced node ID limit of 200 bytes; shorten either ID",
                     child.id, parent.id
                 ));
             }
@@ -1897,9 +1897,9 @@ fn continuation(
         .cloned()
         .ok_or("continuation source missing")?;
     child.id = format!("{}--continue", node.id);
-    if child.id.len() > 64 {
+    if child.id.len() > 200 {
         return Err(format!(
-            "continuation {} exceeds the node ID limit of 64 bytes; shorten the source ID",
+            "continuation {} exceeds the node ID limit of 200 bytes; shorten the source ID",
             child.id
         ));
     }

@@ -307,7 +307,7 @@ pub(super) fn validate_flat_plan(
 
     let mut positions = std::collections::BTreeMap::<String, usize>::new();
     for (index, node) in document.nodes.iter().enumerate() {
-        if !valid_identifier(&node.id) || positions.insert(node.id.clone(), index).is_some() {
+        if !valid_node_identifier(&node.id) || positions.insert(node.id.clone(), index).is_some() {
             return Err("node id");
         }
     }
@@ -797,6 +797,14 @@ pub(super) fn validate_flat_plan(
         },
         topological_positions,
     ))
+}
+
+pub(super) fn valid_node_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 200
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 pub(crate) fn valid_identifier(value: &str) -> bool {
