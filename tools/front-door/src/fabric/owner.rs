@@ -2197,6 +2197,42 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         .map_or_else(|| head.to_owned(), |base| base.to_string())
                 })
             };
+            // Peer roots retain the exact requested route, including family
+            // exclusions, rather than resolving a second, broader alias.
+            let peer_root = provenant_fabric_runtime::graph::FileJournal::execution(
+                &self.factory.context.roots.state,
+                self.factory.context.identity.project,
+                &key.graph_id,
+            )
+            .map_err(graph_journal_error)?
+            .is_some_and(|execution| {
+                execution
+                    .extra
+                    .get("peer_origin_context")
+                    .and_then(|origin| origin["node_id"].as_str())
+                    == Some(key.node_id.as_str())
+            });
+            if peer_root && !accepted {
+                source_head = route
+                    .extra
+                    .get("peer_source_head")
+                    .map(|value| {
+                        serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
+                    })
+                    .transpose()?
+                    .flatten();
+            }
+            let accepted_route = accepted_route.or(if peer_root {
+                route
+                    .extra
+                    .get("peer_requested_route")
+                    .map(|value| {
+                        serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
+                    })
+                    .transpose()?
+            } else {
+                None
+            });
             let input = SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id,
@@ -2467,7 +2503,20 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     };
                 }
             }
-            let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
+            if let Some(network) = route.extra.get("peer_network").filter(|_| peer_root) {
+                grants.network = serde_json::from_value(network.clone())
+                    .map_err(|_| FacadeError::StateCorrupt)?;
+            }
+            let peer_retry = route
+                .extra
+                .get("peer_retry_limit")
+                .filter(|_| peer_root)
+                .map(|value| {
+                    serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
+                })
+                .transpose()?;
+            let retry_limit =
+                accepted_retry_limit.unwrap_or(peer_retry.unwrap_or(node.settlement_retries));
             let mut attempt = accepted_attempt.unwrap_or_else(|| {
                 let mut attempt = node.attempt.cloned().unwrap_or_default();
                 attempt.account = route.account.clone().or(attempt.account);
@@ -2533,6 +2582,21 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }
         }
         let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        // A remote parent is one origin node until its receiver-owned graph
+        // has drained, including children that outlive the provider process.
+        if target
+            .host
+            .is_some_and(|host| host != self.factory.context.identity.host)
+            && attempt
+                .extra
+                .get("peer_subtree")
+                .and_then(|value| value["status"].as_str())
+                .is_some_and(|status| matches!(status, "pending" | "paused"))
+        {
+            return Ok(AttemptObservation::Pending {
+                attempt_ref: reference,
+            });
+        }
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => {

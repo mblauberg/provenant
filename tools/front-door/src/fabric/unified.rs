@@ -95,7 +95,7 @@ impl Factory {
             for attempt in node
                 .attempts
                 .iter()
-                .filter(|a| a.state != AttemptState::Terminal)
+                .filter(|a| a.state != AttemptState::Terminal || self.remote_graph_attempt(a))
             {
                 if let Err(error) = self.cancel_graph_attempt(&mut owner, attempt, budget, cancel) {
                     first_error.get_or_insert(error);
@@ -407,11 +407,30 @@ pub(crate) fn enrich_status_rows(
                 _ => return Err(FacadeError::StateCorrupt),
             }
         };
-        if record.context.as_ref().is_none_or(|context| {
-            context.graph_id.as_deref() != row["graph_id"].as_str()
-                || context.node_id.as_deref() != row["node_id"].as_str()
-        }) {
+        // A peer owns a separate graph rooted at the submitted attempt. Its
+        // authenticated status retains the origin binding beside that pointer.
+        let peer_origin = record.extra.get("peer_origin_context");
+        let peer_graph = record.extra.get("peer_graph");
+        let origin_matches = host != context.identity.host
+            && peer_graph.is_some_and(|graph| {
+                graph["host"] == serde_json::json!(host)
+                    && graph["graph_id"].as_str().is_some_and(|id| !id.is_empty())
+            })
+            && peer_origin.is_some_and(|origin| {
+                origin["graph_id"] == row["graph_id"] && origin["node_id"] == row["node_id"]
+            });
+        if !origin_matches
+            && record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != row["graph_id"].as_str()
+                    || context.node_id.as_deref() != row["node_id"].as_str()
+            })
+        {
             return Err(FacadeError::StateCorrupt);
+        }
+        for field in ["peer_graph", "peer_subtree"] {
+            if let Some(value) = record.extra.get(field) {
+                row[field] = value.clone();
+            }
         }
         let projected = provenant_cli::run::project_lane(
             &record,
@@ -828,7 +847,7 @@ pub(crate) fn unified_graph_output(
             &target.graph,
         )?
         .ok_or(FacadeError::NotFound)?;
-        let references = checkpoint
+        let mut references = checkpoint
             .nodes
             .iter()
             .filter(|node| target.node.as_ref().is_none_or(|id| id == &node.id))
@@ -854,6 +873,102 @@ pub(crate) fn unified_graph_output(
                     .and_then(|attempt| attempt.attempt_ref.clone())
             })
             .collect::<Vec<_>>();
+        if target.attempt.is_none() {
+            // Follow receiver-owned graphs through the same forward SSH status
+            // call. Explicit attempt output remains the ordinary byte reader.
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+            let cancel = CancelToken::new();
+            let owner = BinaryRunOwner {
+                factory: &factory,
+                allow_remote: true,
+                actor: None,
+                chair: None,
+            };
+            let mut seen: std::collections::BTreeSet<_> = references.iter().cloned().collect();
+            let mut expanded = std::collections::BTreeSet::new();
+            let mut cursor = 0;
+            while cursor < references.len() {
+                let reference = &references[cursor];
+                cursor += 1;
+                if !expanded.insert(reference.clone()) {
+                    continue;
+                }
+                let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+                let host = host.parse().map_err(|_| FacadeError::StateCorrupt)?;
+                if host == factory.context.identity.host {
+                    continue;
+                }
+                let record = owner.snapshot(
+                    AttemptTarget {
+                        extra: Default::default(),
+                        host: Some(host),
+                        attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                    },
+                    budget,
+                    &cancel,
+                )?;
+                let peer_attempt = record.attempt_id;
+                let mut subtree = record.extra.get("peer_subtree").cloned();
+                let mut after = 0;
+                while let Some(page) = subtree {
+                    for reference in peer_output_references(&page)? {
+                        // This page covers these local attempts; only another
+                        // host needs a further status request.
+                        if reference
+                            .split_once('/')
+                            .is_some_and(|(peer, _)| peer == host.to_string())
+                        {
+                            expanded.insert(reference.clone());
+                        }
+                        if seen.insert(reference.clone()) {
+                            references.push(reference);
+                        }
+                    }
+                    let Some(next) = page["next_node"].as_u64() else {
+                        if page["omitted_nodes"].as_u64().is_some_and(|n| n > 0) {
+                            return Err(FacadeError::StateCorrupt.into());
+                        }
+                        break;
+                    };
+                    if next <= after {
+                        return Err(FacadeError::StateCorrupt.into());
+                    }
+                    after = next;
+                    subtree = match owner.peer(
+                        host,
+                        PeerAction::Run {
+                            extra: [("peer_subtree_after".into(), json!(next))].into(),
+                            input: RunInput::Status {
+                                extra: Default::default(),
+                                target: AttemptTarget {
+                                    extra: Default::default(),
+                                    host: Some(host),
+                                    attempt: peer_attempt,
+                                },
+                            },
+                        },
+                        budget,
+                        &cancel,
+                    )? {
+                        PeerResult::Run { data, .. } => match *data {
+                            RunResult::Status { attempt, .. }
+                                if attempt.attempt_id == peer_attempt =>
+                            {
+                                Some(
+                                    attempt
+                                        .extra
+                                        .get("peer_subtree")
+                                        .cloned()
+                                        .ok_or(FacadeError::StateCorrupt)?,
+                                )
+                            }
+                            _ => return Err(FacadeError::StateCorrupt.into()),
+                        },
+                        _ => return Err(FacadeError::StateCorrupt.into()),
+                    };
+                }
+            }
+        }
         if references.is_empty() {
             return Ok(Some(provenant_cli::run::Reply {
                 result: provenant_records::CommandResult::new(
@@ -939,6 +1054,33 @@ pub(crate) fn unified_graph_output(
             read_only: true,
         }),
     }
+}
+
+/// Select one output per peer node, with the same terminal preference as
+/// local graph output. References remain host-qualified across graph borders.
+fn peer_output_references(subtree: &Value) -> Result<Vec<String>, FacadeError> {
+    let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+        serde_json::from_value(subtree["checkpoint"].clone())
+            .map_err(|_| FacadeError::StateCorrupt)?;
+    Ok(checkpoint
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.attempts
+                .iter()
+                .rev()
+                .find(|attempt| {
+                    attempt.state == AttemptState::Terminal && attempt.attempt_ref.is_some()
+                })
+                .or_else(|| {
+                    node.attempts
+                        .iter()
+                        .rev()
+                        .find(|attempt| attempt.attempt_ref.is_some())
+                })
+                .and_then(|attempt| attempt.attempt_ref.clone())
+        })
+        .collect())
 }
 
 fn resolve_target(
@@ -1119,6 +1261,32 @@ mod tests {
             assert!(reason.contains("provenant gc --apply"));
         }
         Ok(())
+    }
+
+    #[test]
+    fn peer_output_follows_host_qualified_subtree_attempts() {
+        let mut checkpoint = checkpoint("receiver");
+        let parent = checkpoint.nodes[0].attempts[0].clone();
+        let mut child = parent.clone();
+        child.attempt_ref =
+            Some("33333333333333333333333333333333/44444444444444444444444444444444".into());
+        child.state = AttemptState::Terminal;
+        checkpoint.nodes[1].attempts.push(child.clone());
+        // Prefer the child's completed output over an unfinished retry.
+        let mut retry = child.clone();
+        retry.state = AttemptState::Running;
+        retry.attempt_ref =
+            Some("33333333333333333333333333333333/55555555555555555555555555555555".into());
+        checkpoint.nodes[1].attempts.push(retry);
+        let subtree = serde_json::to_value(graph_snapshot(checkpoint)).unwrap();
+        assert_eq!(
+            peer_output_references(&subtree).unwrap(),
+            vec![parent.attempt_ref.unwrap(), child.attempt_ref.unwrap(),]
+        );
+        assert!(matches!(
+            peer_output_references(&json!({})),
+            Err(FacadeError::StateCorrupt)
+        ));
     }
 
     #[test]

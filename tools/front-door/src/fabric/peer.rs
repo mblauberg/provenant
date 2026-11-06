@@ -1,4 +1,5 @@
 use super::*;
+use provenant_fabric_runtime::runs::SubmissionReceipt;
 
 pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObserver) -> u8 {
     let result = (|| -> Result<Vec<HostHealth>, Box<dyn std::error::Error>> {
@@ -368,10 +369,15 @@ pub fn peer(
                     })
                 }
             }
-            PeerAction::Run { input, .. } => {
+            PeerAction::Run { input, extra } => {
                 let observed = owner
                     .run(input.clone(), budget, &cancel)
                     .and_then(|mut value| {
+                        // Validate and bind the parent's cancel operation before
+                        // mutating any descendant; conflicts leave the subtree alone.
+                        if let RunInput::Cancel { target, .. } = input {
+                            peer_cancel_subtree(&peer_factory, target.attempt, budget, &cancel)?;
+                        }
                         if let provenant_fabric_runtime::runs::RunResult::Status { attempt, .. } =
                             &mut value
                             && matches!(
@@ -387,6 +393,26 @@ pub fn peer(
                                 "graph_custody_released".into(),
                                 serde_json::json!(released),
                             );
+                        }
+                        if let provenant_fabric_runtime::runs::RunResult::Status {
+                            attempt, ..
+                        } = &mut value
+                        {
+                            let after = extra
+                                .get("peer_subtree_after")
+                                .map(|value| {
+                                    value
+                                        .as_u64()
+                                        .and_then(|value| usize::try_from(value).ok())
+                                        .ok_or(FacadeError::InvalidInput { detail: None })
+                                })
+                                .transpose()?
+                                .unwrap_or(0);
+                            attempt.extra.extend(peer_graph_fields_page(
+                                &peer_factory,
+                                attempt.attempt_id,
+                                after,
+                            )?);
                         }
                         Ok(value)
                     });
@@ -487,21 +513,38 @@ pub fn peer(
                         // the authenticated graph launch envelope above.
                         context.graph_template_launch = true;
                     }
-                    owner.submit_with_access(input, budget, &cancel, access, retry, Some(attempt))
+                    peer_submit_graph(
+                        &peer_factory,
+                        input,
+                        actor,
+                        attempt,
+                        access.network,
+                        retry,
+                        budget,
+                        &cancel,
+                    )
                 })(),
                 |data| PeerResult::Submitted {
                     data,
                     extra: Default::default(),
                 },
             ),
-            PeerAction::Output { input, .. } => {
-                peer_result(owner.output(input.clone(), budget, &cancel), |data| {
-                    PeerResult::Output {
-                        data,
-                        extra: Default::default(),
-                    }
-                })
-            }
+            PeerAction::Output { input, .. } => peer_result(
+                owner
+                    .output(input.clone(), budget, &cancel)
+                    .and_then(|mut data| {
+                        let (OutputResult::Chunk { extra, target, .. }
+                        | OutputResult::Artifact { extra, target, .. }) = &mut data;
+                        let mut fields = peer_graph_fields(&peer_factory, target.attempt)?;
+                        fields.remove("peer_subtree");
+                        extra.extend(fields);
+                        Ok(data)
+                    }),
+                |data| PeerResult::Output {
+                    data,
+                    extra: Default::default(),
+                },
+            ),
             PeerAction::RunEvents { after, limit, .. } => {
                 peer_result(owner.events(*after, *limit, &cancel), |data| {
                     PeerResult::RunEvents {
@@ -674,7 +717,22 @@ pub fn peer(
                                 .and_then(|actor| actor.parse::<provenant_core::ActorId>().ok())
                                 .is_some();
                             let receipt = if graph_agent {
-                                owner.retained_graph_receipt(operation_id, &cancel)
+                                peer_retained_receipt(
+                                    &peer_factory,
+                                    operation_id,
+                                    request
+                                        .agent
+                                        .strip_prefix("graph-")
+                                        .and_then(|id| id.parse().ok())
+                                        .ok_or(FacadeError::StateCorrupt)?,
+                                )
+                                .and_then(|receipt| {
+                                    if receipt.is_some() {
+                                        Ok(receipt)
+                                    } else {
+                                        owner.retained_graph_receipt(operation_id, &cancel)
+                                    }
+                                })
                             } else {
                                 Ok(None)
                             };
@@ -804,4 +862,406 @@ pub fn peer(
             3
         }
     }
+}
+
+/// The receiver owns a graph for each authenticated remote submission. Its
+/// journal lock spans launch, just as it does for an ordinary local graph.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn peer_submit_graph(
+    factory: &Factory,
+    input: SubmitInput,
+    actor: provenant_core::ActorId,
+    attempt: provenant_fabric_runtime::graph::AttemptSpec,
+    network: Option<provenant_records::run::NetworkAccess>,
+    retry: Option<u8>,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<SubmissionReceipt, FacadeError> {
+    use provenant_fabric_runtime::graph::{FileJournal, GraphDocument, GraphExecution};
+    use provenant_records::run::RequestedRoute;
+    let submission_digest = provenant_records::CanonicalV1::record_digest(
+        "peer-submission",
+        1,
+        &(&input, actor, &attempt, network, retry),
+    )
+    .map_err(|_| FacadeError::StateCorrupt)?
+    .to_string();
+    let SubmitInput::Submit {
+        operation_id,
+        tasks,
+        concurrency,
+        knobs,
+        ..
+    } = input;
+    // Origin graph launches are single attempts. Refuse a batch rather than
+    // silently changing its completion or cancellation semantics.
+    let [task] = tasks.as_slice() else {
+        return Err(FacadeError::InvalidInput { detail: None });
+    };
+    if concurrency.is_some_and(|n| n != 1) {
+        return Err(FacadeError::InvalidInput { detail: None });
+    }
+    let digest =
+        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, &operation_id))
+            .map_err(|_| FacadeError::StateCorrupt)?;
+    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    let mut route = match &task.route {
+        RequestedRoute::Adapter { provider, name, .. } => {
+            serde_json::json!({"adapter":provider,"name":name})
+        }
+        RequestedRoute::Model {
+            provider,
+            model,
+            effort,
+            ..
+        } => serde_json::json!({"adapter":provider,"model":model,"effort":effort}),
+        RequestedRoute::Named { name, effort, .. }
+        | RequestedRoute::Review { name, effort, .. } => {
+            serde_json::json!({"alias":name,"effort":effort})
+        }
+    };
+    route["peer_requested_route"] =
+        serde_json::to_value(&task.route).map_err(|_| FacadeError::StateCorrupt)?;
+    route["peer_network"] = serde_json::to_value(network).map_err(|_| FacadeError::StateCorrupt)?;
+    route["peer_retry_limit"] = serde_json::json!(retry);
+    route["peer_source_head"] = serde_json::json!(task.source_head);
+    let origin = task
+        .context
+        .clone()
+        .ok_or(FacadeError::InvalidInput { detail: None })?;
+    let node = origin
+        .node_id
+        .clone()
+        .ok_or(FacadeError::InvalidInput { detail: None })?;
+    let mut attempt = attempt;
+    attempt.provider_timeout = attempt.provider_timeout.or(Some(task.timeout_seconds));
+    attempt.account = task.account.clone().or(attempt.account);
+    attempt.build_heavy |= task.build_heavy;
+    let exclude = knobs
+        .iter()
+        .map(|knob| {
+            knob.strip_prefix("routing.graph_exclude=")
+                .ok_or(FacadeError::InvalidInput { detail: None })
+                .and_then(|value| {
+                    serde_json::from_str::<Vec<String>>(value)
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    let network = network.map(|reach| match reach {
+        provenant_records::run::NetworkAccess::Provider => provenant_cli::Switch::Off,
+        _ => provenant_cli::Switch::On,
+    });
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":graph,"template_library":{},"exclude":exclude,
+        "nodes":[{"id":node,"access":"read_only","prompt":task.prompt,"title":task.title,
+          "route":route,"attempt":attempt,"context":origin,"require_skill_location":task.require_skill_location,
+          "settlement_retries":retry}],
+    })).map_err(|_| FacadeError::StateCorrupt)?;
+    document.review_base = task.base.clone();
+    document.nodes[0].source =
+        task.head.as_ref().map(
+            |head| provenant_fabric_runtime::graph::SourceBinding::Commit {
+                commit: head.clone(),
+            },
+        );
+    let review_base = task
+        .base
+        .as_deref()
+        .map(|base| {
+            let git = provenant_os::git::git_executable()
+                .ok_or(FacadeError::InvalidInput { detail: None })?;
+            provenant_run::resolve_git_base(&git, &factory.cwd, base)
+                .map_err(run_error)?
+                .parse()
+                .map_err(|_| FacadeError::StateCorrupt)
+        })
+        .transpose()?;
+    if let Some(network) = network {
+        document.extra.insert(
+            "network".into(),
+            serde_json::json!(if matches!(network, provenant_cli::Switch::On) {
+                "on"
+            } else {
+                "off"
+            }),
+        );
+    }
+    provenant_fabric_runtime::graph::patch::submission(
+        &mut document,
+        &operation_id.to_string(),
+        &factory.context.config.graph.limits,
+    )
+    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        &graph,
+        budget,
+        cancel,
+        &factory.clock,
+    )
+    .map_err(graph_journal_error)?;
+    if let Some(bound) = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        &graph,
+    )
+    .map_err(graph_journal_error)?
+        && bound
+            .extra
+            .get("peer_submission_digest")
+            .and_then(serde_json::Value::as_str)
+            != Some(submission_digest.as_str())
+    {
+        return Err(FacadeError::Conflict);
+    }
+    journal
+        .bind(GraphExecution {
+            review_base,
+            integration_base: None,
+            directory: factory.cwd.clone(),
+            extra: [
+                (
+                    "peer_origin_context".into(),
+                    serde_json::json!({"graph_id":origin.graph_id,"node_id":origin.node_id}),
+                ),
+                ("peer_operation_id".into(), serde_json::json!(operation_id)),
+                (
+                    "peer_submission_digest".into(),
+                    serde_json::json!(submission_digest),
+                ),
+            ]
+            .into(),
+            document: document.clone(),
+        })
+        .map_err(|_| FacadeError::Conflict)?;
+    let mut owner = BoundGraphOwner {
+        factory,
+        integration_base: None,
+        integration_branch: None,
+        network,
+        capability_overrides: Default::default(),
+        exclude,
+        budget,
+        cancel,
+        prices: None,
+        tick: false,
+    };
+    let run = provenant_fabric_runtime::graph::advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &factory.context.config.graph.limits,
+        &factory.context.config.graph.budget,
+    )
+    .map_err(|error| FacadeError::io(format!("advance peer graph: {error}")))?;
+    peer_graph_receipt(factory, operation_id, &graph, &run.checkpoint)
+}
+
+fn peer_graph_receipt(
+    factory: &Factory,
+    operation_id: provenant_core::OperationId,
+    graph: &str,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Result<SubmissionReceipt, FacadeError> {
+    let reference = checkpoint
+        .nodes
+        .first()
+        .and_then(|node| node.attempts.last())
+        .and_then(|attempt| attempt.attempt_ref.as_deref())
+        .ok_or_else(|| FacadeError::LaunchUnknown {
+            operation_id: operation_id.clone(),
+        })?;
+    let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+    Ok(SubmissionReceipt {
+        operation_id,
+        targets: vec![AttemptTarget {
+            extra: Default::default(),
+            host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+            attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+        }],
+        worktree: None,
+        extra: [(
+            "peer_graph".into(),
+            serde_json::json!({"host":factory.context.identity.host,"graph_id":graph}),
+        )]
+        .into(),
+    })
+}
+
+pub(crate) fn peer_graph_fields(
+    factory: &Factory,
+    attempt: provenant_core::AttemptId,
+) -> Result<provenant_records::ExtraFields, FacadeError> {
+    peer_graph_fields_page(factory, attempt, 0)
+}
+
+pub(crate) fn peer_graph_fields_page(
+    factory: &Factory,
+    attempt: provenant_core::AttemptId,
+    after: usize,
+) -> Result<provenant_records::ExtraFields, FacadeError> {
+    use provenant_fabric_runtime::graph::{FileJournal, relay};
+    let cancel = CancelToken::new();
+    let owner = BinaryRunOwner {
+        factory,
+        allow_remote: false,
+        actor: None,
+        chair: None,
+    };
+    let record = owner.snapshot(
+        AttemptTarget {
+            extra: Default::default(),
+            host: None,
+            attempt,
+        },
+        WaitBudget::nonblocking(factory.clock.mono_now()),
+        &cancel,
+    )?;
+    let Some(graph) = record
+        .context
+        .as_ref()
+        .and_then(|context| context.graph_id.as_deref())
+        .filter(|id| id.starts_with("peer-"))
+    else {
+        return Ok(Default::default());
+    };
+    let Some(checkpoint) = FileJournal::read_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )
+    .map_err(graph_journal_error)?
+    else {
+        return Ok(Default::default());
+    };
+    let reference = format!("{}/{}", factory.context.identity.host, attempt);
+    if relay::historical_parent_of_attempt(&checkpoint, &reference).is_none() {
+        return Ok(Default::default());
+    }
+    let Some(execution) = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )
+    .map_err(graph_journal_error)?
+    else {
+        return Ok(Default::default());
+    };
+    let Some(origin) = execution.extra.get("peer_origin_context") else {
+        return Ok(Default::default());
+    };
+    // Peer frames are bounded. This metadata projection omits captured results,
+    // prompts, local paths and expansion fragments; output travels separately.
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    if after > checkpoint.nodes.len() {
+        return Err(FacadeError::InvalidInput { detail: None });
+    }
+    let mut next_node = None;
+    for (index, node) in checkpoint.nodes.iter().enumerate().skip(after) {
+        let mut selected = node.attempts.last().into_iter().collect::<Vec<_>>();
+        if let Some(terminal) = node.attempts.iter().rev().find(|attempt| {
+            attempt.state == provenant_fabric_runtime::graph::AttemptState::Terminal
+                && attempt.attempt_ref.is_some()
+        }) && selected
+            .first()
+            .is_none_or(|latest| latest.key != terminal.key)
+        {
+            selected.push(terminal);
+        }
+        let row = serde_json::json!({"id":node.id,"state":node.state,"worktree":null,
+            "attempts":selected.into_iter().map(|attempt|serde_json::json!({
+                "launched":attempt.launched,"key":attempt.key,"route":{"adapter":attempt.route.adapter,"model":attempt.route.model,"alias":attempt.route.alias,"name":attempt.route.name,"effort":attempt.route.effort,"account":attempt.route.account},
+                "state":attempt.state,"attempt_ref":attempt.attempt_ref,"outcome":attempt.outcome,
+                "launch_actor":attempt.launch_actor})).collect::<Vec<_>>()});
+        let size = serde_json::to_vec(&row)
+            .map_err(|_| FacadeError::StateCorrupt)?
+            .len();
+        if bytes + size > MAX_FRAME / 4 {
+            if rows.is_empty() {
+                return Err(FacadeError::InvalidInput { detail: None });
+            }
+            next_node = Some(index);
+            break;
+        }
+        bytes += size;
+        rows.push(row);
+    }
+    let snapshot = graph_snapshot(checkpoint);
+    let subtree = serde_json::json!({"status":snapshot.status,"outcome":snapshot.outcome,
+        "next_node":next_node,"checkpoint":{"schema_version":1,"graph_id":graph,
+        "plan_digest":snapshot.checkpoint.plan_digest,"cancelled":snapshot.checkpoint.cancelled,"nodes":rows}});
+    Ok([
+        (
+            "peer_graph".into(),
+            serde_json::json!({"host":factory.context.identity.host,"graph_id":graph}),
+        ),
+        ("peer_origin_context".into(), origin.clone()),
+        ("peer_subtree".into(), subtree),
+    ]
+    .into())
+}
+
+pub(crate) fn peer_cancel_subtree(
+    factory: &Factory,
+    attempt: provenant_core::AttemptId,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    let fields = peer_graph_fields(factory, attempt)?;
+    let Some(graph) = fields
+        .get("peer_graph")
+        .and_then(|v| v["graph_id"].as_str())
+    else {
+        return Ok(());
+    };
+    let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )
+    .map_err(graph_journal_error)?
+    .ok_or(FacadeError::NotFound)?;
+    let reference = format!("{}/{}", factory.context.identity.host, attempt);
+    let node = provenant_fabric_runtime::graph::relay::historical_parent_of_attempt(
+        &checkpoint,
+        &reference,
+    )
+    .ok_or(FacadeError::NotFound)?;
+    factory.stop_target(
+        &unified::GraphTarget {
+            graph: graph.into(),
+            node: Some(node.into()),
+            attempt: None,
+        },
+        Some("Cancelled by origin".into()),
+        budget,
+        cancel,
+    )?;
+    Ok(())
+}
+
+fn peer_retained_receipt(
+    factory: &Factory,
+    operation_id: &provenant_core::OperationId,
+    actor: provenant_core::ActorId,
+) -> Result<Option<SubmissionReceipt>, FacadeError> {
+    use provenant_fabric_runtime::graph::FileJournal;
+    let digest =
+        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, operation_id))
+            .map_err(|_| FacadeError::StateCorrupt)?;
+    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    FileJournal::read_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        &graph,
+    )
+    .map_err(graph_journal_error)?
+    .map(|checkpoint| peer_graph_receipt(factory, operation_id.clone(), &graph, &checkpoint))
+    .transpose()
 }
