@@ -879,7 +879,10 @@ impl ToolCall {
             && let Self::GraphDocument(input) = &self
             && input["op"] == "run"
         {
-            let budget = service.budget(input["wait_seconds"].as_u64().unwrap_or(crate::MAX_WAIT_SECONDS))?;
+            if let Some(seconds) = input["wait_seconds"].as_u64() {
+                service.budget(seconds)?;
+            }
+            let budget = service.budget(crate::MAX_WAIT_SECONDS)?;
             let value = service.facade.relay_document(input, budget, cancel)?;
             return service.limit_response(response(self.name(), value), input["explain"] != true, false);
         }
