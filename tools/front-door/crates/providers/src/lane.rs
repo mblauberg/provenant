@@ -231,6 +231,24 @@ pub(crate) fn resolve_exec_path(raw: &Path) -> Option<PathBuf> {
     provenant_confinement::permissions::profile_path_representable(&canonical).then_some(canonical)
 }
 
+/// Apple's Git shim reports helpers under `<developer>/usr/libexec/git-core`.
+/// Resolve the sibling Git binary from that reported path so a lane does not
+/// need to consult the host's active developer-directory selector.
+pub(crate) fn developer_git_for_exec_path(raw: &Path) -> Option<PathBuf> {
+    let core = resolve_exec_path(raw)?;
+    let libexec = core.parent()?;
+    let usr = libexec.parent()?;
+    if core.file_name()? != "git-core"
+        || libexec.file_name()? != "libexec"
+        || usr.file_name()? != "usr"
+    {
+        return None;
+    }
+    let git = std::fs::canonicalize(usr.join("bin/git")).ok()?;
+    (git.is_file() && provenant_confinement::permissions::profile_path_representable(&git))
+        .then_some(git)
+}
+
 /// The exec path as Git reports it, before any resolution.
 pub(crate) fn probe_exec_path(git: &Path) -> Option<PathBuf> {
     let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
@@ -959,19 +977,29 @@ mod tests {
     fn wrapper_pins_the_hosts_exec_path_and_answers_credentials_from_the_token() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let core = dir.path().join("dev/libexec/git-core");
+        let core = dir.path().join("dev/usr/libexec/git-core");
         std::fs::create_dir_all(&core).unwrap();
+        let developer_git = dir.path().join("dev/usr/bin/git");
+        std::fs::create_dir_all(developer_git.parent().unwrap()).unwrap();
+        std::fs::write(&developer_git, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&developer_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Homebrew's opt path crosses a symlink. Make this the path Git reports
+        // before generating the wrapper, just as the host probe does.
+        let link = dir.path().join("opt/git");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("dev"), &link).unwrap();
+        let linked = link.join("usr/libexec/git-core");
         let git = dir.path().join("git");
-        std::fs::write(&git, format!("#!/bin/sh\necho '{}'\n", core.display())).unwrap();
+        std::fs::write(&git, format!("#!/bin/sh\necho '{}'\n", linked.display())).unwrap();
         std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         let text = String::from_utf8(git_wrapper(&git, &GitWrapper::default()).unwrap()).unwrap();
         let canonical = std::fs::canonicalize(&core).unwrap();
         assert!(text.contains(&format!("GIT_EXEC_PATH='{}'", canonical.display())));
-        // A path crossing a symlink (Homebrew's `opt/git`) is pinned resolved.
-        let link = dir.path().join("opt");
-        std::os::unix::fs::symlink(dir.path().join("dev"), &link).unwrap();
-        let linked = link.join("libexec/git-core");
-        assert_eq!(resolve_exec_path(&linked), Some(canonical));
+        assert_eq!(host_exec_path(&git), Some(canonical.clone()));
+        assert_eq!(
+            developer_git_for_exec_path(&linked),
+            Some(std::fs::canonicalize(developer_git).unwrap())
+        );
         assert_eq!(resolve_exec_path(&dir.path().join("absent")), None);
         assert!(text.contains(" -c 'credential.https://github.com.helper="));
         assert!(!text.contains("secret"));
