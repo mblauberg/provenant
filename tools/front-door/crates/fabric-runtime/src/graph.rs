@@ -1095,6 +1095,28 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     })
                     .collect(),
             };
+            if let Some(raw) = document.extra.get("submission_patch") {
+                let patch: patch::Patch = serde_json::from_value(raw.clone())
+                    .map_err(|error| GraphError::Invalid(error.to_string()))?;
+                let library = template::TemplateLibrary::bundled();
+                let resolvers = Default::default();
+                patch::admit_patch(
+                    &mut patch::LiveGraph {
+                        document,
+                        checkpoint: &mut checkpoint,
+                    },
+                    None,
+                    &patch,
+                    &patch::PatchContext {
+                        library: &library,
+                        resolvers: &resolvers,
+                        scan: &patch::scan_for_secrets,
+                        journal: None,
+                        limits,
+                    },
+                )
+                .map_err(|error| GraphError::Invalid(error.to_string()))?;
+            }
             {
                 for (node, progress) in plan.nodes.iter().zip(&mut checkpoint.nodes) {
                     // A loop round's worktree is advanced by earlier rounds;

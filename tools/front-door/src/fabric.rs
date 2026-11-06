@@ -291,6 +291,15 @@ pub struct BoundFacade<'a> {
     factory: &'a Factory,
 }
 impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
+    fn add_from_lane(
+        &mut self,
+        op: &provenant_fabric_runtime::graph::relay::RelayOp,
+        cancel: &CancelToken,
+        within: std::time::Duration,
+    ) -> Result<serde_json::Value, ServiceError> {
+        provenant_cli::fabric::graph_relay::from_lane(op, cancel, within)
+    }
+
     fn console(
         &mut self,
         input: provenant_fabric_mcp::tools::ConsoleInput,
@@ -1440,7 +1449,7 @@ impl Factory {
                         )
                         .map_err(scratch_prepare_error)?,
                 };
-                let document = if resume {
+                let mut document = if resume {
                     self.resolve_graph(&document.to_string_lossy())?
                         .1
                         .ok_or_else(|| FacadeError::DispatchRefused {
@@ -1467,6 +1476,21 @@ impl Factory {
                     }
                     document
                 };
+                if !document.extra.contains_key("submission_patch") {
+                    let submission_key = document
+                        .extra
+                        .get("provenance")
+                        .and_then(|value| value.get("operation_id"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("submit:{}", document.graph_id));
+                    provenant_fabric_runtime::graph::patch::submission(
+                        &mut document,
+                        &submission_key,
+                        &self.context.config.graph.limits,
+                    )
+                    .map_err(|error| FacadeError::invalid(error.to_string()))?;
+                }
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
                         &self.cwd, branch,

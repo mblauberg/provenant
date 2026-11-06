@@ -29,9 +29,257 @@ pub struct CompositeLane {
     pub brief: Option<String>,
 }
 
+/// Resolve production inputs before lowering through the template compiler.
+pub(super) fn expand_for_run(
+    layers: &Layers,
+    name: &str,
+    prompt: &str,
+    params: &[(String, Value)],
+    overrides: &[String],
+) -> Result<Expansion, String> {
+    let (config, mut origins) = layers
+        .resolve(name)
+        .unwrap_or_else(|_| (json!({}), BTreeMap::new()));
+    let mut values = flatten_parameters(
+        name,
+        config.get("parameters").unwrap_or(&json!({})),
+        "",
+        &origins,
+    )?;
+    for (key, value) in params {
+        values[key] = value.clone();
+        origins.insert(format!("parameters.{key}"), "--params-file".into());
+    }
+    for item in overrides {
+        let (path, parsed) = parse_preset_override(item)?;
+        let path = path.strip_prefix("parameters.").unwrap_or(path);
+        let mut fields = path.split('.').peekable();
+        let mut target = &mut values;
+        while let Some(field) = fields.next() {
+            if fields.peek().is_none() {
+                target[field] = parsed["value"].clone();
+            } else {
+                if target.get(field).is_none() {
+                    target[field] = json!({});
+                }
+                target = &mut target[field];
+            }
+        }
+        origins.insert(format!("parameters.{path}"), "--set".into());
+    }
+    values["brief"] = values
+        .get("brief")
+        .cloned()
+        .unwrap_or_else(|| json!(prompt));
+    if values
+        .get("worktree")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+        && let Some(worktree) = &layers.default_worktree
+    {
+        values["worktree"] = json!(worktree);
+    }
+    if values.get("write_scope").is_none()
+        && let Some(scope) = values.get("scope").cloned()
+    {
+        values["write_scope"] = scope;
+    }
+    let mut stack = Vec::new();
+    let mut files = Vec::new();
+    let builder = StageBuilder {
+        layers,
+        name,
+        prompt,
+        parameters: values.clone(),
+        roles: None,
+        stack: &mut stack,
+        origins: &mut origins,
+        repo_files: &mut files,
+        scope: "",
+    };
+    let explicit_lenses = params.iter().any(|(key, _)| key == "lenses")
+        || overrides
+            .iter()
+            .any(|item| item.starts_with("parameters.lenses="));
+    let lenses = if explicit_lenses {
+        values
+            .get("lenses")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    } else if layers.review.is_some() {
+        Vec::new()
+    } else {
+        vec![json!({"name":"correctness", "tier":"senior"})]
+    };
+    let selected = builder.select_items(lenses)?;
+    let resolvers = BTreeMap::from([(
+        "review-panel".into(),
+        selected
+            .iter()
+            .filter_map(|lens| lens["name"].as_str().map(str::to_owned))
+            .collect(),
+    )]);
+    let lanes: Vec<CompositeLane> = values
+        .get("lanes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|lane| {
+            Ok(CompositeLane {
+                name: lane["name"]
+                    .as_str()
+                    .ok_or("batch lane needs a name")?
+                    .into(),
+                worktree: lane["worktree"]
+                    .as_str()
+                    .ok_or("batch lane needs a worktree")?
+                    .into(),
+                scope: serde_json::from_value(lane["scope"].clone()).map_err(|e| e.to_string())?,
+                tier: lane
+                    .get("tier")
+                    .or_else(|| lane.get("route"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                brief: lane
+                    .get("brief")
+                    .or_else(|| lane.get("spec"))
+                    .and_then(Value::as_str)
+                    .filter(|brief| !brief.is_empty())
+                    .map(str::to_owned),
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    let template = if name == "single" {
+        "task"
+    } else {
+        PRESET_TEMPLATES
+            .iter()
+            .find_map(|(alias, template)| (*alias == name).then_some(*template))
+            .unwrap_or(name)
+    };
+    let library = layers
+        .templates
+        .as_ref()
+        .unwrap_or_else(|| bundled_templates());
+    let definition = library.resolve(template)?;
+    let known = |key: &str| {
+        definition.parameters.contains_key(key)
+            || config
+                .get("parameters")
+                .is_some_and(|parameters| parameters.get(key).is_some())
+            || matches!(
+                key,
+                "brief"
+                    | "write_scope"
+                    | "lenses"
+                    | "risk_tier"
+                    | "kind"
+                    | "review_shape"
+                    | "size"
+                    | "risk_tags"
+                    | "subject"
+                    | "base"
+                    | "selection_range"
+                    | "lanes"
+            )
+    };
+    for key in params
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .chain(overrides.iter().filter_map(|item| {
+            item.split_once('=').map(|(path, _)| {
+                path.strip_prefix("parameters.")
+                    .unwrap_or(path)
+                    .split('.')
+                    .next()
+                    .unwrap_or(path)
+            })
+        }))
+    {
+        if !known(key) {
+            return Err(format!("unknown template parameter: {key}"));
+        }
+    }
+    let mut parameters = definition
+        .parameters
+        .keys()
+        .filter_map(|key| values.get(key).map(|value| (key.clone(), value.clone())))
+        .collect::<serde_json::Map<_, _>>();
+    if !definition.is_composite() {
+        for key in ["brief", "worktree", "write_scope"] {
+            if let Some(value) = values.get(key) {
+                parameters.insert(key.into(), value.clone());
+            }
+        }
+    }
+    let mut expansion = expand_composite(
+        layers,
+        template,
+        &Value::Object(parameters),
+        &lanes,
+        &resolvers,
+    )?;
+    if expansion.document["nodes"][0].get("composite").is_none() {
+        expansion.document["nodes"][0]["prompt"] = values["brief"].clone();
+    }
+    visit_nodes(
+        expansion.document["nodes"]
+            .as_array_mut()
+            .ok_or("missing nodes")?,
+        &mut |node| {
+            let id = node["id"].as_str().unwrap_or_default();
+            let lens = selected
+                .iter()
+                .find(|lens| lens["name"].as_str() == Some(id))
+                .or_else(|| {
+                    (selected.len() == 1 && id == "review" && node.get("composite").is_none())
+                        .then(|| &selected[0])
+                });
+            if let Some(lens) = lens {
+                if let Some(tier) = lens["tier"].as_str() {
+                    node["route"] = json!({"alias":tier});
+                }
+                if let Some(group) = lens.get("family_group") {
+                    node["family_group"] = group.clone();
+                }
+                if let Some(subject) = values.get("subject") {
+                    node["source"] = subject.clone();
+                }
+                node["prompt"] = json!(format!(
+                    "{}\n\n{}",
+                    node["prompt"].as_str().unwrap_or_default(),
+                    prompt
+                ));
+            }
+            Ok(())
+        },
+    )?;
+    expansion.document["context"] = json!({});
+    expansion.document["provenance"]["preset"] = json!(name);
+    expansion.document["provenance"]["parameters"] = values.clone();
+    expansion.origins = origins;
+    expansion.warnings = layers.warnings.borrow().clone();
+    expansion.review_shape = Some(
+        layers
+            .used_shapes
+            .borrow()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    if let Some(base) = values
+        .get("base")
+        .filter(|base| base.as_str().is_some_and(|base| !base.is_empty()))
+    {
+        expansion.document["review_base"] = base.clone();
+    }
+    Ok(expansion)
+}
+
 /// Lower a template or preset alias for submission. The host supplies
 /// resolver lists, including `review-panel`. This creates no Git refs.
-#[allow(dead_code, reason = "entry point for the template run interface")]
 pub fn expand_composite(
     layers: &Layers,
     name: &str,
@@ -66,7 +314,36 @@ pub fn expand_composite(
         .unwrap_or_else(|| bundled_templates()),
         resolvers,
     };
-    let mut node = compiler.compile(&json!({"id":"work", "use":template, "with":parameters}))?;
+    let definition = compiler.library.resolve(template)?;
+    let mut supplied = parameters.clone();
+    let mut entry = json!({"id":"work", "use":template});
+    if !definition.is_composite() {
+        for key in ["brief", "worktree", "write_scope"] {
+            if !definition.parameters.contains_key(key)
+                && let Some(value) = supplied.remove(key)
+            {
+                entry[key] = value;
+            }
+        }
+        if definition.access != Some(graph::AccessMode::WorktreeWrite) {
+            entry
+                .as_object_mut()
+                .ok_or("missing template node")?
+                .remove("worktree");
+            entry
+                .as_object_mut()
+                .ok_or("missing template node")?
+                .remove("write_scope");
+        }
+        if definition.access == Some(graph::AccessMode::WorktreeWrite)
+            && entry.get("worktree").is_none()
+            && let Some(worktree) = &layers.default_worktree
+        {
+            entry["worktree"] = json!(worktree);
+        }
+    }
+    entry["with"] = json!(supplied);
+    let mut node = compiler.compile(&entry)?;
     if template == "batch" && !lanes.is_empty() {
         let children = &mut node
             .composite

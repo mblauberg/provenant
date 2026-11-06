@@ -1648,7 +1648,11 @@ pub(super) fn flatten_fragment(
         BTreeSet::new()
     };
     let mut local_nodes = local_nodes;
-    for existing in document.nodes.iter().filter(|node| external.contains(&node.id)) {
+    for existing in document
+        .nodes
+        .iter()
+        .filter(|node| external.contains(&node.id))
+    {
         let name = &existing.id;
         let mut stub: GraphNode = serde_json::from_value(serde_json::json!({
             "id": name, "access": "read_only", "prompt": "placeholder", "route": {"alias": "senior"}

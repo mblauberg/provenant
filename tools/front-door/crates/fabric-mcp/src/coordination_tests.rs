@@ -537,7 +537,102 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
 
 use crate::test_facade::local_inbox_owner;
 local_inbox_owner!(SubmitFacade);
-local_inbox_owner!(FakeFacade);
+impl McpFacade for FakeFacade {
+    fn inbox_owner(
+        &mut self,
+        input: InboxInput,
+        host: Option<String>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<InboxResult, ServiceError> {
+        if host.is_some() {
+            return Err(FacadeError::InvalidInput { detail: None }.into());
+        }
+        Ok(self.inbox(input, budget, cancel)?)
+    }
+
+    fn add_from_lane(
+        &mut self,
+        operation: &provenant_fabric_runtime::graph::relay::RelayOp,
+        _: &CancelToken,
+        _: std::time::Duration,
+    ) -> Result<Value, ServiceError> {
+        Ok(serde_json::to_value(operation)?)
+    }
+}
+
+#[test]
+fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), Box<dyn Error>> {
+    let temporary = tempfile::tempdir()?;
+    let mut roots = RootInputs::new(
+        temporary.path().join("home"),
+        temporary.path().join("checkout"),
+    );
+    roots.state_dir = Some(temporary.path().join("state"));
+    let root = roots.resolve(&Resolver)?.state;
+    let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+    let coordination = CoordinationService::open(
+        &root,
+        ProjectId::from_bytes([1; 16]),
+        ActorId::from_bytes([2; 16]),
+        &clock,
+        &ThreadPause,
+        &CancelToken::new(),
+    )?;
+    let mut service = Service::new(coordination, FakeFacade, &clock).with_lane_restrictions(true);
+    let input = json!({
+        "op":"submit", "operation_id":"child-launch", "wait_seconds":1,
+        "tasks":[{"prompt":"implement the child", "access":"worktree_write",
+            "route":{"kind":"named","name":"senior"}, "timeout_seconds":60}]
+    });
+    let invoke = |service: &mut Service<'_, FakeFacade>| -> Result<Value, Box<dyn Error>> {
+        Ok(ToolCall::parse("fabric_run", input.clone())?
+            .execute(service, &CancelToken::new())?
+            .structured_content)
+    };
+    let first = invoke(&mut service)?;
+    let replay = invoke(&mut service)?;
+    assert_eq!(first, replay);
+    assert_eq!(first["children"][0]["op"], "add");
+    assert_eq!(first["children"][0]["use"], "task");
+    assert_eq!(first["children"][0]["tier"], "senior");
+    assert_eq!(first["children"][0]["brief"], "implement the child");
+    assert_eq!(first["children"][0]["writer"], true);
+    assert_eq!(first["children"][0]["timeout_seconds"], 60);
+    assert!(
+        !first["children"][0]["idempotency_key"]
+            .as_str()
+            .ok_or("missing key")?
+            .is_empty()
+    );
+    assert!(first.get("targets").is_none());
+    let mut unsupported = input.clone();
+    unsupported["tasks"][0]["route"] = json!({"kind":"model","provider":"codex","model":"model"});
+    let error = ToolCall::parse("fabric_run", unsupported)?
+        .execute(&mut service, &CancelToken::new())
+        .err()
+        .ok_or("unsupported child fell through to legacy submit")?;
+    assert_eq!(error.code(), "invalid_input");
+    for (field, value) in [
+        ("unsupported", json!("do not discard")),
+        ("capability_sources", json!({"postgres":"flag"})),
+    ] {
+        let mut unsupported = input.clone();
+        unsupported["tasks"][0][field] = value;
+        // Shared peer records retain extension fields; even a typed caller
+        // bypassing strict MCP parsing cannot silently discard them.
+        unsupported
+            .as_object_mut()
+            .ok_or("submission object")?
+            .remove("wait_seconds");
+        let error = ToolCall::Submit(serde_json::from_value(unsupported)?)
+            .execute(&mut service, &CancelToken::new())
+            .err()
+            .ok_or("unsupported task field was discarded")?;
+        assert_eq!(error.code(), "invalid_input");
+    }
+    Ok(())
+}
 
 #[test]
 fn unsupported_steer_is_an_mcp_refusal_with_the_stable_code() -> Result<(), Box<dyn Error>> {

@@ -2120,3 +2120,126 @@ fn bundled_plan_admits_a_fragment_patch() {
     assert!(run.checkpoint.nodes.iter().any(|node| node.id == "plan--slice"));
     assert!(run.checkpoint.expansions[0].patch.is_some());
 }
+
+#[test]
+fn initial_submission_is_a_durable_revision_and_replays_template_evidence() {
+    let library = TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
+    let node = compiler
+        .compile(&json!({"id":"work", "use":"task", "brief":"Do the work"}))
+        .unwrap();
+    let second = compiler.compile(&json!({"id":"then", "use":"task", "brief":"Continue", "after":["work"]})).unwrap();
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"submitted", "nodes":[node, second],
+        "provenance":{"parameters":{"brief":"Do the work"}}
+    }))
+    .unwrap();
+    let limits = plans::generous();
+    patch::submission(&mut document, "operation-one", &limits).unwrap();
+    struct RefuseSave;
+    impl GraphJournal for RefuseSave {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(None)
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            assert_eq!(patch::revision(checkpoint), 1);
+            assert_eq!(checkpoint.expansions[0].uses[0].name, "task");
+            Err(std::io::Error::other("injected save failure"))
+        }
+    }
+    let mut unlaunched = FakeOwner::default();
+    assert!(advance(&document, &mut unlaunched, &mut RefuseSave).is_err());
+    assert!(unlaunched.calls.is_empty());
+    let mut owner = FakeOwner::default();
+    owner.observations.push_back(AttemptObservation::Pending {
+        attempt_ref: Some("work-attempt".into()),
+    });
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(patch::revision(&run.checkpoint), 1);
+    let expansion = &run.checkpoint.expansions[0];
+    assert_eq!(
+        expansion.patch.as_ref().unwrap().key.as_deref(),
+        Some("operation-one")
+    );
+    assert_eq!(expansion.uses[0].name, "task");
+    assert_eq!(expansion.uses[0].nodes, vec!["work"]);
+    assert_eq!(expansion.uses[1].nodes, vec!["then"]);
+    assert_eq!(expansion.uses[0].parameters["brief"], "Do the work");
+    assert_eq!(run.checkpoint.nodes.len(), 2);
+    assert!(journal.0.as_ref().unwrap().expansions[0].patch.is_some());
+    let mut checkpoint = run.checkpoint;
+    let receipt = admit(
+        &document,
+        &mut checkpoint,
+        document.extra["submission_patch"].clone(),
+    )
+    .unwrap();
+    assert!(receipt.replayed);
+    assert_eq!(receipt.revision, 1);
+    owner.observations.push_back(AttemptObservation::Pending { attempt_ref: Some("work-attempt".into()) });
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(patch::revision(&replay.checkpoint), 1);
+    assert_eq!(replay.checkpoint.nodes.len(), 2);
+    assert_eq!(replay.checkpoint.expansions.len(), 1);
+    let retained = journal.0.clone();
+    let mut changed = document.clone();
+    changed.nodes[0].prompt = "Different work under the same operation".into();
+    changed.extra.remove("submission_patch");
+    patch::submission(&mut changed, "operation-one", &limits).unwrap();
+    assert!(advance(&changed, &mut owner, &mut journal).is_err());
+    assert_eq!(journal.0, retained);
+}
+
+#[test]
+fn initial_submission_refuses_changed_snapshot_before_checkpoint_or_launch() {
+    let library = TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
+    let node = compiler
+        .compile(&json!({"id":"work", "use":"task", "brief":"Do the work"}))
+        .unwrap();
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"secret-submission", "nodes":[node]
+    }))
+    .unwrap();
+    patch::submission(&mut document, "operation-two", &plans::generous()).unwrap();
+    document.extra.get_mut("submission_patch").unwrap()["nodes"][0]["prompt"] =
+        json!("changed prompt");
+    let mut journal = MemoryJournal::default();
+    let mut owner = FakeOwner::default();
+    assert!(advance(&document, &mut owner, &mut journal).is_err());
+    assert!(journal.0.is_none());
+}
+
+#[test]
+fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
+    let library = TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let compiler = Compiler { library: &library, resolvers: &resolvers };
+    let base = compiler.compile(&json!({"id":"work", "use":"task", "brief":"Work"})).unwrap();
+    let brief = "work ".repeat(220_000);
+    let nodes: Vec<_> = (0..8).map(|index| {
+        let mut node = base.clone();
+        node.id = format!("work{index}");
+        node.prompt = brief.clone();
+        node
+    }).collect();
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"large-submission", "nodes":nodes,
+        "provenance":{"parameters":{"brief":brief}}
+    })).unwrap();
+    let limits = plans::generous();
+    patch::submission(&mut document, "large-operation", &limits).unwrap();
+    assert!(canonical_len(&document) > MAX_CHECKPOINT_BYTES as usize);
+    let (plan, _) = validate_plan_with_limits(&document, &limits).unwrap();
+    assert!(graph_envelope_reason(&document, &[], &[], &plan).is_none());
+}
