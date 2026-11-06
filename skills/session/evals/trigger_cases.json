@@ -93,7 +93,7 @@
     {
       "id": "q235107",
       "relation": "negative",
-      "prompt": "Inspect the live Fabric graph's failed lanes and resume its retained document; no session continuity work is needed.",
+      "prompt": "Inspect the graph's failed nodes and retry its unfinished work; no session continuity work is needed.",
       "tags": [
         "adjacent",
         "near-miss"

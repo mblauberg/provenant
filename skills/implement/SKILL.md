@@ -5,7 +5,7 @@ description: "Use to build an approved software change through the deliver loop:
 
 # Implement
 
-The `deliver` preset is the default loop. This skill covers what the preset
+The `deliver` composite is the default loop. This skill covers what the composite
 does not: what to hand it, how to map work onto its nodes, and when to stop.
 
 ## Entry
@@ -27,26 +27,19 @@ named targets, and leave T2 and T3 to CI or a configured host.
 ## How it runs
 
 ```sh
-provenant run --preset deliver --prompt-file ISSUE.md \
-  --set 'parameters.worktree="WT"' --set 'parameters.risk_tier="substantial"' \
-  --set 'parameters.land_tier="substantial"' --set 'parameters.spec="#N"' --explain
+provenant run --use deliver --file ISSUE.md --explain
 ```
 
-Check the explanation, then submit the same command without `--explain` (add
-`--wait 2h` when no one is watching). Nodes run in order: `write`, `ci` (a
-repair loop bounded by `max_iterations`), `review` (`review`), `accept`
-and `land`. `risk_tier` picks the review shape and `land_tier` (default `substantial`) the
-landing gate, so set both to the approved tier. Routine and substantial work
-lands automatically; crucial and terminal work asks the `decision_session`,
-which must then be set. Follow a run with
-`provenant status` and `provenant fabric graph status ID`; take over a stalled
-landing with `provenant land N --head SHA --wait`.
+Check authority, write scopes, CI, review and landing gates in the explanation,
+then submit without `--explain`. `deliver` is the default composite; use
+`implement` for one slice, `implement.fix` for a known defect, and `batch` for
+parallel slices into one integration branch. Use `plan` when the shape is open.
+See [templates](../../docs/runbooks/presets.md) and the
+[planner brief](../orchestrate/references/planner.md).
 
-Split a large dependent change into a stack; see the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
-
-Other shapes: `generator-evaluator` for a slice that stays in your worktree,
-`big-batch` for several lanes, `single` when the change is routine. Read
-`docs/runbooks/presets.md` for parameters.
+Follow `provenant status`, collect `provenant output TARGET`, and use `retry`
+for unfinished work. `edit` changes unstarted nodes. Landing uses
+`provenant land N --head SHA --wait` after the integrated head meets its gates.
 
 ## Writing the brief
 
@@ -56,16 +49,12 @@ instruction to stop and report instead of widening scope. One writer per
 worktree. Name the method skill: `test-design` for observable behaviour,
 `refactor` for restructuring, `diagnose` for an unknown cause.
 
-The preset does not yet implement the planner-led policy or review repair loop.
-Run `review --plan on` and supplement its panel to meet HARNESS floors.
-`deliver` has no gate for that supplemental review, so pass `land=0` when the
-panel needs supplementing and land by hand once it passes. A failed council
-stops `deliver`. A separate writer repairs accepted findings,
-then the raising lenses re-review the delta. After three cycles or a concrete
-design concern, obtain read-only principal scoping; proceed within approved
-scope and notify the owner, but wait at changed scope or one-way doors.
+A separate writer repairs accepted review findings; the raising lenses
+re-review the delta. After three cycles or a concrete design concern, obtain
+read-only principal scoping. Proceed within approved scope and notify the
+owner; changed scope and one-way doors need the owner's decision.
 
-## Rules the preset cannot enforce
+## Writer rules
 
 - The implementer may not edit a failing acceptance test or weaken an
   assertion to pass. A changed test is reported with the reason.

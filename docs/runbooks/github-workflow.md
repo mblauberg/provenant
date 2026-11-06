@@ -10,6 +10,16 @@ absent from that file is deleted on the next sync, so never hand-create one.
 Issue intake uses the issue forms under `.github/ISSUE_TEMPLATE/`; blank
 issues are disabled.
 
+Start approved delivery with
+`provenant run --use deliver --file ISSUE.md --explain`, inspect its authority and gates, then submit without `--explain`.
+Use `batch` for parallel slices of about three acceptance items merged into one
+integration branch. Review each slice lightly and the integrated head in full;
+shared contracts precede dependent slices. See [templates](presets.md).
+Observe with `status`, collect `output TARGET` and `output TARGET --trace`,
+use `steer` for a message, `stop` for a subtree, `retry` for unfinished work
+and `edit` for unstarted graph nodes. `templates`, `land`, `quota` and `trace`
+complete the core interface; `help --all` lists advanced commands.
+
 ## Statuses
 
 | Status | Meaning |
@@ -173,9 +183,10 @@ with an upstream so `gh pr create` finds the branch:
 git push -u origin fix/repo-runbook-mechanics
 ```
 
-A Fabric writer lane has no Git credentials. Use host delivery with
-`provenant run --prompt-file BRIEF --route senior --branch BRANCH --deliver pr`
-to push its verified commit and open the pull request.
+A Fabric writer has no Git credentials. Use
+`provenant run --use deliver --file BRIEF --explain` and check that the composite
+binds the intended branch and host delivery before submitting. The host pushes
+the verified commit and opens the pull request within the approved authority.
 
 ### Pull request
 
