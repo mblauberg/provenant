@@ -221,7 +221,13 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
         }
         let rows = status_rows(&out.result.data);
         let mut data = json!({"rows": rows, "next_cursor": out.result.data["next_cursor"]});
-        for key in ["review_exempt", "native_attempts_error", "cloud_jobs"] {
+        for key in [
+            "review_exempt",
+            "native_attempts_error",
+            "cloud_jobs",
+            "operation",
+            "refused_operations",
+        ] {
             if let Some(value) = out.result.data.get(key) {
                 data[key] = value.clone();
             }

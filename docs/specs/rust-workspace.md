@@ -14,7 +14,9 @@ Each member crate may depend only on the internal crates that the `LAYERS`
 table in `tests/workspace_policy.rs` allows; a manifest may declare fewer. No
 library depends on `cli`, `os` never depends on `supervisor`, and `routing`
 never depends on `run`. A change to a crate's edges updates `LAYERS` in the
-same PR. The binary `provenant` is the only executable.
+same PR. Fabric runtime may use the shared SQLite boundary to inspect legacy
+run stores read-only when enforcing the graph cutover drain. It does not depend
+on the run crate. The binary `provenant` is the only executable.
 - Why: one-way edges keep policy testable without the command layer; typed
   events break cycles, never an import of `run` into `providers` or
   `routing`.

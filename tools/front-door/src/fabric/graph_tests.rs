@@ -385,12 +385,17 @@ mod graph_writer_admission_tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let project = factory.context.identity.project;
-        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+        let mut document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":"refused-preparation", "nodes":[{
                 "id":"worker", "prompt":"review the fixture", "access":"read_only",
                 "routes":[{"adapter":"codex","model":"codex/gpt-6-luna","account":"unregistered-fixture"},{"adapter":"codex","model":"codex/gpt-6","account":"unregistered-fixture"}]
             }]
         }))?;
+        // This is a newly compiled graph, rather than a legacy pending execution
+        // that the graph cutover must drain before admitting new attempts.
+        document.extra.insert("template_library".into(), serde_json::to_value(
+            graph::TemplateLibrary::bundled().snapshot(),
+        )?);
         let mut journal = graph::FileJournal::open(&roots.state, project, &document.graph_id, budget, &cancel, &factory.clock)?;
         journal.bind(graph::GraphExecution {
             extra: Default::default(), review_base:None, integration_base:None,
@@ -403,7 +408,7 @@ mod graph_writer_admission_tests {
         };
         let first = advance(&document, &mut owner, &mut journal)?;
         let node = &first.checkpoint.nodes[0];
-        assert_eq!(node.state, NodeState::Failed);
+        assert_eq!(node.state, NodeState::Failed, "{node:?}");
         assert_ne!(node.advance_error_code.as_deref(), Some("launch_refused"));
         assert_eq!(node.attempts.len(), 2);
         assert_eq!(node.attempts[0].key.route_index, 0);

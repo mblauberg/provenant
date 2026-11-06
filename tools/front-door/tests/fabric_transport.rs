@@ -2362,11 +2362,31 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
 #[allow(clippy::disallowed_methods)] // Exercise the real wait deadline.
 fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
     let mut rig = TestRig::new()?;
-    loopback_peer(&mut rig)?;
+    let host = loopback_peer(&mut rig)?;
+    // Answer the read-only health preflight, then lose the mutating
+    // submission's reply so the deadline exercises actual launch uncertainty.
+    let identity = federated_identity(&mut rig)?;
+    let health = rig.root.join("peer-health.json");
+    std::fs::write(
+        &health,
+        serde_json::to_vec(&json!({
+            "version": 1, "protocol": PROTOCOL, "host": host,
+            "project": identity["data"]["federation"]["key"],
+            "result": {"result":"health", "data":{
+                "host":host, "available":true, "execution":true
+            }}
+        }))?,
+    )?;
+    let submitted = rig.root.join("submitted");
     std::fs::write(
         rig.root.join("ssh"),
-        "#!/bin/sh\nexec /usr/bin/tail -f /dev/null\n",
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in *'\"action\":\"submit\"'*) : > '{}'; exec /usr/bin/tail -f /dev/null ;; esac\ncat '{}'\n",
+            submitted.display(),
+            health.display()
+        ),
     )?;
+    std::fs::set_permissions(rig.root.join("ssh"), std::fs::Permissions::from_mode(0o700))?;
     let start = std::time::Instant::now();
     let (_, result) = json_command(
         &rig,
@@ -2388,6 +2408,10 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
         "{result}"
     );
     assert!(result.to_string().contains("LAUNCH_UNKNOWN"), "{result}");
+    assert!(
+        submitted.exists(),
+        "the mutating submission must reach the peer"
+    );
     assert!(!rig.root.join("peer-state/runs").exists());
     Ok(())
 }

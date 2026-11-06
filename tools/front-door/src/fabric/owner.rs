@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write as _;
 
 #[derive(Clone, Copy)]
 pub(crate) struct BoundGraphBases {
@@ -955,7 +956,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             )
             .map_err(landing::repository_fact_error)?;
             for warning in warnings {
-                eprintln!("warning: {warning}");
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
                 self.launch_warnings.push(warning);
             }
             return Ok(Some(base.to_string()));
@@ -2512,7 +2513,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     grants.source_root.as_deref().unwrap_or(&self.factory.cwd),
                 )
             {
-                eprintln!("warning: {warning}");
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
                 self.launch_warnings.push(warning);
             }
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);

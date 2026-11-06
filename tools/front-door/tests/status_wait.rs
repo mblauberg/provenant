@@ -221,8 +221,8 @@ fn refused_operation_wait_returns_immediately_with_nonzero_status() -> Result {
     assert!(started.elapsed() < Duration::from_secs(10));
     let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(
-        result["data"]["operation"]["refusal"]["code"],
-        "UNSUPPORTED"
+        result["data"]["operation"]["refusal"]["code"], "UNSUPPORTED",
+        "{result}"
     );
     assert_eq!(result["data"]["condition_met"], true);
     assert_eq!(result["data"]["timed_out"], false);

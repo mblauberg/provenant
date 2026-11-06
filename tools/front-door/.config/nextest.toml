@@ -135,3 +135,19 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.ci.overrides]]
 filter = 'package(=provenant-cli) & test(=console::board::tests::board_paging_end_to_end)'
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Catalogue coverage starts two CLI processes per bundled template. Keep every
+# template assertion while allowing for process-start contention in a full run.
+# The oversized peer-frame refusal also reads its boundary-sized frame before
+# contact and exceeds 30 seconds on this host even when run on its own.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.lane.overrides]]
+filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
+slow-timeout = { period = "30s", terminate-after = 4 }

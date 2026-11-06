@@ -1750,6 +1750,7 @@ fn persisted_attempt_with(
         },
         termination: Some(Termination::Exit(exit_code)),
         never_spawned: false,
+        launch_refusal: None,
         stop_reason: options.stop_reason,
         delivered_signals: vec![],
         reaped: vec![],

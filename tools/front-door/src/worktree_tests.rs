@@ -4966,119 +4966,6 @@ fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
     Ok(())
 }
 
-#[cfg(test)]
-mod predicate_tests {
-    #[test]
-    fn nextest_missing_tool_is_reported_when_required() -> super::Result {
-        use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().canonicalize()?;
-        let cargo = root.join("cargo");
-        std::fs::write(&cargo, "#!/bin/sh\n[ \"$FIXTURE_NEXTEST\" = 1 ]\n")?;
-        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o700))?;
-        let executor = SystemExecutor::new(1)?;
-        for (available, required, expected) in
-            [(false, false, 0), (false, true, 15), (true, true, 0)]
-        {
-            let env = [
-                ("PATH".into(), root.as_os_str().to_owned()),
-                ("TMPDIR".into(), root.as_os_str().to_owned()),
-                (
-                    "FIXTURE_NEXTEST".into(),
-                    if available { "1" } else { "0" }.into(),
-                ),
-                (
-                    "PROVENANT_LANE_TOOLS_REQUIRED".into(),
-                    if required { "1" } else { "0" }.into(),
-                ),
-            ];
-            let argv = [
-                "/bin/sh".into(),
-                "-c".into(),
-                super::LANE_NEXTEST_PROBE.into(),
-            ];
-            let mut options = ExecOptions::new(&argv, &root, super::Duration::from_secs(3));
-            options.env = Some(&env);
-            options.stdout = StreamPolicy::Capture { limit: 4096 };
-            options.stderr = StreamPolicy::Capture { limit: 4096 };
-            let output = executor.execute(options)?;
-            assert_eq!(super::code(&output), expected);
-            let stdout = String::from_utf8_lossy(&output.stdout.bytes);
-            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
-            assert_eq!(stdout.contains("lane-nextest: PASS"), available);
-            if !available {
-                assert!(stderr.contains("cargo-nextest unavailable"), "{stderr}");
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn lane_tool_prerequisite_uses_injected_path_and_required_control() -> super::Result {
-        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor};
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().canonicalize()?;
-        let executor = SystemExecutor::new(1)?;
-        for tools in [&[][..], &["node"][..], &["pnpm"][..], &["node", "pnpm"][..]] {
-            let bin = root.join(format!("tools-{}", tools.join("-")));
-            std::fs::create_dir(&bin)?;
-            for name in tools {
-                let path = bin.join(name);
-                std::fs::write(&path, "#!/bin/sh\nexit 0\n")?;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
-            }
-            for required in [None, Some("0"), Some("1")] {
-                let mut env = vec![
-                    ("PATH".into(), bin.as_os_str().to_owned()),
-                    ("TMPDIR".into(), root.as_os_str().to_owned()),
-                ];
-                if let Some(value) = required {
-                    env.push(("PROVENANT_LANE_TOOLS_REQUIRED".into(), value.into()));
-                }
-                let argv = [
-                    "/bin/sh".into(),
-                    "-ec".into(),
-                    super::LANE_NODE_PNPM_PROBE.into(),
-                ];
-                let mut options = ExecOptions::new(&argv, &root, super::Duration::from_secs(3));
-                options.env = Some(&env);
-                options.stdout = provenant_os::exec::StreamPolicy::Capture { limit: 4096 };
-                options.stderr = provenant_os::exec::StreamPolicy::Capture { limit: 4096 };
-                let output = executor.execute(options)?;
-                let available = tools.len() == 2;
-                assert_eq!(
-                    super::code(&output),
-                    if !available && required == Some("1") {
-                        15
-                    } else {
-                        0
-                    }
-                );
-                assert_eq!(
-                    String::from_utf8_lossy(&output.stdout.bytes)
-                        .contains("lane-node-pnpm-compat: PASS"),
-                    available
-                );
-                if !available && required != Some("1") {
-                    assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("SKIP #1:"));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn only_the_narrowest_probe_capable_claude_case_runs_the_native_shell_probe() {
-        assert!(super::native_shell_probe_case("claude", true, false));
-        assert!(!super::native_shell_probe_case("claude", false, false));
-        assert!(!super::native_shell_probe_case("claude", true, true));
-        assert!(!super::native_shell_probe_case("codex", true, false));
-        assert!(!super::native_shell_probe_case("codex", true, true));
-    }
-}
-
 // Port the former dispatch preparation cancellation regression through the
 // graph front door. Entering seeding a second time proves the first launcher
 // released the same worktree's custody before stop returned.
@@ -5243,4 +5130,117 @@ fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> Result {
         fs::remove_file(next_gate.join("hold"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod predicate_tests {
+    #[test]
+    fn nextest_missing_tool_is_reported_when_required() -> super::Result {
+        use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let cargo = root.join("cargo");
+        std::fs::write(&cargo, "#!/bin/sh\n[ \"$FIXTURE_NEXTEST\" = 1 ]\n")?;
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o700))?;
+        let executor = SystemExecutor::new(1)?;
+        for (available, required, expected) in
+            [(false, false, 0), (false, true, 15), (true, true, 0)]
+        {
+            let env = [
+                ("PATH".into(), root.as_os_str().to_owned()),
+                ("TMPDIR".into(), root.as_os_str().to_owned()),
+                (
+                    "FIXTURE_NEXTEST".into(),
+                    if available { "1" } else { "0" }.into(),
+                ),
+                (
+                    "PROVENANT_LANE_TOOLS_REQUIRED".into(),
+                    if required { "1" } else { "0" }.into(),
+                ),
+            ];
+            let argv = [
+                "/bin/sh".into(),
+                "-c".into(),
+                super::LANE_NEXTEST_PROBE.into(),
+            ];
+            let mut options = ExecOptions::new(&argv, &root, super::Duration::from_secs(3));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 4096 };
+            options.stderr = StreamPolicy::Capture { limit: 4096 };
+            let output = executor.execute(options)?;
+            assert_eq!(super::code(&output), expected);
+            let stdout = String::from_utf8_lossy(&output.stdout.bytes);
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+            assert_eq!(stdout.contains("lane-nextest: PASS"), available);
+            if !available {
+                assert!(stderr.contains("cargo-nextest unavailable"), "{stderr}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lane_tool_prerequisite_uses_injected_path_and_required_control() -> super::Result {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor};
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let executor = SystemExecutor::new(1)?;
+        for tools in [&[][..], &["node"][..], &["pnpm"][..], &["node", "pnpm"][..]] {
+            let bin = root.join(format!("tools-{}", tools.join("-")));
+            std::fs::create_dir(&bin)?;
+            for name in tools {
+                let path = bin.join(name);
+                std::fs::write(&path, "#!/bin/sh\nexit 0\n")?;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+            }
+            for required in [None, Some("0"), Some("1")] {
+                let mut env = vec![
+                    ("PATH".into(), bin.as_os_str().to_owned()),
+                    ("TMPDIR".into(), root.as_os_str().to_owned()),
+                ];
+                if let Some(value) = required {
+                    env.push(("PROVENANT_LANE_TOOLS_REQUIRED".into(), value.into()));
+                }
+                let argv = [
+                    "/bin/sh".into(),
+                    "-ec".into(),
+                    super::LANE_NODE_PNPM_PROBE.into(),
+                ];
+                let mut options = ExecOptions::new(&argv, &root, super::Duration::from_secs(3));
+                options.env = Some(&env);
+                options.stdout = provenant_os::exec::StreamPolicy::Capture { limit: 4096 };
+                options.stderr = provenant_os::exec::StreamPolicy::Capture { limit: 4096 };
+                let output = executor.execute(options)?;
+                let available = tools.len() == 2;
+                assert_eq!(
+                    super::code(&output),
+                    if !available && required == Some("1") {
+                        15
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout.bytes)
+                        .contains("lane-node-pnpm-compat: PASS"),
+                    available
+                );
+                if !available && required != Some("1") {
+                    assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("SKIP #1:"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_narrowest_probe_capable_claude_case_runs_the_native_shell_probe() {
+        assert!(super::native_shell_probe_case("claude", true, false));
+        assert!(!super::native_shell_probe_case("claude", false, false));
+        assert!(!super::native_shell_probe_case("claude", true, true));
+        assert!(!super::native_shell_probe_case("codex", true, false));
+        assert!(!super::native_shell_probe_case("codex", true, true));
+    }
 }

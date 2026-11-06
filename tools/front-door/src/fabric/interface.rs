@@ -1683,6 +1683,18 @@ mod tests {
             node["attempt"]["new_worktree"]["base"],
             "refs/remotes/origin/HEAD"
         );
+        assert_eq!(node["attempt"]["new_worktree"]["default_base"], true);
+        let mut explicit = json!({"use":"task"});
+        bind_launch_controls(
+            &json!({"branch":"topic", "base":"refs/remotes/origin/HEAD"}),
+            &mut explicit,
+            Path::new("/repo"),
+        )?;
+        assert!(
+            explicit["attempt"]["new_worktree"]
+                .get("default_base")
+                .is_none()
+        );
         assert!(
             bind_launch_controls(&json!({"base":"HEAD"}), &mut node, Path::new("/repo")).is_err()
         );
@@ -2192,7 +2204,6 @@ mod tests {
         assert_eq!(node["access"], "worktree_write");
         for input in [
             json!({"worktree":".","access":"read_only"}),
-            json!({"branch":"fix/parser"}),
             json!({"base":"HEAD"}),
             json!({"branch":"fix/parser","base":"HEAD","worktree":"."}),
             json!({"access":"unknown"}),
