@@ -1879,6 +1879,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 host: Some(host),
                 attempt: id.parse().map_err(|_| FacadeError::StateCorrupt)?,
             };
+            if host == self.factory.context.identity.host {
+                let store = owner.store(self.cancel)?;
+                let call = owner.call(self.cancel);
+                if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
+                    &store, target.attempt, "", reference, &call, &self.factory.cwd,
+                    std::time::Duration::from_micros(self.budget.remaining(self.factory.clock.mono_now()).as_micros()), true,
+                ).map_err(|error| FacadeError::invalid(&error))? {
+                    return Ok(matches!(observation, provenant_fabric_runtime::graph::AttemptObservation::Terminal { .. }));
+                }
+            }
             let record = owner.graph_policy_tail(target, self.budget, self.cancel)?;
             return Ok(matches!(
                 record.state,
@@ -1892,13 +1902,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             None => Ok(true),
             Some(operation) => {
                 use provenant_run::{AttemptFilter, AttemptReader};
-                if !store
-                    .pending_attempts(operation.run_id, &call)
-                    .map_err(run_error)?
-                    .is_empty()
-                {
-                    return Ok(false);
-                }
                 let attempts = store
                     .attempts(
                         AttemptFilter {
@@ -1913,6 +1916,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     let fact = fact.map_err(run_error)?;
                     let record = store.record(fact.attempt_id, &call).map_err(run_error)?;
                     found = true;
+                    let reference = format!("{}/{}", self.factory.context.identity.host, record.attempt_id);
+                    if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
+                        &store, record.attempt_id, "", &reference, &call, &self.factory.cwd,
+                    std::time::Duration::from_micros(self.budget.remaining(self.factory.clock.mono_now()).as_micros()), true,
+                    ).map_err(|error| FacadeError::invalid(&error))? {
+                        if matches!(observation, provenant_fabric_runtime::graph::AttemptObservation::Terminal { .. }) {
+                            continue;
+                        }
+                        return Ok(false);
+                    }
                     if !store.custody_released(&record, &call).map_err(run_error)? {
                         return Ok(false);
                     }
@@ -1958,6 +1971,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         replay: provenant_fabric_runtime::graph::Replay<'_>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
         use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
+        if node.attempt.and_then(|spec| spec.placement.as_ref()).is_some()
+            && access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+        {
+            return Err(FacadeError::invalid("cloud verification nodes require read-only access"));
+        }
         let mut owner = BinaryRunOwner {
             factory: self.factory,
             allow_remote: true,
@@ -2577,6 +2595,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             ));
             (target, reference)
         };
+        if target.host.is_none_or(|host| host == self.factory.context.identity.host) {
+            let store = owner.store(self.cancel)?;
+            let call = owner.call(self.cancel);
+            if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
+                &store, target.attempt, node.prompt,
+                reference.as_deref().ok_or(FacadeError::StateCorrupt)?,
+                &call, &self.factory.cwd,
+                std::time::Duration::from_micros(self.budget.remaining(self.factory.clock.mono_now()).as_micros()), false,
+            ).map_err(|error| FacadeError::invalid(&error))? {
+                return Ok(observation);
+            }
+        }
         let mut attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
         let mut reference = reference;
         if target

@@ -42,7 +42,6 @@ fn add(
         library: &library,
         resolvers: &resolvers,
         scan: &|_| Ok(()),
-        journal: None,
         limits: &limits,
     };
     admit_child(
@@ -547,4 +546,42 @@ fn writer_child_binds_parent_branch_and_replays_original_source() {
     assert_eq!(relay::child_states(&checkpoint, "a")["children"][0]["settled"], false);
     checkpoint.nodes.iter_mut().find(|node| node.id == receipt.node).unwrap().state = NodeState::Succeeded;
     assert_eq!(relay::child_states(&checkpoint, "a")["children"][0]["settled"], true);
+}
+
+#[test]
+fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
+    let (document, mut checkpoint) = live(None);
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = std::collections::BTreeMap::from([(
+        "review-panel".into(), vec!["correctness".into(), "tests".into()],
+    )]);
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        library: &library, resolvers: &resolvers, limits: &limits,
+        scan: &|_| Ok(()), journal: None,
+    };
+    let mut request = child("panel", "resolved-panel");
+    request.template = "review-panel".into();
+    request.brief = "Review the parser at commit 1111111111111111111111111111111111111111".into();
+    let receipt = admit_child(&mut patch::LiveGraph {
+        document: &document, checkpoint: &mut checkpoint,
+    }, "a", &request, &context).unwrap();
+    let expanded = plans::expand(&document, &checkpoint.extensions,
+        &checkpoint.expansions, &limits).unwrap();
+    let leaves: Vec<_> = expanded.nodes.iter()
+        .filter(|node| node.id.starts_with("a--panel--") && node.composite.is_none())
+        .collect();
+    for lens in ["correctness", "tests"] {
+        assert!(leaves.iter().any(|node|
+            node.prompt.contains(&format!("through the {lens} lens"))
+                && node.prompt.contains(&request.brief)), "missing lens {lens}");
+    }
+    assert!(leaves.iter().all(|node| node.prompt.contains(&request.brief)));
+    let before = checkpoint.clone();
+    let replay = admit_child(&mut patch::LiveGraph {
+        document: &document, checkpoint: &mut checkpoint,
+    }, "a", &request, &context).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.node, receipt.node);
+    assert_eq!(checkpoint, before);
 }

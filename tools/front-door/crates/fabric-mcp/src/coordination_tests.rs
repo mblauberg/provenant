@@ -559,6 +559,19 @@ impl McpFacade for FakeFacade {
     ) -> Result<Value, ServiceError> {
         Ok(serde_json::to_value(operation)?)
     }
+
+    fn wait_for_children(
+        &mut self,
+        _: &CancelToken,
+        within: std::time::Duration,
+    ) -> Result<Value, ServiceError> {
+        // One second completes; two seconds scripts an observation timeout.
+        if within == std::time::Duration::from_secs(2) {
+            return Err(ServiceError::Facade(FacadeError::Timeout));
+        }
+        assert_eq!(within, std::time::Duration::from_secs(1));
+        Ok(json!({"children":[{"node":"parent--child", "settled":true}]}))
+    }
 }
 
 #[test]
@@ -593,6 +606,23 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
     let first = invoke(&mut service)?;
     let replay = invoke(&mut service)?;
     assert_eq!(first, replay);
+    assert_eq!(first["wait"]["children"][0]["settled"], true);
+    let mut timed_out = input.clone();
+    timed_out["wait_seconds"] = json!(2);
+    let timed_out = ToolCall::parse("fabric_run", timed_out)?
+        .execute(&mut service, &CancelToken::new())?
+        .structured_content;
+    assert_eq!(timed_out["children"], first["children"]);
+    assert!(timed_out.get("observation_error").is_some());
+    let mut no_wait = input.clone();
+    no_wait.as_object_mut().ok_or("submission object")?.remove("wait_seconds");
+    let no_wait_input = serde_json::from_value(no_wait)?;
+    let no_wait = ToolCall::Submit(no_wait_input)
+        .execute(&mut service, &CancelToken::new())?
+        .structured_content;
+    assert_eq!(no_wait["children"], first["children"]);
+    assert!(no_wait.get("wait").is_none());
+    assert!(no_wait.get("observation_error").is_none());
     assert_eq!(first["children"][0]["op"], "add");
     assert_eq!(first["children"][0]["use"], "task");
     assert_eq!(first["children"][0]["tier"], "senior");

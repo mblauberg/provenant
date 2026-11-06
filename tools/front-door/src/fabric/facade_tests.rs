@@ -947,6 +947,125 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
+    fn graph_cloud_owner_submits_once_and_replays_remote_completion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        // Isolate PATH and lane markers in a child instead of changing the test process.
+        if std::env::var_os("GRAPH_CLOUD_FIXTURE").is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            use provenant_os::exec::{ExecOptions, Executor, Termination};
+            let scratch = tempfile::tempdir()?;
+            let script = scratch.path().join("codex");
+            std::fs::write(&script, r#"#!/bin/sh
+case "$2" in
+exec) cat >/dev/null; printf x >> "$GRAPH_CLOUD_FIXTURE/submissions"; printf '{"id":"graph-remote"}';;
+status) if test -f "$GRAPH_CLOUD_FIXTURE/result.diff"; then printf completed; else printf running; fi;;
+diff) cat "$GRAPH_CLOUD_FIXTURE/result.diff";;
+*) exit 7;;
+esac
+"#)?;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+            let mut paths = vec![scratch.path().to_path_buf()];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+            let mut environment: Vec<_> = std::env::vars_os().filter(|(key, _)| {
+                !["PATH", provenant_core::RUN_STATE_DIRECTORY_ENV,
+                    provenant_run::LANE_DEPTH_ENV, provenant_run::PARENT_ATTEMPT_ENV]
+                    .iter().any(|name| key == name)
+            }).collect();
+            environment.push(("PATH".into(), std::env::join_paths(paths)?));
+            environment.push(("GRAPH_CLOUD_FIXTURE".into(), scratch.path().as_os_str().to_owned()));
+            let args = vec![std::env::current_exe()?.into_os_string(), "--exact".into(),
+                "fabric::peer_tests::graph_cloud_owner_submits_once_and_replays_remote_completion".into(),
+                "--nocapture".into()];
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&args, &cwd, std::time::Duration::from_secs(30));
+            options.env = Some(&environment);
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0), "{}\n{}",
+                String::from_utf8_lossy(&output.stdout.bytes), String::from_utf8_lossy(&output.stderr.bytes));
+            return Ok(());
+        }
+        let rig = crate::worktree_tests::repository()?;
+        let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut graph_owner = BoundGraphOwner { factory: &factory, integration_base: None,
+            integration_branch: None, network: None, capability_overrides: Default::default(),
+            exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
+        let actor = graph_owner.actor();
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"cloud-owner", "node_id":"verify", "route_index":0
+        }))?;
+        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
+        let spec: graph::AttemptSpec = serde_json::from_value(serde_json::json!({"placement":{
+            "target":"cloud-test", "provider":"codex", "environment":"env", "repository":"repo",
+            "branch":"main", "model":"requested", "deadline_seconds":3600
+        }}))?;
+        let node = || graph::NodeInput {
+            attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&spec),
+            require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
+            context: Default::default(), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
+            source_commit: Some(&head), review_base: None, title: "verify", prompt: "Run targeted tests",
+            required_verdict: None, deadline_seconds: None, inputs_dir: None,
+        };
+        let refused = graph_owner.observe_or_start(&key, node(), &route, graph::AccessMode::WorktreeWrite,
+            None, graph::Replay { delivery: None, branch: None, fast_forward_only: false,
+                stored_ref: None, launch_actor: &actor });
+        assert!(matches!(refused, Err(FacadeError::InvalidInput { .. })));
+        let refused_owner = BinaryRunOwner { factory: &factory, allow_remote: false, actor: None, chair: None };
+        assert!(refused_owner.store(&cancel)?.operation(
+            &graph_operation("graph-attempt-operation", &key)?, &refused_owner.call(&cancel),
+        )?.is_none());
+        let first = graph_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly,
+            None, graph::Replay { delivery: None, branch: None, fast_forward_only: false,
+                stored_ref: None, launch_actor: &actor })?;
+        let graph::AttemptObservation::Pending { attempt_ref: Some(reference) } = first else {
+            return Err(format!("expected submitted cloud node, got {first:?}").into());
+        };
+        let owner = BinaryRunOwner { factory: &factory, allow_remote: false, actor: None, chair: None };
+        let store = owner.store(&cancel)?;
+        let call = owner.call(&cancel);
+        let id = reference.split_once('/').ok_or("attempt reference")?.1.parse()?;
+        let job = provenant_cli::run::cloud_owner::load(&store, id, &call)?.ok_or("missing cloud identity")?;
+        assert_eq!(job.remote_id, "graph-remote");
+        let result = serde_json::json!({"job_id":job.job_id, "nonce":job.nonce, "commit":head,
+            "exit_status":0, "tests_run":["targeted"], "tests_failed":[], "log_location":"log",
+            "tracked_files_changed":false, "observed_model":null});
+        let scratch = std::path::PathBuf::from(std::env::var_os("GRAPH_CLOUD_FIXTURE").ok_or("fixture")?);
+        std::fs::write(scratch.join("result.diff"), format!(
+            "diff --git a/.provenant-cloud-result.json b/.provenant-cloud-result.json\nnew file mode 100644\n--- /dev/null\n+++ b/.provenant-cloud-result.json\n@@ -0,0 +1 @@\n+{result}\n"))?;
+        let terminal = graph_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly,
+            None, graph::Replay { delivery: None, branch: None, fast_forward_only: false,
+                stored_ref: Some(&reference), launch_actor: &actor })?;
+        assert!(matches!(terminal, graph::AttemptObservation::Terminal {
+            outcome: graph::AttemptOutcome::Succeeded, attempt_ref: Some(ref found), ..
+        } if found == &reference));
+        assert_eq!(std::fs::read_to_string(scratch.join("submissions"))?, "x");
+        let downstream: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"cloud-owner", "node_id":"summarise", "route_index":0
+        }))?;
+        let inputs = graph_owner.materialise_inputs(&downstream, &[graph::InputRequest {
+            label: "cloud verification".into(), attempt_ref: Some(reference),
+            inline_findings: None, finding_prefix: None,
+        }], 16_384).ok_or("missing materialised inputs")?;
+        let [graph::MaterialisedInput::File { path, omitted: 0, .. }] = inputs.entries.as_slice() else {
+            return Err(format!("expected readable cloud result, got {inputs:?}").into());
+        };
+        let content: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        assert_eq!(content["state"]["result"]["tests_run"], serde_json::json!(["targeted"]));
+        assert_eq!(content["state"]["result"]["exit_status"], 0);
+        assert_eq!(content["passed"], true);
+        Ok(())
+    }
+
+    #[test]
     fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::graph_review_launch_submits_pinned_source_and_base")? { return Ok(()); }
         use provenant_fabric_runtime::graph::{self, AttemptOwner};
