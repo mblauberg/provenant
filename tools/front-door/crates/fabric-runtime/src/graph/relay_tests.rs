@@ -1137,9 +1137,18 @@ fn planner_native_child_runs_before_parent_settles_and_final_fragment_closes_onc
     assert_eq!(parent_of_attempt(&run.checkpoint, "scout-attempt"), Some("parent--scout"));
     assert_eq!(progress(&run.checkpoint, "parent").state, NodeState::Running);
     journal.0 = Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());
+    // A live child shares its producer's lifetime. The planner waits for its
+    // scout before returning the final patch, as a lane waits through its relay.
+    owner.observations.extend([
+        AttemptObservation::Pending { attempt_ref:Some("planner-attempt".into()) },
+        terminal_from("Scout done", "scout-attempt"),
+    ]);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(progress(&run.checkpoint, "parent").state, NodeState::Running);
+    assert_eq!(progress(&run.checkpoint, "parent--scout").state, NodeState::Succeeded);
+    journal.0 = Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());
     owner.observations.extend([
         terminal_from("```fragment\n{\"schema_version\":1,\"nodes\":[{\"id\":\"final\",\"use\":\"task\",\"brief\":\"Finish\",\"source\":{\"type\":\"commit\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"acceptance_checks\":[\"Done\"],\"after\":[]}]}\n```", "planner-attempt"),
-        terminal_from("Scout done", "scout-attempt"),
         terminal_from("Finished", "final-attempt"),
     ]);
     let run = advance(&document, &mut owner, &mut journal).unwrap();
@@ -1166,7 +1175,7 @@ fn rich_detached_children_keep_their_subtree_after_parent_and_graph_cancellation
     let stopped = cancel_subtree(&document, &mut checkpoint, "a").unwrap();
     assert!(stopped.skipped.is_empty());
     assert!(stopped.running.is_empty());
-    assert_eq!(stopped.detached, ["a--detached", "a--detached--work"]);
+    assert_eq!(stopped.detached, ["a--detached--work", "a--detached"]);
     let protected = relay::fence_detached_cancellation(&document, &mut checkpoint).unwrap();
     assert_eq!(protected.into_iter().collect::<Vec<_>>(), ["a--detached", "a--detached--work"]);
     assert_eq!(progress(&checkpoint, "a--detached--work").state, NodeState::Pending);
